@@ -23,7 +23,10 @@ def _get_exchange() -> ccxt.Exchange:
     })
 
     if not settings.exchange.live_trading:
-        exchange.set_sandbox_mode(True)
+        try:
+            exchange.set_sandbox_mode(True)
+        except Exception:
+            pass  # Some exchanges (e.g. Gate.io) don't support sandbox mode
 
     return exchange
 

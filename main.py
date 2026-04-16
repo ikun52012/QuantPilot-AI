@@ -47,7 +47,7 @@ from notifier import (
     send_telegram,
 )
 from trade_logger import log_trade, get_today_stats, get_today_trades, get_trade_history
-from analytics import calculate_performance, get_daily_pnl, get_trade_distribution
+from analytics import calculate_performance, get_daily_pnl, get_trade_distribution, invalidate_performance_cache
 
 # ─────────────────────────────────────────────
 # Logging setup
@@ -88,17 +88,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"   Supported Exchanges: {', '.join(get_supported_exchanges())}")
     logger.info("=" * 50)
 
-    # Apply runtime settings on startup
+    # Apply runtime settings on startup (non-sensitive fields only; secrets come from .env)
     rs = _load_runtime_settings()
     if rs.get("exchange"):
         settings.exchange.name = rs["exchange"].get("name", settings.exchange.name)
-        settings.exchange.api_key = rs["exchange"].get("api_key", settings.exchange.api_key)
-        settings.exchange.api_secret = rs["exchange"].get("api_secret", settings.exchange.api_secret)
-        settings.exchange.password = rs["exchange"].get("password", settings.exchange.password)
     if rs.get("ai"):
         settings.ai.provider = rs["ai"].get("provider", settings.ai.provider)
     if rs.get("telegram"):
-        settings.telegram.bot_token = rs["telegram"].get("bot_token", settings.telegram.bot_token)
         settings.telegram.chat_id = rs["telegram"].get("chat_id", settings.telegram.chat_id)
     if rs.get("risk"):
         settings.risk.max_position_pct = rs["risk"].get("max_position_pct", settings.risk.max_position_pct)
@@ -214,6 +210,7 @@ async def webhook(request: Request):
             await notify_trade_executed(decision, order_result)
 
         trade_id = log_trade(decision, order_result)
+        invalidate_performance_cache()
 
         return JSONResponse(content={
             "status": "executed" if decision.execute else "rejected",
@@ -385,14 +382,8 @@ async def save_exchange_settings(req: ExchangeSettingsRequest):
     if req.password:
         settings.exchange.password = req.password
 
-    _save_runtime_settings({
-        "exchange": {
-            "name": settings.exchange.name,
-            "api_key": settings.exchange.api_key,
-            "api_secret": settings.exchange.api_secret,
-            "password": settings.exchange.password,
-        }
-    })
+    # Only persist the exchange name – never write API keys to plain-text JSON.
+    _save_runtime_settings({"exchange": {"name": settings.exchange.name}})
     logger.info(f"[Settings] Exchange updated: {settings.exchange.name}")
     return {"status": "saved", "exchange": settings.exchange.name}
 
@@ -409,6 +400,7 @@ async def save_ai_settings(req: AISettingsRequest):
         elif req.provider == "deepseek":
             settings.ai.deepseek_api_key = req.api_key
 
+    # Persist only the provider name, not the API key.
     _save_runtime_settings({"ai": {"provider": settings.ai.provider}})
     logger.info(f"[Settings] AI provider updated: {settings.ai.provider}")
     return {"status": "saved", "provider": settings.ai.provider}
@@ -421,12 +413,8 @@ async def save_telegram_settings(req: TelegramSettingsRequest):
     if req.chat_id:
         settings.telegram.chat_id = req.chat_id
 
-    _save_runtime_settings({
-        "telegram": {
-            "bot_token": settings.telegram.bot_token,
-            "chat_id": settings.telegram.chat_id,
-        }
-    })
+    # Persist only the (non-secret) chat_id; bot_token stays in memory / .env.
+    _save_runtime_settings({"telegram": {"chat_id": settings.telegram.chat_id}})
     logger.info("[Settings] Telegram updated")
     return {"status": "saved"}
 
@@ -483,6 +471,7 @@ async def _process_internal(signal):
     if decision.execute:
         order_result = await execute_trade(decision)
     trade_id = log_trade(decision, order_result)
+    invalidate_performance_cache()
     return {
         "status": "executed" if decision.execute else "rejected",
         "trade_id": trade_id,

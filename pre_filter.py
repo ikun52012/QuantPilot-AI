@@ -6,6 +6,7 @@ Filters out 60-70% of low-quality signals instantly.
 from datetime import datetime, timedelta
 from loguru import logger
 from models import TradingViewSignal, MarketContext, PreFilterResult
+from trade_logger import get_today_pnl
 
 # ─────────────────────────────────────────────
 # In-memory state for tracking
@@ -33,8 +34,9 @@ def increment_trade_count():
 
 
 def update_daily_pnl(pnl: float):
-    global _daily_pnl
-    _daily_pnl += pnl
+    # No-op: daily PnL is now derived directly from trade logs via get_today_pnl().
+    # Kept for backward compatibility.
+    pass
 
 
 def run_pre_filter(
@@ -67,14 +69,15 @@ def run_pre_filter(
         reasons.append(f"Daily trade limit reached ({_daily_trade_count}/{max_daily_trades})")
 
     # ── Check 2: Daily loss limit ──
-    loss_ok = abs(_daily_pnl) < max_daily_loss_pct or _daily_pnl >= 0
+    current_pnl = get_today_pnl()
+    loss_ok = current_pnl > -max_daily_loss_pct
     checks["daily_loss_limit"] = {
         "passed": loss_ok,
-        "current_pnl": _daily_pnl,
+        "current_pnl": current_pnl,
         "max_loss": max_daily_loss_pct,
     }
     if not loss_ok:
-        reasons.append(f"Daily loss limit reached ({_daily_pnl:.2f}% / -{max_daily_loss_pct}%)")
+        reasons.append(f"Daily loss limit reached ({current_pnl:.2f}% / -{max_daily_loss_pct}%)")
 
     # ── Check 3: Duplicate signal cooldown ──
     cooldown_ok = _check_cooldown(signal, cooldown_seconds=300)

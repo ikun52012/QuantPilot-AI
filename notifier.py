@@ -97,9 +97,10 @@ async def notify_trade_executed(decision: TradeDecision, order_result: dict):
             f"Entry: <code>{decision.entry_price}</code>\n"
             f"Stop Loss: <code>{decision.stop_loss}</code>\n"
             f"Take Profit: <code>{decision.take_profit}</code>\n"
-            f"Quantity: <code>{decision.quantity}</code>\n"
-            f"\n🤖 AI Confidence: {decision.ai_analysis.confidence:.0%}" if decision.ai_analysis else ""
+            f"Quantity: <code>{decision.quantity}</code>"
         )
+        if decision.ai_analysis:
+            text += f"\n🤖 AI Confidence: {decision.ai_analysis.confidence:.0%}"
     elif status == "error":
         text = (
             f"💥 <b>Trade Failed</b>\n"

@@ -3,11 +3,17 @@ OpenClaw Signal Server - AI Analyzer
 Uses LLM APIs (OpenAI / Anthropic / DeepSeek) to analyze trading signals.
 This is the brain of the system.
 """
+import asyncio
 import json
 import httpx
 from loguru import logger
 from config import settings
 from models import TradingViewSignal, MarketContext, AIAnalysis
+
+# Retry configuration for AI API calls
+_AI_MAX_RETRIES = 3
+_AI_BASE_DELAY = 1.0  # seconds; doubled each attempt
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 # ─────────────────────────────────────────────
@@ -82,81 +88,128 @@ Should this signal be executed, modified, or rejected? Provide your analysis as 
 
 
 # ─────────────────────────────────────────────
+# Retry helper
+# ─────────────────────────────────────────────
+
+async def _with_retry(coro_factory, label: str) -> str:
+    """
+    Execute an async coroutine factory with exponential-backoff retry.
+    Retries on rate-limit, server errors, and transient network failures.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_AI_MAX_RETRIES):
+        try:
+            return await coro_factory()
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if exc.response.status_code in _RETRYABLE_STATUS_CODES and attempt < _AI_MAX_RETRIES - 1:
+                delay = _AI_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"[AI/{label}] HTTP {exc.response.status_code}, "
+                    f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_AI_MAX_RETRIES})"
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+        except httpx.NetworkError as exc:
+            last_exc = exc
+            if attempt < _AI_MAX_RETRIES - 1:
+                delay = _AI_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"[AI/{label}] Network error, "
+                    f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_AI_MAX_RETRIES})"
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+    raise last_exc  # unreachable but satisfies type checkers
+
+
+# ─────────────────────────────────────────────
 # Provider implementations
 # ─────────────────────────────────────────────
 
 async def _call_openai(system: str, user: str) -> str:
-    """Call OpenAI/compatible API."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.ai.openai_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.ai.openai_model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 1000,
-                "response_format": {"type": "json_object"},
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    """Call OpenAI/compatible API with automatic retry."""
+    async def _do():
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.ai.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.ai.openai_model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 1000,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+
+    return await _with_retry(_do, "openai")
 
 
 async def _call_anthropic(system: str, user: str) -> str:
-    """Call Anthropic Claude API."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": settings.ai.anthropic_api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.ai.anthropic_model,
-                "max_tokens": 1000,
-                "system": system,
-                "messages": [
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.3,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["content"][0]["text"]
+    """Call Anthropic Claude API with automatic retry."""
+    async def _do():
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": settings.ai.anthropic_api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.ai.anthropic_model,
+                    "max_tokens": 1000,
+                    "system": system,
+                    "messages": [
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": 0.3,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["content"][0]["text"]
+
+    return await _with_retry(_do, "anthropic")
 
 
 async def _call_deepseek(system: str, user: str) -> str:
-    """Call DeepSeek API (OpenAI-compatible)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.deepseek.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.ai.deepseek_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.ai.deepseek_model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 1000,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    """Call DeepSeek API (OpenAI-compatible) with automatic retry."""
+    async def _do():
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.ai.deepseek_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.ai.deepseek_model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 1000,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+
+    return await _with_retry(_do, "deepseek")
 
 
 # ─────────────────────────────────────────────

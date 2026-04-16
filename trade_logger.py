@@ -3,6 +3,7 @@ OpenClaw Signal Server - Trade Logger
 Persists all trade decisions and results to JSON files.
 """
 import json
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,9 @@ from models import TradeLog, TradeDecision
 
 LOGS_DIR = Path(__file__).parent / "trade_logs"
 LOGS_DIR.mkdir(exist_ok=True)
+
+# Thread lock to prevent concurrent write races on the daily JSON file
+_file_lock = threading.Lock()
 
 
 def _get_log_file() -> Path:
@@ -72,9 +76,10 @@ def log_trade(decision: TradeDecision, order_result: dict) -> str:
 
     # Save to today's log file
     log_path = _get_log_file()
-    logs = _load_logs(log_path)
-    logs.append(entry)
-    _save_logs(log_path, logs)
+    with _file_lock:
+        logs = _load_logs(log_path)
+        logs.append(entry)
+        _save_logs(log_path, logs)
 
     logger.info(f"[TradeLog] Saved trade {trade_id} → {log_path.name}")
     return trade_id
@@ -83,6 +88,12 @@ def log_trade(decision: TradeDecision, order_result: dict) -> str:
 def get_today_trades() -> list[dict]:
     """Get all trades from today."""
     return _load_logs(_get_log_file())
+
+
+def get_today_pnl() -> float:
+    """Return today's cumulative realised PnL percentage from the trade log."""
+    trades = get_today_trades()
+    return sum(t.get("pnl_pct", 0.0) or 0.0 for t in trades if t.get("execute"))
 
 
 def get_today_stats() -> dict:

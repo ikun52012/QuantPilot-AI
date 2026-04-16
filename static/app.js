@@ -15,6 +15,40 @@ document.addEventListener('DOMContentLoaded', () => {
     detectWebhookUrl();
 });
 
+// ─── Toast notification system ───
+function showToast(message, type = 'info', title = '') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+
+    const icons = {
+        success: 'ri-checkbox-circle-line',
+        error: 'ri-error-warning-line',
+        warning: 'ri-alert-line',
+        info: 'ri-information-line',
+    };
+    const defaultTitles = { success: 'Success', error: 'Error', warning: 'Warning', info: 'Info' };
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.setAttribute('role', 'alert');
+    toast.innerHTML = `
+        <i class="toast-icon ${icons[type] || icons.info}"></i>
+        <div class="toast-body">
+            <div class="toast-title">${title || defaultTitles[type] || 'Notice'}</div>
+            ${message ? `<div class="toast-msg">${message}</div>` : ''}
+        </div>
+    `;
+    container.appendChild(toast);
+
+    // Auto-dismiss after 4 s
+    const dismiss = () => {
+        toast.classList.add('removing');
+        toast.addEventListener('animationend', () => toast.remove(), { once: true });
+    };
+    setTimeout(dismiss, 4000);
+    toast.addEventListener('click', dismiss);
+}
+
 // ─── Navigation ───
 function setupNavigation() {
     document.querySelectorAll('.nav-item').forEach(item => {
@@ -22,18 +56,36 @@ function setupNavigation() {
             e.preventDefault();
             const page = item.dataset.page;
             switchPage(page);
+            // Close sidebar on mobile after navigation
+            closeSidebar();
         });
     });
 
     document.getElementById('menu-toggle')?.addEventListener('click', () => {
-        document.getElementById('sidebar').classList.toggle('open');
+        const sidebar = document.getElementById('sidebar');
+        const overlay = document.getElementById('sidebar-overlay');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
     });
+
+    document.getElementById('sidebar-overlay')?.addEventListener('click', closeSidebar);
+}
+
+function closeSidebar() {
+    document.getElementById('sidebar')?.classList.remove('open');
+    document.getElementById('sidebar-overlay')?.classList.remove('visible');
 }
 
 function switchPage(page) {
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => {
+        n.classList.remove('active');
+        n.removeAttribute('aria-current');
+    });
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.querySelector(`[data-page="${page}"]`)?.classList.add('active');
+
+    const navEl = document.querySelector(`[data-page="${page}"]`);
+    navEl?.classList.add('active');
+    navEl?.setAttribute('aria-current', 'page');
     document.getElementById(`page-${page}`)?.classList.add('active');
 
     const titles = {
@@ -90,6 +142,7 @@ async function loadDashboard() {
 
     } catch (err) {
         console.error('Dashboard load error:', err);
+        showToast(err.message, 'error', 'Dashboard Load Failed');
     }
 }
 
@@ -145,6 +198,7 @@ async function loadRecentSignals() {
         }).join('');
     } catch (e) {
         console.error('Failed to load signals:', e);
+        showToast(e.message, 'error', 'Signals Load Failed');
     }
 }
 
@@ -272,12 +326,12 @@ function chartOptions(yLabel) {
     };
 }
 
-function setChartPeriod(days) {
+function setChartPeriod(evt, days) {
     document.querySelectorAll('.card-actions .btn-sm').forEach(b => b.classList.remove('active'));
-    event.target.classList.add('active');
+    evt.target.classList.add('active');
     fetchAPI(`/api/performance?days=${days}`).then(perf => {
         renderEquityChart(perf.equity_curve || []);
-    });
+    }).catch(err => showToast(err.message, 'error'));
 }
 
 // ─── Positions ───
@@ -319,6 +373,7 @@ async function loadPositions() {
 
     } catch (err) {
         console.error('Positions load error:', err);
+        showToast(err.message, 'error', 'Positions Load Failed');
     }
 }
 
@@ -358,6 +413,7 @@ async function loadHistory() {
         }).join('');
     } catch (err) {
         console.error('History load error:', err);
+        showToast(err.message, 'error', 'History Load Failed');
     }
 }
 
@@ -439,6 +495,7 @@ async function loadAnalytics() {
 
     } catch (err) {
         console.error('Analytics load error:', err);
+        showToast(err.message, 'error', 'Analytics Load Failed');
     }
 }
 
@@ -455,8 +512,11 @@ function setupExchangeToggle() {
 async function loadSettings() {
     try {
         const status = await fetchAPI('/');
-        // Set current values (we don't expose keys for security)
-        // Just display current provider info
+        // Display current exchange & AI provider (keys are not sent for security)
+        const exchangeEl = document.getElementById('set-exchange');
+        if (exchangeEl && status.exchange) exchangeEl.value = status.exchange;
+        const aiEl = document.getElementById('set-ai-provider');
+        if (aiEl && status.ai_provider) aiEl.value = status.ai_provider;
     } catch (e) {
         console.error('Settings load error:', e);
     }
@@ -484,6 +544,7 @@ async function testConnection() {
     } catch (e) {
         result.className = 'conn-result error';
         result.textContent = `Connection failed: ${e.message}`;
+        showToast(e.message, 'error', 'Connection Failed');
     }
 
     btn.disabled = false;
@@ -524,9 +585,9 @@ async function saveRiskSettings() {
 async function testTelegram() {
     try {
         await fetchAPI('/api/test-telegram', { method: 'POST' });
-        alert('Test message sent! Check your Telegram.');
+        showToast('Check your Telegram for the test message.', 'success', 'Test Sent');
     } catch (e) {
-        alert(`Failed: ${e.message}`);
+        showToast(e.message, 'error', 'Test Failed');
     }
 }
 
@@ -536,12 +597,13 @@ async function saveSettings(endpoint, data, btnId) {
 
     try {
         await fetchAPI(endpoint, { method: 'POST', body: JSON.stringify(data) });
+        showToast('Settings saved successfully.', 'success', 'Saved');
         if (btn) { btn.innerHTML = '<i class="ri-check-line"></i> Saved!'; }
         setTimeout(() => {
             if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-save-line"></i> Save'; }
         }, 2000);
     } catch (e) {
-        alert(`Save failed: ${e.message}`);
+        showToast(e.message, 'error', 'Save Failed');
         if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-save-line"></i> Save'; }
     }
 }
@@ -552,12 +614,14 @@ function detectWebhookUrl() {
     if (el) el.textContent = url;
 }
 
-function copyWebhookUrl() {
+function copyWebhookUrl(evt) {
     const url = document.getElementById('webhook-url')?.textContent;
     if (url) {
-        navigator.clipboard.writeText(url);
-        // Brief feedback
-        const btn = event.target.closest('.btn');
+        navigator.clipboard.writeText(url).then(() => {
+            showToast(url, 'success', 'Webhook URL copied');
+        }).catch(() => showToast('Could not access clipboard.', 'warning'));
+        // Brief visual feedback on the button
+        const btn = evt?.target?.closest('.btn');
         if (btn) {
             btn.innerHTML = '<i class="ri-check-line"></i>';
             setTimeout(() => { btn.innerHTML = '<i class="ri-file-copy-line"></i>'; }, 1500);

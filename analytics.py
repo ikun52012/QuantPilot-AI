@@ -3,15 +3,51 @@ Signal Server - Performance Analytics
 Calculates Sharpe ratio, Sortino ratio, max drawdown, win rate, profit factor, etc.
 """
 import math
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from trade_logger import get_trade_history, get_today_trades
+
+# ─────────────────────────────────────────────
+# Simple in-memory cache for performance calculations
+# ─────────────────────────────────────────────
+_CACHE_TTL = 60  # seconds
+_performance_cache: dict[str, tuple[dict, float]] = {}
+
+
+def _get_cached(key: str) -> dict | None:
+    """Return cached value if still fresh, otherwise None."""
+    entry = _performance_cache.get(key)
+    if entry and (time.time() - entry[1]) < _CACHE_TTL:
+        return entry[0]
+    return None
+
+
+def _set_cache(key: str, value: dict):
+    _performance_cache[key] = (value, time.time())
+
+
+def invalidate_performance_cache():
+    """Call this after a new trade is logged to ensure fresh metrics."""
+    _performance_cache.clear()
 
 
 def calculate_performance(days: int = 30) -> dict:
     """
     Calculate comprehensive performance metrics from trade history.
+    Results are cached for up to 60 seconds to avoid redundant computation.
     """
+    cache_key = f"perf_{days}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    result = _calculate_performance_impl(days)
+    _set_cache(cache_key, result)
+    return result
+
+
+def _calculate_performance_impl(days: int = 30) -> dict:
     trades = get_trade_history(days)
     executed = [t for t in trades if t.get("execute") and t.get("order_status") in ("filled", "simulated")]
 
@@ -115,6 +151,10 @@ def calculate_performance(days: int = 30) -> dict:
 
 def get_daily_pnl(days: int = 30) -> list[dict]:
     """Get daily aggregated PnL for charting."""
+    cache_key = f"daily_pnl_{days}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
     trades = get_trade_history(days)
     daily = {}
 
@@ -143,6 +183,7 @@ def get_daily_pnl(days: int = 30) -> list[dict]:
         d["cumulative_pnl"] = round(cum, 4)
         d["pnl"] = round(d["pnl"], 4)
 
+    _set_cache(cache_key, result)
     return result
 
 

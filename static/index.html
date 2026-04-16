@@ -11,27 +11,30 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <!-- Sidebar overlay (mobile) -->
+    <div class="sidebar-overlay" id="sidebar-overlay" aria-hidden="true"></div>
+
     <!-- Sidebar -->
-    <aside class="sidebar" id="sidebar">
+    <aside class="sidebar" id="sidebar" role="complementary" aria-label="Sidebar">
         <div class="sidebar-logo">
             <i class="ri-signal-tower-fill"></i>
             <span>Signal Server</span>
         </div>
-        <nav class="sidebar-nav">
-            <a href="#" class="nav-item active" data-page="dashboard" id="nav-dashboard">
-                <i class="ri-dashboard-3-line"></i><span>Dashboard</span>
+        <nav class="sidebar-nav" role="navigation" aria-label="Main navigation">
+            <a href="#" class="nav-item active" data-page="dashboard" id="nav-dashboard" aria-current="page">
+                <i class="ri-dashboard-3-line" aria-hidden="true"></i><span>Dashboard</span>
             </a>
             <a href="#" class="nav-item" data-page="positions" id="nav-positions">
-                <i class="ri-stock-line"></i><span>Positions</span>
+                <i class="ri-stock-line" aria-hidden="true"></i><span>Positions</span>
             </a>
             <a href="#" class="nav-item" data-page="history" id="nav-history">
-                <i class="ri-history-line"></i><span>History</span>
+                <i class="ri-history-line" aria-hidden="true"></i><span>History</span>
             </a>
             <a href="#" class="nav-item" data-page="analytics" id="nav-analytics">
-                <i class="ri-pie-chart-2-line"></i><span>Analytics</span>
+                <i class="ri-pie-chart-2-line" aria-hidden="true"></i><span>Analytics</span>
             </a>
             <a href="#" class="nav-item" data-page="settings" id="nav-settings">
-                <i class="ri-settings-3-line"></i><span>Settings</span>
+                <i class="ri-settings-3-line" aria-hidden="true"></i><span>Settings</span>
             </a>
         </nav>
         <div class="sidebar-footer">
@@ -55,7 +58,7 @@
                     <span class="mode-dot paper"></span>
                     <span>Paper Trading</span>
                 </div>
-                <button class="btn btn-icon" onclick="refreshAll()" title="Refresh"><i class="ri-refresh-line"></i></button>
+                <button class="btn btn-icon" onclick="refreshAll()" title="Refresh" aria-label="Refresh data"><i class="ri-refresh-line"></i></button>
             </div>
         </header>
 
@@ -99,9 +102,9 @@
                     <div class="card-header">
                         <h3>Equity Curve</h3>
                         <div class="card-actions">
-                            <button class="btn btn-sm active" onclick="setChartPeriod(7)">7D</button>
-                            <button class="btn btn-sm" onclick="setChartPeriod(30)">30D</button>
-                            <button class="btn btn-sm" onclick="setChartPeriod(90)">90D</button>
+                            <button class="btn btn-sm active" onclick="setChartPeriod(event, 7)">7D</button>
+                            <button class="btn btn-sm" onclick="setChartPeriod(event, 30)">30D</button>
+                            <button class="btn btn-sm" onclick="setChartPeriod(event, 90)">90D</button>
                         </div>
                     </div>
                     <div class="chart-container">
@@ -282,6 +285,10 @@
 
         <!-- Page: Settings -->
         <div class="page" id="page-settings">
+            <div class="info-banner">
+                <i class="ri-information-line" aria-hidden="true"></i>
+                <span>API keys are applied immediately in memory but are <strong>not persisted to disk</strong>. Set them in your <code>.env</code> file for permanent configuration.</span>
+            </div>
             <!-- Exchange Settings -->
             <div class="card">
                 <div class="card-header">
@@ -412,7 +419,7 @@
                         <label>Your Webhook Endpoint</label>
                         <div class="webhook-url-box">
                             <code id="webhook-url">Loading...</code>
-                            <button class="btn btn-icon btn-sm" onclick="copyWebhookUrl()" title="Copy"><i class="ri-file-copy-line"></i></button>
+                            <button class="btn btn-icon btn-sm" onclick="copyWebhookUrl(event)" title="Copy" aria-label="Copy webhook URL"><i class="ri-file-copy-line"></i></button>
                         </div>
                     </div>
                     <p class="hint">Paste this URL into your TradingView alert webhook field.</p>
@@ -420,6 +427,9 @@
             </div>
         </div>
     </main>
+
+    <!-- Toast notifications -->
+    <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
 
     <script src="/static/app.js"></script>
 </body>

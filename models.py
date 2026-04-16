@@ -55,7 +55,7 @@ class TradingViewSignal(BaseModel):
 class PreFilterResult(BaseModel):
     passed: bool
     reason: str = ""
-    checks: dict = {}
+    checks: dict = Field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────
@@ -95,7 +95,7 @@ class AIAnalysis(BaseModel):
     position_size_pct: float = 1.0      # suggested position size as % of default
     risk_score: float = Field(default=0.5, ge=0.0, le=1.0)
     market_condition: str = ""          # trending / ranging / volatile / calm
-    warnings: list[str] = []
+    warnings: list[str] = Field(default_factory=list)
     raw_response: str = ""              # raw LLM output for debugging
 
 
