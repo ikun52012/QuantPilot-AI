@@ -798,12 +798,19 @@ select:focus-visible {
     .menu-toggle { display: block; }
     .page { padding: 16px; }
     .header { padding: 0 16px; }
-    .kpi-grid { grid-template-columns: 1fr 1fr; }
-    .balance-grid { grid-template-columns: 1fr 1fr; }
+    /* Two-column KPI grid works down to ~480 px */
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .balance-grid { grid-template-columns: repeat(2, 1fr); }
     /* Make tables horizontally scrollable and keep touch targets comfortable */
     .table-wrapper { -webkit-overflow-scrolling: touch; }
     .data-table td,
     .data-table th { padding: 10px 12px; font-size: 12px; }
     /* Stack settings rows */
     .form-row { flex-direction: column; }
+}
+
+/* True single-column layout for very small screens */
+@media (max-width: 480px) {
+    .kpi-grid { grid-template-columns: 1fr; }
+    .balance-grid { grid-template-columns: 1fr; }
 }

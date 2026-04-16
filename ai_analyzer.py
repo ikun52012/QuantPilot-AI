@@ -96,8 +96,8 @@ async def _with_retry(coro_factory, label: str) -> str:
     Execute an async coroutine factory with exponential-backoff retry.
     Retries on rate-limit, server errors, and transient network failures.
     """
-    last_exc: Exception | None = None
-    for attempt in range(_AI_MAX_RETRIES):
+    last_exc: Exception = RuntimeError(f"[AI/{label}] No attempts made (_AI_MAX_RETRIES={_AI_MAX_RETRIES})")
+    for attempt in range(max(_AI_MAX_RETRIES, 1)):
         try:
             return await coro_factory()
         except httpx.HTTPStatusError as exc:

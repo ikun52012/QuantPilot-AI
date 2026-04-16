@@ -16,6 +16,17 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ─── Toast notification system ───
+
+/** Escape HTML special characters to prevent XSS when inserting user/server content. */
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function showToast(message, type = 'info', title = '') {
     const container = document.getElementById('toast-container');
     if (!container) return;
@@ -28,14 +39,17 @@ function showToast(message, type = 'info', title = '') {
     };
     const defaultTitles = { success: 'Success', error: 'Error', warning: 'Warning', info: 'Info' };
 
+    const safeTitle   = escapeHtml(title || defaultTitles[type] || 'Notice');
+    const safeMessage = message ? escapeHtml(message) : '';
+
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     toast.setAttribute('role', 'alert');
     toast.innerHTML = `
-        <i class="toast-icon ${icons[type] || icons.info}"></i>
+        <i class="toast-icon ${icons[type] || icons.info}" aria-hidden="true"></i>
         <div class="toast-body">
-            <div class="toast-title">${title || defaultTitles[type] || 'Notice'}</div>
-            ${message ? `<div class="toast-msg">${message}</div>` : ''}
+            <div class="toast-title">${safeTitle}</div>
+            ${safeMessage ? `<div class="toast-msg">${safeMessage}</div>` : ''}
         </div>
     `;
     container.appendChild(toast);

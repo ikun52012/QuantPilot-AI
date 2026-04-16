@@ -12,10 +12,10 @@ from trade_logger import get_trade_history, get_today_trades
 # Simple in-memory cache for performance calculations
 # ─────────────────────────────────────────────
 _CACHE_TTL = 60  # seconds
-_performance_cache: dict[str, tuple[dict, float]] = {}
+_performance_cache: dict[str, tuple[object, float]] = {}
 
 
-def _get_cached(key: str) -> dict | None:
+def _get_cached(key: str) -> object | None:
     """Return cached value if still fresh, otherwise None."""
     entry = _performance_cache.get(key)
     if entry and (time.time() - entry[1]) < _CACHE_TTL:
