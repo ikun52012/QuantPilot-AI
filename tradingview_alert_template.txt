@@ -1,0 +1,67 @@
+================================================================
+  TradingView Alert Webhook 配置模板
+================================================================
+
+1. 在 TradingView 中打开你的 Crypto Quant Pro v6 策略
+2. 点击 "Add Alert" 
+3. Condition 选择你的策略
+4. 在 Webhook URL 填入:
+   
+   https://你的域名或IP:8000/webhook
+
+5. 在 Alert Message 中粘贴以下 JSON:
+
+--- Long Entry Alert ---
+{
+    "secret": "你在.env中设置的WEBHOOK_SECRET",
+    "ticker": "{{ticker}}",
+    "exchange": "{{exchange}}",
+    "direction": "long",
+    "price": {{close}},
+    "timeframe": "{{interval}}",
+    "strategy": "Crypto Quant Pro v6",
+    "message": "{{strategy.order.comment}}"
+}
+
+--- Short Entry Alert ---
+{
+    "secret": "你在.env中设置的WEBHOOK_SECRET",
+    "ticker": "{{ticker}}",
+    "exchange": "{{exchange}}",
+    "direction": "short",
+    "price": {{close}},
+    "timeframe": "{{interval}}",
+    "strategy": "Crypto Quant Pro v6",
+    "message": "{{strategy.order.comment}}"
+}
+
+--- Close Long Alert ---
+{
+    "secret": "你在.env中设置的WEBHOOK_SECRET",
+    "ticker": "{{ticker}}",
+    "exchange": "{{exchange}}",
+    "direction": "close_long",
+    "price": {{close}},
+    "timeframe": "{{interval}}",
+    "strategy": "Crypto Quant Pro v6",
+    "message": "{{strategy.order.comment}}"
+}
+
+--- Close Short Alert ---
+{
+    "secret": "你在.env中设置的WEBHOOK_SECRET",
+    "ticker": "{{ticker}}",
+    "exchange": "{{exchange}}",
+    "direction": "close_short",
+    "price": {{close}},
+    "timeframe": "{{interval}}",
+    "strategy": "Crypto Quant Pro v6",
+    "message": "{{strategy.order.comment}}"
+}
+
+================================================================
+注意事项:
+- TradingView 的 Webhook 功能需要 Pro 或更高版本
+- {{}} 内的变量会被 TradingView 自动替换
+- 确保 Webhook URL 使用 HTTPS（可用 Cloudflare Tunnel 或 nginx + Let's Encrypt）
+================================================================

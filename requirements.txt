@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+python-dotenv==1.0.1
+pydantic==2.10.4
+ccxt==4.4.54
+python-telegram-bot==21.9
+apscheduler==3.11.0
+aiofiles==24.1.0
+loguru==0.7.3
