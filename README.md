@@ -1,8 +1,8 @@
-# 🐉 Signal Server
+# 📡 Signal Server
 
 AI-powered crypto trading signal optimization system.
 
-**TradingView → AI Analysis → Exchange Execution**
+**TradingView → AI Analysis → Exchange Execution → Dashboard**
 
 ## Architecture
 
@@ -15,9 +15,9 @@ TradingView Alert (Webhook)
         ↓
    AI Analysis (OpenAI / Claude / DeepSeek)
         ↓
-   Trade Execution (Binance)
+   Trade Execution (Binance / OKX / Bybit / Bitget / Gate.io)
         ↓
-   Telegram Notification + Logging
+   Telegram Notification + Dashboard
 ```
 
 ## Features
@@ -25,11 +25,22 @@ TradingView Alert (Webhook)
 - 📡 Receives TradingView webhook alerts
 - 🔍 Rule-based pre-filter (blocks 60-70% low-quality signals)
 - 🤖 AI analysis via LLM API (OpenAI / Anthropic / DeepSeek)
-- 📈 Auto-executes trades on Binance (futures)
+- 📈 Multi-exchange support: **Binance, OKX, Bybit, Bitget, Gate.io, Coinbase**
 - 📱 Real-time Telegram notifications
-- 📝 Complete trade logging & statistics
+- 📊 **Web Dashboard** with positions, equity curve, Sharpe ratio, and more
+- 📝 Complete trade logging & analytics
 - 🐳 Docker one-click deployment
 - 🔒 Paper trading mode for safe testing
+
+## Dashboard
+
+Access the dashboard at `http://your-server:8000/dashboard`
+
+- **Dashboard** — KPI overview, equity curve, recent signals
+- **Positions** — Real-time open positions & account balance
+- **History** — Full trade history with AI confidence scores
+- **Analytics** — Sharpe ratio, Sortino ratio, profit factor, max drawdown, win/loss distribution
+- **Settings** — Configure exchange API keys, AI provider, Telegram, risk management
 
 ## Quick Start
 
@@ -45,36 +56,34 @@ cp .env.example .env
 # Deploy
 docker compose up -d
 
-# Check status
-curl http://localhost:8000/health
+# Open dashboard
+open http://localhost:8000/dashboard
 ```
 
-## Configuration
+## Supported Exchanges
 
-Copy `.env.example` to `.env` and fill in:
-
-- **AI Provider**: Choose between OpenAI, Anthropic, or DeepSeek
-- **Exchange**: Binance API keys
-- **Telegram**: Bot token and chat ID (optional)
-- **Risk Management**: Daily trade limits, max loss, position sizing
+| Exchange | Futures | Passphrase Required |
+|----------|---------|-------------------|
+| Binance  | ✅ | No |
+| OKX      | ✅ | Yes |
+| Bybit    | ✅ | No |
+| Bitget   | ✅ | Yes |
+| Gate.io  | ✅ | No |
+| Coinbase | ❌ | No |
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Server status |
-| `/health` | GET | Health check |
+| `/dashboard` | GET | Web dashboard |
 | `/webhook` | POST | TradingView webhook receiver |
-| `/stats` | GET | Today's trading statistics |
-| `/trades` | GET | Today's trade log |
+| `/api/positions` | GET | Open positions |
+| `/api/performance` | GET | Performance metrics (Sharpe, Sortino, etc.) |
+| `/api/daily-pnl` | GET | Daily P&L for charting |
+| `/api/history` | GET | Trade history |
+| `/api/settings/*` | POST | Update settings via dashboard |
 | `/balance` | GET | Account balance |
-| `/test-signal` | POST | Send test signal |
-
-## TradingView Setup
-
-See `tradingview_alert_template.txt` for webhook alert JSON templates.
-
-> ⚠️ TradingView Webhook requires Pro subscription or higher.
+| `/stats` | GET | Today's statistics |
 
 ## License
 

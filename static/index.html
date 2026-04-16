@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signal Server Dashboard</title>
+    <meta name="description" content="AI-powered crypto trading signal dashboard">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-logo">
+            <i class="ri-signal-tower-fill"></i>
+            <span>Signal Server</span>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="#" class="nav-item active" data-page="dashboard" id="nav-dashboard">
+                <i class="ri-dashboard-3-line"></i><span>Dashboard</span>
+            </a>
+            <a href="#" class="nav-item" data-page="positions" id="nav-positions">
+                <i class="ri-stock-line"></i><span>Positions</span>
+            </a>
+            <a href="#" class="nav-item" data-page="history" id="nav-history">
+                <i class="ri-history-line"></i><span>History</span>
+            </a>
+            <a href="#" class="nav-item" data-page="analytics" id="nav-analytics">
+                <i class="ri-pie-chart-2-line"></i><span>Analytics</span>
+            </a>
+            <a href="#" class="nav-item" data-page="settings" id="nav-settings">
+                <i class="ri-settings-3-line"></i><span>Settings</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="server-status" id="server-status">
+                <span class="status-dot"></span>
+                <span>Connected</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <button class="menu-toggle" id="menu-toggle"><i class="ri-menu-line"></i></button>
+                <h1 id="page-title">Dashboard</h1>
+            </div>
+            <div class="header-right">
+                <div class="trading-mode" id="trading-mode">
+                    <span class="mode-dot paper"></span>
+                    <span>Paper Trading</span>
+                </div>
+                <button class="btn btn-icon" onclick="refreshAll()" title="Refresh"><i class="ri-refresh-line"></i></button>
+            </div>
+        </header>
+
+        <!-- Page: Dashboard -->
+        <div class="page active" id="page-dashboard">
+            <!-- KPI Cards -->
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <div class="kpi-icon green"><i class="ri-funds-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Total P&L</span>
+                        <span class="kpi-value" id="kpi-pnl">--</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon blue"><i class="ri-bar-chart-grouped-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Total Trades</span>
+                        <span class="kpi-value" id="kpi-trades">--</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon purple"><i class="ri-trophy-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Win Rate</span>
+                        <span class="kpi-value" id="kpi-winrate">--</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon orange"><i class="ri-flashlight-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Sharpe Ratio</span>
+                        <span class="kpi-value" id="kpi-sharpe">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Row -->
+            <div class="charts-row">
+                <div class="chart-card wide">
+                    <div class="card-header">
+                        <h3>Equity Curve</h3>
+                        <div class="card-actions">
+                            <button class="btn btn-sm active" onclick="setChartPeriod(7)">7D</button>
+                            <button class="btn btn-sm" onclick="setChartPeriod(30)">30D</button>
+                            <button class="btn btn-sm" onclick="setChartPeriod(90)">90D</button>
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="equity-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bottom Row -->
+            <div class="charts-row two-col">
+                <div class="chart-card">
+                    <div class="card-header"><h3>Performance Metrics</h3></div>
+                    <div class="metrics-grid" id="metrics-grid">
+                        <!-- Filled by JS -->
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="card-header"><h3>Recent Signals</h3></div>
+                    <div class="signals-list" id="recent-signals">
+                        <!-- Filled by JS -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Page: Positions -->
+        <div class="page" id="page-positions">
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="ri-stock-line"></i> Open Positions</h3>
+                    <button class="btn btn-sm btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table" id="positions-table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Size</th>
+                                <th>Entry Price</th>
+                                <th>Mark Price</th>
+                                <th>Liq. Price</th>
+                                <th>Unrealized P&L</th>
+                                <th>ROE %</th>
+                                <th>Leverage</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body">
+                            <tr><td colspan="9" class="empty-state">Loading positions...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Account Balance -->
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-wallet-3-line"></i> Account Balance</h3></div>
+                <div class="balance-grid" id="balance-grid">
+                    <div class="balance-item">
+                        <span class="balance-label">Total</span>
+                        <span class="balance-value" id="bal-total">--</span>
+                    </div>
+                    <div class="balance-item">
+                        <span class="balance-label">Available</span>
+                        <span class="balance-value" id="bal-free">--</span>
+                    </div>
+                    <div class="balance-item">
+                        <span class="balance-label">In Use</span>
+                        <span class="balance-value" id="bal-used">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Page: History -->
+        <div class="page" id="page-history">
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="ri-history-line"></i> Trade History</h3>
+                    <div class="card-actions">
+                        <select id="history-days" class="select-input" onchange="loadHistory()">
+                            <option value="7">Last 7 Days</option>
+                            <option value="30" selected>Last 30 Days</option>
+                            <option value="90">Last 90 Days</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table" id="history-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Ticker</th>
+                                <th>Direction</th>
+                                <th>Entry</th>
+                                <th>SL</th>
+                                <th>TP</th>
+                                <th>AI Conf.</th>
+                                <th>Status</th>
+                                <th>P&L</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-body">
+                            <tr><td colspan="9" class="empty-state">Loading history...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Page: Analytics -->
+        <div class="page" id="page-analytics">
+            <!-- Summary Cards -->
+            <div class="kpi-grid analytics-kpis">
+                <div class="kpi-card">
+                    <div class="kpi-icon green"><i class="ri-percent-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Profit Factor</span>
+                        <span class="kpi-value" id="an-pf">--</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon red"><i class="ri-arrow-down-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Max Drawdown</span>
+                        <span class="kpi-value" id="an-dd">--</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon blue"><i class="ri-scales-3-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Risk/Reward</span>
+                        <span class="kpi-value" id="an-rr">--</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon purple"><i class="ri-line-chart-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Sortino Ratio</span>
+                        <span class="kpi-value" id="an-sortino">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="charts-row two-col">
+                <!-- Daily PnL Chart -->
+                <div class="chart-card">
+                    <div class="card-header"><h3>Daily P&L</h3></div>
+                    <div class="chart-container">
+                        <canvas id="daily-pnl-chart"></canvas>
+                    </div>
+                </div>
+                <!-- Win/Loss Distribution -->
+                <div class="chart-card">
+                    <div class="card-header"><h3>Win / Loss Distribution</h3></div>
+                    <div class="chart-container">
+                        <canvas id="winloss-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detailed Metrics Table -->
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-file-list-3-line"></i> Detailed Metrics</h3></div>
+                <div class="metrics-table" id="detailed-metrics">
+                    <!-- Filled by JS -->
+                </div>
+            </div>
+
+            <!-- AI Accuracy -->
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-robot-2-line"></i> AI Analysis Performance</h3></div>
+                <div class="ai-stats" id="ai-stats">
+                    <!-- Filled by JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Page: Settings -->
+        <div class="page" id="page-settings">
+            <!-- Exchange Settings -->
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="ri-exchange-line"></i> Exchange Configuration</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label for="set-exchange">Exchange</label>
+                        <select id="set-exchange" class="select-input">
+                            <option value="binance">Binance</option>
+                            <option value="okx">OKX</option>
+                            <option value="bybit">Bybit</option>
+                            <option value="bitget">Bitget</option>
+                            <option value="gate">Gate.io</option>
+                            <option value="coinbase">Coinbase</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="set-api-key">API Key</label>
+                        <input type="password" id="set-api-key" class="text-input" placeholder="Enter API Key">
+                    </div>
+                    <div class="form-group">
+                        <label for="set-api-secret">API Secret</label>
+                        <input type="password" id="set-api-secret" class="text-input" placeholder="Enter API Secret">
+                    </div>
+                    <div class="form-group" id="password-group" style="display:none">
+                        <label for="set-password">Passphrase <span class="hint">(OKX / Bitget)</span></label>
+                        <input type="password" id="set-password" class="text-input" placeholder="Enter Passphrase">
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-primary" onclick="testConnection()" id="btn-test-conn">
+                            <i class="ri-link"></i> Test Connection
+                        </button>
+                        <button class="btn btn-success" onclick="saveExchangeSettings()" id="btn-save-exchange">
+                            <i class="ri-save-line"></i> Save
+                        </button>
+                    </div>
+                    <div id="conn-result" class="conn-result"></div>
+                </div>
+            </div>
+
+            <!-- AI Settings -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-robot-2-line"></i> AI Provider</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label for="set-ai-provider">Provider</label>
+                        <select id="set-ai-provider" class="select-input">
+                            <option value="deepseek">DeepSeek (Cheapest)</option>
+                            <option value="openai">OpenAI (GPT-4o)</option>
+                            <option value="anthropic">Anthropic (Claude)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="set-ai-key">API Key</label>
+                        <input type="password" id="set-ai-key" class="text-input" placeholder="Enter AI API Key">
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-success" onclick="saveAISettings()" id="btn-save-ai">
+                            <i class="ri-save-line"></i> Save AI Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Telegram Settings -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-telegram-line"></i> Telegram Notifications</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label for="set-tg-token">Bot Token</label>
+                        <input type="password" id="set-tg-token" class="text-input" placeholder="Enter Telegram Bot Token">
+                    </div>
+                    <div class="form-group">
+                        <label for="set-tg-chat">Chat ID</label>
+                        <input type="text" id="set-tg-chat" class="text-input" placeholder="Enter Chat ID">
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-primary" onclick="testTelegram()">
+                            <i class="ri-send-plane-line"></i> Send Test Message
+                        </button>
+                        <button class="btn btn-success" onclick="saveTelegramSettings()">
+                            <i class="ri-save-line"></i> Save
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Risk Settings -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-shield-check-line"></i> Risk Management</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-row three-col">
+                        <div class="form-group">
+                            <label for="set-max-pos">Max Position %</label>
+                            <input type="number" id="set-max-pos" class="text-input" value="10" step="0.5">
+                        </div>
+                        <div class="form-group">
+                            <label for="set-max-trades">Max Daily Trades</label>
+                            <input type="number" id="set-max-trades" class="text-input" value="10" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="set-max-loss">Max Daily Loss %</label>
+                            <input type="number" id="set-max-loss" class="text-input" value="5" step="0.5">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-success" onclick="saveRiskSettings()">
+                            <i class="ri-save-line"></i> Save Risk Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Webhook Info -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-webhook-line"></i> Webhook URL</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label>Your Webhook Endpoint</label>
+                        <div class="webhook-url-box">
+                            <code id="webhook-url">Loading...</code>
+                            <button class="btn btn-icon btn-sm" onclick="copyWebhookUrl()" title="Copy"><i class="ri-file-copy-line"></i></button>
+                        </div>
+                    </div>
+                    <p class="hint">Paste this URL into your TradingView alert webhook field.</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

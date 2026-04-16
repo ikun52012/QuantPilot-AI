@@ -1,5 +1,5 @@
 """
-OpenClaw Signal Server - Configuration
+Signal Server - Configuration
 """
 import os
 from pathlib import Path
@@ -23,8 +23,9 @@ class AIConfig(BaseModel):
 
 class ExchangeConfig(BaseModel):
     name: str = os.getenv("EXCHANGE", "binance")
-    api_key: str = os.getenv("BINANCE_API_KEY", "")
-    api_secret: str = os.getenv("BINANCE_API_SECRET", "")
+    api_key: str = os.getenv("EXCHANGE_API_KEY", "") or os.getenv("BINANCE_API_KEY", "")
+    api_secret: str = os.getenv("EXCHANGE_API_SECRET", "") or os.getenv("BINANCE_API_SECRET", "")
+    password: str = os.getenv("EXCHANGE_PASSWORD", "")  # OKX/Bitget passphrase
     live_trading: bool = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
 
