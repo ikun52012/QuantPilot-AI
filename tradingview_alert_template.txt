@@ -1,0 +1,92 @@
+==================================================================
+
+TradingView Alert Webhook Configuration Template
+
+=================================================================
+
+1. Open your Crypto Quant Pro v6 strategy in TradingView
+
+2. Click "Add Alert"
+
+3. Select your strategy in Condition
+
+4. Enter the following in Webhook URL:
+
+https://yourdomain or IP:8000/webhook
+
+5. Paste the following JSON into Alert Message:
+
+--- Long Entry Alert ---
+
+{
+"secret": "Your WEBHOOK_SECRET setting in .env",
+
+"ticker": "{{ticker}}",
+
+"exchange": "{{exchange}}",
+
+"direction": "long",
+
+"price": {{close}},
+
+"timeframe": "{{interval}}",
+
+"strategy": "Crypto Quant Pro v6",
+
+"message": "{{strategy.order.comment}}"
+
+}
+--- Short Entry Alert ---
+
+{
+"secret": "Your WEBHOOK_SECRET setting in .env",
+
+"ticker": "{{ticker}}",
+
+"exchange": "{{exchange}}",
+
+"direction": "short",
+
+"price": {{close}},
+
+"timeframe": "{{interval}}",
+
+"strategy": "Crypto Quant Pro v6",
+
+"message": "{{strategy.order.comment}}"
+}
+
+--- Close Long Alert ---
+{ 
+"secret": "WEBHOOK_SECRET you set in .env", 
+"ticker": "{{ticker}}", 
+"exchange": "{{exchange}}", 
+"direction": "close_long", 
+"price": {{close}}, 
+"timeframe": "{{interval}}", 
+"strategy": "Crypto Quant Pro v6", 
+"message": "{{strategy.order.comment}}"
+}
+
+--- Close Short Alert ---
+{ 
+"secret": "WEBHOOK_SECRET you set in .env", 
+"ticker": "{{ticker}}", 
+"exchange": "{{exchange}}", 
+"direction": "close_short", 
+"price": {{close}}, 
+"timeframe": "{{interval}}", "strategy": "Crypto Quant Pro v6",
+
+"message": "{{strategy.order.comment}}"
+
+}
+==================================================================
+Notes:
+
+- TradingView's Webhook functionality requires Pro or a higher version.
+
+- Variables within {{}} will be automatically replaced by TradingView.
+
+- Ensure the Webhook URL uses HTTPS (using Cloudflare Tunnel or nginx + Let's Encrypt).
+
+=====================================================================
