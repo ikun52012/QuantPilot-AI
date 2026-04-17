@@ -1,4 +1,4 @@
-# 📡 OpenClaw Signal Server v3.0
+# 📡 Tradingview Signal Server v3.0
 
 AI-powered cryptocurrency trading signal server with multi-exchange support, intelligent analysis, and advanced risk management.
 
