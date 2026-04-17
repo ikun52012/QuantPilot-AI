@@ -5,7 +5,7 @@ AI-powered cryptocurrency trading signal server with multi-exchange support, int
 ## ✨ Features
 
 ### 🤖 Custom AI Analysis
-- **3 Providers**: OpenAI (GPT-4o), Anthropic (Claude), DeepSeek
+- **3 Providers**: OpenAI (GPT), Anthropic (Claude), DeepSeek
 - **Custom Parameters**: Configurable temperature, max tokens, custom system prompt
 - **Intelligent Decisions**: AI analyzes signals and recommends execute/modify/reject
 
