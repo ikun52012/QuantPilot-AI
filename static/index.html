@@ -341,16 +341,41 @@
                 <div class="settings-form">
                     <div class="form-group">
                         <label for="set-ai-provider">Provider</label>
-                        <select id="set-ai-provider" class="select-input">
+                        <select id="set-ai-provider" class="select-input" onchange="toggleCustomAIFields()">
                             <option value="deepseek">DeepSeek (Cheapest)</option>
                             <option value="openai">OpenAI (GPT-4o)</option>
                             <option value="anthropic">Anthropic (Claude)</option>
+                            <option value="custom">Custom Provider</option>
                         </select>
                     </div>
                     <div class="form-group">
                         <label for="set-ai-key">API Key</label>
                         <input type="password" id="set-ai-key" class="text-input" placeholder="Enter AI API Key">
                     </div>
+                    
+                    <!-- Custom AI Provider Fields (hidden by default) -->
+                    <div id="custom-ai-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="set-custom-provider-name">Custom Provider Name</label>
+                            <input type="text" id="set-custom-provider-name" class="text-input" placeholder="e.g., my-llm, local-ai, etc.">
+                        </div>
+                        <div class="form-group">
+                            <label for="set-custom-provider-model">Custom Model Name</label>
+                            <input type="text" id="set-custom-provider-model" class="text-input" placeholder="e.g., gpt-3.5-turbo, llama-3-70b, etc.">
+                        </div>
+                        <div class="form-group">
+                            <label for="set-custom-provider-url">Custom API URL</label>
+                            <input type="text" id="set-custom-provider-url" class="text-input" placeholder="https://api.example.com/v1/chat/completions">
+                            <p class="hint">Must support OpenAI-compatible API format</p>
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="set-custom-provider-enabled">
+                                <span>Enable Custom Provider</span>
+                            </label>
+                        </div>
+                    </div>
+                    
                     <div class="form-row three-col" style="margin-top:0">
                         <div class="form-group">
                             <label for="set-ai-temp">Temperature</label>

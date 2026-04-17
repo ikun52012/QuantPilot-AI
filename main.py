@@ -179,6 +179,10 @@ async def api_status():
         "supported_exchanges": get_supported_exchanges(),
         "tp_levels": settings.take_profit.num_levels,
         "trailing_stop_mode": settings.trailing_stop.mode,
+        # Custom AI provider info
+        "custom_provider_enabled": settings.ai.custom_provider_enabled,
+        "custom_provider_name": settings.ai.custom_provider_name,
+        "custom_provider_model": settings.ai.custom_provider_model,
         "time": datetime.utcnow().isoformat(),
     }
 
@@ -455,6 +459,11 @@ class AISettingsRequest(BaseModel):
     temperature: float = 0.3
     max_tokens: int = 1000
     custom_system_prompt: str = ""
+    # Custom AI provider fields
+    custom_provider_enabled: bool = False
+    custom_provider_name: str = "custom"
+    custom_provider_model: str = ""
+    custom_provider_api_url: str = ""
 
 
 class TelegramSettingsRequest(BaseModel):
@@ -515,6 +524,17 @@ async def save_ai_settings(req: AISettingsRequest):
             settings.ai.anthropic_api_key = req.api_key
         elif req.provider == "deepseek":
             settings.ai.deepseek_api_key = req.api_key
+        elif req.provider == req.custom_provider_name:
+            settings.ai.custom_provider_api_key = req.api_key
+
+    # Handle custom provider settings
+    settings.ai.custom_provider_enabled = req.custom_provider_enabled
+    if req.custom_provider_name:
+        settings.ai.custom_provider_name = req.custom_provider_name
+    if req.custom_provider_model:
+        settings.ai.custom_provider_model = req.custom_provider_model
+    if req.custom_provider_api_url:
+        settings.ai.custom_provider_api_url = req.custom_provider_api_url
 
     settings.ai.temperature = req.temperature
     settings.ai.max_tokens = req.max_tokens
@@ -527,6 +547,9 @@ async def save_ai_settings(req: AISettingsRequest):
             "temperature": settings.ai.temperature,
             "max_tokens": settings.ai.max_tokens,
             "custom_system_prompt": settings.ai.custom_system_prompt,
+            "custom_provider_enabled": settings.ai.custom_provider_enabled,
+            "custom_provider_name": settings.ai.custom_provider_name,
+            "custom_provider_model": settings.ai.custom_provider_model,
         }
     })
     logger.info(f"[Settings] AI provider updated: {settings.ai.provider}")

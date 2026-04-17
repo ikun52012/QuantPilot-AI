@@ -12,13 +12,19 @@ load_dotenv(ENV_PATH)
 
 
 class AIConfig(BaseModel):
-    provider: str = os.getenv("AI_PROVIDER", "openai")
+    provider: str = os.getenv("AI_PROVIDER", "deepseek")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o")
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    # Custom AI provider parameters
+    custom_provider_enabled: bool = os.getenv("CUSTOM_AI_PROVIDER_ENABLED", "false").lower() == "true"
+    custom_provider_name: str = os.getenv("CUSTOM_AI_PROVIDER_NAME", "custom")
+    custom_provider_api_key: str = os.getenv("CUSTOM_AI_API_KEY", "")
+    custom_provider_model: str = os.getenv("CUSTOM_AI_MODEL", "")
+    custom_provider_api_url: str = os.getenv("CUSTOM_AI_API_URL", "")
     # Custom AI parameters
     temperature: float = float(os.getenv("AI_TEMPERATURE", "0.3"))
     max_tokens: int = int(os.getenv("AI_MAX_TOKENS", "1000"))

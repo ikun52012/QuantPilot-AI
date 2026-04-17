@@ -514,7 +514,23 @@ async function loadAnalytics() {
     }
 }
 
-// ─── Settings ───
+// ─── Custom AI Provider Functions ───
+
+function toggleCustomAIFields() {
+    const provider = document.getElementById('set-ai-provider').value;
+    const customFields = document.getElementById('custom-ai-fields');
+    
+    if (provider === 'custom') {
+        customFields.style.display = 'block';
+        // Set default values for custom provider
+        document.getElementById('set-custom-provider-name').value = 'custom';
+        document.getElementById('set-custom-provider-enabled').checked = true;
+    } else {
+        customFields.style.display = 'none';
+    }
+}
+
+// ─── AI Settings ───
 function setupExchangeToggle() {
     const exchangeSelect = document.getElementById('set-exchange');
     exchangeSelect?.addEventListener('change', () => {
@@ -531,7 +547,20 @@ async function loadSettings() {
         const exchangeEl = document.getElementById('set-exchange');
         if (exchangeEl && status.exchange) exchangeEl.value = status.exchange;
         const aiEl = document.getElementById('set-ai-provider');
-        if (aiEl && status.ai_provider) aiEl.value = status.ai_provider;
+        if (aiEl && status.ai_provider) {
+            // Check if current provider is a custom provider
+            if (status.custom_provider_enabled && status.ai_provider === status.custom_provider_name) {
+                aiEl.value = 'custom';
+                // Show custom provider fields
+                document.getElementById('custom-ai-fields').style.display = 'block';
+                // Set custom provider values
+                document.getElementById('set-custom-provider-name').value = status.custom_provider_name || 'custom';
+                document.getElementById('set-custom-provider-model').value = status.custom_provider_model || '';
+                document.getElementById('set-custom-provider-enabled').checked = true;
+            } else {
+                aiEl.value = status.ai_provider;
+            }
+        }
 
         // Set TP levels from status
         if (status.tp_levels) {
@@ -594,13 +623,24 @@ async function saveExchangeSettings() {
 }
 
 async function saveAISettings() {
-    await saveSettings('/api/settings/ai', {
-        provider: document.getElementById('set-ai-provider').value,
+    const provider = document.getElementById('set-ai-provider').value;
+    const data = {
+        provider: provider,
         api_key: document.getElementById('set-ai-key').value,
         temperature: parseFloat(document.getElementById('set-ai-temp').value) || 0.3,
         max_tokens: parseInt(document.getElementById('set-ai-tokens').value) || 1000,
         custom_system_prompt: document.getElementById('set-ai-prompt').value || '',
-    }, 'btn-save-ai');
+    };
+    
+    // Add custom provider fields if provider is 'custom'
+    if (provider === 'custom') {
+        data.custom_provider_enabled = document.getElementById('set-custom-provider-enabled').checked;
+        data.custom_provider_name = document.getElementById('set-custom-provider-name').value || 'custom';
+        data.custom_provider_model = document.getElementById('set-custom-provider-model').value || '';
+        data.custom_provider_api_url = document.getElementById('set-custom-provider-url').value || '';
+    }
+    
+    await saveSettings('/api/settings/ai', data, 'btn-save-ai');
 }
 
 async function saveTelegramSettings() {

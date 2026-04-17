@@ -256,6 +256,58 @@ async def _call_deepseek(system: str, user: str) -> str:
     return await _with_retry(_do, "deepseek")
 
 
+async def _call_custom(system: str, user: str) -> str:
+    """Call custom AI provider API with automatic retry."""
+    async def _do():
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Check if custom provider is properly configured
+            if not settings.ai.custom_provider_api_url:
+                raise ValueError("Custom AI provider API URL is not configured")
+            if not settings.ai.custom_provider_api_key:
+                raise ValueError("Custom AI provider API key is not configured")
+            
+            # Prepare request payload (OpenAI-compatible format)
+            payload = {
+                "model": settings.ai.custom_provider_model or "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": settings.ai.temperature,
+                "max_tokens": settings.ai.max_tokens,
+            }
+            
+            resp = await client.post(
+                settings.ai.custom_provider_api_url,
+                headers={
+                    "Authorization": f"Bearer {settings.ai.custom_provider_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            
+            # Handle OpenAI-compatible response format
+            if "choices" in data and len(data["choices"]) > 0:
+                return data["choices"][0]["message"]["content"]
+            # Handle Anthropic-compatible response format
+            elif "content" in data and len(data["content"]) > 0:
+                return data["content"][0]["text"]
+            else:
+                # Try to extract text from common response formats
+                if "text" in data:
+                    return data["text"]
+                elif "response" in data:
+                    return data["response"]
+                elif "message" in data:
+                    return data["message"]
+                else:
+                    raise ValueError(f"Unexpected response format: {data}")
+
+    return await _with_retry(_do, settings.ai.custom_provider_name)
+
+
 # ─────────────────────────────────────────────
 # Main analysis function
 # ─────────────────────────────────────────────
@@ -282,6 +334,8 @@ async def analyze_signal(
             raw = await _call_anthropic(system_prompt, user_prompt)
         elif provider == "deepseek":
             raw = await _call_deepseek(system_prompt, user_prompt)
+        elif provider == settings.ai.custom_provider_name and settings.ai.custom_provider_enabled:
+            raw = await _call_custom(system_prompt, user_prompt)
         else:
             raise ValueError(f"Unknown AI provider: {provider}")
 
