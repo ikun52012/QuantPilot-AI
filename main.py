@@ -183,6 +183,7 @@ async def api_status():
         "custom_provider_enabled": settings.ai.custom_provider_enabled,
         "custom_provider_name": settings.ai.custom_provider_name,
         "custom_provider_model": settings.ai.custom_provider_model,
+        "custom_provider_url": settings.ai.custom_provider_api_url,
         "time": datetime.utcnow().isoformat(),
     }
 

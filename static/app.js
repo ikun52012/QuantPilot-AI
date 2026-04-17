@@ -549,13 +549,14 @@ async function loadSettings() {
         const aiEl = document.getElementById('set-ai-provider');
         if (aiEl && status.ai_provider) {
             // Check if current provider is a custom provider
-            if (status.custom_provider_enabled && status.ai_provider === status.custom_provider_name) {
+            if (status.custom_provider_enabled && status.ai_provider === 'custom') {
                 aiEl.value = 'custom';
                 // Show custom provider fields
                 document.getElementById('custom-ai-fields').style.display = 'block';
                 // Set custom provider values
                 document.getElementById('set-custom-provider-name').value = status.custom_provider_name || 'custom';
                 document.getElementById('set-custom-provider-model').value = status.custom_provider_model || '';
+                document.getElementById('set-custom-provider-url').value = status.custom_provider_url || '';
                 document.getElementById('set-custom-provider-enabled').checked = true;
             } else {
                 aiEl.value = status.ai_provider;
