@@ -2,33 +2,17 @@
 OpenClaw Signal Server - Market Data Fetcher
 Fetches real-time market data from the exchange via ccxt.
 """
+import asyncio
 import ccxt
 from loguru import logger
 from config import settings
 from models import MarketContext
+from exchange import _build_exchange, _resolve_symbol
 
 
 def _get_exchange() -> ccxt.Exchange:
     """Create a ccxt exchange instance."""
-    exchange_id = settings.exchange.name.lower()
-    exchange_class = getattr(ccxt, exchange_id, None)
-    if exchange_class is None:
-        raise ValueError(f"Unsupported exchange: {exchange_id}")
-
-    exchange = exchange_class({
-        "apiKey": settings.exchange.api_key,
-        "secret": settings.exchange.api_secret,
-        "options": {"defaultType": "future"},   # use futures market
-        "enableRateLimit": True,
-    })
-
-    if not settings.exchange.live_trading:
-        try:
-            exchange.set_sandbox_mode(True)
-        except Exception:
-            pass  # Some exchanges (e.g. Gate.io) don't support sandbox mode
-
-    return exchange
+    return _build_exchange()
 
 
 async def fetch_market_context(ticker: str) -> MarketContext:
@@ -37,14 +21,15 @@ async def fetch_market_context(ticker: str) -> MarketContext:
     Gathers price, volume, orderbook, and funding data.
     """
     exchange = _get_exchange()
-    symbol = _normalize_symbol(ticker)
+    symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
 
     try:
-        # Fetch multiple data points in parallel
-        ticker_data = exchange.fetch_ticker(symbol)
-        ohlcv_1h = exchange.fetch_ohlcv(symbol, "1h", limit=30)
-        ohlcv_4h = exchange.fetch_ohlcv(symbol, "4h", limit=10)
-        orderbook = exchange.fetch_order_book(symbol, limit=20)
+        # CCXT is synchronous here; run calls in a worker thread so webhook
+        # processing does not block the FastAPI event loop.
+        ticker_data = await asyncio.to_thread(exchange.fetch_ticker, symbol)
+        ohlcv_1h = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, "1h", None, 30)
+        ohlcv_4h = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, "4h", None, 10)
+        orderbook = await asyncio.to_thread(exchange.fetch_order_book, symbol, 20)
 
         # Calculate price changes
         current_price = ticker_data.get("last", 0.0)
@@ -85,7 +70,7 @@ async def fetch_market_context(ticker: str) -> MarketContext:
         # Try to get funding rate (futures only)
         funding_rate = None
         try:
-            funding = exchange.fetch_funding_rate(symbol)
+            funding = await asyncio.to_thread(exchange.fetch_funding_rate, symbol)
             funding_rate = funding.get("fundingRate")
         except Exception:
             pass
@@ -117,7 +102,10 @@ async def fetch_market_context(ticker: str) -> MarketContext:
         # Return minimal context on failure
         return MarketContext(ticker=ticker, current_price=0.0)
     finally:
-        exchange.close()
+        try:
+            exchange.close()
+        except AttributeError:
+            pass
 
 
 def _normalize_symbol(ticker: str) -> str:

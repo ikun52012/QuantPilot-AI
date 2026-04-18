@@ -1,25 +1,32 @@
 """
-Signal Server - Main Application
+TradingView Signal Server v4.0 - Main Application
 
 Complete pipeline:
   TradingView Webhook → Pre-Filter → AI Analysis → Trade Execution → Notification
 
-Includes homepage, dashboard frontend and API endpoints for positions, analytics, settings.
+Features:
+  - User auth (JWT) with admin/user roles
+  - Subscription system with crypto payments
+  - Homepage, dashboard, login/register pages
+  - Enhanced pre-filter (15 checks)
+  - Multi-TP, trailing stop, custom AI
 
 Usage:
   uvicorn main:app --host 0.0.0.0 --port 8000
 """
 import sys
 import json
+import hmac
+import threading
 from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 from typing import Optional
 
 from config import settings
@@ -52,6 +59,48 @@ from notifier import (
 )
 from trade_logger import log_trade, get_today_stats, get_today_trades, get_trade_history
 from analytics import calculate_performance, get_daily_pnl, get_trade_distribution, invalidate_performance_cache
+from auth import (
+    hash_password,
+    verify_password,
+    create_token,
+    get_current_user,
+    require_admin,
+    get_optional_user,
+)
+from database import (
+    init_database,
+    create_user,
+    get_user_by_username,
+    get_user_by_email,
+    get_user_by_id,
+    update_user_login,
+    get_all_users,
+    update_user_status,
+    get_subscription_plans,
+    create_subscription_plan,
+    update_subscription_plan,
+    delete_subscription_plan,
+    create_subscription,
+    activate_subscription,
+    get_user_active_subscription,
+    get_user_subscriptions,
+    create_payment as db_create_payment,
+    confirm_payment,
+    get_pending_payment_for_subscription,
+    submit_payment_tx,
+    get_user_payments,
+    get_all_payments,
+    get_admin_setting,
+    set_admin_setting,
+)
+from payment import (
+    get_payment_address,
+    set_payment_address,
+    get_all_payment_addresses,
+    create_payment_request,
+    get_supported_payment_options,
+    SUPPORTED_NETWORKS,
+)
 
 # ─────────────────────────────────────────────
 # Logging setup
@@ -62,6 +111,7 @@ logger.add("logs/server_{time:YYYY-MM-DD}.log", rotation="1 day", retention="30 
 
 # Settings file for runtime config changes
 SETTINGS_FILE = Path(__file__).parent / "runtime_settings.json"
+_settings_lock = threading.Lock()
 
 
 def _load_runtime_settings() -> dict:
@@ -74,9 +124,12 @@ def _load_runtime_settings() -> dict:
 
 
 def _save_runtime_settings(data: dict):
-    current = _load_runtime_settings()
-    current.update(data)
-    SETTINGS_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+    with _settings_lock:
+        current = _load_runtime_settings()
+        current.update(data)
+        tmp_path = SETTINGS_FILE.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(SETTINGS_FILE)
 
 
 # ─────────────────────────────────────────────
@@ -84,8 +137,11 @@ def _save_runtime_settings(data: dict):
 # ─────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize database
+    init_database()
+
     logger.info("=" * 50)
-    logger.info("📡 Signal Server starting...")
+    logger.info("📡 TradingView Signal Server v4.0 starting...")
     logger.info(f"   AI Provider: {settings.ai.provider}")
     logger.info(f"   Exchange: {settings.exchange.name}")
     logger.info(f"   Live Trading: {'🔴 YES' if settings.exchange.live_trading else '🟢 NO (Paper)'}")
@@ -94,7 +150,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"   Trailing Stop: {settings.trailing_stop.mode}")
     logger.info("=" * 50)
 
-    # Apply runtime settings on startup (non-sensitive fields only; secrets come from .env)
+    # Apply runtime settings on startup
     rs = _load_runtime_settings()
     if rs.get("exchange"):
         settings.exchange.name = rs["exchange"].get("name", settings.exchange.name)
@@ -103,9 +159,14 @@ async def lifespan(app: FastAPI):
         settings.ai.temperature = rs["ai"].get("temperature", settings.ai.temperature)
         settings.ai.max_tokens = rs["ai"].get("max_tokens", settings.ai.max_tokens)
         settings.ai.custom_system_prompt = rs["ai"].get("custom_system_prompt", settings.ai.custom_system_prompt)
+        settings.ai.custom_provider_enabled = rs["ai"].get("custom_provider_enabled", settings.ai.custom_provider_enabled)
+        settings.ai.custom_provider_name = rs["ai"].get("custom_provider_name", settings.ai.custom_provider_name)
+        settings.ai.custom_provider_model = rs["ai"].get("custom_provider_model", settings.ai.custom_provider_model)
+        settings.ai.custom_provider_api_url = rs["ai"].get("custom_provider_api_url", settings.ai.custom_provider_api_url)
     if rs.get("telegram"):
         settings.telegram.chat_id = rs["telegram"].get("chat_id", settings.telegram.chat_id)
     if rs.get("risk"):
+        settings.risk.account_equity_usdt = rs["risk"].get("account_equity_usdt", settings.risk.account_equity_usdt)
         settings.risk.max_position_pct = rs["risk"].get("max_position_pct", settings.risk.max_position_pct)
         settings.risk.max_daily_trades = rs["risk"].get("max_daily_trades", settings.risk.max_daily_trades)
         settings.risk.max_daily_loss_pct = rs["risk"].get("max_daily_loss_pct", settings.risk.max_daily_loss_pct)
@@ -127,17 +188,20 @@ async def lifespan(app: FastAPI):
         settings.trailing_stop.activation_profit_pct = ts.get("activation_profit_pct", settings.trailing_stop.activation_profit_pct)
         settings.trailing_stop.trailing_step_pct = ts.get("trailing_step_pct", settings.trailing_stop.trailing_step_pct)
 
+    if settings.exchange.live_trading and not settings.server.webhook_secret:
+        raise RuntimeError("WEBHOOK_SECRET must be set when LIVE_TRADING=true")
+
     yield
-    logger.info("Signal Server shutting down...")
+    logger.info("TradingView Signal Server shutting down...")
 
 
 # ─────────────────────────────────────────────
 # FastAPI app
 # ─────────────────────────────────────────────
 app = FastAPI(
-    title="Signal Server",
-    description="AI-optimized crypto trading signal processor",
-    version="3.0.0",
+    title="TradingView Signal Server",
+    description="AI-powered crypto trading signal processor with subscriptions",
+    version="4.0.0",
     lifespan=lifespan,
 )
 
@@ -146,40 +210,359 @@ STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-# ─────────────────────────────────────────────
-# Homepage (landing page)
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════
+# PAGE ROUTES
+# ═══════════════════════════════════════════════
+
 @app.get("/", response_class=HTMLResponse)
 async def homepage():
-    """Serve the beautiful landing homepage."""
     return FileResponse(STATIC_DIR / "home.html")
 
-
-# ─────────────────────────────────────────────
-# Dashboard (serve frontend)
-# ─────────────────────────────────────────────
 @app.get("/dashboard")
 async def dashboard():
-    """Serve the dashboard frontend."""
     return FileResponse(STATIC_DIR / "index.html")
 
+@app.get("/login")
+async def login_page():
+    return FileResponse(STATIC_DIR / "login.html")
 
-# ─────────────────────────────────────────────
-# Health & Status
-# ─────────────────────────────────────────────
+@app.get("/register")
+async def register_page():
+    return FileResponse(STATIC_DIR / "register.html")
+
+
+# ═══════════════════════════════════════════════
+# AUTH API
+# ═══════════════════════════════════════════════
+
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=8, max_length=256)
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class SubscribeRequest(BaseModel):
+    plan_id: str = Field(min_length=1, max_length=80)
+
+
+class PaymentCreateRequest(BaseModel):
+    subscription_id: str = Field(min_length=1, max_length=80)
+    currency: str = Field(default="USDT", min_length=2, max_length=12)
+    network: str = Field(default="TRC20", min_length=2, max_length=20)
+
+
+class PaymentSubmitRequest(BaseModel):
+    payment_id: str = Field(min_length=1, max_length=80)
+    tx_hash: str = Field(min_length=6, max_length=200)
+
+
+@app.post("/api/auth/register")
+async def api_register(req: RegisterRequest):
+    username = req.username.lower().strip()
+    email = req.email.lower().strip()
+    if len(username) < 3:
+        raise HTTPException(400, "Username must be at least 3 characters")
+    if len(req.password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        raise HTTPException(400, "Invalid email address")
+
+    # Check if username or email already taken
+    if get_user_by_username(username):
+        raise HTTPException(400, "Username already exists")
+    if get_user_by_email(email):
+        raise HTTPException(400, "Email already registered")
+
+    pw_hash = hash_password(req.password)
+    try:
+        user = create_user(username, email, pw_hash)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    token = create_token(user["id"], user["username"], user["role"])
+
+    logger.info(f"[Auth] New user registered: {username}")
+    return {"token": token, "user": {"id": user["id"], "username": user["username"], "email": email, "role": user["role"]}}
+
+
+@app.post("/api/auth/login")
+async def api_login(req: LoginRequest):
+    username = req.username.lower().strip()
+    user = get_user_by_username(username)
+    if not user or not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid username or password")
+
+    if not user.get("is_active", 1):
+        raise HTTPException(403, "Account is disabled")
+
+    update_user_login(user["id"])
+    token = create_token(user["id"], user["username"], user["role"])
+
+    logger.info(f"[Auth] User logged in: {username}")
+    return {"token": token, "user": {"id": user["id"], "username": user["username"], "email": user["email"], "role": user["role"]}}
+
+
+@app.get("/api/auth/me")
+async def api_me(user=Depends(get_current_user)):
+    db_user = get_user_by_id(user["sub"])
+    if not db_user:
+        raise HTTPException(404, "User not found")
+
+    sub = get_user_active_subscription(user["sub"])
+    return {
+        "id": db_user["id"],
+        "username": db_user["username"],
+        "email": db_user["email"],
+        "role": db_user["role"],
+        "created_at": db_user["created_at"],
+        "subscription": sub,
+    }
+
+
+# ═══════════════════════════════════════════════
+# SUBSCRIPTION API
+# ═══════════════════════════════════════════════
+
+@app.get("/api/plans")
+async def api_get_plans():
+    """Get all active subscription plans (public)."""
+    return get_subscription_plans(active_only=True)
+
+
+@app.post("/api/subscribe")
+async def api_subscribe(req: SubscribeRequest, user=Depends(get_current_user)):
+    """Create a subscription for the current user."""
+    # Check if user already has active subscription
+    current_sub = get_user_active_subscription(user["sub"])
+    if current_sub:
+        raise HTTPException(400, "You already have an active subscription")
+
+    try:
+        sub = create_subscription(user["sub"], req.plan_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    if sub.get("price_usdt", 0) <= 0:
+        activate_subscription(sub["id"])
+        sub["status"] = "active"
+        logger.info(f"[Subscription] Free plan activated for {user['username']}: {req.plan_id}")
+        return sub
+    logger.info(f"[Subscription] User {user['username']} subscribed to plan {req.plan_id}")
+    return sub
+
+
+@app.get("/api/my-subscription")
+async def api_my_subscription(user=Depends(get_current_user)):
+    sub = get_user_active_subscription(user["sub"])
+    return sub or {"status": "none"}
+
+
+@app.get("/api/my-subscriptions")
+async def api_my_subscriptions(user=Depends(get_current_user)):
+    return get_user_subscriptions(user["sub"])
+
+
+# ═══════════════════════════════════════════════
+# PAYMENT API
+# ═══════════════════════════════════════════════
+
+@app.get("/api/payment-options")
+async def api_payment_options():
+    """Get available payment networks and currencies."""
+    return {
+        "networks": get_supported_payment_options(),
+        "supported": list(SUPPORTED_NETWORKS.keys()),
+    }
+
+
+@app.post("/api/payment/create")
+async def api_create_payment(req: PaymentCreateRequest, user=Depends(get_current_user)):
+    """Create a payment for a subscription."""
+    subscription_id = req.subscription_id
+    currency = req.currency.upper().strip()
+    network = req.network.upper().strip()
+
+    # Get subscription to find the amount
+    subs = get_user_subscriptions(user["sub"])
+    sub = next((s for s in subs if s["id"] == subscription_id), None)
+    if not sub:
+        raise HTTPException(404, "Subscription not found")
+
+    amount = sub.get("price_usdt", 0)
+    if amount <= 0:
+        # Free plan, activate immediately
+        activate_subscription(subscription_id)
+        return {"status": "activated", "message": "Free plan activated"}
+
+    existing_payment = get_pending_payment_for_subscription(user["sub"], subscription_id, currency, network)
+
+    # Get payment address
+    payment_info = create_payment_request(user["sub"], amount, currency, network)
+    if "error" in payment_info:
+        raise HTTPException(400, payment_info["error"])
+
+    if existing_payment:
+        existing_payment.update(payment_info)
+        if existing_payment.get("wallet_address"):
+            existing_payment["address"] = existing_payment["wallet_address"]
+        return existing_payment
+
+    # Create payment record
+    payment = db_create_payment(
+        user_id=user["sub"],
+        subscription_id=subscription_id,
+        amount=amount,
+        currency=currency,
+        network=network,
+        wallet_address=payment_info["address"],
+    )
+
+    payment.update(payment_info)
+    logger.info(f"[Payment] Created for user {user['username']}: {amount} {currency} on {network}")
+    return payment
+
+
+@app.post("/api/payment/submit-tx")
+async def api_submit_tx(req: PaymentSubmitRequest, user=Depends(get_current_user)):
+    """Submit a transaction hash for payment verification."""
+    payment_id = req.payment_id
+    tx_hash = req.tx_hash.strip()
+
+    # The admin will need to verify the tx manually.
+    if not submit_payment_tx(payment_id, user["sub"], tx_hash):
+        raise HTTPException(404, "Payment not found")
+
+    logger.info(f"[Payment] TX submitted by {user['username']}: {tx_hash}")
+    return {"status": "submitted", "message": "Transaction submitted for admin review"}
+
+
+@app.get("/api/my-payments")
+async def api_my_payments(user=Depends(get_current_user)):
+    return get_user_payments(user["sub"])
+
+
+# ═══════════════════════════════════════════════
+# ADMIN API
+# ═══════════════════════════════════════════════
+
+@app.get("/api/admin/users")
+async def api_admin_users(admin=Depends(require_admin)):
+    users = get_all_users()
+    # Add subscription info for each user
+    for u in users:
+        sub = get_user_active_subscription(u["id"])
+        u["subscription"] = sub
+    return users
+
+
+@app.post("/api/admin/user/{user_id}/toggle")
+async def api_admin_toggle_user(user_id: str, admin=Depends(require_admin)):
+    user = get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user_id == admin["sub"]:
+        raise HTTPException(400, "You cannot disable your own admin account")
+    if user.get("role") == "admin":
+        raise HTTPException(400, "Admin accounts cannot be toggled from this endpoint")
+    new_status = not bool(user.get("is_active", 1))
+    update_user_status(user_id, new_status)
+    return {"status": "ok", "is_active": new_status}
+
+
+@app.get("/api/admin/payments")
+async def api_admin_payments(status: str = None, admin=Depends(require_admin)):
+    return get_all_payments(status)
+
+
+@app.post("/api/admin/payment/{payment_id}/confirm")
+async def api_admin_confirm_payment(payment_id: str, admin=Depends(require_admin)):
+    try:
+        confirm_payment(payment_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    logger.info(f"[Admin] Payment {payment_id} confirmed")
+    return {"status": "confirmed"}
+
+
+@app.post("/api/admin/payment/{payment_id}/reject")
+async def api_admin_reject_payment(payment_id: str, admin=Depends(require_admin)):
+    from database import get_connection
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE payments SET status='rejected' WHERE id=?", (payment_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "rejected"}
+
+
+# Admin subscription plan management
+class PlanRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = ""
+    price_usdt: float = Field(ge=0)
+    duration_days: int = Field(default=30, ge=1, le=3650)
+    features: list[str] = Field(default_factory=list)
+    max_signals_per_day: int = Field(default=0, ge=0)
+
+
+@app.post("/api/admin/plans")
+async def api_admin_create_plan(req: PlanRequest, admin=Depends(require_admin)):
+    plan = create_subscription_plan(req.name, req.description, req.price_usdt, req.duration_days, req.features, req.max_signals_per_day)
+    return plan
+
+
+@app.put("/api/admin/plans/{plan_id}")
+async def api_admin_update_plan(plan_id: str, req: PlanRequest, admin=Depends(require_admin)):
+    update_subscription_plan(plan_id, name=req.name, description=req.description, price_usdt=req.price_usdt,
+                             duration_days=req.duration_days, features=req.features, max_signals_per_day=req.max_signals_per_day)
+    return {"status": "updated"}
+
+
+@app.delete("/api/admin/plans/{plan_id}")
+async def api_admin_delete_plan(plan_id: str, admin=Depends(require_admin)):
+    delete_subscription_plan(plan_id)
+    return {"status": "deleted"}
+
+
+# Admin payment address management
+class PaymentAddressRequest(BaseModel):
+    network: str = Field(min_length=2, max_length=20)
+    address: str = Field(min_length=8, max_length=200)
+
+
+@app.get("/api/admin/payment-addresses")
+async def api_admin_get_addresses(admin=Depends(require_admin)):
+    return get_all_payment_addresses()
+
+
+@app.post("/api/admin/payment-addresses")
+async def api_admin_set_address(req: PaymentAddressRequest, admin=Depends(require_admin)):
+    try:
+        set_payment_address(req.network, req.address)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"status": "saved", "network": req.network.upper().strip()}
+
+
+# ═══════════════════════════════════════════════
+# HEALTH & STATUS
+# ═══════════════════════════════════════════════
+
 @app.get("/api/status")
 async def api_status():
     return {
-        "name": "Signal Server",
+        "name": "TradingView Signal Server",
         "status": "running",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "ai_provider": settings.ai.provider,
         "exchange": settings.exchange.name,
         "live_trading": settings.exchange.live_trading,
         "supported_exchanges": get_supported_exchanges(),
         "tp_levels": settings.take_profit.num_levels,
         "trailing_stop_mode": settings.trailing_stop.mode,
-        # Custom AI provider info
         "custom_provider_enabled": settings.ai.custom_provider_enabled,
         "custom_provider_name": settings.ai.custom_provider_name,
         "custom_provider_model": settings.ai.custom_provider_model,
@@ -193,9 +576,10 @@ async def health():
     return {"status": "ok"}
 
 
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════
 # MAIN WEBHOOK ENDPOINT
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════
+
 @app.post("/webhook")
 async def webhook(request: Request):
     """
@@ -203,14 +587,22 @@ async def webhook(request: Request):
     Pipeline: Parse → Market Data → Pre-Filter → AI Analysis → Decision → Execute → Log
     """
     try:
-        body = await request.json()
-        signal = TradingViewSignal(**body)
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        try:
+            signal = TradingViewSignal(**body)
+        except ValidationError as e:
+            raise HTTPException(status_code=422, detail=json.loads(e.json()))
 
         # Authenticate
         if settings.server.webhook_secret:
-            if signal.secret != settings.server.webhook_secret:
+            if not hmac.compare_digest(signal.secret, settings.server.webhook_secret):
                 logger.warning(f"[Webhook] ❌ Invalid secret from {request.client.host}")
                 raise HTTPException(status_code=403, detail="Invalid webhook secret")
+        elif settings.exchange.live_trading:
+            raise HTTPException(status_code=503, detail="WEBHOOK_SECRET is required for live trading")
 
         logger.info(f"[Webhook] 📡 Signal: {signal.ticker} {signal.direction.value} @ {signal.price}")
         await notify_signal_received(signal.ticker, signal.direction.value, signal.price)
@@ -248,7 +640,8 @@ async def webhook(request: Request):
         order_result = {"status": "not_executed"}
         if decision.execute:
             order_result = await execute_trade(decision)
-            increment_trade_count()
+            if order_result.get("status") in ("filled", "simulated", "closed"):
+                increment_trade_count()
             await notify_trade_executed(decision, order_result)
 
         trade_id = log_trade(decision, order_result)
@@ -274,17 +667,24 @@ async def webhook(request: Request):
 
 
 # ─────────────────────────────────────────────
-# Decision logic (enhanced with multi-TP & trailing stop)
+# Decision logic
 # ─────────────────────────────────────────────
 CONFIDENCE_THRESHOLD = 0.5
 RISK_THRESHOLD = 0.8
 
 
 def _make_decision(signal, analysis, market) -> TradeDecision:
-    if analysis.recommendation == "reject":
+    recommendation = (analysis.recommendation or "hold").lower().strip()
+    if recommendation == "reject":
         return TradeDecision(
             execute=False, ticker=signal.ticker,
             reason=f"AI rejected (conf={analysis.confidence:.2f}): {analysis.reasoning}",
+            signal=signal, ai_analysis=analysis,
+        )
+    if recommendation not in {"execute", "modify"}:
+        return TradeDecision(
+            execute=False, ticker=signal.ticker,
+            reason=f"AI recommendation is {recommendation}; not executing",
             signal=signal, ai_analysis=analysis,
         )
     if analysis.confidence < CONFIDENCE_THRESHOLD:
@@ -302,12 +702,29 @@ def _make_decision(signal, analysis, market) -> TradeDecision:
 
     direction = analysis.suggested_direction or signal.direction
     entry = analysis.suggested_entry or signal.price or market.current_price
-    qty = _calc_qty(entry, analysis.suggested_stop_loss, market) * analysis.position_size_pct
+    if direction in (SignalDirection.CLOSE_LONG, SignalDirection.CLOSE_SHORT):
+        return TradeDecision(
+            execute=True, direction=direction, ticker=signal.ticker,
+            entry_price=entry, reason=f"AI approved close: {analysis.reasoning}",
+            signal=signal, ai_analysis=analysis,
+        )
+    if not entry or entry <= 0:
+        return TradeDecision(
+            execute=False, ticker=signal.ticker,
+            reason="Cannot calculate entry price",
+            signal=signal, ai_analysis=analysis,
+        )
 
-    # Build multi-TP levels
+    size_multiplier = _clamp(analysis.position_size_pct, 0.0, 1.0)
+    qty = _calc_qty(entry, analysis.suggested_stop_loss, market) * size_multiplier
+    if qty <= 0:
+        return TradeDecision(
+            execute=False, ticker=signal.ticker,
+            reason="Calculated quantity is zero",
+            signal=signal, ai_analysis=analysis,
+        )
+
     tp_levels = _build_tp_levels(analysis, entry, direction)
-
-    # Build trailing stop config
     trailing_config = _build_trailing_config()
 
     return TradeDecision(
@@ -323,14 +740,8 @@ def _make_decision(signal, analysis, market) -> TradeDecision:
 
 
 def _build_tp_levels(analysis, entry, direction) -> list[TakeProfitLevel]:
-    """Build take-profit levels from AI analysis and settings."""
     tp_levels = []
-    num = settings.take_profit.num_levels
-
-    # Map AI-suggested TPs with fallback to settings-based % distances
-    tp_prices = []
-    tp_qtys = []
-
+    num = int(_clamp(settings.take_profit.num_levels, 1, 4))
     is_long = direction in (SignalDirection.LONG,)
 
     for i in range(1, num + 1):
@@ -339,22 +750,28 @@ def _build_tp_levels(analysis, entry, direction) -> list[TakeProfitLevel]:
         default_pct = getattr(settings.take_profit, f"tp{i}_pct", 2.0 * i)
         default_qty = getattr(settings.take_profit, f"tp{i}_qty", 25.0)
 
-        if ai_tp and ai_tp > 0:
+        if ai_tp and ai_tp > 0 and ((is_long and ai_tp > entry) or (not is_long and ai_tp < entry)):
             price = ai_tp
         else:
-            # Calculate from entry ± percentage
             pct = default_pct / 100.0
             price = entry * (1 + pct) if is_long else entry * (1 - pct)
 
         qty_pct = ai_qty if ai_qty != 25.0 else default_qty
-
+        qty_pct = _clamp(qty_pct, 1.0, 100.0)
         tp_levels.append(TakeProfitLevel(price=round(price, 8), qty_pct=qty_pct))
+
+    total_qty = sum(tp.qty_pct for tp in tp_levels)
+    if total_qty > 100:
+        scale = 100 / total_qty
+        tp_levels = [
+            TakeProfitLevel(price=tp.price, qty_pct=round(tp.qty_pct * scale, 4))
+            for tp in tp_levels
+        ]
 
     return tp_levels
 
 
 def _build_trailing_config() -> TrailingStopConfig:
-    """Build trailing stop config from runtime settings."""
     mode_str = settings.trailing_stop.mode.lower()
     try:
         mode = TrailingStopMode(mode_str)
@@ -363,104 +780,111 @@ def _build_trailing_config() -> TrailingStopConfig:
 
     return TrailingStopConfig(
         mode=mode,
-        trail_pct=settings.trailing_stop.trail_pct,
-        activation_profit_pct=settings.trailing_stop.activation_profit_pct,
-        trailing_step_pct=settings.trailing_stop.trailing_step_pct,
+        trail_pct=_clamp(settings.trailing_stop.trail_pct, 0.1, 20.0),
+        activation_profit_pct=_clamp(settings.trailing_stop.activation_profit_pct, 0.1, 50.0),
+        trailing_step_pct=_clamp(settings.trailing_stop.trailing_step_pct, 0.1, 10.0),
     )
 
 
 def _calc_qty(entry, stop_loss, market, risk_pct=1.0):
     if not entry or entry <= 0:
         return 0.0
+    account_equity = max(settings.risk.account_equity_usdt, 0)
+    if account_equity <= 0:
+        return 0.0
     if stop_loss and stop_loss > 0:
         risk_per_unit = abs(entry - stop_loss)
         if risk_per_unit > 0:
-            risk_capital = 10000 * risk_pct * 0.01
-            max_qty = (10000 * settings.risk.max_position_pct * 0.01) / entry
+            risk_capital = account_equity * risk_pct * 0.01
+            max_qty = (account_equity * settings.risk.max_position_pct * 0.01) / entry
             return min(risk_capital / risk_per_unit, max_qty)
-    return (10000 * settings.risk.max_position_pct * 0.01) / entry
+    return (account_equity * settings.risk.max_position_pct * 0.01) / entry
+
+
+def _clamp(value, low, high):
+    return max(low, min(high, float(value)))
 
 
 # ═══════════════════════════════════════════════
-# DASHBOARD API ENDPOINTS
+# DASHBOARD API ENDPOINTS (require auth)
 # ═══════════════════════════════════════════════
 
 @app.get("/stats")
-async def stats():
+async def stats(user=Depends(require_admin)):
     return get_today_stats()
 
 
 @app.get("/trades")
-async def trades():
+async def trades(user=Depends(require_admin)):
     return get_today_trades()
 
 
 @app.get("/balance")
-async def balance():
+async def balance(user=Depends(require_admin)):
     return await get_account_balance()
 
 
-# ── Positions ──
 @app.get("/api/positions")
-async def api_positions():
+async def api_positions(user=Depends(require_admin)):
     return await get_open_positions()
 
 
 @app.get("/api/orders")
-async def api_orders(symbol: str = None, limit: int = 50):
+async def api_orders(symbol: str = None, limit: int = 50, user=Depends(require_admin)):
+    limit = max(1, min(limit, 200))
     return await get_recent_orders(symbol, limit)
 
 
-# ── History ──
 @app.get("/api/history")
-async def api_history(days: int = 30):
+async def api_history(days: int = 30, user=Depends(require_admin)):
+    days = max(1, min(days, 365))
     return get_trade_history(days)
 
 
-# ── Performance Analytics ──
 @app.get("/api/performance")
-async def api_performance(days: int = 30):
+async def api_performance(days: int = 30, user=Depends(require_admin)):
+    days = max(1, min(days, 365))
     return calculate_performance(days)
 
 
 @app.get("/api/daily-pnl")
-async def api_daily_pnl(days: int = 30):
+async def api_daily_pnl(days: int = 30, user=Depends(require_admin)):
+    days = max(1, min(days, 365))
     return get_daily_pnl(days)
 
 
 @app.get("/api/distribution")
-async def api_distribution():
+async def api_distribution(user=Depends(require_admin)):
     return get_trade_distribution()
 
 
 # ── Connection Test ──
 class ConnectionTestRequest(BaseModel):
-    exchange: str
-    api_key: str
-    api_secret: str
+    exchange: str = Field(min_length=2, max_length=30)
+    api_key: str = Field(min_length=1, max_length=300)
+    api_secret: str = Field(min_length=1, max_length=300)
     password: str = ""
 
 
 @app.post("/api/test-connection")
-async def api_test_connection(req: ConnectionTestRequest):
+async def api_test_connection(req: ConnectionTestRequest, user=Depends(require_admin)):
     return await test_exchange_connection(req.exchange, req.api_key, req.api_secret, req.password)
 
 
-# ── Settings ──
+# ── Settings (admin only) ──
 class ExchangeSettingsRequest(BaseModel):
     exchange: str = ""
-    api_key: str = ""
-    api_secret: str = ""
-    password: str = ""
+    api_key: str = Field(default="", max_length=300)
+    api_secret: str = Field(default="", max_length=300)
+    password: str = Field(default="", max_length=300)
 
 
 class AISettingsRequest(BaseModel):
     provider: str = ""
-    api_key: str = ""
-    temperature: float = 0.3
-    max_tokens: int = 1000
+    api_key: str = Field(default="", max_length=500)
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=1000, ge=128, le=8000)
     custom_system_prompt: str = ""
-    # Custom AI provider fields
     custom_provider_enabled: bool = False
     custom_provider_name: str = "custom"
     custom_provider_model: str = ""
@@ -468,67 +892,72 @@ class AISettingsRequest(BaseModel):
 
 
 class TelegramSettingsRequest(BaseModel):
-    bot_token: str = ""
-    chat_id: str = ""
+    bot_token: str = Field(default="", max_length=300)
+    chat_id: str = Field(default="", max_length=100)
 
 
 class RiskSettingsRequest(BaseModel):
-    max_position_pct: float = 10.0
-    max_daily_trades: int = 10
-    max_daily_loss_pct: float = 5.0
+    max_position_pct: float = Field(default=10.0, ge=0.1, le=100.0)
+    max_daily_trades: int = Field(default=10, ge=0, le=1000)
+    max_daily_loss_pct: float = Field(default=5.0, ge=0.1, le=100.0)
 
 
 class TakeProfitSettingsRequest(BaseModel):
-    num_levels: int = 1
-    tp1_pct: float = 2.0
-    tp2_pct: float = 4.0
-    tp3_pct: float = 6.0
-    tp4_pct: float = 10.0
-    tp1_qty: float = 25.0
-    tp2_qty: float = 25.0
-    tp3_qty: float = 25.0
-    tp4_qty: float = 25.0
+    num_levels: int = Field(default=1, ge=1, le=4)
+    tp1_pct: float = Field(default=2.0, gt=0, le=200.0)
+    tp2_pct: float = Field(default=4.0, gt=0, le=200.0)
+    tp3_pct: float = Field(default=6.0, gt=0, le=200.0)
+    tp4_pct: float = Field(default=10.0, gt=0, le=200.0)
+    tp1_qty: float = Field(default=25.0, ge=0.0, le=100.0)
+    tp2_qty: float = Field(default=25.0, ge=0.0, le=100.0)
+    tp3_qty: float = Field(default=25.0, ge=0.0, le=100.0)
+    tp4_qty: float = Field(default=25.0, ge=0.0, le=100.0)
 
 
 class TrailingStopSettingsRequest(BaseModel):
     mode: str = "none"
-    trail_pct: float = 1.0
-    activation_profit_pct: float = 1.0
-    trailing_step_pct: float = 0.5
+    trail_pct: float = Field(default=1.0, ge=0.1, le=20.0)
+    activation_profit_pct: float = Field(default=1.0, ge=0.1, le=50.0)
+    trailing_step_pct: float = Field(default=0.5, ge=0.1, le=10.0)
 
 
 @app.post("/api/settings/exchange")
-async def save_exchange_settings(req: ExchangeSettingsRequest):
+async def save_exchange_settings(req: ExchangeSettingsRequest, admin=Depends(require_admin)):
     if req.exchange:
-        settings.exchange.name = req.exchange
+        exchange_name = req.exchange.lower().strip()
+        if exchange_name not in get_supported_exchanges():
+            raise HTTPException(400, f"Unsupported exchange: {req.exchange}")
+        settings.exchange.name = exchange_name
     if req.api_key:
         settings.exchange.api_key = req.api_key
     if req.api_secret:
         settings.exchange.api_secret = req.api_secret
     if req.password:
         settings.exchange.password = req.password
-
-    # Only persist the exchange name – never write API keys to plain-text JSON.
     _save_runtime_settings({"exchange": {"name": settings.exchange.name}})
     logger.info(f"[Settings] Exchange updated: {settings.exchange.name}")
     return {"status": "saved", "exchange": settings.exchange.name}
 
 
 @app.post("/api/settings/ai")
-async def save_ai_settings(req: AISettingsRequest):
+async def save_ai_settings(req: AISettingsRequest, admin=Depends(require_admin)):
+    valid_providers = {"openai", "anthropic", "deepseek", "custom", req.custom_provider_name}
     if req.provider:
-        settings.ai.provider = req.provider
+        provider = req.provider.lower().strip()
+        if provider not in valid_providers:
+            raise HTTPException(400, f"Unsupported AI provider: {req.provider}")
+        settings.ai.provider = provider
     if req.api_key:
-        if req.provider == "openai":
+        active_provider = settings.ai.provider
+        if active_provider == "openai":
             settings.ai.openai_api_key = req.api_key
-        elif req.provider == "anthropic":
+        elif active_provider == "anthropic":
             settings.ai.anthropic_api_key = req.api_key
-        elif req.provider == "deepseek":
+        elif active_provider == "deepseek":
             settings.ai.deepseek_api_key = req.api_key
-        elif req.provider == req.custom_provider_name:
+        elif active_provider in {"custom", req.custom_provider_name}:
             settings.ai.custom_provider_api_key = req.api_key
 
-    # Handle custom provider settings
     settings.ai.custom_provider_enabled = req.custom_provider_enabled
     if req.custom_provider_name:
         settings.ai.custom_provider_name = req.custom_provider_name
@@ -536,12 +965,10 @@ async def save_ai_settings(req: AISettingsRequest):
         settings.ai.custom_provider_model = req.custom_provider_model
     if req.custom_provider_api_url:
         settings.ai.custom_provider_api_url = req.custom_provider_api_url
-
     settings.ai.temperature = req.temperature
     settings.ai.max_tokens = req.max_tokens
     settings.ai.custom_system_prompt = req.custom_system_prompt
 
-    # Persist non-secret AI settings
     _save_runtime_settings({
         "ai": {
             "provider": settings.ai.provider,
@@ -551,6 +978,7 @@ async def save_ai_settings(req: AISettingsRequest):
             "custom_provider_enabled": settings.ai.custom_provider_enabled,
             "custom_provider_name": settings.ai.custom_provider_name,
             "custom_provider_model": settings.ai.custom_provider_model,
+            "custom_provider_api_url": settings.ai.custom_provider_api_url,
         }
     })
     logger.info(f"[Settings] AI provider updated: {settings.ai.provider}")
@@ -558,24 +986,21 @@ async def save_ai_settings(req: AISettingsRequest):
 
 
 @app.post("/api/settings/telegram")
-async def save_telegram_settings(req: TelegramSettingsRequest):
+async def save_telegram_settings(req: TelegramSettingsRequest, admin=Depends(require_admin)):
     if req.bot_token:
         settings.telegram.bot_token = req.bot_token
     if req.chat_id:
         settings.telegram.chat_id = req.chat_id
-
-    # Persist only the (non-secret) chat_id; bot_token stays in memory / .env.
     _save_runtime_settings({"telegram": {"chat_id": settings.telegram.chat_id}})
     logger.info("[Settings] Telegram updated")
     return {"status": "saved"}
 
 
 @app.post("/api/settings/risk")
-async def save_risk_settings(req: RiskSettingsRequest):
+async def save_risk_settings(req: RiskSettingsRequest, admin=Depends(require_admin)):
     settings.risk.max_position_pct = req.max_position_pct
     settings.risk.max_daily_trades = req.max_daily_trades
     settings.risk.max_daily_loss_pct = req.max_daily_loss_pct
-
     _save_runtime_settings({
         "risk": {
             "max_position_pct": req.max_position_pct,
@@ -588,7 +1013,13 @@ async def save_risk_settings(req: RiskSettingsRequest):
 
 
 @app.post("/api/settings/take-profit")
-async def save_take_profit_settings(req: TakeProfitSettingsRequest):
+async def save_take_profit_settings(req: TakeProfitSettingsRequest, admin=Depends(require_admin)):
+    active_qty = [req.tp1_qty, req.tp2_qty, req.tp3_qty, req.tp4_qty][:req.num_levels]
+    if any(q <= 0 for q in active_qty):
+        raise HTTPException(400, "Active TP close percentages must be greater than 0")
+    total_qty = sum(active_qty)
+    if total_qty > 100:
+        raise HTTPException(400, f"Total active TP close percentage is {total_qty:.2f}%, must be <= 100%")
     settings.take_profit.num_levels = req.num_levels
     settings.take_profit.tp1_pct = req.tp1_pct
     settings.take_profit.tp2_pct = req.tp2_pct
@@ -598,7 +1029,6 @@ async def save_take_profit_settings(req: TakeProfitSettingsRequest):
     settings.take_profit.tp2_qty = req.tp2_qty
     settings.take_profit.tp3_qty = req.tp3_qty
     settings.take_profit.tp4_qty = req.tp4_qty
-
     _save_runtime_settings({
         "take_profit": {
             "num_levels": req.num_levels,
@@ -613,16 +1043,18 @@ async def save_take_profit_settings(req: TakeProfitSettingsRequest):
 
 
 @app.post("/api/settings/trailing-stop")
-async def save_trailing_stop_settings(req: TrailingStopSettingsRequest):
+async def save_trailing_stop_settings(req: TrailingStopSettingsRequest, admin=Depends(require_admin)):
+    try:
+        TrailingStopMode(req.mode)
+    except ValueError:
+        raise HTTPException(400, f"Unsupported trailing-stop mode: {req.mode}")
     settings.trailing_stop.mode = req.mode
     settings.trailing_stop.trail_pct = req.trail_pct
     settings.trailing_stop.activation_profit_pct = req.activation_profit_pct
     settings.trailing_stop.trailing_step_pct = req.trailing_step_pct
-
     _save_runtime_settings({
         "trailing_stop": {
-            "mode": req.mode,
-            "trail_pct": req.trail_pct,
+            "mode": req.mode, "trail_pct": req.trail_pct,
             "activation_profit_pct": req.activation_profit_pct,
             "trailing_step_pct": req.trailing_step_pct,
         }
@@ -632,14 +1064,13 @@ async def save_trailing_stop_settings(req: TrailingStopSettingsRequest):
 
 
 @app.post("/api/test-telegram")
-async def api_test_telegram():
-    await send_telegram("🧪 <b>Test Message</b>\n\nSignal Server is connected!")
+async def api_test_telegram(admin=Depends(require_admin)):
+    await send_telegram("🧪 <b>Test Message</b>\n\nTradingView Signal Server is connected!")
     return {"status": "sent"}
 
 
-# ── Test Signal ──
 @app.post("/test-signal")
-async def test_signal():
+async def test_signal(admin=Depends(require_admin)):
     market = await fetch_market_context("BTCUSDT")
     signal = TradingViewSignal(
         secret=settings.server.webhook_secret,
@@ -665,6 +1096,8 @@ async def _process_internal(signal):
     order_result = {"status": "not_executed"}
     if decision.execute:
         order_result = await execute_trade(decision)
+        if order_result.get("status") in ("filled", "simulated", "closed"):
+            increment_trade_count()
     trade_id = log_trade(decision, order_result)
     invalidate_performance_cache()
     return {

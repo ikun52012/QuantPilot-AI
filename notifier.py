@@ -1,5 +1,5 @@
 """
-OpenClaw Signal Server - Telegram Notifications
+TradingView Signal Server - Telegram Notifications
 Sends trading notifications to Telegram.
 """
 import httpx

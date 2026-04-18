@@ -1,10 +1,10 @@
 """
-OpenClaw Signal Server - Data Models
+TradingView Signal Server - Data Models
 """
 from datetime import datetime
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SignalDirection(str, Enum):
@@ -79,14 +79,36 @@ class TradingViewSignal(BaseModel):
     }
     """
     secret: str = ""
-    ticker: str                         # e.g. "BTCUSDT"
-    exchange: str = "BINANCE"           # e.g. "BINANCE"
+    ticker: str = Field(min_length=1, max_length=40)  # e.g. "BTCUSDT"
+    exchange: str = Field(default="BINANCE", max_length=30)  # e.g. "BINANCE"
     direction: SignalDirection
-    price: float
-    timeframe: str = "60"               # e.g. "60" for 1h
-    strategy: str = "unknown"
-    message: str = ""
+    price: float = Field(gt=0)
+    timeframe: str = Field(default="60", max_length=20)  # e.g. "60" for 1h
+    strategy: str = Field(default="unknown", max_length=120)
+    message: str = Field(default="", max_length=2000)
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+    @field_validator("ticker", "exchange", "timeframe", "strategy")
+    @classmethod
+    def _strip_required_strings(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value cannot be empty")
+        return value
+
+    @field_validator("ticker")
+    @classmethod
+    def _validate_ticker(cls, value: str) -> str:
+        normalized = value.upper().strip()
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/:._-")
+        if any(ch not in allowed for ch in normalized):
+            raise ValueError("ticker contains unsupported characters")
+        return normalized
+
+    @field_validator("message")
+    @classmethod
+    def _strip_message(cls, value: str) -> str:
+        return value.strip()
 
 
 # ─────────────────────────────────────────────
@@ -136,11 +158,11 @@ class AIAnalysis(BaseModel):
     suggested_tp2: Optional[float] = None
     suggested_tp3: Optional[float] = None
     suggested_tp4: Optional[float] = None
-    tp1_qty_pct: float = 25.0   # % of position to close at TP1
-    tp2_qty_pct: float = 25.0
-    tp3_qty_pct: float = 25.0
-    tp4_qty_pct: float = 25.0
-    position_size_pct: float = 1.0      # suggested position size as % of default
+    tp1_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)   # % of position to close at TP1
+    tp2_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)
+    tp3_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)
+    tp4_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)
+    position_size_pct: float = Field(default=1.0, ge=0.0, le=1.0)  # suggested position size as % of default
     risk_score: float = Field(default=0.5, ge=0.0, le=1.0)
     market_condition: str = ""          # trending / ranging / volatile / calm
     warnings: list[str] = Field(default_factory=list)

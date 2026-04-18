@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+data/
 trade_logs/
 logs/
 *.egg-info/

@@ -3,6 +3,7 @@ Signal Server - Multi-Exchange Executor
 Supports: Binance, OKX, Bybit, Bitget, Gate.io, Coinbase
 Enhanced with multi-TP and trailing-stop execution
 """
+import asyncio
 import ccxt
 from loguru import logger
 from config import settings
@@ -63,6 +64,7 @@ def _build_exchange(
     """Build CCXT exchange instance with proper configuration."""
     if exchange_id is None:
         exchange_id = settings.exchange.name
+    exchange_id = exchange_id.lower().strip()
 
     if exchange_id not in SUPPORTED_EXCHANGES:
         raise ValueError(f"Unsupported exchange: {exchange_id}")
@@ -82,12 +84,15 @@ def _build_exchange(
     if password or "password" in (config.get("extra_keys") or []):
         exchange_config["password"] = password if password else settings.exchange.password
 
-    # Use sandbox mode if not live trading
-    if config.get("has_sandbox", False) and not (live or settings.exchange.live_trading):
-        exchange_config["sandbox"] = True
-
     # Create exchange instance
     exchange = exchange_class(exchange_config)
+
+    # Use sandbox mode if not live trading
+    if config.get("has_sandbox", False) and not (live or settings.exchange.live_trading):
+        try:
+            exchange.set_sandbox_mode(True)
+        except Exception as e:
+            logger.debug(f"[Exchange] Sandbox mode unavailable for {exchange_id}: {e}")
 
     # Set default market type
     if "defaultType" in exchange_config["options"]:
@@ -106,6 +111,51 @@ def _normalize_symbol(symbol: str) -> str:
     return symbol
 
 
+def _symbol_candidates(symbol: str) -> list[str]:
+    """Return common CCXT symbol candidates for a TradingView-style ticker."""
+    cleaned = symbol.upper().replace(" ", "").replace("-", "").replace("_", "").replace("/", "")
+    quotes = ["USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]
+    candidates = [symbol.upper(), cleaned]
+    for quote in quotes:
+        if cleaned.endswith(quote) and len(cleaned) > len(quote):
+            base = cleaned[:-len(quote)]
+            candidates.extend([
+                f"{base}/{quote}",
+                f"{base}/{quote}:{quote}",
+                f"{base}{quote}",
+            ])
+            break
+    else:
+        candidates.extend([f"{cleaned}/USDT", f"{cleaned}/USDT:USDT", f"{cleaned}USDT"])
+
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(candidates))
+
+
+def _resolve_symbol(exchange: ccxt.Exchange, symbol: str) -> str:
+    """Resolve a TradingView ticker into an exchange market symbol."""
+    candidates = _symbol_candidates(symbol)
+    try:
+        markets = exchange.load_markets()
+    except Exception as e:
+        logger.debug(f"[Exchange] Could not load markets for symbol resolution: {e}")
+        return candidates[0]
+
+    for candidate in candidates:
+        if candidate in markets:
+            return candidate
+
+    cleaned = symbol.upper().replace(" ", "").replace("-", "").replace("_", "").replace("/", "")
+    for market_symbol, market in markets.items():
+        market_id = str(market.get("id", "")).upper().replace("-", "").replace("_", "").replace("/", "")
+        compact_symbol = market_symbol.upper().replace("/", "").replace(":", "").replace("-", "").replace("_", "")
+        if cleaned in {market_id, compact_symbol}:
+            return market_symbol
+
+    logger.warning(f"[Exchange] Symbol {symbol} not found in loaded markets; using {candidates[0]}")
+    return candidates[0]
+
+
 async def execute_trade(decision: TradeDecision) -> dict:
     """
     Execute a trade on the configured exchange.
@@ -120,7 +170,7 @@ async def execute_trade(decision: TradeDecision) -> dict:
         return _simulate_order(decision)
 
     exchange = _build_exchange()
-    symbol = _normalize_symbol(decision.ticker)
+    symbol = await asyncio.to_thread(_resolve_symbol, exchange, decision.ticker)
 
     try:
         if decision.direction in [SignalDirection.LONG]:
@@ -134,8 +184,12 @@ async def execute_trade(decision: TradeDecision) -> dict:
         else:
             return {"status": "error", "reason": f"Unknown direction: {decision.direction}"}
 
+        if decision.quantity is None or decision.quantity <= 0:
+            return {"status": "error", "reason": "Quantity must be greater than zero"}
+
         logger.info(f"[Exchange] Placing {side} order: {symbol} qty={decision.quantity}")
-        order = exchange.create_order(
+        order = await asyncio.to_thread(
+            exchange.create_order,
             symbol=symbol,
             type="market",
             side=side,
@@ -163,7 +217,8 @@ async def execute_trade(decision: TradeDecision) -> dict:
             # Fallback: single TP order
             try:
                 tp_side = "sell" if side == "buy" else "buy"
-                tp_order = exchange.create_order(
+                tp_order = await asyncio.to_thread(
+                    exchange.create_order,
                     symbol=symbol, type="take_profit_market", side=tp_side,
                     amount=decision.quantity,
                     params={"stopPrice": decision.take_profit, "closePosition": False},
@@ -183,7 +238,8 @@ async def execute_trade(decision: TradeDecision) -> dict:
                 sl_side = "sell" if side == "buy" else "buy"
                 trail_pct = decision.trailing_stop.trail_pct
                 callback_rate = trail_pct  # Binance uses callbackRate
-                ts_order = exchange.create_order(
+                ts_order = await asyncio.to_thread(
+                    exchange.create_order,
                     symbol=symbol, type="trailing_stop_market", side=sl_side,
                     amount=decision.quantity,
                     params={
@@ -240,7 +296,8 @@ async def _place_stop_loss(exchange, symbol, side, quantity, stop_price, result)
     """Place a standard stop-loss order."""
     try:
         sl_side = "sell" if side == "buy" else "buy"
-        sl_order = exchange.create_order(
+        sl_order = await asyncio.to_thread(
+            exchange.create_order,
             symbol=symbol, type="stop_market", side=sl_side,
             amount=quantity,
             params={"stopPrice": stop_price, "closePosition": False},
@@ -262,7 +319,8 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
         if tp_qty <= 0:
             continue
         try:
-            tp_order = exchange.create_order(
+            tp_order = await asyncio.to_thread(
+                exchange.create_order,
                 symbol=symbol, type="take_profit_market", side=tp_side,
                 amount=round(tp_qty, 6),
                 params={"stopPrice": tp.price, "closePosition": False},
@@ -293,11 +351,12 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
 async def _close_position(exchange: ccxt.Exchange, symbol: str, side: str) -> dict:
     """Close an existing position."""
     try:
-        positions = exchange.fetch_positions([symbol])
+        positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
         for pos in positions:
             if pos["symbol"] == symbol and float(pos.get("contracts", 0)) > 0:
                 amount = float(pos["contracts"])
-                order = exchange.create_order(
+                order = await asyncio.to_thread(
+                    exchange.create_order,
                     symbol=symbol, type="market", side=side, amount=amount,
                     params={"reduceOnly": True},
                 )
@@ -346,12 +405,17 @@ async def get_account_balance() -> dict:
     """Fetch account balance from exchange."""
     exchange = _build_exchange()
     try:
-        balance = exchange.fetch_balance()
+        balance = await asyncio.to_thread(exchange.fetch_balance)
+        quote = "USDT" if "USDT" in balance.get("total", {}) else "USD"
         # Extract relevant balance info
         result = {
             "total": balance.get("total", {}),
             "free": balance.get("free", {}),
             "used": balance.get("used", {}),
+            "quote": quote,
+            "total_quote": balance.get("total", {}).get(quote, 0.0) or 0.0,
+            "free_quote": balance.get("free", {}).get(quote, 0.0) or 0.0,
+            "used_quote": balance.get("used", {}).get(quote, 0.0) or 0.0,
             "timestamp": balance.get("timestamp"),
             "datetime": balance.get("datetime"),
         }
@@ -370,7 +434,7 @@ async def get_balance() -> dict:
     """Fetch account balance from exchange."""
     exchange = _build_exchange()
     try:
-        balance = exchange.fetch_balance()
+        balance = await asyncio.to_thread(exchange.fetch_balance)
         # Extract relevant balance info
         result = {
             "total": balance.get("total", {}),
@@ -394,7 +458,8 @@ async def get_ticker(symbol: str) -> dict:
     """Fetch ticker data for a symbol."""
     exchange = _build_exchange()
     try:
-        ticker = exchange.fetch_ticker(_normalize_symbol(symbol))
+        resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
+        ticker = await asyncio.to_thread(exchange.fetch_ticker, resolved_symbol)
         return {
             "symbol": ticker.get("symbol"),
             "last": ticker.get("last"),
@@ -420,21 +485,39 @@ async def get_open_positions() -> list[dict]:
     """Fetch open positions from exchange."""
     exchange = _build_exchange()
     try:
-        positions = exchange.fetch_positions()
+        positions = await asyncio.to_thread(exchange.fetch_positions)
         result = []
         for pos in positions:
-            if pos.get('contracts', 0) != 0:
+            try:
+                contracts = float(pos.get('contracts') or 0)
+            except (TypeError, ValueError):
+                contracts = 0.0
+            if contracts != 0:
+                unrealized_pnl = pos.get('unrealizedPnl')
+                notional = pos.get('notional')
+                percentage = pos.get('percentage')
+                if percentage is None and unrealized_pnl is not None and notional:
+                    try:
+                        percentage = (float(unrealized_pnl) / abs(float(notional))) * 100
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        percentage = None
                 result.append({
                     "symbol": pos.get('symbol'),
                     "side": pos.get('side'),
-                    "contracts": pos.get('contracts'),
+                    "contracts": contracts,
                     "entryPrice": pos.get('entryPrice'),
+                    "entry_price": pos.get('entryPrice'),
                     "markPrice": pos.get('markPrice'),
+                    "mark_price": pos.get('markPrice'),
                     "notional": pos.get('notional'),
                     "unrealizedPnl": pos.get('unrealizedPnl'),
+                    "unrealized_pnl": unrealized_pnl,
                     "liquidationPrice": pos.get('liquidationPrice'),
+                    "liquidation_price": pos.get('liquidationPrice'),
+                    "percentage": percentage,
                     "leverage": pos.get('leverage'),
                     "marginMode": pos.get('marginMode'),
+                    "margin_mode": pos.get('marginMode'),
                 })
         return result
     except Exception as e:
@@ -452,9 +535,10 @@ async def get_recent_orders(symbol: str = None, limit: int = 50) -> list[dict]:
     exchange = _build_exchange()
     try:
         if symbol:
-            orders = exchange.fetch_closed_orders(_normalize_symbol(symbol), limit=limit)
+            resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
+            orders = await asyncio.to_thread(exchange.fetch_closed_orders, resolved_symbol, None, limit)
         else:
-            orders = exchange.fetch_closed_orders(limit=limit)
+            orders = await asyncio.to_thread(exchange.fetch_closed_orders, None, None, limit)
 
         return [
             {
@@ -497,7 +581,7 @@ async def test_exchange_connection(
             password=password,
             live=True,
         )
-        balance = exchange.fetch_balance()
+        balance = await asyncio.to_thread(exchange.fetch_balance)
         try:
             exchange.close()
         except AttributeError:

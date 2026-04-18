@@ -1,11 +1,11 @@
 """
-OpenClaw Signal Server - Trade Logger
+TradingView Signal Server - Trade Logger
 Persists all trade decisions and results to JSON files.
 """
 import json
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from loguru import logger
 from models import TradeLog, TradeDecision
@@ -36,8 +36,10 @@ def _load_logs(path: Path) -> list[dict]:
 
 def _save_logs(path: Path, logs: list[dict]):
     """Save trade logs to file."""
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(logs, f, indent=2, default=str, ensure_ascii=False)
+    tmp_path.replace(path)
 
 
 def log_trade(decision: TradeDecision, order_result: dict) -> str:
@@ -56,6 +58,11 @@ def log_trade(decision: TradeDecision, order_result: dict) -> str:
         "entry_price": decision.entry_price,
         "stop_loss": decision.stop_loss,
         "take_profit": decision.take_profit,
+        "take_profit_levels": [
+            {"price": tp.price, "qty_pct": tp.qty_pct}
+            for tp in decision.take_profit_levels
+        ],
+        "trailing_stop": decision.trailing_stop.mode.value if decision.trailing_stop else "none",
         "quantity": decision.quantity,
         "reason": decision.reason,
         "order_status": order_result.get("status", "unknown"),
@@ -113,10 +120,20 @@ def get_today_stats() -> dict:
 def get_trade_history(days: int = 7) -> list[dict]:
     """Get trade history for the last N days."""
     all_trades = []
+    days = max(1, min(int(days), 365))
     for i in range(days):
-        date = datetime.utcnow() - __import__("datetime").timedelta(days=i)
+        date = datetime.utcnow() - timedelta(days=i)
         date_str = date.strftime("%Y-%m-%d")
         path = LOGS_DIR / f"trades_{date_str}.json"
         trades = _load_logs(path)
         all_trades.extend(trades)
     return all_trades
+
+
+def get_recent_trade_results(limit: int = 5) -> list[dict]:
+    """Get the most recent executed trade results (for consecutive loss check)."""
+    all_trades = get_trade_history(days=3)
+    executed = [t for t in all_trades if t.get("execute")]
+    # Sort by timestamp descending
+    executed.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+    return executed[:limit]

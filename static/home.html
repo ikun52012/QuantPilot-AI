@@ -3,35 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OpenClaw Signal Server — AI-Powered Crypto Trading</title>
+    <title>TradingView Signal Server — AI-Powered Crypto Trading</title>
     <meta name="description" content="AI-powered cryptocurrency trading signal server with multi-exchange support, intelligent analysis, and advanced risk management.">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800;900&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <style>
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
         :root {
-            --bg-dark: #050810;
-            --bg-card: rgba(15, 20, 35, 0.65);
-            --border: rgba(255, 255, 255, 0.06);
-            --text-primary: #e8edf5;
-            --text-secondary: #8892a8;
-            --text-muted: #5a6478;
-            --accent-blue: #4f8cff;
+            --bg-dark: #020617;
+            --bg-card: rgba(15, 23, 42, 0.65);
+            --border: rgba(255, 255, 255, 0.08);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-blue: #3b82f6;
             --accent-purple: #a855f7;
-            --accent-cyan: #22d3ee;
+            --accent-cyan: #06b6d4;
             --accent-green: #10b981;
             --accent-orange: #f59e0b;
-            --gradient-hero: linear-gradient(135deg, #4f8cff 0%, #a855f7 50%, #22d3ee 100%);
-            --gradient-card: linear-gradient(135deg, rgba(79,140,255,0.08), rgba(168,85,247,0.06));
-            --glow-blue: 0 0 80px rgba(79,140,255,0.15);
-            --glow-purple: 0 0 80px rgba(168,85,247,0.12);
-            --radius: 16px;
-            --radius-sm: 10px;
+            --gradient-hero: linear-gradient(135deg, #3b82f6 0%, #a855f7 50%, #06b6d4 100%);
+            --gradient-card: linear-gradient(135deg, rgba(59,130,246,0.08), rgba(168,85,247,0.06));
+            --glow-blue: 0 0 80px rgba(59,130,246,0.2);
+            --glow-purple: 0 0 80px rgba(168,85,247,0.15);
+            --radius: 24px;
+            --radius-sm: 12px;
         }
 
         html { scroll-behavior: smooth; }
-        body {
+         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg-dark);
             color: var(--text-primary);
@@ -39,22 +39,34 @@
             line-height: 1.6;
         }
 
+        h1, h2, h3, h4, h5, h6, .nav-logo {
+            font-family: 'Outfit', sans-serif;
+        }
+
         /* ── Animated background ── */
         .bg-grid {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             background-image:
-                linear-gradient(rgba(79,140,255,0.03) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(79,140,255,0.03) 1px, transparent 1px);
+                linear-gradient(rgba(59,130,246,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(59,130,246,0.03) 1px, transparent 1px);
             background-size: 60px 60px;
         }
         .bg-glow {
             position: fixed; z-index: 0; pointer-events: none;
             width: 600px; height: 600px; border-radius: 50%;
-            filter: blur(120px); opacity: 0.4;
+            filter: blur(140px); opacity: 0.35;
+            animation: float 20s infinite ease-in-out alternate;
         }
-        .bg-glow.g1 { top: -200px; left: -100px; background: rgba(79,140,255,0.15); }
-        .bg-glow.g2 { top: 40%; right: -200px; background: rgba(168,85,247,0.12); }
-        .bg-glow.g3 { bottom: -200px; left: 30%; background: rgba(34,211,238,0.10); }
+        .bg-glow.g1 { top: -200px; left: -100px; background: rgba(59,130,246,0.18); animation-delay: 0s; }
+        .bg-glow.g2 { top: 40%; right: -200px; background: rgba(168,85,247,0.14); animation-delay: -5s; }
+        .bg-glow.g3 { bottom: -200px; left: 30%; background: rgba(6,182,212,0.12); animation-delay: -10s; }
+
+        @keyframes float {
+            0% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(30px, -50px) scale(1.1); }
+            66% { transform: translate(-20px, 20px) scale(0.9); }
+            100% { transform: translate(0, 0) scale(1); }
+        }
 
         /* ── Utility ── */
         .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
@@ -71,6 +83,19 @@
             background: var(--gradient-hero);
             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
             background-clip: text;
+        }
+
+        @keyframes shimmer {
+            0% { background-position: 0% center; }
+            100% { background-position: -200% center; }
+        }
+        .shimmer-text {
+            background: linear-gradient(90deg, #3b82f6 0%, #a855f7 25%, #06b6d4 50%, #a855f7 75%, #3b82f6 100%);
+            background-size: 200% auto;
+            color: transparent;
+            -webkit-background-clip: text;
+            background-clip: text;
+            animation: shimmer 4s linear infinite;
         }
 
         /* ── Header / Navbar ── */
@@ -134,7 +159,7 @@
             letter-spacing: -0.03em; line-height: 1.1; margin-bottom: 24px;
         }
         .hero p {
-            font-size: 18px; color: var(--text-secondary); max-width: 640px;
+            font-size: 18px; color: var(--text-secondary); max-width: 680px;
             margin: 0 auto 40px; line-height: 1.7;
         }
         .hero-actions { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
@@ -180,10 +205,24 @@
             transition: all 0.3s ease;
             position: relative;
             overflow: hidden;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
         }
+        .feature-card::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            transition: opacity 0.3s;
+            background: radial-gradient(600px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(255,255,255,0.06), transparent 40%);
+            pointer-events: none;
+            z-index: 1;
+        }
+        .feature-card:hover::after { opacity: 1; }
         .feature-card::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-            background: var(--gradient-hero); opacity: 0;
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent); opacity: 0;
             transition: opacity 0.3s ease;
         }
         .feature-card:hover {
@@ -222,7 +261,15 @@
         }
         .pipeline-step i { font-size: 22px; }
         .pipeline-step span { font-size: 14px; font-weight: 600; }
-        .pipeline-arrow { color: var(--text-muted); font-size: 20px; }
+        .pipeline-arrow { 
+            color: var(--accent-blue); 
+            font-size: 24px; 
+            animation: pulse-arrow 1.5s infinite alternate ease-in-out;
+        }
+        @keyframes pulse-arrow {
+            0% { transform: translateX(-4px); opacity: 0.4; text-shadow: none; }
+            100% { transform: translateX(4px); opacity: 1; text-shadow: 0 0 16px var(--accent-blue); }
+        }
 
         /* ── TP & Trailing Section ── */
         .tp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
@@ -265,15 +312,22 @@
             text-align: center; padding: 80px 0 120px;
         }
         .cta-box {
-            background: var(--gradient-card);
-            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.4);
+            border: 1px solid rgba(255,255,255,0.08);
             border-radius: 24px;
             padding: 64px 48px;
             position: relative; overflow: hidden;
+            backdrop-filter: blur(24px);
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 20px 60px rgba(0,0,0,0.5);
+            animation: pulse-glow 4s infinite alternate;
+        }
+        @keyframes pulse-glow {
+            0% { box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 20px 60px rgba(0,0,0,0.5), 0 0 30px rgba(168,85,247,0.1); }
+            100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 20px 60px rgba(0,0,0,0.5), 0 0 50px rgba(59,130,246,0.2); }
         }
         .cta-box::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-            background: var(--gradient-hero);
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
         }
         .cta-box h2 { font-size: 32px; font-weight: 800; margin-bottom: 16px; }
         .cta-box p { color: var(--text-secondary); font-size: 16px; margin-bottom: 32px; max-width: 500px; margin-left: auto; margin-right: auto; }
@@ -334,16 +388,17 @@
     <div class="container">
         <a href="/" class="nav-logo">
             <i class="ri-signal-tower-fill"></i>
-            <span>OpenClaw</span>
+            <span>TVSS</span>
         </a>
         <div class="nav-links">
             <a href="#features">Features</a>
             <a href="#pipeline">Pipeline</a>
             <a href="#tp-trailing">Take Profit</a>
             <a href="#exchanges">Exchanges</a>
+            <a href="/login">Login</a>
         </div>
-        <a href="/dashboard" class="nav-cta">
-            <i class="ri-dashboard-3-line"></i> Dashboard
+        <a href="/register" class="nav-cta">
+            <i class="ri-user-add-line"></i> Sign Up
         </a>
     </div>
 </nav>
@@ -353,11 +408,11 @@
     <div class="container">
         <div class="hero-badge">
             <span class="dot"></span>
-            <span>v3.0 — Multi Take-Profit & Trailing Stop</span>
+            <span>v4.0 — Auth · Subscriptions · Crypto Payments</span>
         </div>
         <h1>
             AI-Powered<br>
-            <span class="gradient-text">Crypto Trading</span><br>
+            <span class="shimmer-text">Crypto Trading</span><br>
             Signal Server
         </h1>
         <p>
@@ -379,8 +434,8 @@
                 <div class="hero-stat-label">Exchanges Supported</div>
             </div>
             <div class="hero-stat">
-                <div class="hero-stat-value counter" data-target="3">0</div>
-                <div class="hero-stat-label">AI Providers</div>
+                <div class="hero-stat-value counter" data-target="15">0</div>
+                <div class="hero-stat-label">Pre-Filter Checks</div>
             </div>
             <div class="hero-stat">
                 <div class="hero-stat-value counter" data-target="4">0</div>
@@ -410,7 +465,7 @@
                 <p>Choose from OpenAI GPT-4o, Anthropic Claude, or DeepSeek. Customize temperature, max tokens, and add your own system prompt for tailored trade decisions.</p>
             </div>
             <div class="feature-card reveal delay-2">
-                <div class="feature-icon green"><i class="ri-target-line"></i></div>
+                <div class="feature-icon green"><i class="ri-money-dollar-circle-line"></i></div>
                 <h3>Multi Take-Profit (TP1-TP4)</h3>
                 <p>Set up to 4 progressive take-profit levels with independent position-close percentages. Scale out of winning trades systematically.</p>
             </div>
@@ -426,8 +481,8 @@
             </div>
             <div class="feature-card reveal delay-2">
                 <div class="feature-icon orange"><i class="ri-shield-check-line"></i></div>
-                <h3>Risk Management</h3>
-                <p>Built-in pre-filters for daily trade limits, maximum drawdown, position sizing, and volatility-based adjustments.</p>
+                <h3>15-Check Pre-Filter</h3>
+                <p>Enhanced pre-filter with RSI extremes, funding rate guard, orderbook imbalance, market hours, consecutive loss protection, EMA alignment, and more.</p>
             </div>
             <div class="feature-card reveal delay-3">
                 <div class="feature-icon blue"><i class="ri-pie-chart-2-line"></i></div>
@@ -444,32 +499,32 @@
         <h2 class="section-title reveal">Signal <span class="gradient-text">Processing Pipeline</span></h2>
         <p class="section-subtitle reveal delay-1">Every signal flows through a battle-tested 6-step pipeline.</p>
         <div class="pipeline-flow reveal delay-2">
-            <div class="pipeline-step" style="color: var(--accent-blue);">
+            <div class="pipeline-step reveal delay-1" style="color: var(--accent-blue);">
                 <i class="ri-tv-2-line"></i>
                 <span>TradingView</span>
             </div>
-            <span class="pipeline-arrow">→</span>
-            <div class="pipeline-step" style="color: var(--accent-orange);">
+            <span class="pipeline-arrow reveal delay-1"><i class="ri-arrow-right-line"></i></span>
+            <div class="pipeline-step reveal delay-2" style="color: var(--accent-orange);">
                 <i class="ri-filter-3-line"></i>
                 <span>Pre-Filter</span>
             </div>
-            <span class="pipeline-arrow">→</span>
-            <div class="pipeline-step" style="color: var(--accent-purple);">
+            <span class="pipeline-arrow reveal delay-2"><i class="ri-arrow-right-line"></i></span>
+            <div class="pipeline-step reveal delay-3" style="color: var(--accent-purple);">
                 <i class="ri-robot-2-line"></i>
                 <span>AI Analysis</span>
             </div>
-            <span class="pipeline-arrow">→</span>
-            <div class="pipeline-step" style="color: var(--accent-green);">
+            <span class="pipeline-arrow reveal delay-3"><i class="ri-arrow-right-line"></i></span>
+            <div class="pipeline-step reveal delay-4" style="color: var(--accent-green);">
                 <i class="ri-checkbox-circle-line"></i>
                 <span>Decision</span>
             </div>
-            <span class="pipeline-arrow">→</span>
-            <div class="pipeline-step" style="color: var(--accent-cyan);">
+            <span class="pipeline-arrow reveal delay-4"><i class="ri-arrow-right-line"></i></span>
+            <div class="pipeline-step reveal delay-5" style="color: var(--accent-cyan);">
                 <i class="ri-exchange-line"></i>
                 <span>Execute</span>
             </div>
-            <span class="pipeline-arrow">→</span>
-            <div class="pipeline-step" style="color: var(--accent-blue);">
+            <span class="pipeline-arrow reveal delay-5"><i class="ri-arrow-right-line"></i></span>
+            <div class="pipeline-step reveal delay-5" style="color: var(--accent-blue);">
                 <i class="ri-telegram-line"></i>
                 <span>Notify</span>
             </div>
@@ -558,10 +613,15 @@
     <div class="container">
         <div class="cta-box reveal">
             <h2>Ready to Start <span class="gradient-text">Trading Smarter</span>?</h2>
-            <p>Open the dashboard to configure your AI provider, exchange, take-profit levels, and trailing stop strategy.</p>
-            <a href="/dashboard" class="btn-hero primary" style="font-size:16px;padding:16px 40px;">
-                <i class="ri-rocket-2-line"></i> Launch Dashboard
-            </a>
+            <p>Create an account, subscribe to a plan, and start receiving AI-powered trading signals on your exchange.</p>
+            <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
+                <a href="/register" class="btn-hero primary" style="font-size:16px;padding:16px 40px;">
+                    <i class="ri-user-add-line"></i> Create Account
+                </a>
+                <a href="/login" class="btn-hero secondary" style="font-size:16px;padding:16px 40px;">
+                    <i class="ri-login-box-line"></i> Sign In
+                </a>
+            </div>
         </div>
     </div>
 </section>
@@ -569,7 +629,7 @@
 <!-- ── Footer ── -->
 <footer class="footer">
     <div class="container">
-        <p>© 2026 tradingview Signal Server · Built with @ikun52012 · v3.0.0</p>
+        <p>© 2026 TradingView Signal Server · Built by @ikun52012 · v4.0.0</p>
     </div>
 </footer>
 
@@ -621,12 +681,30 @@
         }
     });
 
+    // ── Spotlight Hover Effect for Cards ──
+    const cards = document.querySelectorAll('.feature-card, .tp-card, .exchange-chip');
+    cards.forEach(card => {
+        card.addEventListener('mousemove', (e) => {
+            const rect = card.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            card.style.setProperty('--mouse-x', `${x}px`);
+            card.style.setProperty('--mouse-y', `${y}px`);
+        });
+    });
+
     // ── Smooth scroll for anchor links ──
     document.querySelectorAll('a[href^="#"]').forEach(link => {
         link.addEventListener('click', (e) => {
             e.preventDefault();
             const target = document.querySelector(link.getAttribute('href'));
-            if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            if (target) {
+                const navHeight = document.getElementById('navbar').offsetHeight;
+                window.scrollTo({
+                    top: target.offsetTop - navHeight,
+                    behavior: 'smooth'
+                });
+            }
         });
     });
 </script>

@@ -45,6 +45,7 @@ class TelegramConfig(BaseModel):
 
 
 class RiskConfig(BaseModel):
+    account_equity_usdt: float = float(os.getenv("ACCOUNT_EQUITY_USDT", "10000"))
     max_position_pct: float = float(os.getenv("MAX_POSITION_PCT", "10.0"))
     max_daily_trades: int = int(os.getenv("MAX_DAILY_TRADES", "10"))
     max_daily_loss_pct: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "5.0"))

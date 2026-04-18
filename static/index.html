@@ -3,14 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Signal Server Dashboard</title>
+    <title>TradingView Signal Server — Dashboard</title>
     <meta name="description" content="AI-powered crypto trading signal dashboard">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <!-- Background effects -->
+    <div class="bg-grid"></div>
+    <div class="bg-glow g1"></div>
+    <div class="bg-glow g2"></div>
+    <div class="bg-glow g3"></div>
+
     <!-- Sidebar overlay (mobile) -->
     <div class="sidebar-overlay" id="sidebar-overlay" aria-hidden="true"></div>
 
@@ -18,7 +23,7 @@
     <aside class="sidebar" id="sidebar" role="complementary" aria-label="Sidebar">
         <div class="sidebar-logo">
             <i class="ri-signal-tower-fill"></i>
-            <span>Signal Server</span>
+            <span>TVSS</span>
         </div>
         <nav class="sidebar-nav" role="navigation" aria-label="Main navigation">
             <a href="/" class="nav-item" id="nav-home">
@@ -36,8 +41,14 @@
             <a href="#" class="nav-item" data-page="analytics" id="nav-analytics">
                 <i class="ri-pie-chart-2-line" aria-hidden="true"></i><span>Analytics</span>
             </a>
+            <a href="#" class="nav-item" data-page="subscription" id="nav-subscription">
+                <i class="ri-vip-crown-line" aria-hidden="true"></i><span>Subscription</span>
+            </a>
             <a href="#" class="nav-item" data-page="settings" id="nav-settings">
                 <i class="ri-settings-3-line" aria-hidden="true"></i><span>Settings</span>
+            </a>
+            <a href="#" class="nav-item admin-only" data-page="admin" id="nav-admin">
+                <i class="ri-admin-line" aria-hidden="true"></i><span>Admin</span>
             </a>
         </nav>
         <div class="sidebar-footer">
@@ -62,6 +73,11 @@
                     <span>Paper Trading</span>
                 </div>
                 <button class="btn btn-icon" onclick="refreshAll()" title="Refresh" aria-label="Refresh data"><i class="ri-refresh-line"></i></button>
+                <div class="user-info">
+                    <span class="role-badge user" id="user-role-badge">User</span>
+                    <span id="user-display-name">User</span>
+                    <button class="btn btn-icon" onclick="logout()" title="Logout"><i class="ri-logout-box-r-line"></i></button>
+                </div>
             </div>
         </header>
 
@@ -611,7 +627,40 @@
                 </div>
             </div>
         </div>
+
+        <!-- Page: Subscription -->
+        <div class="page" id="page-subscription">
+            <div class="card">
+                <div class="card-header"><h3><i class="ri-vip-crown-line"></i> Your Subscription</h3></div>
+                <div id="sub-status" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-price-tag-3-line"></i> Available Plans</h3></div>
+                <div class="plans-grid" id="plans-grid" style="padding:20px">Loading plans...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-history-line"></i> Payment History</h3></div>
+                <div id="payment-history" style="padding:20px">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Page: Admin -->
+        <div class="page" id="page-admin">
+            <div class="card">
+                <div class="card-header"><h3><i class="ri-user-settings-line"></i> User Management</h3></div>
+                <div id="admin-users" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-money-dollar-circle-line"></i> Pending Payments</h3></div>
+                <div id="admin-payments" style="padding:20px">Loading...</div>
+            </div>
+        </div>
     </main>
+
+    <!-- Payment Modal -->
+    <div id="payment-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);align-items:center;justify-content:center">
+        <div style="background:var(--card-bg,#111827);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:32px;max-width:480px;width:90%;max-height:80vh;overflow-y:auto" id="payment-modal-body">Loading...</div>
+    </div>
 
     <!-- Toast notifications -->
     <div id="toast-container" aria-live="polite" aria-atomic="false"></div>

@@ -43,6 +43,7 @@ pip install -r requirements.txt
 # 3. Configure
 cp .env.example .env
 # Edit .env with your API keys
+# Set JWT_SECRET, WEBHOOK_SECRET, and DEFAULT_ADMIN_PASSWORD before exposing the server
 
 # 4. Run
 python main.py

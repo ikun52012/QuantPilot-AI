@@ -1,5 +1,5 @@
 """
-OpenClaw Signal Server - AI Analyzer
+TradingView Signal Server - AI Analyzer
 Uses LLM APIs (OpenAI / Anthropic / DeepSeek) to analyze trading signals.
 This is the brain of the system.
 """
@@ -334,7 +334,10 @@ async def analyze_signal(
             raw = await _call_anthropic(system_prompt, user_prompt)
         elif provider == "deepseek":
             raw = await _call_deepseek(system_prompt, user_prompt)
-        elif provider == settings.ai.custom_provider_name and settings.ai.custom_provider_enabled:
+        elif (
+            settings.ai.custom_provider_enabled
+            and provider in {"custom", settings.ai.custom_provider_name.lower()}
+        ):
             raw = await _call_custom(system_prompt, user_prompt)
         else:
             raise ValueError(f"Unknown AI provider: {provider}")
@@ -376,13 +379,31 @@ def _parse_response(raw: str) -> AIAnalysis:
                     json_lines.append(line)
             raw_clean = "\n".join(json_lines)
 
+        if not raw_clean.startswith("{"):
+            start = raw_clean.find("{")
+            end = raw_clean.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                raw_clean = raw_clean[start:end + 1]
+
         data = json.loads(raw_clean)
+        recommendation = str(data.get("recommendation", "hold")).lower().strip()
+        if recommendation not in {"execute", "modify", "reject", "hold"}:
+            recommendation = "hold"
+
+        warnings = data.get("warnings", [])
+        if isinstance(warnings, str):
+            warnings = [warnings]
+        elif not isinstance(warnings, list):
+            warnings = []
+        suggested_direction = data.get("suggested_direction")
+        if isinstance(suggested_direction, str):
+            suggested_direction = suggested_direction.lower().strip() or None
 
         return AIAnalysis(
             confidence=float(data.get("confidence", 0.5)),
-            recommendation=data.get("recommendation", "hold"),
+            recommendation=recommendation,
             reasoning=data.get("reasoning", ""),
-            suggested_direction=data.get("suggested_direction"),
+            suggested_direction=suggested_direction,
             suggested_entry=data.get("suggested_entry"),
             suggested_stop_loss=data.get("suggested_stop_loss"),
             suggested_take_profit=data.get("suggested_take_profit"),
@@ -397,7 +418,7 @@ def _parse_response(raw: str) -> AIAnalysis:
             position_size_pct=float(data.get("position_size_pct", 1.0)),
             risk_score=float(data.get("risk_score", 0.5)),
             market_condition=data.get("market_condition", ""),
-            warnings=data.get("warnings", []),
+            warnings=warnings,
             raw_response=raw,
         )
     except (json.JSONDecodeError, ValueError) as e:
