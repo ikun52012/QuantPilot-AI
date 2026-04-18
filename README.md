@@ -4,7 +4,6 @@ AI-powered crypto signal server for TradingView webhooks. It includes exchange e
 
 ## Current Highlights
 
-- JWT auth with an HttpOnly browser cookie and admin/user roles.
 - First deployment admin account: `admin / 123456`.
 - Admin user management: edit username, email, role, active status, USDT balance, and subscriptions.
 - Subscription system with free plans, paid plans, balance payment, USDT manual payment, and card-code redemption.
