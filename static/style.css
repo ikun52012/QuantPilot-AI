@@ -403,6 +403,8 @@ h1, h2, h3, h4, h5, h6 {
 /* ── Tables ── */
 .table-wrapper {
     overflow-x: auto;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(255,255,255,0.04);
 }
 
 .data-table {
@@ -429,6 +431,7 @@ h1, h2, h3, h4, h5, h6 {
     font-size: 13px;
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
+    vertical-align: top;
 }
 
 .data-table tbody tr {
@@ -558,6 +561,72 @@ h1, h2, h3, h4, h5, h6 {
     font-size: 12px;
     color: var(--text-muted);
     margin-top: 4px;
+}
+
+.option-card-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.option-card {
+    position: relative;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 12px;
+    align-items: start;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: rgba(0,0,0,0.18);
+    cursor: pointer;
+    transition: border-color var(--transition), background var(--transition), transform var(--transition);
+}
+
+.option-card:hover {
+    border-color: rgba(59,130,246,0.45);
+    background: rgba(59,130,246,0.08);
+}
+
+.option-card input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.option-card:has(input:checked) {
+    border-color: var(--accent-blue);
+    background: var(--accent-blue-bg);
+    box-shadow: 0 0 0 1px rgba(59,130,246,0.2), var(--shadow-glow);
+}
+
+.option-card-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,0.05);
+    color: var(--accent-cyan);
+    font-size: 18px;
+}
+
+.option-card-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.option-card-copy strong {
+    font-size: 14px;
+    color: var(--text-primary);
+}
+
+.option-card-copy small {
+    color: var(--text-muted);
+    line-height: 1.45;
 }
 
 .conn-result {
@@ -940,6 +1009,9 @@ textarea:focus-visible {
     .data-table th { padding: 10px 12px; font-size: 12px; }
     /* Stack settings rows */
     .form-row { flex-direction: column; }
+    .option-card-grid { grid-template-columns: 1fr; }
+    .admin-inline { grid-template-columns: 1fr; }
+    .admin-address-row { padding: 12px; }
 }
 
 /* True single-column layout for very small screens */
@@ -1122,6 +1194,67 @@ textarea:focus-visible {
 .badge-submitted { background: var(--accent-blue-bg); color: var(--accent-blue); }
 .badge-confirmed { background: var(--accent-green-bg); color: var(--accent-green); }
 
+.admin-users-table .text-input,
+.admin-users-table .select-input {
+    min-width: 132px;
+    padding: 8px 10px;
+    font-size: 12px;
+    border-radius: 8px;
+}
+
+.admin-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 180px;
+}
+
+.admin-inline {
+    display: grid;
+    grid-template-columns: minmax(92px, 1fr) minmax(110px, 1fr);
+    gap: 8px;
+}
+
+.admin-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 132px;
+}
+
+.admin-actions .btn {
+    justify-content: center;
+}
+
+.admin-address-row {
+    align-items: flex-end;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: rgba(0,0,0,0.14);
+}
+
+.admin-address-row .form-group:first-child {
+    flex: 1;
+}
+
+.admin-button-bottom {
+    display: flex;
+    align-items: flex-end;
+}
+
+.admin-create-row {
+    align-items: start;
+}
+
+#admin-users,
+#admin-payment-addresses,
+#admin-registration,
+#admin-redeem-codes,
+#admin-payments {
+    overflow: hidden;
+}
+
 .btn-danger {
     background: var(--accent-red-bg);
     color: var(--accent-red);
@@ -1160,9 +1293,9 @@ textarea:focus-visible {
     cursor: pointer;
     font-size: 14px;
 }
-.checkbox-label input[type="checkbox"] {
+.checkbox-label input[type="checkbox"],
+.checkbox-label input[type="radio"] {
     width: 18px;
     height: 18px;
     accent-color: var(--accent-blue);
 }
-

@@ -4,6 +4,12 @@
  */
 
 const API = '';
+const USDT_PAYMENT_NETWORKS = [
+    { id: 'TRC20', name: 'Tron (TRC20)' },
+    { id: 'ERC20', name: 'Ethereum (ERC20)' },
+    { id: 'BEP20', name: 'BSC (BEP20)' },
+    { id: 'SOL', name: 'Solana (SPL)' },
+];
 let equityChart = null;
 let dailyPnlChart = null;
 let winlossChart = null;
@@ -24,7 +30,8 @@ function requireAuth() {
     return true;
 }
 
-function logout() {
+async function logout() {
+    try { await fetch('/api/auth/logout', {method:'POST'}); } catch {}
     localStorage.removeItem('tvss_token');
     localStorage.removeItem('tvss_user');
     window.location.href = '/login';
@@ -281,6 +288,14 @@ function toggleCustomAIFields() {
     if (fields) fields.style.display = provider === 'custom' ? 'block' : 'none';
 }
 
+function toggleExitModeFields() {
+    const mode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';
+    const aiFields = document.getElementById('ai-exit-fields');
+    const customFields = document.getElementById('custom-exit-fields');
+    if (aiFields) aiFields.style.display = mode === 'ai' ? 'block' : 'none';
+    if (customFields) customFields.style.display = mode === 'custom' ? 'block' : 'none';
+}
+
 async function loadSettings() {
     try {
         const status = await fetchAPI('/api/status');
@@ -293,6 +308,16 @@ async function loadSettings() {
         toggleCustomAIFields();
         if (status.tp_levels) { const el = document.getElementById('set-tp-levels'); if (el) { el.value = status.tp_levels; toggleTPLevels(); } }
         if (status.trailing_stop_mode) { const el = document.getElementById('set-ts-mode'); if (el) { el.value = status.trailing_stop_mode; toggleTSFields(); } }
+        const risk = status.risk || {};
+        setFieldValue('set-max-pos', risk.max_position_pct ?? 10);
+        setFieldValue('set-max-trades', risk.max_daily_trades ?? 10);
+        setFieldValue('set-max-loss', risk.max_daily_loss_pct ?? 5);
+        setFieldValue('set-custom-sl', risk.custom_stop_loss_pct ?? 1.5);
+        setFieldValue('set-ai-exit-prompt', risk.ai_exit_system_prompt || '');
+        const mode = risk.exit_management_mode === 'custom' ? 'custom' : 'ai';
+        const modeEl = document.getElementById(`exit-mode-${mode}`);
+        if (modeEl) modeEl.checked = true;
+        toggleExitModeFields();
     } catch (e) { console.error('Settings load error:', e); }
 }
 
@@ -311,7 +336,17 @@ async function testConnection() {
 async function saveExchangeSettings() { await saveSettings('/api/settings/exchange', { exchange:document.getElementById('set-exchange').value, api_key:document.getElementById('set-api-key').value, api_secret:document.getElementById('set-api-secret').value, password:document.getElementById('set-password').value }, 'btn-save-exchange'); }
 async function saveAISettings() { await saveSettings('/api/settings/ai', { provider:document.getElementById('set-ai-provider').value, api_key:document.getElementById('set-ai-key').value, temperature:parseFloat(document.getElementById('set-ai-temp').value)||0.3, max_tokens:parseInt(document.getElementById('set-ai-tokens').value)||1000, custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'' }, 'btn-save-ai'); }
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
-async function saveRiskSettings() { await saveSettings('/api/settings/risk', { max_position_pct:parseFloat(document.getElementById('set-max-pos').value), max_daily_trades:parseInt(document.getElementById('set-max-trades').value), max_daily_loss_pct:parseFloat(document.getElementById('set-max-loss').value) }); }
+async function saveRiskSettings() {
+    const mode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';
+    await saveSettings('/api/settings/risk', {
+        max_position_pct: parseFloat(document.getElementById('set-max-pos').value) || 10,
+        max_daily_trades: parseInt(document.getElementById('set-max-trades').value) || 10,
+        max_daily_loss_pct: parseFloat(document.getElementById('set-max-loss').value) || 5,
+        exit_management_mode: mode,
+        custom_stop_loss_pct: parseFloat(document.getElementById('set-custom-sl').value) || 1.5,
+        ai_exit_system_prompt: document.getElementById('set-ai-exit-prompt').value || '',
+    });
+}
 
 // ─── Take-Profit ───
 function toggleTPLevels() { const num = parseInt(document.getElementById('set-tp-levels').value)||1; for(let i=1;i<=4;i++){const r=document.getElementById(`tp-row-${i}`);if(r)r.style.display=i<=num?'block':'none';} }
@@ -342,25 +377,39 @@ async function saveTSSettings() {
 // ─── Subscription Page ───
 async function loadSubscription() {
     try {
-        const [plans, mySub, myPayments] = await Promise.all([
+        const [plans, mySub, myPayments, me] = await Promise.all([
             fetchAPI('/api/plans'),
             fetchAPI('/api/my-subscription'),
             fetchAPI('/api/my-payments'),
+            fetchAPI('/api/auth/me'),
         ]);
+        const currentUser = getUser();
+        localStorage.setItem('tvss_user', JSON.stringify({
+            ...currentUser,
+            id: me.id,
+            username: me.username,
+            email: me.email,
+            role: me.role,
+            balance_usdt: me.balance_usdt,
+        }));
+        updateUserUI();
+        const balance = Number(me.balance_usdt || 0);
         // Current subscription status
         const statusEl = document.getElementById('sub-status');
         if (mySub && mySub.status === 'active') {
             const endDate = new Date(mySub.end_date).toLocaleDateString();
-            statusEl.innerHTML = `<div class="sub-active"><i class="ri-checkbox-circle-fill"></i><div><strong>${escapeHtml(mySub.plan_name)}</strong><br><span style="color:var(--text-muted);font-size:13px">Active until ${endDate}</span></div></div>`;
+            statusEl.innerHTML = `<div class="sub-active"><i class="ri-checkbox-circle-fill"></i><div><strong>${escapeHtml(mySub.plan_name)}</strong><br><span style="color:var(--text-muted);font-size:13px">Active until ${endDate} · Balance ${formatNum(balance)} USDT</span></div></div>`;
         } else {
-            statusEl.innerHTML = `<div class="sub-inactive"><i class="ri-close-circle-line"></i><span>No active subscription</span></div>`;
+            statusEl.innerHTML = `<div class="sub-inactive"><i class="ri-close-circle-line"></i><span>No active subscription · Balance ${formatNum(balance)} USDT</span></div>`;
         }
 
         // Available plans
         const plansEl = document.getElementById('plans-grid');
         plansEl.innerHTML = plans.map(p => {
             const features = Array.isArray(p.features) ? p.features : JSON.parse(p.features_json || '[]');
-            return `<div class="plan-card"><h3>${escapeHtml(p.name)}</h3><div class="plan-price">${p.price_usdt > 0 ? '$' + p.price_usdt : 'Free'}</div><p class="plan-desc">${escapeHtml(p.description)}</p><ul class="plan-features">${features.map(f=>`<li><i class="ri-check-line"></i>${escapeHtml(f)}</li>`).join('')}</ul><button class="btn-plan" onclick="subscribeToPlan('${p.id}',${p.price_usdt})">Select Plan</button></div>`;
+            const price = Number(p.price_usdt || 0);
+            const buttonText = price <= 0 ? 'Activate Free' : (balance >= price ? 'Pay With Balance' : 'Pay USDT');
+            return `<div class="plan-card"><h3>${escapeHtml(p.name)}</h3><div class="plan-price">${price > 0 ? '$' + formatNum(price) : 'Free'}</div><p class="plan-desc">${escapeHtml(p.description)}</p><ul class="plan-features">${features.map(f=>`<li><i class="ri-check-line"></i>${escapeHtml(f)}</li>`).join('')}</ul><button class="btn-plan" onclick="subscribeToPlan('${escapeJsSingle(p.id)}',${price})">${buttonText}</button></div>`;
         }).join('');
 
         // Payment history
@@ -376,14 +425,34 @@ async function loadSubscription() {
 async function subscribeToPlan(planId, price) {
     try {
         const sub = await fetchAPI('/api/subscribe', { method:'POST', body:JSON.stringify({ plan_id:planId }) });
-        if (price <= 0) {
-            showToast('Free plan activated!','success','Subscribed');
+        if (price <= 0 || sub.status === 'active') {
+            showToast(sub.paid_from_balance ? 'Subscription paid from account balance.' : 'Subscription activated.','success','Subscribed');
             loadSubscription();
             return;
         }
         // Show payment modal
         showPaymentModal(sub.id, price);
     } catch (err) { showToast(err.message,'error','Subscribe Failed'); }
+}
+
+async function redeemCardCode() {
+    const input = document.getElementById('redeem-code-input');
+    const code = input?.value.trim();
+    if (!code) {
+        showToast('Please enter a card code.','warning','Missing Code');
+        return;
+    }
+    try {
+        const result = await fetchAPI('/api/redeem-code', { method:'POST', body:JSON.stringify({ code }) });
+        input.value = '';
+        const pieces = [];
+        if (Number(result.balance_usdt || 0) > 0) pieces.push(`${formatNum(result.balance_usdt)} USDT balance`);
+        if (result.subscription) pieces.push('subscription activated');
+        showToast(pieces.length ? pieces.join(' + ') : 'Code redeemed.', 'success', 'Redeemed');
+        loadSubscription();
+    } catch (err) {
+        showToast(err.message, 'error', 'Redeem Failed');
+    }
 }
 
 async function showPaymentModal(subscriptionId, amount) {
@@ -447,7 +516,8 @@ function closePaymentModal() {
 }
 
 // ─── Admin Panel ───
-async function loadAdmin() {
+async function loadAdminLegacyUnused() {
+    return loadAdmin();
     if (!isAdmin()) { showToast('Admin access required','error'); return; }
     try {
         const [users, payments] = await Promise.all([fetchAPI('/api/admin/users'), fetchAPI('/api/admin/payments')]);
@@ -480,6 +550,216 @@ async function adminRejectPayment(paymentId) {
 }
 
 // ─── Helpers ───
+async function loadAdmin() {
+    if (!isAdmin()) { showToast('Admin access required','error'); return; }
+    try {
+        const [users, payments, plans, addresses, registration, invites, redeemCodes] = await Promise.all([
+            fetchAPI('/api/admin/users'),
+            fetchAPI('/api/admin/payments'),
+            fetchAPI('/api/admin/plans'),
+            fetchAPI('/api/admin/payment-addresses'),
+            fetchAPI('/api/admin/registration'),
+            fetchAPI('/api/admin/invite-codes'),
+            fetchAPI('/api/admin/redeem-codes'),
+        ]);
+
+        renderAdminUsers(users, plans);
+        renderAdminPaymentAddresses(addresses || {});
+        renderAdminRegistration(registration || {}, invites || []);
+        renderAdminRedeemCodes(redeemCodes || [], plans || []);
+        renderAdminPendingPayments(payments || []);
+    } catch (err) { showToast(err.message, 'error', 'Admin Load Failed'); }
+}
+
+function renderAdminUsers(users, plans) {
+    const usersEl = document.getElementById('admin-users');
+    if (!usersEl) return;
+    if (!users.length) {
+        usersEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No users found</p>';
+        return;
+    }
+    usersEl.innerHTML = `<div class="table-wrapper"><table class="data-table admin-users-table"><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Balance</th><th>Current Subscription</th><th>Grant Subscription</th><th>Actions</th></tr></thead><tbody>${users.map(u => {
+        const id = escapeHtml(u.id);
+        const jsId = escapeJsSingle(u.id);
+        const active = Boolean(u.is_active);
+        const sub = u.subscription ? `<strong>${escapeHtml(u.subscription.plan_name || u.subscription.plan_id)}</strong><br><span class="hint">Until ${escapeHtml(formatDateTime(u.subscription.end_date))}</span>` : '<span style="color:var(--text-muted)">None</span>';
+        return `<tr>
+            <td><div class="admin-stack"><input id="admin-username-${id}" class="text-input table-input" value="${escapeHtml(u.username)}" autocomplete="off"><input id="admin-email-${id}" class="text-input table-input" value="${escapeHtml(u.email)}" autocomplete="off"></div></td>
+            <td><select id="admin-role-${id}" class="select-input table-input"><option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
+            <td><select id="admin-active-${id}" class="select-input table-input"><option value="true" ${active ? 'selected' : ''}>Active</option><option value="false" ${!active ? 'selected' : ''}>Disabled</option></select></td>
+            <td><input id="admin-balance-${id}" type="number" class="text-input table-input" value="${Number(u.balance_usdt || 0).toFixed(2)}" min="0" step="0.01"></td>
+            <td>${sub}</td>
+            <td><div class="admin-stack"><select id="admin-plan-${id}" class="select-input table-input">${planOptions(plans)}</select><div class="admin-inline"><input id="admin-duration-${id}" type="number" class="text-input table-input" min="0" step="1" placeholder="Plan days"><select id="admin-substatus-${id}" class="select-input table-input"><option value="active">Active</option><option value="pending">Pending</option></select></div><button class="btn btn-sm btn-primary" onclick="grantSubscription('${jsId}')">Grant</button></div></td>
+            <td><div class="admin-actions"><button class="btn btn-sm btn-success" onclick="saveAdminUser('${jsId}')">Save</button>${u.role !== 'admin' ? `<button class="btn btn-sm" onclick="toggleUser('${jsId}')">${active ? 'Disable' : 'Enable'}</button>` : ''}</div></td>
+        </tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+
+function renderAdminPaymentAddresses(addresses) {
+    const el = document.getElementById('admin-payment-addresses');
+    if (!el) return;
+    el.innerHTML = `<div class="settings-form admin-mini-form">${USDT_PAYMENT_NETWORKS.map(n => {
+        const address = addresses[n.id]?.address || '';
+        return `<div class="form-row admin-address-row">
+            <div class="form-group"><label>${escapeHtml(n.name)}</label><input id="pay-address-${n.id}" class="text-input" value="${escapeHtml(address)}" placeholder="USDT receiving address"></div>
+            <div class="form-group admin-button-bottom"><button class="btn btn-primary" onclick="savePaymentAddress('${n.id}')"><i class="ri-save-line"></i> Save</button></div>
+        </div>`;
+    }).join('')}</div>`;
+}
+
+function renderAdminRegistration(registration, invites) {
+    const el = document.getElementById('admin-registration');
+    if (!el) return;
+    const rows = invites.length ? invites.map(c => {
+        const active = c.is_active && Number(c.used_count || 0) < Number(c.max_uses || 0);
+        const status = active ? 'active' : 'inactive';
+        return `<tr><td><code>${escapeHtml(c.code)}</code></td><td>${escapeHtml(c.used_count || 0)} / ${escapeHtml(c.max_uses || 1)}</td><td>${escapeHtml(c.expires_at || '--')}</td><td>${escapeHtml(c.note || '')}</td><td><span class="badge badge-${status}">${status}</span></td><td><button class="btn btn-sm" onclick="copyText('${escapeJsSingle(c.code)}','Invite code copied')">Copy</button></td></tr>`;
+    }).join('') : '<tr><td colspan="6" class="empty-state">No invite codes yet</td></tr>';
+    el.innerHTML = `<div class="settings-form">
+        <label class="checkbox-label"><input type="checkbox" id="admin-invite-required" ${registration.invite_required ? 'checked' : ''}><span>Require invite code for new registrations</span></label>
+        <div class="form-row"><button class="btn btn-success" onclick="saveRegistrationSettings()"><i class="ri-save-line"></i> Save Registration Settings</button></div>
+        <div class="form-row three-col admin-create-row">
+            <div class="form-group"><label for="invite-max-uses">Max Uses</label><input type="number" id="invite-max-uses" class="text-input" value="1" min="1" max="1000"></div>
+            <div class="form-group"><label for="invite-expires">Expires</label><input type="date" id="invite-expires" class="text-input"></div>
+            <div class="form-group"><label for="invite-note">Note</label><input type="text" id="invite-note" class="text-input" placeholder="Optional"></div>
+        </div>
+        <div class="form-row"><button class="btn btn-primary" onclick="createInviteCode()"><i class="ri-key-2-line"></i> Generate Invite Code</button></div>
+        <div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Code</th><th>Uses</th><th>Expires</th><th>Note</th><th>Status</th><th>Copy</th></tr></thead><tbody>${rows}</tbody></table></div>
+    </div>`;
+}
+
+function renderAdminRedeemCodes(codes, plans) {
+    const el = document.getElementById('admin-redeem-codes');
+    if (!el) return;
+    const rows = codes.length ? codes.map(c => {
+        const parts = [];
+        if (c.plan_name) parts.push(escapeHtml(c.plan_name));
+        if (Number(c.balance_usdt || 0) > 0) parts.push(`${formatNum(c.balance_usdt)} USDT`);
+        const status = (!c.is_active || c.redeemed_by) ? 'inactive' : 'active';
+        return `<tr><td><code>${escapeHtml(c.code)}</code></td><td>${parts.length ? parts.join(' + ') : '--'}</td><td>${escapeHtml(c.redeemed_by_username || '--')}</td><td>${escapeHtml(c.expires_at || '--')}</td><td><span class="badge badge-${status}">${status === 'active' ? 'Active' : 'Used'}</span></td><td><button class="btn btn-sm" onclick="copyText('${escapeJsSingle(c.code)}','Card code copied')">Copy</button></td></tr>`;
+    }).join('') : '<tr><td colspan="6" class="empty-state">No card codes yet</td></tr>';
+    el.innerHTML = `<div class="settings-form">
+        <div class="form-row three-col admin-create-row">
+            <div class="form-group"><label for="redeem-plan">Subscription Plan</label><select id="redeem-plan" class="select-input">${planOptions(plans, '', 'No subscription')}</select></div>
+            <div class="form-group"><label for="redeem-duration">Duration Override</label><input type="number" id="redeem-duration" class="text-input" value="0" min="0" step="1"><p class="hint">0 uses the plan duration</p></div>
+            <div class="form-group"><label for="redeem-balance">Balance USDT</label><input type="number" id="redeem-balance" class="text-input" value="0" min="0" step="0.01"></div>
+        </div>
+        <div class="form-row two-col admin-create-row">
+            <div class="form-group"><label for="redeem-expires">Expires</label><input type="date" id="redeem-expires" class="text-input"></div>
+            <div class="form-group"><label for="redeem-note">Note</label><input type="text" id="redeem-note" class="text-input" placeholder="Optional"></div>
+        </div>
+        <div class="form-row"><button class="btn btn-primary" onclick="createRedeemCode()"><i class="ri-coupon-3-line"></i> Generate Card Code</button></div>
+        <div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Code</th><th>Benefit</th><th>Redeemed By</th><th>Expires</th><th>Status</th><th>Copy</th></tr></thead><tbody>${rows}</tbody></table></div>
+    </div>`;
+}
+
+function renderAdminPendingPayments(payments) {
+    const pendingPayments = payments.filter(p => p.status === 'submitted');
+    const payEl = document.getElementById('admin-payments');
+    if (!payEl) return;
+    if (pendingPayments.length) {
+        payEl.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>User</th><th>Amount</th><th>Network</th><th>TX Hash</th><th>Date</th><th>Actions</th></tr></thead><tbody>${pendingPayments.map(p => `<tr><td>${escapeHtml(p.username||'--')}</td><td>${escapeHtml(p.amount)} ${escapeHtml(p.currency)}</td><td>${escapeHtml(p.network)}</td><td><code style="font-size:11px">${p.tx_hash?escapeHtml(p.tx_hash.slice(0,20))+'...':'--'}</code></td><td>${escapeHtml(formatDateTime(p.created_at))}</td><td><div class="admin-actions"><button class="btn btn-sm btn-success" onclick="adminConfirmPayment('${escapeJsSingle(p.id)}')">Confirm</button><button class="btn btn-sm btn-danger" onclick="adminRejectPayment('${escapeJsSingle(p.id)}')">Reject</button></div></td></tr>`).join('')}</tbody></table></div>`;
+    } else {
+        payEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No pending payments</p>';
+    }
+}
+
+function planOptions(plans, selected = '', emptyLabel = 'Select plan...') {
+    return `<option value="">${escapeHtml(emptyLabel)}</option>${plans.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === selected ? 'selected' : ''}>${escapeHtml(p.name)} (${formatNum(p.price_usdt)} USDT)</option>`).join('')}`;
+}
+
+async function saveAdminUser(userId) {
+    const data = {
+        username: document.getElementById(`admin-username-${userId}`)?.value || '',
+        email: document.getElementById(`admin-email-${userId}`)?.value || '',
+        role: document.getElementById(`admin-role-${userId}`)?.value || 'user',
+        is_active: document.getElementById(`admin-active-${userId}`)?.value === 'true',
+        balance_usdt: parseFloat(document.getElementById(`admin-balance-${userId}`)?.value) || 0,
+    };
+    try {
+        const result = await fetchAPI(`/api/admin/user/${encodeURIComponent(userId)}`, { method:'PUT', body:JSON.stringify(data) });
+        const current = getUser();
+        if (current.id === userId && result.user) {
+            localStorage.setItem('tvss_user', JSON.stringify({ ...current, ...result.user }));
+            updateUserUI();
+        }
+        showToast('User account updated.','success','Saved');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Save Failed'); }
+}
+
+async function grantSubscription(userId) {
+    const planId = document.getElementById(`admin-plan-${userId}`)?.value;
+    if (!planId) {
+        showToast('Choose a subscription plan first.','warning','Missing Plan');
+        return;
+    }
+    const data = {
+        plan_id: planId,
+        duration_days: parseInt(document.getElementById(`admin-duration-${userId}`)?.value) || 0,
+        status: document.getElementById(`admin-substatus-${userId}`)?.value || 'active',
+    };
+    try {
+        await fetchAPI(`/api/admin/user/${encodeURIComponent(userId)}/subscription`, { method:'POST', body:JSON.stringify(data) });
+        showToast('Subscription updated.','success','Saved');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Grant Failed'); }
+}
+
+async function savePaymentAddress(network) {
+    const address = document.getElementById(`pay-address-${network}`)?.value.trim();
+    if (!address) {
+        showToast('Payment address cannot be empty.','warning','Missing Address');
+        return;
+    }
+    try {
+        await fetchAPI('/api/admin/payment-addresses', { method:'POST', body:JSON.stringify({ network, address }) });
+        showToast(`${network} address saved.`, 'success', 'Saved');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Save Failed'); }
+}
+
+async function saveRegistrationSettings() {
+    const inviteRequired = document.getElementById('admin-invite-required')?.checked || false;
+    try {
+        await fetchAPI('/api/admin/registration', { method:'POST', body:JSON.stringify({ invite_required: inviteRequired }) });
+        showToast('Registration settings saved.','success','Saved');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Save Failed'); }
+}
+
+async function createInviteCode() {
+    const data = {
+        max_uses: parseInt(document.getElementById('invite-max-uses')?.value) || 1,
+        expires_at: document.getElementById('invite-expires')?.value || '',
+        note: document.getElementById('invite-note')?.value || '',
+    };
+    try {
+        const created = await fetchAPI('/api/admin/invite-codes', { method:'POST', body:JSON.stringify(data) });
+        showToast(created.code, 'success', 'Invite Code Generated');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Generate Failed'); }
+}
+
+async function createRedeemCode() {
+    const data = {
+        plan_id: document.getElementById('redeem-plan')?.value || '',
+        duration_days: parseInt(document.getElementById('redeem-duration')?.value) || 0,
+        balance_usdt: parseFloat(document.getElementById('redeem-balance')?.value) || 0,
+        expires_at: document.getElementById('redeem-expires')?.value || '',
+        note: document.getElementById('redeem-note')?.value || '',
+    };
+    if (!data.plan_id && data.balance_usdt <= 0) {
+        showToast('Choose a plan or enter a balance amount.','warning','Missing Benefit');
+        return;
+    }
+    try {
+        const created = await fetchAPI('/api/admin/redeem-codes', { method:'POST', body:JSON.stringify(data) });
+        showToast(created.code, 'success', 'Card Code Generated');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Generate Failed'); }
+}
+
 async function saveSettings(endpoint, data, btnId) {
     const btn = btnId ? document.getElementById(btnId) : null;
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line"></i> Saving...'; }
@@ -528,6 +808,10 @@ async function fetchAPI(path, options = {}) {
 }
 
 function firstDefined(...values) { return values.find(v => v !== undefined && v !== null); }
+function setFieldValue(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value ?? '';
+}
 function pickBalance(section, quote = 'USDT') {
     if (!section || typeof section !== 'object') return 0;
     return firstDefined(section[quote], section.USDT, section.USD, section.USDC, 0);
@@ -539,6 +823,12 @@ function formatNum(n) {
     return value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 }
 function formatValue(v) { if (v==='∞'||v===Infinity) return '∞'; if (typeof v==='number') return v.toFixed(2); return v||'--'; }
+function formatDateTime(value) {
+    if (!value) return '--';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString();
+}
 async function refreshAll() {
     const p = document.querySelector('.page.active')?.id?.replace('page-','');
     if (p==='dashboard') await loadDashboard(); else if (p==='positions') await loadPositions();

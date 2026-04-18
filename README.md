@@ -30,6 +30,14 @@ Binance · OKX · Bybit · Bitget · Gate.io · Coinbase
 - Sharpe, Sortino, Calmar, Profit Factor
 - AI performance metrics
 
+### Admin, Registration, and Payment Controls
+- `/dashboard` redirects anonymous visitors to `/login`
+- Admin panel can edit users, roles, active status, USDT balance, and subscriptions
+- USDT receiving addresses can be configured for TRC20 / ERC20 / BEP20 / SOL
+- Card codes can redeem balance, subscriptions, or both
+- Optional invite-code-only registration with generated invite codes
+- Risk exits can use AI-generated stop loss / take profits or fixed custom stop loss
+
 ## 🚀 Quick Start
 
 ```bash
@@ -43,7 +51,8 @@ pip install -r requirements.txt
 # 3. Configure
 cp .env.example .env
 # Edit .env with your API keys
-# Set JWT_SECRET, WEBHOOK_SECRET, and DEFAULT_ADMIN_PASSWORD before exposing the server
+# First deployment admin is admin / 123456 by default.
+# Set JWT_SECRET, WEBHOOK_SECRET, and change DEFAULT_ADMIN_PASSWORD before exposing the server.
 
 # 4. Run
 python main.py
@@ -79,6 +88,13 @@ All settings can be configured via:
 | `TP_LEVELS` | Number of TP levels (1-4) | 1 |
 | `TRAILING_STOP_MODE` | none / moving / breakeven_on_tp1 / step_trailing / profit_pct_trailing | none |
 | `TRAILING_STOP_PCT` | Trail distance % | 1.0 |
+| `EXIT_MANAGEMENT_MODE` | ai / custom stop-loss and take-profit source | ai |
+| `CUSTOM_STOP_LOSS_PCT` | Fixed stop loss when custom mode is selected | 1.5 |
+| `AI_EXIT_SYSTEM_PROMPT` | Extra instruction for AI-generated stop loss / take profits | see `.env.example` |
+| `PAYMENT_ADDRESS_TRC20` | USDT TRC20 receiving address | empty |
+| `PAYMENT_ADDRESS_ERC20` | USDT ERC20 receiving address | empty |
+| `PAYMENT_ADDRESS_BEP20` | USDT BEP20 receiving address | empty |
+| `PAYMENT_ADDRESS_SOL` | USDT SPL receiving address | empty |
 
 ## 📝 API Endpoints
 
@@ -94,6 +110,11 @@ All settings can be configured via:
 | POST | `/api/settings/take-profit` | Configure TP levels |
 | POST | `/api/settings/trailing-stop` | Configure trailing stop |
 | POST | `/api/settings/ai` | Configure AI provider |
+| POST | `/api/settings/risk` | Configure risk and exit-generation mode |
+| GET/POST | `/api/admin/registration` | Configure invite-only registration |
+| GET/POST | `/api/admin/invite-codes` | List and generate invite codes |
+| GET/POST | `/api/admin/redeem-codes` | List and generate card codes |
+| GET/POST | `/api/admin/payment-addresses` | Configure USDT payment addresses |
 
 ## 📄 License
 

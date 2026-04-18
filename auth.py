@@ -132,6 +132,27 @@ def verify_token(token: str) -> dict | None:
 # ─────────────────────────────────────────────
 from fastapi import Request, HTTPException
 
+AUTH_COOKIE_NAME = "tvss_token"
+
+
+def set_auth_cookie(response, token: str):
+    """Set the browser cookie used by page routes."""
+    max_age = JWT_EXPIRY_HOURS * 3600
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        token,
+        max_age=max_age,
+        httponly=True,
+        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_auth_cookie(response):
+    """Clear auth cookie on logout."""
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+
 
 def get_current_user(request: Request) -> dict:
     """
@@ -139,10 +160,15 @@ def get_current_user(request: Request) -> dict:
     Usage: user = Depends(get_current_user)
     """
     auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    token = ""
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.cookies.get(AUTH_COOKIE_NAME, "")
+
+    if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    token = auth_header[7:]
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -177,9 +203,12 @@ def require_admin(request: Request) -> dict:
 def get_optional_user(request: Request) -> dict | None:
     """Returns user payload if authenticated, None otherwise."""
     auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    if not token:
         return None
-    token = auth_header[7:]
     payload = verify_token(token)
     if not payload:
         return None

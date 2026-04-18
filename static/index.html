@@ -602,6 +602,36 @@
                             <input type="number" id="set-max-loss" class="text-input" value="5" step="0.5">
                         </div>
                     </div>
+                    <div class="form-group">
+                        <label>Stop Loss / Take Profit Source</label>
+                        <div class="option-card-grid">
+                            <label class="option-card">
+                                <input type="radio" name="exit-management-mode" id="exit-mode-ai" value="ai" checked onchange="toggleExitModeFields()">
+                                <span class="option-card-icon"><i class="ri-robot-2-line"></i></span>
+                                <span class="option-card-copy">
+                                    <strong>AI Generated</strong>
+                                    <small>AI returns stop loss plus take-profit levels for each signal.</small>
+                                </span>
+                            </label>
+                            <label class="option-card">
+                                <input type="radio" name="exit-management-mode" id="exit-mode-custom" value="custom" onchange="toggleExitModeFields()">
+                                <span class="option-card-icon"><i class="ri-sliders-2-line"></i></span>
+                                <span class="option-card-copy">
+                                    <strong>Custom Fixed</strong>
+                                    <small>Use your fixed stop-loss percent and configured TP distances.</small>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="ai-exit-fields" class="form-group">
+                        <label for="set-ai-exit-prompt">AI Exit Prompt</label>
+                        <textarea id="set-ai-exit-prompt" class="text-input" rows="3" placeholder="Tell AI how to generate stop loss and take-profit levels."></textarea>
+                    </div>
+                    <div id="custom-exit-fields" class="form-group" style="display:none">
+                        <label for="set-custom-sl">Custom Stop Loss %</label>
+                        <input type="number" id="set-custom-sl" class="text-input" value="1.5" step="0.1" min="0.1">
+                        <p class="hint">Take-profit distances still use the Take-Profit Configuration above.</p>
+                    </div>
                     <div class="form-row">
                         <button class="btn btn-success" onclick="saveRiskSettings()">
                             <i class="ri-save-line"></i> Save Risk Settings
@@ -639,6 +669,20 @@
                 <div class="plans-grid" id="plans-grid" style="padding:20px">Loading plans...</div>
             </div>
             <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-coupon-3-line"></i> Redeem Card Code</h3></div>
+                <div class="settings-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="redeem-code-input">Card Code</label>
+                            <input type="text" id="redeem-code-input" class="text-input" placeholder="CARD-XXXXXXXXXXXX">
+                        </div>
+                        <div class="form-group" style="display:flex;align-items:flex-end">
+                            <button class="btn btn-primary" onclick="redeemCardCode()"><i class="ri-gift-line"></i> Redeem</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-history-line"></i> Payment History</h3></div>
                 <div id="payment-history" style="padding:20px">Loading...</div>
             </div>
@@ -649,6 +693,18 @@
             <div class="card">
                 <div class="card-header"><h3><i class="ri-user-settings-line"></i> User Management</h3></div>
                 <div id="admin-users" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-bank-card-line"></i> USDT Payment Addresses</h3></div>
+                <div id="admin-payment-addresses" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-user-add-line"></i> Registration & Invite Codes</h3></div>
+                <div id="admin-registration" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-coupon-3-line"></i> Redeem Card Codes</h3></div>
+                <div id="admin-redeem-codes" style="padding:20px">Loading...</div>
             </div>
             <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-money-dollar-circle-line"></i> Pending Payments</h3></div>

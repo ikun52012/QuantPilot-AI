@@ -73,6 +73,20 @@ Respond ONLY with the JSON object, no other text."""
 def _get_effective_system_prompt() -> str:
     """Return system prompt with optional custom additions."""
     base = SYSTEM_PROMPT
+    if settings.risk.exit_management_mode == "ai":
+        base += (
+            "\n\nExit management mode: AI-generated exits are enabled. "
+            "You must provide suggested_stop_loss plus take-profit targets "
+            "that match the configured TP levels and obey the requested risk profile."
+        )
+        if settings.risk.ai_exit_system_prompt:
+            base += f"\nExit-generation instructions:\n{settings.risk.ai_exit_system_prompt}"
+    else:
+        base += (
+            "\n\nExit management mode: custom fixed exits are enabled. "
+            "You may still comment on risk, but the server will ignore AI stop-loss "
+            "and take-profit prices and use configured custom percentages."
+        )
     if settings.ai.custom_system_prompt:
         base += f"\n\nAdditional instructions from the user:\n{settings.ai.custom_system_prompt}"
     return base

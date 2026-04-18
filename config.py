@@ -49,6 +49,13 @@ class RiskConfig(BaseModel):
     max_position_pct: float = float(os.getenv("MAX_POSITION_PCT", "10.0"))
     max_daily_trades: int = int(os.getenv("MAX_DAILY_TRADES", "10"))
     max_daily_loss_pct: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "5.0"))
+    exit_management_mode: str = os.getenv("EXIT_MANAGEMENT_MODE", "ai")  # ai / custom
+    custom_stop_loss_pct: float = float(os.getenv("CUSTOM_STOP_LOSS_PCT", "1.5"))
+    ai_exit_system_prompt: str = os.getenv(
+        "AI_EXIT_SYSTEM_PROMPT",
+        "Generate a protective stop loss and up to four take-profit levels. "
+        "Keep risk/reward at least 1:1.5 unless market conditions are poor.",
+    )
 
 
 class TakeProfitSettings(BaseModel):

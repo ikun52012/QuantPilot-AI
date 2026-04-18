@@ -22,8 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi import FastAPI, HTTPException, Request, Depends, Response
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
@@ -63,6 +63,8 @@ from auth import (
     hash_password,
     verify_password,
     create_token,
+    set_auth_cookie,
+    clear_auth_cookie,
     get_current_user,
     require_admin,
     get_optional_user,
@@ -75,7 +77,10 @@ from database import (
     get_user_by_id,
     update_user_login,
     get_all_users,
+    update_user_admin,
     update_user_status,
+    pay_subscription_from_balance,
+    set_user_subscription,
     get_subscription_plans,
     create_subscription_plan,
     update_subscription_plan,
@@ -92,6 +97,13 @@ from database import (
     get_all_payments,
     get_admin_setting,
     set_admin_setting,
+    create_invite_code,
+    list_invite_codes,
+    is_invite_code_valid,
+    validate_and_consume_invite,
+    create_redeem_code,
+    list_redeem_codes,
+    redeem_code_for_user,
 )
 from payment import (
     get_payment_address,
@@ -170,6 +182,9 @@ async def lifespan(app: FastAPI):
         settings.risk.max_position_pct = rs["risk"].get("max_position_pct", settings.risk.max_position_pct)
         settings.risk.max_daily_trades = rs["risk"].get("max_daily_trades", settings.risk.max_daily_trades)
         settings.risk.max_daily_loss_pct = rs["risk"].get("max_daily_loss_pct", settings.risk.max_daily_loss_pct)
+        settings.risk.exit_management_mode = rs["risk"].get("exit_management_mode", settings.risk.exit_management_mode)
+        settings.risk.custom_stop_loss_pct = rs["risk"].get("custom_stop_loss_pct", settings.risk.custom_stop_loss_pct)
+        settings.risk.ai_exit_system_prompt = rs["risk"].get("ai_exit_system_prompt", settings.risk.ai_exit_system_prompt)
     if rs.get("take_profit"):
         tp = rs["take_profit"]
         settings.take_profit.num_levels = tp.get("num_levels", settings.take_profit.num_levels)
@@ -219,7 +234,9 @@ async def homepage():
     return FileResponse(STATIC_DIR / "home.html")
 
 @app.get("/dashboard")
-async def dashboard():
+async def dashboard(request: Request):
+    if not get_optional_user(request):
+        return RedirectResponse(url="/login", status_code=303)
     return FileResponse(STATIC_DIR / "index.html")
 
 @app.get("/login")
@@ -239,6 +256,7 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     email: str = Field(min_length=5, max_length=254)
     password: str = Field(min_length=8, max_length=256)
+    invite_code: str = Field(default="", max_length=80)
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=32)
@@ -260,8 +278,12 @@ class PaymentSubmitRequest(BaseModel):
     tx_hash: str = Field(min_length=6, max_length=200)
 
 
+class RedeemCodeRequest(BaseModel):
+    code: str = Field(min_length=4, max_length=80)
+
+
 @app.post("/api/auth/register")
-async def api_register(req: RegisterRequest):
+async def api_register(req: RegisterRequest, response: Response):
     username = req.username.lower().strip()
     email = req.email.lower().strip()
     if len(username) < 3:
@@ -276,20 +298,30 @@ async def api_register(req: RegisterRequest):
         raise HTTPException(400, "Username already exists")
     if get_user_by_email(email):
         raise HTTPException(400, "Email already registered")
+    invite_required = get_admin_setting("registration_invite_required", "false").lower() == "true"
+    invite_code = req.invite_code.strip().upper()
+    if invite_required and not invite_code:
+        raise HTTPException(400, "Invite code is required")
+    if invite_required and not is_invite_code_valid(invite_code):
+        raise HTTPException(400, "Invalid or expired invite code")
 
     pw_hash = hash_password(req.password)
     try:
         user = create_user(username, email, pw_hash)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    if invite_required and not validate_and_consume_invite(invite_code, user["id"]):
+        update_user_status(user["id"], False)
+        raise HTTPException(400, "Invalid or expired invite code")
     token = create_token(user["id"], user["username"], user["role"])
+    set_auth_cookie(response, token)
 
     logger.info(f"[Auth] New user registered: {username}")
     return {"token": token, "user": {"id": user["id"], "username": user["username"], "email": email, "role": user["role"]}}
 
 
 @app.post("/api/auth/login")
-async def api_login(req: LoginRequest):
+async def api_login(req: LoginRequest, response: Response):
     username = req.username.lower().strip()
     user = get_user_by_username(username)
     if not user or not verify_password(req.password, user["password_hash"]):
@@ -300,9 +332,16 @@ async def api_login(req: LoginRequest):
 
     update_user_login(user["id"])
     token = create_token(user["id"], user["username"], user["role"])
+    set_auth_cookie(response, token)
 
     logger.info(f"[Auth] User logged in: {username}")
     return {"token": token, "user": {"id": user["id"], "username": user["username"], "email": user["email"], "role": user["role"]}}
+
+
+@app.post("/api/auth/logout")
+async def api_logout(response: Response):
+    clear_auth_cookie(response)
+    return {"status": "ok"}
 
 
 @app.get("/api/auth/me")
@@ -317,6 +356,7 @@ async def api_me(user=Depends(get_current_user)):
         "username": db_user["username"],
         "email": db_user["email"],
         "role": db_user["role"],
+        "balance_usdt": db_user.get("balance_usdt", 0),
         "created_at": db_user["created_at"],
         "subscription": sub,
     }
@@ -330,6 +370,13 @@ async def api_me(user=Depends(get_current_user)):
 async def api_get_plans():
     """Get all active subscription plans (public)."""
     return get_subscription_plans(active_only=True)
+
+
+@app.get("/api/registration-settings")
+async def api_registration_settings():
+    return {
+        "invite_required": get_admin_setting("registration_invite_required", "false").lower() == "true"
+    }
 
 
 @app.post("/api/subscribe")
@@ -349,6 +396,18 @@ async def api_subscribe(req: SubscribeRequest, user=Depends(get_current_user)):
         sub["status"] = "active"
         logger.info(f"[Subscription] Free plan activated for {user['username']}: {req.plan_id}")
         return sub
+
+    db_user = get_user_by_id(user["sub"]) or {}
+    if float(db_user.get("balance_usdt") or 0) >= float(sub.get("price_usdt") or 0):
+        paid = pay_subscription_from_balance(user["sub"], sub["id"], sub["price_usdt"])
+        if paid:
+            sub["status"] = "active"
+            sub["paid_from_balance"] = True
+            sub["balance_usdt"] = paid["balance_usdt"]
+            sub["end_date"] = paid["end_date"]
+            logger.info(f"[Subscription] Balance paid for {user['username']}: {req.plan_id}")
+            return sub
+
     logger.info(f"[Subscription] User {user['username']} subscribed to plan {req.plan_id}")
     return sub
 
@@ -371,9 +430,10 @@ async def api_my_subscriptions(user=Depends(get_current_user)):
 @app.get("/api/payment-options")
 async def api_payment_options():
     """Get available payment networks and currencies."""
+    networks = [n for n in get_supported_payment_options() if "USDT" in n.get("currencies", [])]
     return {
-        "networks": get_supported_payment_options(),
-        "supported": list(SUPPORTED_NETWORKS.keys()),
+        "networks": networks,
+        "supported": [key for key, value in SUPPORTED_NETWORKS.items() if "USDT" in value.get("currencies", [])],
     }
 
 
@@ -443,9 +503,51 @@ async def api_my_payments(user=Depends(get_current_user)):
     return get_user_payments(user["sub"])
 
 
+@app.post("/api/redeem-code")
+async def api_redeem_code(req: RedeemCodeRequest, user=Depends(get_current_user)):
+    try:
+        result = redeem_code_for_user(req.code, user["sub"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    logger.info(f"[Redeem] User {user['username']} redeemed code {req.code.strip().upper()}")
+    return {"status": "redeemed", **result}
+
+
 # ═══════════════════════════════════════════════
 # ADMIN API
 # ═══════════════════════════════════════════════
+
+class AdminUserUpdateRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    email: str = Field(min_length=5, max_length=254)
+    role: str = "user"
+    is_active: bool = True
+    balance_usdt: float = Field(default=0.0, ge=0.0)
+
+
+class AdminSubscriptionRequest(BaseModel):
+    plan_id: str = Field(min_length=1, max_length=80)
+    duration_days: int = Field(default=0, ge=0, le=3650)
+    status: str = "active"
+
+
+class RegistrationSettingsRequest(BaseModel):
+    invite_required: bool = False
+
+
+class InviteCodeRequest(BaseModel):
+    note: str = Field(default="", max_length=200)
+    max_uses: int = Field(default=1, ge=1, le=1000)
+    expires_at: str = Field(default="", max_length=40)
+
+
+class RedeemCodeCreateRequest(BaseModel):
+    plan_id: str = Field(default="", max_length=80)
+    duration_days: int = Field(default=0, ge=0, le=3650)
+    balance_usdt: float = Field(default=0.0, ge=0.0)
+    note: str = Field(default="", max_length=200)
+    expires_at: str = Field(default="", max_length=40)
+
 
 @app.get("/api/admin/users")
 async def api_admin_users(admin=Depends(require_admin)):
@@ -469,6 +571,40 @@ async def api_admin_toggle_user(user_id: str, admin=Depends(require_admin)):
     new_status = not bool(user.get("is_active", 1))
     update_user_status(user_id, new_status)
     return {"status": "ok", "is_active": new_status}
+
+
+@app.put("/api/admin/user/{user_id}")
+async def api_admin_update_user(user_id: str, req: AdminUserUpdateRequest, admin=Depends(require_admin)):
+    existing = get_user_by_id(user_id)
+    if not existing:
+        raise HTTPException(404, "User not found")
+    if user_id == admin["sub"] and (req.role != "admin" or not req.is_active):
+        raise HTTPException(400, "You cannot demote or disable your own admin account")
+    try:
+        updated = update_user_admin(
+            user_id=user_id,
+            username=req.username,
+            email=req.email,
+            role=req.role,
+            is_active=req.is_active,
+            balance_usdt=req.balance_usdt,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"status": "updated", "user": updated}
+
+
+@app.post("/api/admin/user/{user_id}/subscription")
+async def api_admin_set_user_subscription(user_id: str, req: AdminSubscriptionRequest, admin=Depends(require_admin)):
+    if not get_user_by_id(user_id):
+        raise HTTPException(404, "User not found")
+    if req.status not in ("active", "pending"):
+        raise HTTPException(400, "status must be active or pending")
+    try:
+        sub = set_user_subscription(user_id, req.plan_id, req.status, req.duration_days or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"status": "saved", "subscription": sub}
 
 
 @app.get("/api/admin/payments")
@@ -514,6 +650,11 @@ async def api_admin_create_plan(req: PlanRequest, admin=Depends(require_admin)):
     return plan
 
 
+@app.get("/api/admin/plans")
+async def api_admin_get_plans(admin=Depends(require_admin)):
+    return get_subscription_plans(active_only=False)
+
+
 @app.put("/api/admin/plans/{plan_id}")
 async def api_admin_update_plan(plan_id: str, req: PlanRequest, admin=Depends(require_admin)):
     update_subscription_plan(plan_id, name=req.name, description=req.description, price_usdt=req.price_usdt,
@@ -547,6 +688,49 @@ async def api_admin_set_address(req: PaymentAddressRequest, admin=Depends(requir
     return {"status": "saved", "network": req.network.upper().strip()}
 
 
+@app.get("/api/admin/registration")
+async def api_admin_registration(admin=Depends(require_admin)):
+    return await api_registration_settings()
+
+
+@app.post("/api/admin/registration")
+async def api_admin_save_registration(req: RegistrationSettingsRequest, admin=Depends(require_admin)):
+    set_admin_setting("registration_invite_required", "true" if req.invite_required else "false")
+    return {"status": "saved", "invite_required": req.invite_required}
+
+
+@app.get("/api/admin/invite-codes")
+async def api_admin_invite_codes(admin=Depends(require_admin)):
+    return list_invite_codes()
+
+
+@app.post("/api/admin/invite-codes")
+async def api_admin_create_invite_code(req: InviteCodeRequest, admin=Depends(require_admin)):
+    return create_invite_code(req.note, req.max_uses, req.expires_at, admin["sub"])
+
+
+@app.get("/api/admin/redeem-codes")
+async def api_admin_redeem_codes(admin=Depends(require_admin)):
+    return list_redeem_codes()
+
+
+@app.post("/api/admin/redeem-codes")
+async def api_admin_create_redeem_code(req: RedeemCodeCreateRequest, admin=Depends(require_admin)):
+    if not req.plan_id and req.balance_usdt <= 0:
+        raise HTTPException(400, "Choose a subscription plan or set balance_usdt")
+    try:
+        return create_redeem_code(
+            plan_id=req.plan_id,
+            duration_days=req.duration_days,
+            balance_usdt=req.balance_usdt,
+            note=req.note,
+            expires_at=req.expires_at,
+            created_by=admin["sub"],
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # ═══════════════════════════════════════════════
 # HEALTH & STATUS
 # ═══════════════════════════════════════════════
@@ -567,6 +751,14 @@ async def api_status():
         "custom_provider_name": settings.ai.custom_provider_name,
         "custom_provider_model": settings.ai.custom_provider_model,
         "custom_provider_url": settings.ai.custom_provider_api_url,
+        "risk": {
+            "max_position_pct": settings.risk.max_position_pct,
+            "max_daily_trades": settings.risk.max_daily_trades,
+            "max_daily_loss_pct": settings.risk.max_daily_loss_pct,
+            "exit_management_mode": settings.risk.exit_management_mode,
+            "custom_stop_loss_pct": settings.risk.custom_stop_loss_pct,
+            "ai_exit_system_prompt": settings.risk.ai_exit_system_prompt,
+        },
         "time": datetime.utcnow().isoformat(),
     }
 
@@ -715,8 +907,9 @@ def _make_decision(signal, analysis, market) -> TradeDecision:
             signal=signal, ai_analysis=analysis,
         )
 
+    stop_loss = _build_stop_loss(analysis, entry, direction)
     size_multiplier = _clamp(analysis.position_size_pct, 0.0, 1.0)
-    qty = _calc_qty(entry, analysis.suggested_stop_loss, market) * size_multiplier
+    qty = _calc_qty(entry, stop_loss, market) * size_multiplier
     if qty <= 0:
         return TradeDecision(
             execute=False, ticker=signal.ticker,
@@ -729,7 +922,7 @@ def _make_decision(signal, analysis, market) -> TradeDecision:
 
     return TradeDecision(
         execute=True, direction=direction, ticker=signal.ticker,
-        entry_price=entry, stop_loss=analysis.suggested_stop_loss,
+        entry_price=entry, stop_loss=stop_loss,
         take_profit=analysis.suggested_take_profit,
         take_profit_levels=tp_levels,
         trailing_stop=trailing_config,
@@ -750,7 +943,8 @@ def _build_tp_levels(analysis, entry, direction) -> list[TakeProfitLevel]:
         default_pct = getattr(settings.take_profit, f"tp{i}_pct", 2.0 * i)
         default_qty = getattr(settings.take_profit, f"tp{i}_qty", 25.0)
 
-        if ai_tp and ai_tp > 0 and ((is_long and ai_tp > entry) or (not is_long and ai_tp < entry)):
+        use_ai_tp = settings.risk.exit_management_mode == "ai"
+        if use_ai_tp and ai_tp and ai_tp > 0 and ((is_long and ai_tp > entry) or (not is_long and ai_tp < entry)):
             price = ai_tp
         else:
             pct = default_pct / 100.0
@@ -769,6 +963,17 @@ def _build_tp_levels(analysis, entry, direction) -> list[TakeProfitLevel]:
         ]
 
     return tp_levels
+
+
+def _build_stop_loss(analysis, entry, direction) -> float | None:
+    is_long = direction in (SignalDirection.LONG,)
+    if settings.risk.exit_management_mode == "ai":
+        sl = analysis.suggested_stop_loss
+        if sl and sl > 0 and ((is_long and sl < entry) or (not is_long and sl > entry)):
+            return sl
+
+    pct = settings.risk.custom_stop_loss_pct / 100.0
+    return round(entry * (1 - pct if is_long else 1 + pct), 8)
 
 
 def _build_trailing_config() -> TrailingStopConfig:
@@ -900,6 +1105,9 @@ class RiskSettingsRequest(BaseModel):
     max_position_pct: float = Field(default=10.0, ge=0.1, le=100.0)
     max_daily_trades: int = Field(default=10, ge=0, le=1000)
     max_daily_loss_pct: float = Field(default=5.0, ge=0.1, le=100.0)
+    exit_management_mode: str = "ai"
+    custom_stop_loss_pct: float = Field(default=1.5, ge=0.1, le=100.0)
+    ai_exit_system_prompt: str = Field(default="", max_length=4000)
 
 
 class TakeProfitSettingsRequest(BaseModel):
@@ -998,14 +1206,22 @@ async def save_telegram_settings(req: TelegramSettingsRequest, admin=Depends(req
 
 @app.post("/api/settings/risk")
 async def save_risk_settings(req: RiskSettingsRequest, admin=Depends(require_admin)):
+    if req.exit_management_mode not in ("ai", "custom"):
+        raise HTTPException(400, "exit_management_mode must be ai or custom")
     settings.risk.max_position_pct = req.max_position_pct
     settings.risk.max_daily_trades = req.max_daily_trades
     settings.risk.max_daily_loss_pct = req.max_daily_loss_pct
+    settings.risk.exit_management_mode = req.exit_management_mode
+    settings.risk.custom_stop_loss_pct = req.custom_stop_loss_pct
+    settings.risk.ai_exit_system_prompt = req.ai_exit_system_prompt
     _save_runtime_settings({
         "risk": {
             "max_position_pct": req.max_position_pct,
             "max_daily_trades": req.max_daily_trades,
             "max_daily_loss_pct": req.max_daily_loss_pct,
+            "exit_management_mode": req.exit_management_mode,
+            "custom_stop_loss_pct": req.custom_stop_loss_pct,
+            "ai_exit_system_prompt": req.ai_exit_system_prompt,
         }
     })
     logger.info("[Settings] Risk settings updated")
