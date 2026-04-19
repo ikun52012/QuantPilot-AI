@@ -32,6 +32,9 @@
             <a href="#" class="nav-item active" data-page="dashboard" id="nav-dashboard" aria-current="page">
                 <i class="ri-dashboard-3-line" aria-hidden="true"></i><span>Dashboard</span>
             </a>
+            <a href="#" class="nav-item user-only" data-page="user" id="nav-user">
+                <i class="ri-user-heart-line" aria-hidden="true"></i><span>My Trading</span>
+            </a>
             <a href="#" class="nav-item" data-page="positions" id="nav-positions">
                 <i class="ri-stock-line" aria-hidden="true"></i><span>Positions</span>
             </a>
@@ -306,7 +309,7 @@
         <div class="page" id="page-settings">
             <div class="info-banner">
                 <i class="ri-information-line" aria-hidden="true"></i>
-                <span>API keys are applied immediately in memory but are <strong>not persisted to disk</strong>. Set them in your <code>.env</code> file for permanent configuration.</span>
+                <span>Saved API keys and notification settings are encrypted by your server filesystem permissions and persist in <code>runtime_settings.json</code>. Existing secrets are not displayed back in password fields.</span>
             </div>
             <!-- Exchange Settings -->
             <div class="card">
@@ -654,7 +657,90 @@
                         </div>
                     </div>
                     <p class="hint">Paste this URL into your TradingView alert webhook field.</p>
+                    <div class="form-group">
+                        <label>Webhook Secret</label>
+                        <div class="webhook-url-box">
+                            <code id="admin-webhook-secret">Loading...</code>
+                            <button class="btn btn-icon btn-sm" onclick="copyAdminWebhookSecret(event)" title="Copy" aria-label="Copy webhook secret"><i class="ri-file-copy-line"></i></button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>TradingView Alert Message Template</label>
+                        <pre class="code-template" id="admin-webhook-template">Loading...</pre>
+                    </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Page: User Portal -->
+        <div class="page" id="page-user">
+            <div class="card">
+                <div class="card-header"><h3><i class="ri-line-chart-line"></i> My Performance</h3></div>
+                <div class="kpi-grid" style="padding:20px">
+                    <div class="kpi-card"><div class="kpi-label">My P&amp;L</div><div class="kpi-value" id="user-kpi-pnl">0.00%</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Trades</div><div class="kpi-value" id="user-kpi-trades">0</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Win Rate</div><div class="kpi-value" id="user-kpi-winrate">0.0%</div></div>
+                    <div class="kpi-card"><div class="kpi-label">Subscription</div><div class="kpi-value" id="user-kpi-sub">--</div></div>
+                </div>
+                <div class="chart-container" style="height:280px;padding:0 20px 20px"><canvas id="user-equity-chart"></canvas></div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-webhook-line"></i> My Webhook</h3></div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label>Webhook URL</label>
+                        <div class="webhook-url-box"><code id="user-webhook-url">Loading...</code><button class="btn btn-icon btn-sm" onclick="copyUserWebhookUrl(event)" title="Copy"><i class="ri-file-copy-line"></i></button></div>
+                    </div>
+                    <div class="form-group">
+                        <label>Secret</label>
+                        <div class="webhook-url-box"><code id="user-webhook-secret">Loading...</code><button class="btn btn-icon btn-sm" onclick="copyUserWebhookSecret(event)" title="Copy"><i class="ri-file-copy-line"></i></button></div>
+                    </div>
+                    <div class="form-group">
+                        <label>TradingView Alert Message Template</label>
+                        <pre class="code-template" id="user-webhook-template">Loading...</pre>
+                    </div>
+                </div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-exchange-line"></i> My Exchange Configuration</h3></div>
+                <div class="settings-form">
+                    <div class="form-row three-col">
+                        <div class="form-group"><label for="user-exchange">Exchange</label><select id="user-exchange" class="select-input"><option value="binance">Binance</option><option value="okx">OKX</option><option value="bybit">Bybit</option><option value="bitget">Bitget</option><option value="gate">Gate.io</option><option value="coinbase">Coinbase</option></select></div>
+                        <div class="form-group"><label for="user-live-trading">Trading Mode</label><select id="user-live-trading" class="select-input"><option value="false">Paper Trading</option><option value="true">Live Trading</option></select></div>
+                        <div class="form-group"><label>Saved Keys</label><div class="hint" id="user-api-configured">Not configured</div></div>
+                    </div>
+                    <div class="form-row three-col">
+                        <div class="form-group"><label for="user-api-key">API Key</label><input type="password" id="user-api-key" class="text-input" placeholder="Leave blank to keep saved key"></div>
+                        <div class="form-group"><label for="user-api-secret">API Secret</label><input type="password" id="user-api-secret" class="text-input" placeholder="Leave blank to keep saved secret"></div>
+                        <div class="form-group"><label for="user-api-password">Passphrase</label><input type="password" id="user-api-password" class="text-input" placeholder="OKX / Bitget optional"></div>
+                    </div>
+                    <button class="btn btn-success" onclick="saveUserExchangeSettings()"><i class="ri-save-line"></i> Save Exchange</button>
+                </div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-target-line"></i> My TP Configuration</h3></div>
+                <div class="settings-form">
+                    <div class="form-row three-col">
+                        <div class="form-group"><label for="user-tp-levels">TP Levels</label><select id="user-tp-levels" class="select-input"><option value="1">1 Level</option><option value="2">2 Levels</option><option value="3">3 Levels</option><option value="4">4 Levels</option></select></div>
+                        <div class="form-group"><label for="user-tp1-pct">TP1 %</label><input type="number" id="user-tp1-pct" class="text-input" value="2" step="0.1"></div>
+                        <div class="form-group"><label for="user-tp1-qty">TP1 Close %</label><input type="number" id="user-tp1-qty" class="text-input" value="25" step="1"></div>
+                    </div>
+                    <div class="form-row three-col">
+                        <div class="form-group"><label for="user-tp2-pct">TP2 %</label><input type="number" id="user-tp2-pct" class="text-input" value="4" step="0.1"></div>
+                        <div class="form-group"><label for="user-tp3-pct">TP3 %</label><input type="number" id="user-tp3-pct" class="text-input" value="6" step="0.1"></div>
+                        <div class="form-group"><label for="user-tp4-pct">TP4 %</label><input type="number" id="user-tp4-pct" class="text-input" value="10" step="0.1"></div>
+                    </div>
+                    <div class="form-row three-col">
+                        <div class="form-group"><label for="user-tp2-qty">TP2 Close %</label><input type="number" id="user-tp2-qty" class="text-input" value="25" step="1"></div>
+                        <div class="form-group"><label for="user-tp3-qty">TP3 Close %</label><input type="number" id="user-tp3-qty" class="text-input" value="25" step="1"></div>
+                        <div class="form-group"><label for="user-tp4-qty">TP4 Close %</label><input type="number" id="user-tp4-qty" class="text-input" value="25" step="1"></div>
+                    </div>
+                    <button class="btn btn-success" onclick="saveUserTPSettings()"><i class="ri-save-line"></i> Save TP</button>
+                </div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-vip-crown-line"></i> Subscription & Recharge</h3></div>
+                <div id="user-subscription-panel" style="padding:20px">Loading...</div>
             </div>
         </div>
 

@@ -30,6 +30,18 @@ SUPPORTED_NETWORKS = {
         "confirmation_time": "~3 minutes",
         "fee": "~0.5 USDT",
     },
+    "ARBITRUM": {
+        "name": "Arbitrum One",
+        "currencies": ["USDT", "USDC"],
+        "confirmation_time": "~1 minute",
+        "fee": "~0.1 USDT",
+    },
+    "APT": {
+        "name": "Aptos (APT)",
+        "currencies": ["USDT", "USDC"],
+        "confirmation_time": "~1 minute",
+        "fee": "~0.01 APT",
+    },
     "SOL": {
         "name": "Solana (SPL)",
         "currencies": ["USDT", "USDC"],

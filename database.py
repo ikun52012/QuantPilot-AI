@@ -329,6 +329,136 @@ def update_user_admin(
 # ─────────────────────────────────────────────
 # Subscription Plans CRUD
 # ─────────────────────────────────────────────
+def create_user_admin(
+    username: str,
+    email: str,
+    password_hash: str,
+    role: str = "user",
+    is_active: bool = True,
+    balance_usdt: float = 0.0,
+) -> dict:
+    """Create a user from the admin panel with editable account fields."""
+    conn = get_connection()
+    try:
+        if role not in ("user", "admin"):
+            raise ValueError("Invalid role")
+        user_id = str(uuid.uuid4())
+        normalized_username = username.lower().strip()
+        normalized_email = email.lower().strip()
+        conn.execute(
+            """
+            INSERT INTO users (id, username, email, password_hash, role, is_active, balance_usdt)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            (user_id, normalized_username, normalized_email, password_hash, role, 1 if is_active else 0, balance_usdt),
+        )
+        conn.commit()
+        return {
+            "id": user_id,
+            "username": normalized_username,
+            "email": normalized_email,
+            "role": role,
+            "is_active": 1 if is_active else 0,
+            "balance_usdt": balance_usdt,
+        }
+    except sqlite3.IntegrityError as e:
+        if "username" in str(e):
+            raise ValueError("Username already exists")
+        if "email" in str(e):
+            raise ValueError("Email already registered")
+        raise
+    finally:
+        conn.close()
+
+
+def delete_user_admin(user_id: str) -> bool:
+    """Hard-delete a user and their owned billing rows."""
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            return False
+        if row["role"] == "admin":
+            admin_count = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
+            if admin_count <= 1:
+                raise ValueError("Cannot delete the last admin account")
+        conn.execute("UPDATE redeem_codes SET redeemed_by=NULL WHERE redeemed_by=?", (user_id,))
+        conn.execute("DELETE FROM payments WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM subscriptions WHERE user_id=?", (user_id,))
+        cur = conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_user_settings(user_id: str) -> dict:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT settings_json FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            return {}
+        try:
+            return json.loads(row["settings_json"] or "{}")
+        except json.JSONDecodeError:
+            return {}
+    finally:
+        conn.close()
+
+
+def update_user_settings(user_id: str, updates: dict) -> dict:
+    """Deep-merge per-user settings into users.settings_json."""
+    current = get_user_settings(user_id)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(current.get(key), dict):
+            current[key].update(value)
+        else:
+            current[key] = value
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "UPDATE users SET settings_json=? WHERE id=?",
+            (json.dumps(current, ensure_ascii=False), user_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            raise ValueError("User not found")
+        return current
+    finally:
+        conn.close()
+
+
+def ensure_user_webhook_secret(user_id: str) -> str:
+    settings = get_user_settings(user_id)
+    secret = (settings.get("webhook") or {}).get("secret", "")
+    if not secret:
+        secret = secrets.token_urlsafe(32)
+        update_user_settings(user_id, {"webhook": {"secret": secret}})
+    return secret
+
+
+def find_user_by_webhook_secret(secret: str) -> dict | None:
+    if not secret:
+        return None
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, email, role, is_active, settings_json FROM users WHERE is_active=1"
+        ).fetchall()
+        for row in rows:
+            try:
+                user_settings = json.loads(row["settings_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if secrets.compare_digest(str(user_settings.get("webhook", {}).get("secret", "")), str(secret)):
+                user = dict(row)
+                user.pop("settings_json", None)
+                return user
+        return None
+    finally:
+        conn.close()
+
+
 def get_subscription_plans(active_only: bool = True) -> list[dict]:
     conn = get_connection()
     try:

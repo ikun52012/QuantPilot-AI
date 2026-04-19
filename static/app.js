@@ -8,11 +8,15 @@ const USDT_PAYMENT_NETWORKS = [
     { id: 'TRC20', name: 'Tron (TRC20)' },
     { id: 'ERC20', name: 'Ethereum (ERC20)' },
     { id: 'BEP20', name: 'BSC (BEP20)' },
+    { id: 'ARBITRUM', name: 'Arbitrum One' },
+    { id: 'APT', name: 'Aptos (APT)' },
     { id: 'SOL', name: 'Solana (SPL)' },
 ];
 let equityChart = null;
 let dailyPnlChart = null;
 let winlossChart = null;
+let userEquityChart = null;
+let currentUserSettings = null;
 
 // ─── Auth Helper ───
 function getToken() { return localStorage.getItem('tvss_token'); }
@@ -45,7 +49,7 @@ document.addEventListener('DOMContentLoaded', () => {
     detectWebhookUrl();
     updateUserUI();
     if (isAdmin()) loadDashboard();
-    else switchPage('subscription');
+    else switchPage('user');
 });
 
 function updateUserUI() {
@@ -60,6 +64,13 @@ function updateUserUI() {
     // Show/hide admin nav items
     document.querySelectorAll('.admin-only').forEach(el => {
         el.style.display = isAdmin() ? '' : 'none';
+    });
+    document.querySelectorAll('.user-only').forEach(el => {
+        el.style.display = isAdmin() ? 'none' : '';
+    });
+    ['dashboard','positions','history','analytics','settings'].forEach(page => {
+        const el = document.querySelector(`.nav-item[data-page="${page}"]`);
+        if (el && !isAdmin()) el.style.display = 'none';
     });
 }
 
@@ -121,12 +132,13 @@ function switchPage(page) {
     navEl?.classList.add('active');
     navEl?.setAttribute('aria-current','page');
     document.getElementById(`page-${page}`)?.classList.add('active');
-    const titles = { dashboard:'Dashboard', positions:'Positions', history:'Trade History', analytics:'Analytics', settings:'Settings', subscription:'Subscription', admin:'Admin Panel' };
+    const titles = { dashboard:'Dashboard', user:'My Trading', positions:'Positions', history:'Trade History', analytics:'Analytics', settings:'Settings', subscription:'Subscription', admin:'Admin Panel' };
     document.getElementById('page-title').textContent = titles[page] || page;
     if (page === 'positions') loadPositions();
     if (page === 'history') loadHistory();
     if (page === 'analytics') loadAnalytics();
     if (page === 'settings') loadSettings();
+    if (page === 'user') loadUserPortal();
     if (page === 'subscription') loadSubscription();
     if (page === 'admin') loadAdmin();
 }
@@ -304,7 +316,10 @@ function toggleExitModeFields() {
 
 async function loadSettings() {
     try {
-        const status = await fetchAPI('/api/status');
+        const [status, webhookConfig] = await Promise.all([
+            fetchAPI('/api/status'),
+            isAdmin() ? fetchAPI('/api/admin/webhook-config') : Promise.resolve(null),
+        ]);
         if (document.getElementById('set-exchange') && status.exchange) document.getElementById('set-exchange').value = status.exchange;
         toggleExchangePasswordField();
         if (document.getElementById('set-ai-provider') && status.ai_provider) document.getElementById('set-ai-provider').value = status.ai_provider;
@@ -344,6 +359,11 @@ async function loadSettings() {
         const modeEl = document.getElementById(`exit-mode-${mode}`);
         if (modeEl) modeEl.checked = true;
         toggleExitModeFields();
+        if (webhookConfig) {
+            setText('webhook-url', webhookConfig.webhook_url || `${window.location.origin}/webhook`);
+            setText('admin-webhook-secret', webhookConfig.secret || '');
+            setText('admin-webhook-template', webhookConfig.template || '');
+        }
     } catch (e) { console.error('Settings load error:', e); }
 }
 
@@ -401,6 +421,119 @@ async function saveTSSettings() {
 }
 
 // ─── Subscription Page ───
+async function loadUserPortal() {
+    try {
+        const [userSettings, perf, sub] = await Promise.all([
+            fetchAPI('/api/user/settings'),
+            fetchAPI('/api/user/performance?days=30'),
+            fetchAPI('/api/my-subscription'),
+        ]);
+        currentUserSettings = userSettings;
+        renderUserSettings(userSettings);
+        renderUserPerformance(perf, sub);
+        await loadUserSubscriptionPanel();
+    } catch (err) {
+        showToast(err.message, 'error', 'User Portal Load Failed');
+    }
+}
+
+function renderUserSettings(data) {
+    const ex = data.exchange || {}, tp = data.take_profit || {}, wh = data.webhook || {};
+    setFieldValue('user-exchange', ex.exchange || 'binance');
+    setFieldValue('user-live-trading', String(Boolean(ex.live_trading)));
+    setText('user-api-configured', ex.api_configured ? 'Configured' : 'Not configured');
+    setFieldValue('user-tp-levels', tp.num_levels || 1);
+    ['tp1_pct','tp2_pct','tp3_pct','tp4_pct','tp1_qty','tp2_qty','tp3_qty','tp4_qty'].forEach(key => {
+        const id = `user-${key.replace('_','-')}`;
+        if (document.getElementById(id)) setFieldValue(id, tp[key] ?? '');
+    });
+    setText('user-webhook-url', wh.url || `${window.location.origin}/webhook`);
+    setText('user-webhook-secret', wh.secret || '');
+    setText('user-webhook-template', wh.template || '');
+}
+
+function renderUserPerformance(perf, sub) {
+    const pnl = Number(perf.total_pnl_pct || 0);
+    const pnlEl = document.getElementById('user-kpi-pnl');
+    if (pnlEl) {
+        pnlEl.textContent = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+        pnlEl.className = `kpi-value ${pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}`;
+    }
+    setText('user-kpi-trades', perf.total_trades || 0);
+    setText('user-kpi-winrate', `${Number(perf.win_rate || 0).toFixed(1)}%`);
+    setText('user-kpi-sub', sub && sub.status === 'active' ? 'Active' : 'None');
+    renderUserEquityChart(perf.equity_curve || []);
+}
+
+function renderUserEquityChart(curve) {
+    const ctx = document.getElementById('user-equity-chart')?.getContext('2d');
+    if (!ctx) return;
+    if (userEquityChart) userEquityChart.destroy();
+    userEquityChart = new Chart(ctx, {
+        type:'line',
+        data:{ labels:curve.map((_,i)=>`#${i+1}`), datasets:[{ label:'My P&L %', data:curve.map(c=>c.cumulative_pnl), borderColor:'#10b981', backgroundColor:'rgba(16,185,129,.12)', borderWidth:2, fill:true, tension:.35, pointRadius:0 }] },
+        options:chartOptions('P&L %')
+    });
+}
+
+async function loadUserSubscriptionPanel() {
+    const panel = document.getElementById('user-subscription-panel');
+    if (!panel) return;
+    const [plans, mySub, payments, me] = await Promise.all([fetchAPI('/api/plans'), fetchAPI('/api/my-subscription'), fetchAPI('/api/my-payments'), fetchAPI('/api/auth/me')]);
+    const balance = Number(me.balance_usdt || 0);
+    const status = mySub && mySub.status === 'active'
+        ? `<div class="sub-active"><i class="ri-checkbox-circle-fill"></i><div><strong>${escapeHtml(mySub.plan_name)}</strong><br><span class="hint">Until ${escapeHtml(formatDateTime(mySub.end_date))} · Balance ${formatNum(balance)} USDT</span></div></div>`
+        : `<div class="sub-inactive"><i class="ri-close-circle-line"></i><span>No active subscription · Balance ${formatNum(balance)} USDT</span></div>`;
+    const planCards = plans.map(p => {
+        const price = Number(p.price_usdt || 0);
+        const buttonText = price <= 0 ? 'Activate Free' : (balance >= price ? 'Pay With Balance' : 'Pay USDT');
+        return `<div class="plan-card"><h3>${escapeHtml(p.name)}</h3><div class="plan-price">${price > 0 ? '$' + formatNum(price) : 'Free'}</div><p class="plan-desc">${escapeHtml(p.description || '')}</p><button class="btn-plan" onclick="subscribeToPlan('${escapeJsSingle(p.id)}',${price})">${buttonText}</button></div>`;
+    }).join('');
+    const rows = payments.length ? `<table class="data-table"><thead><tr><th>Date</th><th>Amount</th><th>Network</th><th>Status</th></tr></thead><tbody>${payments.slice(0,8).map(p => `<tr><td>${escapeHtml(formatDateTime(p.created_at))}</td><td>${escapeHtml(p.amount)} ${escapeHtml(p.currency)}</td><td>${escapeHtml(p.network)}</td><td><span class="badge badge-${safeClassToken(p.status)}">${escapeHtml(p.status)}</span></td></tr>`).join('')}</tbody></table>` : '<p class="empty-state">No payments yet</p>';
+    panel.innerHTML = `${status}<div class="plans-grid" style="margin-top:20px">${planCards}</div><div class="form-row" style="margin-top:20px"><div class="form-group"><label for="user-redeem-code">Card Code</label><input id="user-redeem-code" class="text-input" placeholder="CARD-XXXXXXXXXXXX"></div><div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="redeemUserCardCode()"><i class="ri-gift-line"></i> Redeem</button></div></div><div class="mt-4">${rows}</div>`;
+}
+
+async function saveUserExchangeSettings() {
+    const data = {
+        exchange: document.getElementById('user-exchange')?.value || 'binance',
+        live_trading: document.getElementById('user-live-trading')?.value === 'true',
+        api_key: document.getElementById('user-api-key')?.value || '',
+        api_secret: document.getElementById('user-api-secret')?.value || '',
+        password: document.getElementById('user-api-password')?.value || '',
+    };
+    await fetchAPI('/api/user/settings/exchange', { method:'POST', body:JSON.stringify(data) });
+    ['user-api-key','user-api-secret','user-api-password'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    showToast('Exchange settings saved.','success','Saved');
+    loadUserPortal();
+}
+
+async function saveUserTPSettings() {
+    const data = {
+        num_levels: parseInt(document.getElementById('user-tp-levels')?.value) || 1,
+        tp1_pct: parseFloat(document.getElementById('user-tp1-pct')?.value) || 2,
+        tp2_pct: parseFloat(document.getElementById('user-tp2-pct')?.value) || 4,
+        tp3_pct: parseFloat(document.getElementById('user-tp3-pct')?.value) || 6,
+        tp4_pct: parseFloat(document.getElementById('user-tp4-pct')?.value) || 10,
+        tp1_qty: parseFloat(document.getElementById('user-tp1-qty')?.value) || 25,
+        tp2_qty: parseFloat(document.getElementById('user-tp2-qty')?.value) || 25,
+        tp3_qty: parseFloat(document.getElementById('user-tp3-qty')?.value) || 25,
+        tp4_qty: parseFloat(document.getElementById('user-tp4-qty')?.value) || 25,
+    };
+    await fetchAPI('/api/user/settings/take-profit', { method:'POST', body:JSON.stringify(data) });
+    showToast('Take-profit settings saved.','success','Saved');
+    loadUserPortal();
+}
+
+async function redeemUserCardCode() {
+    const input = document.getElementById('user-redeem-code');
+    const code = input?.value.trim();
+    if (!code) return showToast('Please enter a card code.','warning','Missing Code');
+    await fetchAPI('/api/redeem-code', { method:'POST', body:JSON.stringify({ code }) });
+    input.value = '';
+    showToast('Code redeemed.','success','Redeemed');
+    loadUserPortal();
+}
+
 async function loadSubscription() {
     try {
         const [plans, mySub, myPayments, me] = await Promise.all([
@@ -453,7 +586,7 @@ async function subscribeToPlan(planId, price) {
         const sub = await fetchAPI('/api/subscribe', { method:'POST', body:JSON.stringify({ plan_id:planId }) });
         if (price <= 0 || sub.status === 'active') {
             showToast(sub.paid_from_balance ? 'Subscription paid from account balance.' : 'Subscription activated.','success','Subscribed');
-            loadSubscription();
+            reloadBillingViews();
             return;
         }
         // Show payment modal
@@ -475,7 +608,7 @@ async function redeemCardCode() {
         if (Number(result.balance_usdt || 0) > 0) pieces.push(`${formatNum(result.balance_usdt)} USDT balance`);
         if (result.subscription) pieces.push('subscription activated');
         showToast(pieces.length ? pieces.join(' + ') : 'Code redeemed.', 'success', 'Redeemed');
-        loadSubscription();
+        reloadBillingViews();
     } catch (err) {
         showToast(err.message, 'error', 'Redeem Failed');
     }
@@ -494,9 +627,9 @@ async function showPaymentModal(subscriptionId, amount) {
     body.innerHTML = `
         <h3 style="margin-bottom:16px">Pay ${amount} USDT</h3>
         <div class="form-group"><label>Payment Network</label>
-            <select id="pay-network" class="form-input" onchange="updatePaymentAddress('${subscriptionId}',${amount})">
-                ${options.networks.map(n => `<option value="${n.network}">${n.name} (fee: ${n.fee})</option>`).join('')}
-            </select>
+            <div id="pay-network" class="payment-network-grid">
+                ${options.networks.map((n, idx) => `<button type="button" class="payment-network-option ${idx === 0 ? 'active' : ''}" data-network="${escapeHtml(n.network)}" onclick="selectPaymentNetwork(this,'${subscriptionId}',${amount})">${escapeHtml(n.name)}<span>${escapeHtml(n.fee)}</span></button>`).join('')}
+            </div>
         </div>
         <div id="pay-address-info" style="margin-top:16px"></div>
         <div class="form-group" style="margin-top:16px"><label>Transaction Hash (TX ID)</label><input type="text" id="pay-tx-hash" class="form-input" placeholder="Paste your TX hash after sending"></div>
@@ -509,14 +642,14 @@ async function showPaymentModal(subscriptionId, amount) {
 }
 
 async function updatePaymentAddress(subscriptionId, amount) {
-    const network = document.getElementById('pay-network').value;
+    const network = document.querySelector('#pay-network .payment-network-option.active')?.dataset.network || 'TRC20';
     try {
         const payment = await fetchAPI('/api/payment/create', { method:'POST', body:JSON.stringify({ subscription_id:subscriptionId, currency:'USDT', network:network }) });
         const infoEl = document.getElementById('pay-address-info');
         if (payment.status === 'activated') {
             closePaymentModal();
             showToast('Free plan activated!','success');
-            loadSubscription();
+            reloadBillingViews();
             return;
         }
         infoEl.innerHTML = `<div class="payment-address-box"><label>Send to this address:</label><div class="address-display"><code>${escapeHtml(payment.address)}</code><button class="btn-copy" onclick="copyText('${escapeJsSingle(payment.address)}','Address copied!')"><i class="ri-file-copy-line"></i></button></div><p style="color:var(--text-muted);font-size:12px;margin-top:8px">Network: ${escapeHtml(payment.network_name)} · Confirmation: ${escapeHtml(payment.confirmation_time)}</p></div>`;
@@ -533,12 +666,18 @@ async function submitPayment(subscriptionId) {
         await fetchAPI('/api/payment/submit-tx', { method:'POST', body:JSON.stringify({ payment_id:paymentId, tx_hash:txHash }) });
         showToast('Payment submitted for review!','success');
         closePaymentModal();
-        loadSubscription();
+        reloadBillingViews();
     } catch (err) { showToast(err.message,'error'); }
 }
 
 function closePaymentModal() {
     document.getElementById('payment-modal').style.display = 'none';
+}
+
+function reloadBillingViews() {
+    const page = document.querySelector('.page.active')?.id?.replace('page-', '');
+    if (page === 'user') loadUserPortal();
+    else loadSubscription();
 }
 
 // ─── Admin Panel ───
@@ -604,7 +743,19 @@ function renderAdminUsers(users, plans) {
         usersEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No users found</p>';
         return;
     }
-    usersEl.innerHTML = `<div class="table-wrapper"><table class="data-table admin-users-table"><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Balance</th><th>Password</th><th>Current Subscription</th><th>Grant Subscription</th><th>Actions</th></tr></thead><tbody>${users.map(u => {
+    const createForm = `<div class="settings-form admin-create-user">
+        <div class="form-row three-col">
+            <div class="form-group"><label for="new-user-username">Username</label><input id="new-user-username" class="text-input" placeholder="username"></div>
+            <div class="form-group"><label for="new-user-email">Email</label><input id="new-user-email" class="text-input" placeholder="user@example.com"></div>
+            <div class="form-group"><label for="new-user-password">Password</label><input id="new-user-password" type="password" class="text-input" placeholder="min 6 chars"></div>
+        </div>
+        <div class="form-row three-col">
+            <div class="form-group"><label for="new-user-role">Role</label><select id="new-user-role" class="select-input"><option value="user">User</option><option value="admin">Admin</option></select></div>
+            <div class="form-group"><label for="new-user-balance">Balance USDT</label><input id="new-user-balance" type="number" min="0" step="0.01" value="0" class="text-input"></div>
+            <div class="form-group admin-button-bottom"><button class="btn btn-primary" onclick="createAdminUser()"><i class="ri-user-add-line"></i> Add User</button></div>
+        </div>
+    </div>`;
+    usersEl.innerHTML = `${createForm}<div class="table-wrapper"><table class="data-table admin-users-table"><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Balance</th><th>Password</th><th>Current Subscription</th><th>Grant Subscription</th><th>Actions</th></tr></thead><tbody>${users.map(u => {
         const id = escapeHtml(u.id);
         const jsId = escapeJsSingle(u.id);
         const active = Boolean(u.is_active);
@@ -617,7 +768,7 @@ function renderAdminUsers(users, plans) {
             <td><div class="admin-stack"><input id="admin-password-${id}" type="password" class="text-input table-input" placeholder="New password" autocomplete="new-password"><button class="btn btn-sm btn-primary" onclick="resetAdminPassword('${jsId}')">Reset</button></div></td>
             <td>${sub}</td>
             <td><div class="admin-stack"><select id="admin-plan-${id}" class="select-input table-input">${planOptions(plans)}</select><div class="admin-inline"><input id="admin-duration-${id}" type="number" class="text-input table-input" min="0" step="1" placeholder="Plan days"><select id="admin-substatus-${id}" class="select-input table-input"><option value="active">Active</option><option value="pending">Pending</option></select></div><button class="btn btn-sm btn-primary" onclick="grantSubscription('${jsId}')">Grant</button></div></td>
-            <td><div class="admin-actions"><button class="btn btn-sm btn-success" onclick="saveAdminUser('${jsId}')">Save</button>${u.role !== 'admin' ? `<button class="btn btn-sm" onclick="toggleUser('${jsId}')">${active ? 'Disable' : 'Enable'}</button>` : ''}</div></td>
+            <td><div class="admin-actions"><button class="btn btn-sm btn-success" onclick="saveAdminUser('${jsId}')">Save</button>${u.role !== 'admin' ? `<button class="btn btn-sm" onclick="toggleUser('${jsId}')">${active ? 'Disable' : 'Enable'}</button>` : ''}<button class="btn btn-sm btn-danger" onclick="deleteAdminUser('${jsId}')">Delete</button></div></td>
         </tr>`;
     }).join('')}</tbody></table></div>`;
 }
@@ -713,6 +864,31 @@ async function saveAdminUser(userId) {
         showToast('User account updated.','success','Saved');
         loadAdmin();
     } catch (err) { showToast(err.message,'error','Save Failed'); }
+}
+
+async function createAdminUser() {
+    const data = {
+        username: document.getElementById('new-user-username')?.value || '',
+        email: document.getElementById('new-user-email')?.value || '',
+        password: document.getElementById('new-user-password')?.value || '',
+        role: document.getElementById('new-user-role')?.value || 'user',
+        is_active: true,
+        balance_usdt: parseFloat(document.getElementById('new-user-balance')?.value) || 0,
+    };
+    try {
+        await fetchAPI('/api/admin/users', { method:'POST', body:JSON.stringify(data) });
+        showToast('User created.','success','Created');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Create Failed'); }
+}
+
+async function deleteAdminUser(userId) {
+    if (!confirm('Delete this user and their subscriptions/payments?')) return;
+    try {
+        await fetchAPI(`/api/admin/user/${encodeURIComponent(userId)}`, { method:'DELETE' });
+        showToast('User deleted.','success','Deleted');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Delete Failed'); }
 }
 
 async function resetAdminPassword(userId) {
@@ -836,6 +1012,18 @@ function copyWebhookUrl(evt) {
         if (btn) { btn.innerHTML = '<i class="ri-check-line"></i>'; setTimeout(() => { btn.innerHTML = '<i class="ri-file-copy-line"></i>'; }, 1500); }
     }
 }
+function copyAdminWebhookSecret() {
+    const value = document.getElementById('admin-webhook-secret')?.textContent;
+    if (value) copyText(value, 'Webhook secret copied');
+}
+function copyUserWebhookUrl() {
+    const value = document.getElementById('user-webhook-url')?.textContent;
+    if (value) copyText(value, 'Webhook URL copied');
+}
+function copyUserWebhookSecret() {
+    const value = document.getElementById('user-webhook-secret')?.textContent;
+    if (value) copyText(value, 'Webhook secret copied');
+}
 
 async function fetchAPI(path, options = {}) {
     const token = getToken();
@@ -854,6 +1042,16 @@ function firstDefined(...values) { return values.find(v => v !== undefined && v 
 function setFieldValue(id, value) {
     const el = document.getElementById(id);
     if (el) el.value = value ?? '';
+}
+
+function selectPaymentNetwork(button, subscriptionId, amount) {
+    document.querySelectorAll('#pay-network .payment-network-option').forEach(btn => btn.classList.remove('active'));
+    button.classList.add('active');
+    updatePaymentAddress(subscriptionId, amount);
+}
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value ?? '';
 }
 function pickBalance(section, quote = 'USDT') {
     if (!section || typeof section !== 'object') return 0;
@@ -875,6 +1073,6 @@ function formatDateTime(value) {
 async function refreshAll() {
     const p = document.querySelector('.page.active')?.id?.replace('page-','');
     if (p==='dashboard') await loadDashboard(); else if (p==='positions') await loadPositions();
-    else if (p==='history') await loadHistory(); else if (p==='analytics') await loadAnalytics();
+    else if (p==='user') await loadUserPortal(); else if (p==='history') await loadHistory(); else if (p==='analytics') await loadAnalytics();
     else if (p==='subscription') await loadSubscription(); else if (p==='admin') await loadAdmin();
 }

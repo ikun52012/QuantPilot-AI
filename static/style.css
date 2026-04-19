@@ -1247,6 +1247,53 @@ textarea:focus-visible {
     align-items: start;
 }
 
+.admin-create-user {
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 18px;
+}
+
+.code-template {
+    margin: 0;
+    padding: 14px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: rgba(0,0,0,0.22);
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+}
+
+.payment-network-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+}
+
+.payment-network-option {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.03);
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+}
+
+.payment-network-option span {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.payment-network-option.active {
+    border-color: var(--accent-blue);
+    background: var(--accent-blue-bg);
+}
+
 #admin-users,
 #admin-payment-addresses,
 #admin-registration,

@@ -32,23 +32,23 @@ def invalidate_performance_cache():
     _performance_cache.clear()
 
 
-def calculate_performance(days: int = 30) -> dict:
+def calculate_performance(days: int = 30, user_id: str | None = None) -> dict:
     """
     Calculate comprehensive performance metrics from trade history.
     Results are cached for up to 60 seconds to avoid redundant computation.
     """
-    cache_key = f"perf_{days}"
+    cache_key = f"perf_{days}_{user_id or 'all'}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
-    result = _calculate_performance_impl(days)
+    result = _calculate_performance_impl(days, user_id=user_id)
     _set_cache(cache_key, result)
     return result
 
 
-def _calculate_performance_impl(days: int = 30) -> dict:
-    trades = get_trade_history(days)
+def _calculate_performance_impl(days: int = 30, user_id: str | None = None) -> dict:
+    trades = get_trade_history(days, user_id=user_id)
     executed = [t for t in trades if t.get("execute") and t.get("order_status") in ("filled", "simulated")]
 
     if not executed:
@@ -149,13 +149,13 @@ def _calculate_performance_impl(days: int = 30) -> dict:
     }
 
 
-def get_daily_pnl(days: int = 30) -> list[dict]:
+def get_daily_pnl(days: int = 30, user_id: str | None = None) -> list[dict]:
     """Get daily aggregated PnL for charting."""
-    cache_key = f"daily_pnl_{days}"
+    cache_key = f"daily_pnl_{days}_{user_id or 'all'}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
-    trades = get_trade_history(days)
+    trades = get_trade_history(days, user_id=user_id)
     daily = {}
 
     for t in trades:

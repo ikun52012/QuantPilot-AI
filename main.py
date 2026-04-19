@@ -17,6 +17,7 @@ Usage:
 import sys
 import json
 import hmac
+import secrets
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -77,9 +78,15 @@ from database import (
     get_user_by_id,
     update_user_login,
     get_all_users,
+    create_user_admin,
+    delete_user_admin,
     update_user_admin,
     update_user_status,
     update_user_password_hash,
+    get_user_settings,
+    update_user_settings,
+    ensure_user_webhook_secret,
+    find_user_by_webhook_secret,
     pay_subscription_from_balance,
     set_user_subscription,
     get_subscription_plans,
@@ -167,8 +174,15 @@ async def lifespan(app: FastAPI):
     rs = _load_runtime_settings()
     if rs.get("exchange"):
         settings.exchange.name = rs["exchange"].get("name", settings.exchange.name)
+        settings.exchange.api_key = rs["exchange"].get("api_key", settings.exchange.api_key)
+        settings.exchange.api_secret = rs["exchange"].get("api_secret", settings.exchange.api_secret)
+        settings.exchange.password = rs["exchange"].get("password", settings.exchange.password)
     if rs.get("ai"):
         settings.ai.provider = rs["ai"].get("provider", settings.ai.provider)
+        settings.ai.openai_api_key = rs["ai"].get("openai_api_key", settings.ai.openai_api_key)
+        settings.ai.anthropic_api_key = rs["ai"].get("anthropic_api_key", settings.ai.anthropic_api_key)
+        settings.ai.deepseek_api_key = rs["ai"].get("deepseek_api_key", settings.ai.deepseek_api_key)
+        settings.ai.custom_provider_api_key = rs["ai"].get("custom_provider_api_key", settings.ai.custom_provider_api_key)
         settings.ai.temperature = rs["ai"].get("temperature", settings.ai.temperature)
         settings.ai.max_tokens = rs["ai"].get("max_tokens", settings.ai.max_tokens)
         settings.ai.custom_system_prompt = rs["ai"].get("custom_system_prompt", settings.ai.custom_system_prompt)
@@ -177,6 +191,7 @@ async def lifespan(app: FastAPI):
         settings.ai.custom_provider_model = rs["ai"].get("custom_provider_model", settings.ai.custom_provider_model)
         settings.ai.custom_provider_api_url = rs["ai"].get("custom_provider_api_url", settings.ai.custom_provider_api_url)
     if rs.get("telegram"):
+        settings.telegram.bot_token = rs["telegram"].get("bot_token", settings.telegram.bot_token)
         settings.telegram.chat_id = rs["telegram"].get("chat_id", settings.telegram.chat_id)
     if rs.get("risk"):
         settings.risk.account_equity_usdt = rs["risk"].get("account_equity_usdt", settings.risk.account_equity_usdt)
@@ -204,8 +219,13 @@ async def lifespan(app: FastAPI):
         settings.trailing_stop.activation_profit_pct = ts.get("activation_profit_pct", settings.trailing_stop.activation_profit_pct)
         settings.trailing_stop.trailing_step_pct = ts.get("trailing_step_pct", settings.trailing_stop.trailing_step_pct)
 
-    if settings.exchange.live_trading and not settings.server.webhook_secret:
-        raise RuntimeError("WEBHOOK_SECRET must be set when LIVE_TRADING=true")
+    if not settings.server.webhook_secret:
+        stored_secret = get_admin_setting("webhook_secret", "")
+        if not stored_secret:
+            stored_secret = secrets.token_urlsafe(32)
+            set_admin_setting("webhook_secret", stored_secret)
+            logger.warning("[Security] Generated a persistent admin webhook secret. Keep it private.")
+        settings.server.webhook_secret = stored_secret
 
     yield
     logger.info("TradingView Signal Server shutting down...")
@@ -281,6 +301,26 @@ class PaymentSubmitRequest(BaseModel):
 
 class RedeemCodeRequest(BaseModel):
     code: str = Field(min_length=4, max_length=80)
+
+
+class UserExchangeSettingsRequest(BaseModel):
+    exchange: str = Field(default="binance", max_length=40)
+    api_key: str = Field(default="", max_length=300)
+    api_secret: str = Field(default="", max_length=300)
+    password: str = Field(default="", max_length=300)
+    live_trading: bool = False
+
+
+class UserTakeProfitSettingsRequest(BaseModel):
+    num_levels: int = Field(default=1, ge=1, le=4)
+    tp1_pct: float = Field(default=2.0, gt=0, le=200.0)
+    tp2_pct: float = Field(default=4.0, gt=0, le=200.0)
+    tp3_pct: float = Field(default=6.0, gt=0, le=200.0)
+    tp4_pct: float = Field(default=10.0, gt=0, le=200.0)
+    tp1_qty: float = Field(default=25.0, ge=0.0, le=100.0)
+    tp2_qty: float = Field(default=25.0, ge=0.0, le=100.0)
+    tp3_qty: float = Field(default=25.0, ge=0.0, le=100.0)
+    tp4_qty: float = Field(default=25.0, ge=0.0, le=100.0)
 
 
 @app.post("/api/auth/register")
@@ -518,9 +558,98 @@ async def api_redeem_code(req: RedeemCodeRequest, user=Depends(get_current_user)
 # ADMIN API
 # ═══════════════════════════════════════════════
 
+def _public_user_settings(user_id: str, request: Request | None = None) -> dict:
+    user_settings = get_user_settings(user_id)
+    if not (user_settings.get("webhook") or {}).get("secret"):
+        ensure_user_webhook_secret(user_id)
+        user_settings = get_user_settings(user_id)
+    exchange_cfg = user_settings.get("exchange") or {}
+    tp_cfg = user_settings.get("take_profit") or {}
+    webhook_secret = user_settings.get("webhook", {}).get("secret", "")
+    webhook_url = str(request.base_url).rstrip("/") + "/webhook" if request else "/webhook"
+    return {
+        "exchange": {
+            "exchange": exchange_cfg.get("exchange", settings.exchange.name),
+            "live_trading": bool(exchange_cfg.get("live_trading", False)),
+            "api_configured": bool(exchange_cfg.get("api_key") and exchange_cfg.get("api_secret")),
+        },
+        "take_profit": {
+            "num_levels": tp_cfg.get("num_levels", settings.take_profit.num_levels),
+            "tp1_pct": tp_cfg.get("tp1_pct", settings.take_profit.tp1_pct),
+            "tp2_pct": tp_cfg.get("tp2_pct", settings.take_profit.tp2_pct),
+            "tp3_pct": tp_cfg.get("tp3_pct", settings.take_profit.tp3_pct),
+            "tp4_pct": tp_cfg.get("tp4_pct", settings.take_profit.tp4_pct),
+            "tp1_qty": tp_cfg.get("tp1_qty", settings.take_profit.tp1_qty),
+            "tp2_qty": tp_cfg.get("tp2_qty", settings.take_profit.tp2_qty),
+            "tp3_qty": tp_cfg.get("tp3_qty", settings.take_profit.tp3_qty),
+            "tp4_qty": tp_cfg.get("tp4_qty", settings.take_profit.tp4_qty),
+        },
+        "webhook": {
+            "url": webhook_url,
+            "secret": webhook_secret,
+            "template": _tradingview_template(webhook_secret),
+        },
+    }
+
+
+@app.get("/api/user/settings")
+async def api_user_settings(request: Request, user=Depends(get_current_user)):
+    return _public_user_settings(user["sub"], request)
+
+
+@app.post("/api/user/settings/exchange")
+async def api_user_save_exchange(req: UserExchangeSettingsRequest, user=Depends(get_current_user)):
+    exchange_name = req.exchange.lower().strip()
+    if exchange_name not in get_supported_exchanges():
+        raise HTTPException(400, f"Unsupported exchange: {req.exchange}")
+    current = get_user_settings(user["sub"]).get("exchange") or {}
+    updates = {
+        "exchange": exchange_name,
+        "live_trading": req.live_trading,
+        "api_key": req.api_key or current.get("api_key", ""),
+        "api_secret": req.api_secret or current.get("api_secret", ""),
+        "password": req.password or current.get("password", ""),
+    }
+    update_user_settings(user["sub"], {"exchange": updates})
+    return {"status": "saved", "exchange": exchange_name}
+
+
+@app.post("/api/user/settings/take-profit")
+async def api_user_save_take_profit(req: UserTakeProfitSettingsRequest, user=Depends(get_current_user)):
+    active_qty = [req.tp1_qty, req.tp2_qty, req.tp3_qty, req.tp4_qty][:req.num_levels]
+    if any(q <= 0 for q in active_qty):
+        raise HTTPException(400, "Active TP close percentages must be greater than 0")
+    total_qty = sum(active_qty)
+    if total_qty > 100:
+        raise HTTPException(400, f"Total active TP close percentage is {total_qty:.2f}%, must be <= 100%")
+    update_user_settings(user["sub"], {"take_profit": req.dict()})
+    return {"status": "saved", "num_levels": req.num_levels}
+
+
+@app.get("/api/user/history")
+async def api_user_history(days: int = 30, user=Depends(get_current_user)):
+    days = max(1, min(days, 365))
+    return get_trade_history(days, user_id=user["sub"])
+
+
+@app.get("/api/user/performance")
+async def api_user_performance(days: int = 30, user=Depends(get_current_user)):
+    days = max(1, min(days, 365))
+    return calculate_performance(days, user_id=user["sub"])
+
+
 class AdminUserUpdateRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     email: str = Field(min_length=5, max_length=254)
+    role: str = "user"
+    is_active: bool = True
+    balance_usdt: float = Field(default=0.0, ge=0.0)
+
+
+class AdminUserCreateRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=6, max_length=256)
     role: str = "user"
     is_active: bool = True
     balance_usdt: float = Field(default=0.0, ge=0.0)
@@ -564,6 +693,23 @@ async def api_admin_users(admin=Depends(require_admin)):
     return users
 
 
+@app.post("/api/admin/users")
+async def api_admin_create_user(req: AdminUserCreateRequest, admin=Depends(require_admin)):
+    try:
+        user = create_user_admin(
+            username=req.username,
+            email=req.email,
+            password_hash=hash_password(req.password),
+            role=req.role,
+            is_active=req.is_active,
+            balance_usdt=req.balance_usdt,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    logger.info(f"[Admin] User {user['username']} created by {admin['username']}")
+    return {"status": "created", "user": user}
+
+
 @app.post("/api/admin/user/{user_id}/toggle")
 async def api_admin_toggle_user(user_id: str, admin=Depends(require_admin)):
     user = get_user_by_id(user_id)
@@ -597,6 +743,20 @@ async def api_admin_update_user(user_id: str, req: AdminUserUpdateRequest, admin
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"status": "updated", "user": updated}
+
+
+@app.delete("/api/admin/user/{user_id}")
+async def api_admin_delete_user(user_id: str, admin=Depends(require_admin)):
+    if user_id == admin["sub"]:
+        raise HTTPException(400, "You cannot delete your own account")
+    try:
+        deleted = delete_user_admin(user_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not deleted:
+        raise HTTPException(404, "User not found")
+    logger.info(f"[Admin] User {user_id} deleted by {admin['username']}")
+    return {"status": "deleted"}
 
 
 @app.post("/api/admin/user/{user_id}/subscription")
@@ -759,6 +919,7 @@ async def api_status():
         "ai_provider": settings.ai.provider,
         "exchange": settings.exchange.name,
         "live_trading": settings.exchange.live_trading,
+        "exchange_api_configured": bool(settings.exchange.api_key and settings.exchange.api_secret),
         "supported_exchanges": get_supported_exchanges(),
         "tp_levels": settings.take_profit.num_levels,
         "trailing_stop_mode": settings.trailing_stop.mode,
@@ -771,6 +932,7 @@ async def api_status():
         "custom_provider_url": settings.ai.custom_provider_api_url,
         "telegram": {
             "chat_id": settings.telegram.chat_id,
+            "bot_configured": bool(settings.telegram.bot_token),
         },
         "risk": {
             "max_position_pct": settings.risk.max_position_pct,
@@ -801,6 +963,29 @@ async def api_status():
     }
 
 
+def _tradingview_template(secret: str) -> str:
+    return json.dumps({
+        "secret": secret,
+        "ticker": "{{ticker}}",
+        "exchange": "{{exchange}}",
+        "direction": "long",
+        "price": "{{close}}",
+        "timeframe": "{{interval}}",
+        "strategy": "{{strategy.order.comment}}",
+        "message": "{{strategy.order.action}} {{ticker}} @ {{close}}"
+    }, indent=2)
+
+
+@app.get("/api/admin/webhook-config")
+async def api_admin_webhook_config(request: Request, admin=Depends(require_admin)):
+    webhook_url = str(request.base_url).rstrip("/") + "/webhook"
+    return {
+        "webhook_url": webhook_url,
+        "secret": settings.server.webhook_secret,
+        "template": _tradingview_template(settings.server.webhook_secret),
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -826,15 +1011,18 @@ async def webhook(request: Request):
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=json.loads(e.json()))
 
-        # Authenticate
-        if settings.server.webhook_secret:
-            if not hmac.compare_digest(signal.secret, settings.server.webhook_secret):
-                logger.warning(f"[Webhook] ❌ Invalid secret from {request.client.host}")
+        logger.info(f"[Webhook] Signal: {signal.ticker} {signal.direction.value} @ {signal.price}")
+        webhook_user = None
+        if settings.server.webhook_secret and hmac.compare_digest(signal.secret, settings.server.webhook_secret):
+            pass
+        else:
+            webhook_user = find_user_by_webhook_secret(signal.secret)
+            if not webhook_user:
+                logger.warning(f"[Webhook] Invalid secret from {request.client.host}")
                 raise HTTPException(status_code=403, detail="Invalid webhook secret")
-        elif settings.exchange.live_trading:
-            raise HTTPException(status_code=503, detail="WEBHOOK_SECRET is required for live trading")
+        user_id = webhook_user["id"] if webhook_user else None
+        user_settings = get_user_settings(user_id) if user_id else {}
 
-        logger.info(f"[Webhook] 📡 Signal: {signal.ticker} {signal.direction.value} @ {signal.price}")
         await notify_signal_received(signal.ticker, signal.direction.value, signal.price)
 
         # Fetch market context
@@ -853,7 +1041,7 @@ async def webhook(request: Request):
                 execute=False, ticker=signal.ticker,
                 reason=f"Pre-filter: {filter_result.reason}", signal=signal,
             )
-            trade_id = log_trade(decision, {"status": "blocked_by_prefilter"})
+            trade_id = log_trade(decision, {"status": "blocked_by_prefilter"}, user_id=user_id)
             return JSONResponse(content={
                 "status": "blocked", "trade_id": trade_id,
                 "reason": filter_result.reason, "checks": filter_result.checks,
@@ -864,17 +1052,17 @@ async def webhook(request: Request):
         await notify_ai_analysis(signal.ticker, analysis)
 
         # Decision
-        decision = _make_decision(signal, analysis, market)
+        decision = _make_decision(signal, analysis, market, user_settings=user_settings)
 
         # Execute
         order_result = {"status": "not_executed"}
         if decision.execute:
-            order_result = await execute_trade(decision)
+            order_result = await execute_trade(decision, user_settings.get("exchange") if user_settings else None)
             if order_result.get("status") in ("filled", "simulated", "closed"):
                 increment_trade_count()
             await notify_trade_executed(decision, order_result)
 
-        trade_id = log_trade(decision, order_result)
+        trade_id = log_trade(decision, order_result, user_id=user_id)
         invalidate_performance_cache()
 
         return JSONResponse(content={
@@ -903,7 +1091,7 @@ CONFIDENCE_THRESHOLD = 0.5
 RISK_THRESHOLD = 0.8
 
 
-def _make_decision(signal, analysis, market) -> TradeDecision:
+def _make_decision(signal, analysis, market, user_settings: dict | None = None) -> TradeDecision:
     recommendation = (analysis.recommendation or "hold").lower().strip()
     if recommendation == "reject":
         return TradeDecision(
@@ -945,7 +1133,7 @@ def _make_decision(signal, analysis, market) -> TradeDecision:
             signal=signal, ai_analysis=analysis,
         )
 
-    stop_loss = _build_stop_loss(analysis, entry, direction)
+    stop_loss = _build_stop_loss(analysis, entry, direction, user_settings=user_settings)
     size_multiplier = _clamp(analysis.position_size_pct, 0.0, 1.0)
     qty = _calc_qty(entry, stop_loss, market) * size_multiplier
     if qty <= 0:
@@ -955,7 +1143,7 @@ def _make_decision(signal, analysis, market) -> TradeDecision:
             signal=signal, ai_analysis=analysis,
         )
 
-    tp_levels = _build_tp_levels(analysis, entry, direction)
+    tp_levels = _build_tp_levels(analysis, entry, direction, user_settings=user_settings)
     trailing_config = _build_trailing_config()
 
     return TradeDecision(
@@ -970,16 +1158,17 @@ def _make_decision(signal, analysis, market) -> TradeDecision:
     )
 
 
-def _build_tp_levels(analysis, entry, direction) -> list[TakeProfitLevel]:
+def _build_tp_levels(analysis, entry, direction, user_settings: dict | None = None) -> list[TakeProfitLevel]:
     tp_levels = []
-    num = int(_clamp(settings.take_profit.num_levels, 1, 4))
+    tp_cfg = (user_settings or {}).get("take_profit") or {}
+    num = int(_clamp(tp_cfg.get("num_levels", settings.take_profit.num_levels), 1, 4))
     is_long = direction in (SignalDirection.LONG,)
 
     for i in range(1, num + 1):
         ai_tp = getattr(analysis, f"suggested_tp{i}", None)
         ai_qty = getattr(analysis, f"tp{i}_qty_pct", 25.0)
-        default_pct = getattr(settings.take_profit, f"tp{i}_pct", 2.0 * i)
-        default_qty = getattr(settings.take_profit, f"tp{i}_qty", 25.0)
+        default_pct = tp_cfg.get(f"tp{i}_pct", getattr(settings.take_profit, f"tp{i}_pct", 2.0 * i))
+        default_qty = tp_cfg.get(f"tp{i}_qty", getattr(settings.take_profit, f"tp{i}_qty", 25.0))
 
         use_ai_tp = settings.risk.exit_management_mode == "ai"
         if use_ai_tp and ai_tp and ai_tp > 0 and ((is_long and ai_tp > entry) or (not is_long and ai_tp < entry)):
@@ -1003,7 +1192,7 @@ def _build_tp_levels(analysis, entry, direction) -> list[TakeProfitLevel]:
     return tp_levels
 
 
-def _build_stop_loss(analysis, entry, direction) -> float | None:
+def _build_stop_loss(analysis, entry, direction, user_settings: dict | None = None) -> float | None:
     is_long = direction in (SignalDirection.LONG,)
     if settings.risk.exit_management_mode == "ai":
         sl = analysis.suggested_stop_loss
@@ -1180,7 +1369,12 @@ async def save_exchange_settings(req: ExchangeSettingsRequest, admin=Depends(req
         settings.exchange.api_secret = req.api_secret
     if req.password:
         settings.exchange.password = req.password
-    _save_runtime_settings({"exchange": {"name": settings.exchange.name}})
+    _save_runtime_settings({"exchange": {
+        "name": settings.exchange.name,
+        "api_key": settings.exchange.api_key,
+        "api_secret": settings.exchange.api_secret,
+        "password": settings.exchange.password,
+    }})
     logger.info(f"[Settings] Exchange updated: {settings.exchange.name}")
     return {"status": "saved", "exchange": settings.exchange.name}
 
@@ -1218,6 +1412,10 @@ async def save_ai_settings(req: AISettingsRequest, admin=Depends(require_admin))
     _save_runtime_settings({
         "ai": {
             "provider": settings.ai.provider,
+            "openai_api_key": settings.ai.openai_api_key,
+            "anthropic_api_key": settings.ai.anthropic_api_key,
+            "deepseek_api_key": settings.ai.deepseek_api_key,
+            "custom_provider_api_key": settings.ai.custom_provider_api_key,
             "temperature": settings.ai.temperature,
             "max_tokens": settings.ai.max_tokens,
             "custom_system_prompt": settings.ai.custom_system_prompt,
@@ -1237,7 +1435,10 @@ async def save_telegram_settings(req: TelegramSettingsRequest, admin=Depends(req
         settings.telegram.bot_token = req.bot_token
     if req.chat_id:
         settings.telegram.chat_id = req.chat_id
-    _save_runtime_settings({"telegram": {"chat_id": settings.telegram.chat_id}})
+    _save_runtime_settings({"telegram": {
+        "bot_token": settings.telegram.bot_token,
+        "chat_id": settings.telegram.chat_id,
+    }})
     logger.info("[Settings] Telegram updated")
     return {"status": "saved"}
 

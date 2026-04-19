@@ -42,7 +42,13 @@ def _save_logs(path: Path, logs: list[dict]):
     tmp_path.replace(path)
 
 
-def log_trade(decision: TradeDecision, order_result: dict) -> str:
+def _filter_user(trades: list[dict], user_id: str | None = None) -> list[dict]:
+    if user_id is None:
+        return trades
+    return [t for t in trades if t.get("user_id") == user_id]
+
+
+def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None = None) -> str:
     """
     Log a trade decision and its execution result.
     Returns the trade ID.
@@ -52,6 +58,7 @@ def log_trade(decision: TradeDecision, order_result: dict) -> str:
     entry = {
         "id": trade_id,
         "timestamp": datetime.utcnow().isoformat(),
+        "user_id": user_id,
         "ticker": decision.ticker,
         "direction": decision.direction.value if decision.direction else "unknown",
         "execute": decision.execute,
@@ -92,20 +99,20 @@ def log_trade(decision: TradeDecision, order_result: dict) -> str:
     return trade_id
 
 
-def get_today_trades() -> list[dict]:
+def get_today_trades(user_id: str | None = None) -> list[dict]:
     """Get all trades from today."""
-    return _load_logs(_get_log_file())
+    return _filter_user(_load_logs(_get_log_file()), user_id)
 
 
-def get_today_pnl() -> float:
+def get_today_pnl(user_id: str | None = None) -> float:
     """Return today's cumulative realised PnL percentage from the trade log."""
-    trades = get_today_trades()
+    trades = get_today_trades(user_id)
     return sum(t.get("pnl_pct", 0.0) or 0.0 for t in trades if t.get("execute"))
 
 
-def get_today_stats() -> dict:
+def get_today_stats(user_id: str | None = None) -> dict:
     """Get today's trading statistics."""
-    trades = get_today_trades()
+    trades = get_today_trades(user_id)
     executed = [t for t in trades if t.get("execute")]
     rejected = [t for t in trades if not t.get("execute")]
 
@@ -117,7 +124,7 @@ def get_today_stats() -> dict:
     }
 
 
-def get_trade_history(days: int = 7) -> list[dict]:
+def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
     """Get trade history for the last N days."""
     all_trades = []
     days = max(1, min(int(days), 365))
@@ -126,13 +133,13 @@ def get_trade_history(days: int = 7) -> list[dict]:
         date_str = date.strftime("%Y-%m-%d")
         path = LOGS_DIR / f"trades_{date_str}.json"
         trades = _load_logs(path)
-        all_trades.extend(trades)
+        all_trades.extend(_filter_user(trades, user_id))
     return all_trades
 
 
-def get_recent_trade_results(limit: int = 5) -> list[dict]:
+def get_recent_trade_results(limit: int = 5, user_id: str | None = None) -> list[dict]:
     """Get the most recent executed trade results (for consecutive loss check)."""
-    all_trades = get_trade_history(days=3)
+    all_trades = get_trade_history(days=3, user_id=user_id)
     executed = [t for t in all_trades if t.get("execute")]
     # Sort by timestamp descending
     executed.sort(key=lambda t: t.get("timestamp", ""), reverse=True)

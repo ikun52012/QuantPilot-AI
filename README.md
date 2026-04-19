@@ -5,9 +5,10 @@ AI-powered crypto signal server for TradingView webhooks. It includes exchange e
 ## Current Highlights
 
 - First deployment admin account: `admin / 123456`.
-- Admin user management: edit username, email, role, active status, USDT balance, and subscriptions.
+- Admin user management: add/delete users, edit username, email, role, active status, USDT balance, passwords, and subscriptions.
 - Subscription system with free plans, paid plans, balance payment, USDT manual payment, and card-code redemption.
-- USDT receiving address settings for TRC20, ERC20, BEP20, and SOL.
+- USDT receiving address settings for TRC20, ERC20, BEP20, Arbitrum One, Aptos, and SOL.
+- Separate user portal with personal webhook secret, exchange keys, TP settings, subscription/recharge, and isolated performance charts.
 - Invite-only registration can be switched on/off from the admin panel.
 - Card codes can redeem account balance, subscription access, or both.
 - Risk exits can be AI-generated or custom fixed stop-loss based.
@@ -48,7 +49,7 @@ Change `DEFAULT_ADMIN_PASSWORD`, `JWT_SECRET`, and `WEBHOOK_SECRET` before expos
 docker-compose up -d
 ```
 
-The SQLite database is stored under `data/server.db`. Keep this directory persistent in production so users, subscriptions, payments, invite codes, and card codes survive restarts.
+The SQLite database is stored under `data/server.db`. Keep this directory persistent in production so users, subscriptions, payments, invite codes, card codes, and per-user settings survive restarts. Runtime admin settings saved from the dashboard are stored in `runtime_settings.json`; keep it persistent as well.
 
 ## Signal Pipeline
 
@@ -75,10 +76,10 @@ TradingView Alert
 
 Admin users can manage:
 
-- Users: username, email, role, enabled/disabled state, and USDT balance.
+- Users: create/delete users, reset passwords, edit username, email, role, enabled/disabled state, and USDT balance.
 - Subscriptions: grant active or pending subscriptions with optional custom duration.
 - Payments: confirm or reject submitted USDT payment hashes.
-- USDT receiving addresses: TRC20, ERC20, BEP20, SOL.
+- USDT receiving addresses: TRC20, ERC20, BEP20, Arbitrum One, Aptos, SOL.
 - Registration settings: require invite code or allow open registration.
 - Invite codes: generate and copy invite codes.
 - Card codes: generate balance/subscription redemption codes.
@@ -143,8 +144,9 @@ Take-profit and trailing-stop features:
 Settings can come from:
 
 1. `.env` for persistent deployment configuration.
-2. Dashboard runtime settings, stored in `runtime_settings.json`.
-3. Admin settings stored in SQLite, such as payment addresses and registration settings.
+2. Dashboard runtime settings, including saved exchange, AI, and Telegram secrets, stored in `runtime_settings.json`.
+3. Admin settings stored in SQLite, such as payment addresses, webhook secret, and registration settings.
+4. Per-user exchange, TP, and webhook settings stored in `users.settings_json`.
 
 ### Key Environment Variables
 
@@ -174,13 +176,15 @@ Settings can come from:
 | `PAYMENT_ADDRESS_TRC20` | USDT TRC20 receiving address | empty |
 | `PAYMENT_ADDRESS_ERC20` | USDT ERC20 receiving address | empty |
 | `PAYMENT_ADDRESS_BEP20` | USDT BEP20 receiving address | empty |
+| `PAYMENT_ADDRESS_ARBITRUM` | USDT Arbitrum One receiving address | empty |
+| `PAYMENT_ADDRESS_APT` | USDT Aptos receiving address | empty |
 | `PAYMENT_ADDRESS_SOL` | USDT SPL receiving address | empty |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token | empty |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID | empty |
 
 ## TradingView Alert Example
 
-Use `/webhook` as the alert webhook URL.
+Use `/webhook` as the alert webhook URL. Admins can copy the generated server secret and JSON template from Settings. Normal users can copy their personal secret and template from My Trading; signals sent with a personal secret are logged and charted only for that user.
 
 Example JSON body:
 
@@ -217,6 +221,11 @@ Example JSON body:
 | POST | `/api/auth/logout` | Clear auth cookie |
 | GET | `/api/auth/me` | Current user profile |
 | GET | `/api/registration-settings` | Public registration settings |
+| GET | `/api/user/settings` | User personal webhook, exchange, and TP settings |
+| POST | `/api/user/settings/exchange` | Save user exchange keys and paper/live mode |
+| POST | `/api/user/settings/take-profit` | Save user TP settings |
+| GET | `/api/user/history` | User-isolated trade history |
+| GET | `/api/user/performance` | User-isolated performance chart data |
 
 ### Subscription and Payment
 
@@ -237,7 +246,9 @@ Example JSON body:
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/api/admin/users` | List users |
+| POST | `/api/admin/users` | Create user |
 | PUT | `/api/admin/user/{user_id}` | Edit user profile, role, status, balance |
+| DELETE | `/api/admin/user/{user_id}` | Delete user |
 | POST | `/api/admin/user/{user_id}/toggle` | Enable/disable non-admin user |
 | POST | `/api/admin/user/{user_id}/password` | Reset user password |
 | POST | `/api/admin/user/{user_id}/subscription` | Grant subscription |
@@ -250,6 +261,7 @@ Example JSON body:
 | GET/POST | `/api/admin/registration` | Get/set invite-only registration |
 | GET/POST | `/api/admin/invite-codes` | List/create invite codes |
 | GET/POST | `/api/admin/redeem-codes` | List/create card codes |
+| GET | `/api/admin/webhook-config` | Admin webhook URL, secret, and TradingView JSON template |
 
 ### Trading and Settings
 
@@ -285,7 +297,7 @@ Example JSON body:
 - Keep `LIVE_TRADING=false` until exchange keys and risk settings are verified.
 - Configure USDT receiving addresses from Admin or `.env`.
 - Enable invite-only registration if public registration should be restricted.
-- Back up `data/server.db`.
+- Back up `data/server.db` and `runtime_settings.json`.
 - Use HTTPS and set `COOKIE_SECURE=true` when deployed behind TLS.
 
 ## Local Verification

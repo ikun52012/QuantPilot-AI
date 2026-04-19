@@ -156,7 +156,7 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str) -> str:
     return candidates[0]
 
 
-async def execute_trade(decision: TradeDecision) -> dict:
+async def execute_trade(decision: TradeDecision, exchange_config: dict | None = None) -> dict:
     """
     Execute a trade on the configured exchange.
     Enhanced with multi-TP and trailing-stop support.
@@ -165,11 +165,20 @@ async def execute_trade(decision: TradeDecision) -> dict:
     if not decision.execute:
         return {"status": "skipped", "reason": decision.reason}
 
-    if not settings.exchange.live_trading:
+    exchange_config = exchange_config or {}
+    live_trading = bool(exchange_config.get("live_trading", settings.exchange.live_trading))
+
+    if not live_trading:
         logger.warning("[Exchange] 🔶 PAPER TRADING MODE - not sending real orders")
         return _simulate_order(decision)
 
-    exchange = _build_exchange()
+    exchange = _build_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+        password=exchange_config.get("password") or settings.exchange.password,
+        live=live_trading,
+    )
     symbol = await asyncio.to_thread(_resolve_symbol, exchange, decision.ticker)
 
     try:
