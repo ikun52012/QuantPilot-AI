@@ -964,16 +964,19 @@ async def api_status():
 
 
 def _tradingview_template(secret: str) -> str:
-    return json.dumps({
-        "secret": secret,
-        "ticker": "{{ticker}}",
-        "exchange": "{{exchange}}",
-        "direction": "long",
-        "price": "{{close}}",
-        "timeframe": "{{interval}}",
-        "strategy": "{{strategy.order.comment}}",
-        "message": "{{strategy.order.action}} {{ticker}} @ {{close}}"
-    }, indent=2)
+    escaped_secret = json.dumps(secret)
+    return (
+        "{\n"
+        f'  "secret": {escaped_secret},\n'
+        '  "ticker": "{{ticker}}",\n'
+        '  "exchange": "{{exchange}}",\n'
+        '  "direction": "long",\n'
+        '  "price": {{close}},\n'
+        '  "timeframe": "{{interval}}",\n'
+        '  "strategy": "{{strategy.order.comment}}",\n'
+        '  "message": "{{strategy.order.action}} {{ticker}} @ {{close}}"\n'
+        "}"
+    )
 
 
 @app.get("/api/admin/webhook-config")

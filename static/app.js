@@ -316,10 +316,7 @@ function toggleExitModeFields() {
 
 async function loadSettings() {
     try {
-        const [status, webhookConfig] = await Promise.all([
-            fetchAPI('/api/status'),
-            isAdmin() ? fetchAPI('/api/admin/webhook-config') : Promise.resolve(null),
-        ]);
+        const status = await fetchAPI('/api/status');
         if (document.getElementById('set-exchange') && status.exchange) document.getElementById('set-exchange').value = status.exchange;
         toggleExchangePasswordField();
         if (document.getElementById('set-ai-provider') && status.ai_provider) document.getElementById('set-ai-provider').value = status.ai_provider;
@@ -359,12 +356,25 @@ async function loadSettings() {
         const modeEl = document.getElementById(`exit-mode-${mode}`);
         if (modeEl) modeEl.checked = true;
         toggleExitModeFields();
-        if (webhookConfig) {
-            setText('webhook-url', webhookConfig.webhook_url || `${window.location.origin}/webhook`);
-            setText('admin-webhook-secret', webhookConfig.secret || '');
-            setText('admin-webhook-template', webhookConfig.template || '');
-        }
+        if (isAdmin()) loadAdminWebhookConfig();
     } catch (e) { console.error('Settings load error:', e); }
+}
+
+async function loadAdminWebhookConfig() {
+    setText('webhook-url', `${window.location.origin}/webhook`);
+    setText('admin-webhook-secret', 'Loading...');
+    setText('admin-webhook-template', 'Loading...');
+    try {
+        const webhookConfig = await fetchAPI('/api/admin/webhook-config');
+        setText('webhook-url', webhookConfig.webhook_url || `${window.location.origin}/webhook`);
+        setText('admin-webhook-secret', webhookConfig.secret || '');
+        setText('admin-webhook-template', webhookConfig.template || '');
+    } catch (e) {
+        console.error('Webhook config load error:', e);
+        setText('admin-webhook-secret', 'Unable to load. Make sure you are logged in as admin and the backend image is updated.');
+        setText('admin-webhook-template', `Unable to load template: ${e.message}`);
+        showToast(e.message, 'error', 'Webhook Config Load Failed');
+    }
 }
 
 async function testConnection() {
