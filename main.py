@@ -79,6 +79,7 @@ from database import (
     get_all_users,
     update_user_admin,
     update_user_status,
+    update_user_password_hash,
     pay_subscription_from_balance,
     set_user_subscription,
     get_subscription_plans,
@@ -531,6 +532,10 @@ class AdminSubscriptionRequest(BaseModel):
     status: str = "active"
 
 
+class AdminPasswordRequest(BaseModel):
+    password: str = Field(min_length=6, max_length=256)
+
+
 class RegistrationSettingsRequest(BaseModel):
     invite_required: bool = False
 
@@ -605,6 +610,16 @@ async def api_admin_set_user_subscription(user_id: str, req: AdminSubscriptionRe
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"status": "saved", "subscription": sub}
+
+
+@app.post("/api/admin/user/{user_id}/password")
+async def api_admin_set_user_password(user_id: str, req: AdminPasswordRequest, admin=Depends(require_admin)):
+    if not get_user_by_id(user_id):
+        raise HTTPException(404, "User not found")
+    if not update_user_password_hash(user_id, hash_password(req.password)):
+        raise HTTPException(404, "User not found")
+    logger.info(f"[Admin] Password reset for user {user_id} by {admin['username']}")
+    return {"status": "saved"}
 
 
 @app.get("/api/admin/payments")
@@ -747,10 +762,16 @@ async def api_status():
         "supported_exchanges": get_supported_exchanges(),
         "tp_levels": settings.take_profit.num_levels,
         "trailing_stop_mode": settings.trailing_stop.mode,
+        "ai_temperature": settings.ai.temperature,
+        "ai_max_tokens": settings.ai.max_tokens,
+        "ai_custom_system_prompt": settings.ai.custom_system_prompt,
         "custom_provider_enabled": settings.ai.custom_provider_enabled,
         "custom_provider_name": settings.ai.custom_provider_name,
         "custom_provider_model": settings.ai.custom_provider_model,
         "custom_provider_url": settings.ai.custom_provider_api_url,
+        "telegram": {
+            "chat_id": settings.telegram.chat_id,
+        },
         "risk": {
             "max_position_pct": settings.risk.max_position_pct,
             "max_daily_trades": settings.risk.max_daily_trades,
@@ -758,6 +779,23 @@ async def api_status():
             "exit_management_mode": settings.risk.exit_management_mode,
             "custom_stop_loss_pct": settings.risk.custom_stop_loss_pct,
             "ai_exit_system_prompt": settings.risk.ai_exit_system_prompt,
+        },
+        "take_profit": {
+            "num_levels": settings.take_profit.num_levels,
+            "tp1_pct": settings.take_profit.tp1_pct,
+            "tp2_pct": settings.take_profit.tp2_pct,
+            "tp3_pct": settings.take_profit.tp3_pct,
+            "tp4_pct": settings.take_profit.tp4_pct,
+            "tp1_qty": settings.take_profit.tp1_qty,
+            "tp2_qty": settings.take_profit.tp2_qty,
+            "tp3_qty": settings.take_profit.tp3_qty,
+            "tp4_qty": settings.take_profit.tp4_qty,
+        },
+        "trailing_stop": {
+            "mode": settings.trailing_stop.mode,
+            "trail_pct": settings.trailing_stop.trail_pct,
+            "activation_profit_pct": settings.trailing_stop.activation_profit_pct,
+            "trailing_step_pct": settings.trailing_stop.trailing_step_pct,
         },
         "time": datetime.utcnow().isoformat(),
     }

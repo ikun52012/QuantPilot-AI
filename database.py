@@ -278,6 +278,16 @@ def update_user_status(user_id: str, is_active: bool):
         conn.close()
 
 
+def update_user_password_hash(user_id: str, password_hash: str) -> bool:
+    conn = get_connection()
+    try:
+        cur = conn.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, user_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def update_user_admin(
     user_id: str,
     username: str,

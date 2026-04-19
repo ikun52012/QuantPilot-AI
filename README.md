@@ -239,6 +239,7 @@ Example JSON body:
 | GET | `/api/admin/users` | List users |
 | PUT | `/api/admin/user/{user_id}` | Edit user profile, role, status, balance |
 | POST | `/api/admin/user/{user_id}/toggle` | Enable/disable non-admin user |
+| POST | `/api/admin/user/{user_id}/password` | Reset user password |
 | POST | `/api/admin/user/{user_id}/subscription` | Grant subscription |
 | GET | `/api/admin/payments` | List payments |
 | POST | `/api/admin/payment/{payment_id}/confirm` | Confirm payment |

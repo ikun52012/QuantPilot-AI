@@ -278,8 +278,14 @@ async function loadAnalytics() {
 // ─── Settings ───
 function setupExchangeToggle() {
     const sel = document.getElementById('set-exchange');
-    sel?.addEventListener('change', () => { document.getElementById('password-group').style.display = ['okx','bitget'].includes(sel.value)?'block':'none'; });
+    sel?.addEventListener('change', toggleExchangePasswordField);
     document.getElementById('set-ai-provider')?.addEventListener('change', toggleCustomAIFields);
+}
+
+function toggleExchangePasswordField() {
+    const exchange = document.getElementById('set-exchange')?.value;
+    const group = document.getElementById('password-group');
+    if (group) group.style.display = ['okx','bitget'].includes(exchange) ? 'block' : 'none';
 }
 
 function toggleCustomAIFields() {
@@ -300,14 +306,34 @@ async function loadSettings() {
     try {
         const status = await fetchAPI('/api/status');
         if (document.getElementById('set-exchange') && status.exchange) document.getElementById('set-exchange').value = status.exchange;
+        toggleExchangePasswordField();
         if (document.getElementById('set-ai-provider') && status.ai_provider) document.getElementById('set-ai-provider').value = status.ai_provider;
         if (document.getElementById('set-custom-provider-enabled')) document.getElementById('set-custom-provider-enabled').checked = Boolean(status.custom_provider_enabled);
         if (document.getElementById('set-custom-provider-name')) document.getElementById('set-custom-provider-name').value = status.custom_provider_name || 'custom';
         if (document.getElementById('set-custom-provider-model')) document.getElementById('set-custom-provider-model').value = status.custom_provider_model || '';
         if (document.getElementById('set-custom-provider-url')) document.getElementById('set-custom-provider-url').value = status.custom_provider_url || '';
+        setFieldValue('set-ai-temp', status.ai_temperature ?? 0.3);
+        setFieldValue('set-ai-tokens', status.ai_max_tokens ?? 1000);
+        setFieldValue('set-ai-prompt', status.ai_custom_system_prompt || '');
+        setFieldValue('set-tg-chat', status.telegram?.chat_id || '');
         toggleCustomAIFields();
-        if (status.tp_levels) { const el = document.getElementById('set-tp-levels'); if (el) { el.value = status.tp_levels; toggleTPLevels(); } }
-        if (status.trailing_stop_mode) { const el = document.getElementById('set-ts-mode'); if (el) { el.value = status.trailing_stop_mode; toggleTSFields(); } }
+        const tp = status.take_profit || {};
+        setFieldValue('set-tp-levels', tp.num_levels ?? status.tp_levels ?? 1);
+        setFieldValue('set-tp1-pct', tp.tp1_pct ?? 2);
+        setFieldValue('set-tp2-pct', tp.tp2_pct ?? 4);
+        setFieldValue('set-tp3-pct', tp.tp3_pct ?? 6);
+        setFieldValue('set-tp4-pct', tp.tp4_pct ?? 10);
+        setFieldValue('set-tp1-qty', tp.tp1_qty ?? 25);
+        setFieldValue('set-tp2-qty', tp.tp2_qty ?? 25);
+        setFieldValue('set-tp3-qty', tp.tp3_qty ?? 25);
+        setFieldValue('set-tp4-qty', tp.tp4_qty ?? 25);
+        toggleTPLevels();
+        const ts = status.trailing_stop || {};
+        setFieldValue('set-ts-mode', ts.mode ?? status.trailing_stop_mode ?? 'none');
+        setFieldValue('set-ts-trail-pct', ts.trail_pct ?? 1.0);
+        setFieldValue('set-ts-activation', ts.activation_profit_pct ?? 1.0);
+        setFieldValue('set-ts-step', ts.trailing_step_pct ?? 0.5);
+        toggleTSFields();
         const risk = status.risk || {};
         setFieldValue('set-max-pos', risk.max_position_pct ?? 10);
         setFieldValue('set-max-trades', risk.max_daily_trades ?? 10);
@@ -578,7 +604,7 @@ function renderAdminUsers(users, plans) {
         usersEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No users found</p>';
         return;
     }
-    usersEl.innerHTML = `<div class="table-wrapper"><table class="data-table admin-users-table"><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Balance</th><th>Current Subscription</th><th>Grant Subscription</th><th>Actions</th></tr></thead><tbody>${users.map(u => {
+    usersEl.innerHTML = `<div class="table-wrapper"><table class="data-table admin-users-table"><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Balance</th><th>Password</th><th>Current Subscription</th><th>Grant Subscription</th><th>Actions</th></tr></thead><tbody>${users.map(u => {
         const id = escapeHtml(u.id);
         const jsId = escapeJsSingle(u.id);
         const active = Boolean(u.is_active);
@@ -588,6 +614,7 @@ function renderAdminUsers(users, plans) {
             <td><select id="admin-role-${id}" class="select-input table-input"><option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
             <td><select id="admin-active-${id}" class="select-input table-input"><option value="true" ${active ? 'selected' : ''}>Active</option><option value="false" ${!active ? 'selected' : ''}>Disabled</option></select></td>
             <td><input id="admin-balance-${id}" type="number" class="text-input table-input" value="${Number(u.balance_usdt || 0).toFixed(2)}" min="0" step="0.01"></td>
+            <td><div class="admin-stack"><input id="admin-password-${id}" type="password" class="text-input table-input" placeholder="New password" autocomplete="new-password"><button class="btn btn-sm btn-primary" onclick="resetAdminPassword('${jsId}')">Reset</button></div></td>
             <td>${sub}</td>
             <td><div class="admin-stack"><select id="admin-plan-${id}" class="select-input table-input">${planOptions(plans)}</select><div class="admin-inline"><input id="admin-duration-${id}" type="number" class="text-input table-input" min="0" step="1" placeholder="Plan days"><select id="admin-substatus-${id}" class="select-input table-input"><option value="active">Active</option><option value="pending">Pending</option></select></div><button class="btn btn-sm btn-primary" onclick="grantSubscription('${jsId}')">Grant</button></div></td>
             <td><div class="admin-actions"><button class="btn btn-sm btn-success" onclick="saveAdminUser('${jsId}')">Save</button>${u.role !== 'admin' ? `<button class="btn btn-sm" onclick="toggleUser('${jsId}')">${active ? 'Disable' : 'Enable'}</button>` : ''}</div></td>
@@ -686,6 +713,22 @@ async function saveAdminUser(userId) {
         showToast('User account updated.','success','Saved');
         loadAdmin();
     } catch (err) { showToast(err.message,'error','Save Failed'); }
+}
+
+async function resetAdminPassword(userId) {
+    const input = document.getElementById(`admin-password-${userId}`);
+    const password = input?.value || '';
+    if (password.length < 6) {
+        showToast('Password must be at least 6 characters.','warning','Invalid Password');
+        return;
+    }
+    try {
+        await fetchAPI(`/api/admin/user/${encodeURIComponent(userId)}/password`, { method:'POST', body:JSON.stringify({ password }) });
+        input.value = '';
+        showToast('Password updated.','success','Saved');
+    } catch (err) {
+        showToast(err.message,'error','Password Reset Failed');
+    }
 }
 
 async function grantSubscription(userId) {
