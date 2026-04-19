@@ -129,22 +129,28 @@ logger.remove()
 logger.add(sys.stdout, level="INFO", format="{time:HH:mm:ss} | {level:<7} | {message}")
 logger.add("logs/server_{time:YYYY-MM-DD}.log", rotation="1 day", retention="30 days", level="DEBUG")
 
-# Settings file for runtime config changes
-SETTINGS_FILE = Path(__file__).parent / "runtime_settings.json"
+# Settings file for runtime config changes.
+# Store it under data/ because docker-compose already persists /app/data.
+DATA_DIR = Path(__file__).parent / "data"
+SETTINGS_FILE = DATA_DIR / "runtime_settings.json"
+LEGACY_SETTINGS_FILE = Path(__file__).parent / "runtime_settings.json"
 _settings_lock = threading.Lock()
 
 
 def _load_runtime_settings() -> dict:
-    if SETTINGS_FILE.exists():
+    for path in (SETTINGS_FILE, LEGACY_SETTINGS_FILE):
+        if not path.exists():
+            continue
         try:
-            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"[Settings] Failed to read {path.name}: {e}")
     return {}
 
 
 def _save_runtime_settings(data: dict):
     with _settings_lock:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
         current = _load_runtime_settings()
         current.update(data)
         tmp_path = SETTINGS_FILE.with_suffix(".json.tmp")
@@ -912,6 +918,16 @@ async def api_admin_create_redeem_code(req: RedeemCodeCreateRequest, admin=Depen
 
 @app.get("/api/status")
 async def api_status():
+    ai_key_configured = {
+        "openai": bool(settings.ai.openai_api_key),
+        "anthropic": bool(settings.ai.anthropic_api_key),
+        "deepseek": bool(settings.ai.deepseek_api_key),
+        "custom": bool(settings.ai.custom_provider_api_key),
+    }
+    if settings.ai.provider in {"custom", settings.ai.custom_provider_name}:
+        active_ai_key_configured = ai_key_configured["custom"]
+    else:
+        active_ai_key_configured = ai_key_configured.get(settings.ai.provider, False)
     return {
         "name": "TradingView Signal Server",
         "status": "running",
@@ -920,6 +936,7 @@ async def api_status():
         "exchange": settings.exchange.name,
         "live_trading": settings.exchange.live_trading,
         "exchange_api_configured": bool(settings.exchange.api_key and settings.exchange.api_secret),
+        "exchange_password_configured": bool(settings.exchange.password),
         "supported_exchanges": get_supported_exchanges(),
         "tp_levels": settings.take_profit.num_levels,
         "trailing_stop_mode": settings.trailing_stop.mode,
@@ -930,6 +947,8 @@ async def api_status():
         "custom_provider_name": settings.ai.custom_provider_name,
         "custom_provider_model": settings.ai.custom_provider_model,
         "custom_provider_url": settings.ai.custom_provider_api_url,
+        "ai_api_configured": active_ai_key_configured,
+        "ai_keys_configured": ai_key_configured,
         "telegram": {
             "chat_id": settings.telegram.chat_id,
             "bot_configured": bool(settings.telegram.bot_token),

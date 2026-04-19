@@ -49,7 +49,7 @@ Change `DEFAULT_ADMIN_PASSWORD`, `JWT_SECRET`, and `WEBHOOK_SECRET` before expos
 docker-compose up -d
 ```
 
-The SQLite database is stored under `data/server.db`. Keep this directory persistent in production so users, subscriptions, payments, invite codes, card codes, and per-user settings survive restarts. Runtime admin settings saved from the dashboard are stored in `runtime_settings.json`; keep it persistent as well.
+The SQLite database is stored under `data/server.db`. Keep this directory persistent in production so users, subscriptions, payments, invite codes, card codes, and per-user settings survive restarts. Runtime admin settings saved from the dashboard are stored in `data/runtime_settings.json`, which is persisted by the default Docker volume.
 
 ## Signal Pipeline
 
@@ -144,7 +144,7 @@ Take-profit and trailing-stop features:
 Settings can come from:
 
 1. `.env` for persistent deployment configuration.
-2. Dashboard runtime settings, including saved exchange, AI, and Telegram secrets, stored in `runtime_settings.json`.
+2. Dashboard runtime settings, including saved exchange, AI, and Telegram secrets, stored in `data/runtime_settings.json`.
 3. Admin settings stored in SQLite, such as payment addresses, webhook secret, and registration settings.
 4. Per-user exchange, TP, and webhook settings stored in `users.settings_json`.
 
@@ -297,7 +297,7 @@ Example JSON body:
 - Keep `LIVE_TRADING=false` until exchange keys and risk settings are verified.
 - Configure USDT receiving addresses from Admin or `.env`.
 - Enable invite-only registration if public registration should be restricted.
-- Back up `data/server.db` and `runtime_settings.json`.
+- Back up the full `data/` directory, including `server.db` and `runtime_settings.json`.
 - Use HTTPS and set `COOKIE_SECURE=true` when deployed behind TLS.
 
 ## Local Verification

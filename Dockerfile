@@ -9,8 +9,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create directories for logs
-RUN mkdir -p logs trade_logs
+# Create directories for persistent data and logs
+RUN mkdir -p data logs trade_logs
 
 # Expose port
 EXPOSE 8000

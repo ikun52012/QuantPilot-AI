@@ -8,7 +8,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data                # persist users, subscriptions, payments
+      - ./data:/app/data                # persist users, subscriptions, payments, runtime settings
       - ./trade_logs:/app/trade_logs    # persist trade logs
       - ./logs:/app/logs                # persist server logs
     healthcheck:

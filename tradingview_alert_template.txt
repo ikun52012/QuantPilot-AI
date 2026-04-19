@@ -19,7 +19,7 @@ https://yourdomain or IP:8000/webhook
 --- Long Entry Alert ---
 
 {
-"secret": "Your WEBHOOK_SECRET setting in .env",
+"secret": "Copy the secret from Admin Settings or My Trading",
 
 "ticker": "{{ticker}}",
 
@@ -39,7 +39,7 @@ https://yourdomain or IP:8000/webhook
 --- Short Entry Alert ---
 
 {
-"secret": "Your WEBHOOK_SECRET setting in .env",
+"secret": "Copy the secret from Admin Settings or My Trading",
 
 "ticker": "{{ticker}}",
 
@@ -58,7 +58,7 @@ https://yourdomain or IP:8000/webhook
 
 --- Close Long Alert ---
 { 
-"secret": "WEBHOOK_SECRET you set in .env", 
+"secret": "Copy the secret from Admin Settings or My Trading",
 "ticker": "{{ticker}}", 
 "exchange": "{{exchange}}", 
 "direction": "close_long", 
@@ -70,7 +70,7 @@ https://yourdomain or IP:8000/webhook
 
 --- Close Short Alert ---
 { 
-"secret": "WEBHOOK_SECRET you set in .env", 
+"secret": "Copy the secret from Admin Settings or My Trading",
 "ticker": "{{ticker}}", 
 "exchange": "{{exchange}}", 
 "direction": "close_short", 
@@ -86,6 +86,8 @@ Notes:
 - TradingView's Webhook functionality requires Pro or a higher version.
 
 - Variables within {{}} will be automatically replaced by TradingView.
+
+- Admin/global signals use the secret shown in Admin Settings. User-isolated signals use the secret shown in that user's My Trading page.
 
 - Ensure the Webhook URL uses HTTPS (using Cloudflare Tunnel or nginx + Let's Encrypt).
 

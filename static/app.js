@@ -319,7 +319,11 @@ async function loadSettings() {
         const status = await fetchAPI('/api/status');
         if (document.getElementById('set-exchange') && status.exchange) document.getElementById('set-exchange').value = status.exchange;
         toggleExchangePasswordField();
+        setSecretPlaceholder('set-api-key', status.exchange_api_configured, 'Enter API Key');
+        setSecretPlaceholder('set-api-secret', status.exchange_api_configured, 'Enter API Secret');
+        setSecretPlaceholder('set-password', status.exchange_password_configured, 'Enter Passphrase');
         if (document.getElementById('set-ai-provider') && status.ai_provider) document.getElementById('set-ai-provider').value = status.ai_provider;
+        setSecretPlaceholder('set-ai-key', status.ai_api_configured, 'Enter AI API Key');
         if (document.getElementById('set-custom-provider-enabled')) document.getElementById('set-custom-provider-enabled').checked = Boolean(status.custom_provider_enabled);
         if (document.getElementById('set-custom-provider-name')) document.getElementById('set-custom-provider-name').value = status.custom_provider_name || 'custom';
         if (document.getElementById('set-custom-provider-model')) document.getElementById('set-custom-provider-model').value = status.custom_provider_model || '';
@@ -328,6 +332,7 @@ async function loadSettings() {
         setFieldValue('set-ai-tokens', status.ai_max_tokens ?? 1000);
         setFieldValue('set-ai-prompt', status.ai_custom_system_prompt || '');
         setFieldValue('set-tg-chat', status.telegram?.chat_id || '');
+        setSecretPlaceholder('set-tg-token', status.telegram?.bot_configured, 'Enter Telegram Bot Token');
         toggleCustomAIFields();
         const tp = status.take_profit || {};
         setFieldValue('set-tp-levels', tp.num_levels ?? status.tp_levels ?? 1);
@@ -1052,6 +1057,12 @@ function firstDefined(...values) { return values.find(v => v !== undefined && v 
 function setFieldValue(id, value) {
     const el = document.getElementById(id);
     if (el) el.value = value ?? '';
+}
+function setSecretPlaceholder(id, configured, emptyText) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = '';
+    el.placeholder = configured ? 'Saved securely. Leave blank to keep existing value.' : emptyText;
 }
 
 function selectPaymentNetwork(button, subscriptionId, amount) {
