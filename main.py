@@ -194,6 +194,19 @@ def _is_placeholder_webhook_secret(value: str | None) -> bool:
     return normalized.lower() in PLACEHOLDER_WEBHOOK_SECRETS
 
 
+def _is_placeholder_public_base_url(value: str | None) -> bool:
+    normalized = (value or "").strip().lower().rstrip("/")
+    return normalized in {
+        "",
+        "https://your-domain.example",
+        "http://your-domain.example",
+        "https://example.com",
+        "http://example.com",
+        "https://<your-domain>",
+        "http://<your-domain>",
+    } or "your-domain" in normalized
+
+
 def _load_runtime_settings() -> dict:
     for path in (SETTINGS_FILE, LEGACY_SETTINGS_FILE):
         if not path.exists():
@@ -219,7 +232,7 @@ def _save_runtime_settings(data: dict):
 
 
 def _public_base_url(request: Request | None = None) -> str:
-    if settings.server.public_base_url:
+    if not _is_placeholder_public_base_url(settings.server.public_base_url):
         return settings.server.public_base_url.rstrip("/")
     if request:
         forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
@@ -1451,7 +1464,7 @@ async def api_admin_system(request: Request, admin=Depends(require_admin)):
         },
         "security": {
             "cookie_secure": os.getenv("COOKIE_SECURE", "false").lower() == "true",
-            "public_base_url_configured": bool(settings.server.public_base_url),
+            "public_base_url_configured": not _is_placeholder_public_base_url(settings.server.public_base_url),
             "encryption_key_configured": bool(os.getenv("APP_ENCRYPTION_KEY", "")),
         },
     }
