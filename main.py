@@ -135,6 +135,19 @@ DATA_DIR = Path(__file__).parent / "data"
 SETTINGS_FILE = DATA_DIR / "runtime_settings.json"
 LEGACY_SETTINGS_FILE = Path(__file__).parent / "runtime_settings.json"
 _settings_lock = threading.Lock()
+PLACEHOLDER_WEBHOOK_SECRETS = {
+    "",
+    "replace-with-a-long-random-webhook-secret",
+    "your-webhook-secret",
+    "your_webhook_secret",
+    "changeme",
+    "change-me",
+}
+
+
+def _is_placeholder_webhook_secret(value: str | None) -> bool:
+    normalized = (value or "").strip()
+    return normalized.lower() in PLACEHOLDER_WEBHOOK_SECRETS
 
 
 def _load_runtime_settings() -> dict:
@@ -225,13 +238,16 @@ async def lifespan(app: FastAPI):
         settings.trailing_stop.activation_profit_pct = ts.get("activation_profit_pct", settings.trailing_stop.activation_profit_pct)
         settings.trailing_stop.trailing_step_pct = ts.get("trailing_step_pct", settings.trailing_stop.trailing_step_pct)
 
-    if not settings.server.webhook_secret:
+    env_webhook_secret = (settings.server.webhook_secret or "").strip()
+    if _is_placeholder_webhook_secret(env_webhook_secret):
         stored_secret = get_admin_setting("webhook_secret", "")
-        if not stored_secret:
+        if _is_placeholder_webhook_secret(stored_secret):
             stored_secret = secrets.token_urlsafe(32)
             set_admin_setting("webhook_secret", stored_secret)
             logger.warning("[Security] Generated a persistent admin webhook secret. Keep it private.")
         settings.server.webhook_secret = stored_secret
+    else:
+        settings.server.webhook_secret = env_webhook_secret
 
     yield
     logger.info("TradingView Signal Server shutting down...")

@@ -41,7 +41,7 @@ Username: admin
 Password: 123456
 ```
 
-Change `DEFAULT_ADMIN_PASSWORD`, `JWT_SECRET`, and `WEBHOOK_SECRET` before exposing the service to the internet.
+Change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` before exposing the service to the internet. `WEBHOOK_SECRET` can be left empty; the app will generate a persistent admin webhook secret and show it in Admin Settings.
 
 ## Docker
 
@@ -163,7 +163,7 @@ Settings can come from:
 | `EXCHANGE_API_SECRET` | Exchange API secret | empty |
 | `EXCHANGE_PASSWORD` | OKX/Bitget passphrase | empty |
 | `LIVE_TRADING` | Enable real exchange orders | `false` |
-| `WEBHOOK_SECRET` | TradingView webhook secret | required |
+| `WEBHOOK_SECRET` | Optional TradingView webhook secret. Leave empty to auto-generate a persistent one. | empty |
 | `JWT_SECRET` | JWT signing secret | required for production |
 | `DEFAULT_ADMIN_PASSWORD` | First admin password | `123456` |
 | `ACCOUNT_EQUITY_USDT` | Equity used for risk sizing | `10000` |
@@ -293,7 +293,7 @@ Example JSON body:
 
 - Change `DEFAULT_ADMIN_PASSWORD` after first login.
 - Set a strong `JWT_SECRET`.
-- Set a strong `WEBHOOK_SECRET`.
+- Copy the actual webhook secret from Admin Settings or the user's My Trading page; placeholder values are ignored and replaced automatically.
 - Keep `LIVE_TRADING=false` until exchange keys and risk settings are verified.
 - Configure USDT receiving addresses from Admin or `.env`.
 - Enable invite-only registration if public registration should be restricted.
