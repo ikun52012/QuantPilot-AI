@@ -88,6 +88,11 @@ class TradingViewSignal(BaseModel):
     message: str = Field(default="", max_length=2000)
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
+    @field_validator("secret")
+    @classmethod
+    def _strip_secret(cls, value: str) -> str:
+        return value.strip()
+
     @field_validator("ticker", "exchange", "timeframe", "strategy")
     @classmethod
     def _strip_required_strings(cls, value: str) -> str:

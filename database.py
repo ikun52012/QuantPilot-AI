@@ -467,6 +467,7 @@ def ensure_user_webhook_secret(user_id: str) -> str:
 
 def find_user_by_webhook_secret(secret: str) -> dict | None:
     """O(1) lookup via indexed webhook_secret column."""
+    secret = str(secret or "").strip()
     if not secret:
         return None
     conn = get_connection()
