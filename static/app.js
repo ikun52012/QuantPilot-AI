@@ -26,7 +26,7 @@ let _cachedUser = null;
 async function ensureUser() {
     if (_cachedUser) return _cachedUser;
     try {
-        const r = await fetch('/api/auth/me', { credentials: 'include' });
+        const r = await fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' });
         if (!r.ok) return null;
         _cachedUser = await r.json();
         return _cachedUser;
@@ -38,7 +38,7 @@ function isAdmin() { return getUser().role === 'admin'; }
 async function requireAuth() {
     const user = await ensureUser();
     if (!user) {
-        window.location.href = '/login';
+        window.location.replace('/login');
         return false;
     }
     return true;
@@ -47,7 +47,7 @@ async function requireAuth() {
 async function logout() {
     try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch {}
     _cachedUser = null;
-    window.location.href = '/login?logged_out=1';
+    window.location.replace('/login');
 }
 
 // ─── Initialization ───
@@ -1199,7 +1199,7 @@ async function fetchAPI(path, options = {}) {
     const method = String(options.method || 'GET').toUpperCase();
     const csrf = getCookie('tvss_csrf');
     if (!['GET','HEAD','OPTIONS'].includes(method) && csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
-    const resp = await fetch(`${API}${path}`, { credentials: 'include', headers, ...options, headers });
+    const resp = await fetch(`${API}${path}`, { credentials: 'include', cache: 'no-store', headers, ...options });
     if (resp.status === 401) { logout(); throw new Error('Session expired'); }
     if (!resp.ok) {
         const data = await resp.json().catch(()=>({}));

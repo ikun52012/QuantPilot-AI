@@ -92,15 +92,6 @@ const pwInput = document.getElementById('password');
 const togglePw = document.getElementById('toggle-pw');
 const eyeIcon = document.getElementById('eye-icon');
 
-// Redirect if already logged in (via cookie — check /api/auth/me)
-(async () => {
-    if (new URLSearchParams(window.location.search).get('logged_out') === '1') return;
-    try {
-        const r = await fetch('/api/auth/me', { credentials: 'include' });
-        if (r.ok) window.location.href = '/dashboard';
-    } catch (_) {}
-})();
-
 togglePw.addEventListener('click', () => {
     const visible = pwInput.type === 'text';
     pwInput.type = visible ? 'password' : 'text';
@@ -130,7 +121,7 @@ form.addEventListener('submit', async (e) => {
         }
 
         // Token is stored in httpOnly cookie by the server; no localStorage needed
-        window.location.href = '/dashboard';
+        window.location.replace('/dashboard');
     } catch (err) {
         errText.textContent = err.message;
         errEl.classList.add('visible');

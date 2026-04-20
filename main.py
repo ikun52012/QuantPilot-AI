@@ -14,10 +14,10 @@ Features:
 Usage:
   uvicorn main:app --host 0.0.0.0 --port 8000
 """
+import os
 import sys
 import json
 import hmac
-import os
 import hashlib
 import secrets
 import threading
@@ -64,6 +64,7 @@ from notifier import (
 from trade_logger import log_trade, get_today_stats, get_today_trades, get_trade_history
 from analytics import calculate_performance, get_daily_pnl, get_trade_distribution, invalidate_performance_cache
 from auth import (
+    AUTH_COOKIE_NAME,
     CSRF_COOKIE_NAME,
     hash_password,
     verify_password,
@@ -432,28 +433,63 @@ async def csrf_middleware(request: Request, call_next):
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+_NO_STORE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    "Vary": "Cookie",
+}
+
+
+def _apply_no_store_headers(response: Response) -> Response:
+    for key, value in _NO_STORE_HEADERS.items():
+        response.headers[key] = value
+    return response
+
+
+def _file_response_no_store(path: Path) -> FileResponse:
+    return _apply_no_store_headers(FileResponse(path))
+
+
+def _redirect_no_store(url: str, request: Request | None = None, clear_cookie: bool = False) -> RedirectResponse:
+    response = RedirectResponse(url=url, status_code=303)
+    if clear_cookie:
+        clear_auth_cookie(response, request)
+    return _apply_no_store_headers(response)
+
+
+def _auth_page_response(request: Request, path: Path) -> Response:
+    if get_optional_user(request):
+        return _redirect_no_store("/dashboard", request)
+    response = _file_response_no_store(path)
+    if request.cookies.get(AUTH_COOKIE_NAME):
+        clear_auth_cookie(response, request)
+    return response
+
 
 # ═══════════════════════════════════════════════
 # PAGE ROUTES
 # ═══════════════════════════════════════════════
 
 @app.get("/", response_class=HTMLResponse)
-async def homepage():
-    return FileResponse(STATIC_DIR / "home.html")
+async def homepage(request: Request):
+    if get_optional_user(request):
+        return _redirect_no_store("/dashboard", request)
+    return _file_response_no_store(STATIC_DIR / "home.html")
 
 @app.get("/dashboard")
 async def dashboard(request: Request):
     if not get_optional_user(request):
-        return RedirectResponse(url="/login", status_code=303)
-    return FileResponse(STATIC_DIR / "index.html")
+        return _redirect_no_store("/login", request, clear_cookie=True)
+    return _file_response_no_store(STATIC_DIR / "index.html")
 
 @app.get("/login")
-async def login_page():
-    return FileResponse(STATIC_DIR / "login.html")
+async def login_page(request: Request):
+    return _auth_page_response(request, STATIC_DIR / "login.html")
 
 @app.get("/register")
-async def register_page():
-    return FileResponse(STATIC_DIR / "register.html")
+async def register_page(request: Request):
+    return _auth_page_response(request, STATIC_DIR / "register.html")
 
 
 # ═══════════════════════════════════════════════
@@ -512,6 +548,7 @@ class UserTakeProfitSettingsRequest(BaseModel):
 
 @app.post("/api/auth/register")
 async def api_register(req: RegisterRequest, request: Request, response: Response):
+    _apply_no_store_headers(response)
     username = req.username.lower().strip()
     email = req.email.lower().strip()
     if len(username) < 3:
@@ -550,6 +587,7 @@ async def api_register(req: RegisterRequest, request: Request, response: Respons
 
 @app.post("/api/auth/login")
 async def api_login(req: LoginRequest, request: Request, response: Response):
+    _apply_no_store_headers(response)
     client_ip = _client_ip(request) or "unknown"
     if not _check_login_rate_limit(client_ip):
         logger.warning(f"[Auth] Rate limit hit for login from {client_ip}")
@@ -574,12 +612,14 @@ async def api_login(req: LoginRequest, request: Request, response: Response):
 
 @app.post("/api/auth/logout")
 async def api_logout(request: Request, response: Response):
+    _apply_no_store_headers(response)
     clear_auth_cookie(response, request)
     return {"status": "ok"}
 
 
 @app.get("/api/auth/me")
-async def api_me(user=Depends(get_current_user)):
+async def api_me(response: Response, user=Depends(get_current_user)):
+    _apply_no_store_headers(response)
     db_user = get_user_by_id(user["sub"])
     if not db_user:
         raise HTTPException(404, "User not found")
@@ -1238,11 +1278,12 @@ async def api_admin_run_position_monitor(request: Request, admin=Depends(require
 # ═══════════════════════════════════════════════
 
 @app.get("/api/status")
-async def api_status(current_user=Depends(get_optional_user)):
+async def api_status(response: Response, current_user=Depends(get_optional_user)):
     """
     Public/user: returns minimal server info.
     Admin: returns full configuration status.
     """
+    _apply_no_store_headers(response)
     base = {
         "name": "TradingView Signal Server",
         "status": "running",
@@ -2069,4 +2110,9 @@ async def _process_internal(signal):
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host=settings.server.host, port=settings.server.port, reload=True)
+    uvicorn.run(
+        "main:app",
+        host=settings.server.host,
+        port=settings.server.port,
+        reload=os.getenv("UVICORN_RELOAD", "false").lower() == "true",
+    )

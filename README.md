@@ -1,6 +1,6 @@
 # 📡 TradingView AI Signal Server (v4.0)
 
-![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
+![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
 
 **TradingView Signal Server** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT, Anthropic Claude, DeepSeek, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
 
@@ -62,7 +62,10 @@ Before starting your money-making machine, ensure your server terminal has the f
 - **Docker & Docker Compose** (Recommended deployment method).
 - A TradingView account (Any tier, but paid tiers are recommended to create Webhooks).
 
+Use **Python 3.10+** for local installs. Docker uses Python 3.12 by default and is the recommended path on Windows, especially if your local machine only has a 32-bit Python interpreter.
+
 ### 2. Local Source Deployment (For Custom Development)
+
 ```bash
 # 1. Clone the repository
 git clone https://github.com/your-organization/signal-server.git
@@ -76,12 +79,29 @@ cp .env.example .env
 nano .env # Setup API keys for Exchanges, AI, Telegram Bot, etc.
 
 # 4. Ignite! 🔥
-uvicorn main:app --host 0.0.0.0 --port 8000
+python main.py
+# Set UVICORN_RELOAD=true only for local auto-reload development.
 ```
 Visit `http://0.0.0.0:8000` locally or on your LAN to access the quant dashboard!
 
+Open:
+
+- Homepage: `http://localhost:8000/`
+- Login: `http://localhost:8000/login`
+- Dashboard: `http://localhost:8000/dashboard`
+
+Default first-deployment login:
+
+```text
+Username: admin
+Password: 123456
+```
+
+Change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` before exposing the service to the internet. `WEBHOOK_SECRET` can be left empty; the app will generate a persistent admin webhook secret and show it in Admin Settings. Keep `UVICORN_RELOAD=false` in deployments.
+
 ### 3. One-Click Docker Deployment
 When you are ready to deploy it as a 24/7 cloud miner:
+
 ```bash
 # After configuring your .env file
 docker-compose up -d --build

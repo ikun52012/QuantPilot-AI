@@ -118,15 +118,6 @@ const sucEl = document.getElementById('success-msg');
 const sucText = document.getElementById('success-text');
 const btn = document.getElementById('btn-register');
 
-// Redirect if already logged in
-(async () => {
-    if (new URLSearchParams(window.location.search).get('logged_out') === '1') return;
-    try {
-        const r = await fetch('/api/auth/me', { credentials: 'include' });
-        if (r.ok) window.location.href = '/dashboard';
-    } catch (_) {}
-})();
-
 // Password visibility toggles
 function makeEyeToggle(btnId, inputId, iconId) {
     const t = document.getElementById(btnId);
@@ -188,7 +179,7 @@ form.addEventListener('submit', async (e) => {
         // Token stored in httpOnly cookie — no localStorage needed
         sucText.textContent = 'Account created! Redirecting...';
         sucEl.classList.add('visible');
-        setTimeout(() => { window.location.href = '/dashboard'; }, 1000);
+        setTimeout(() => { window.location.replace('/dashboard'); }, 1000);
     } catch (err) {
         errText.textContent = err.message;
         errEl.classList.add('visible');
