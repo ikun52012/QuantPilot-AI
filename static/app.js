@@ -57,9 +57,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupExchangeToggle();
     detectWebhookUrl();
     updateUserUI();
+    setupSpotlight();
     if (isAdmin()) loadDashboard();
     else switchPage('user');
 });
+
+function setupSpotlight() {
+    document.addEventListener('mousemove', e => {
+        document.querySelectorAll('.card, .chart-card, .kpi-card, .plan-card, .option-card').forEach(card => {
+            const rect = card.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            card.style.setProperty('--mouse-x', `${x}px`);
+            card.style.setProperty('--mouse-y', `${y}px`);
+        });
+    }, { passive: true });
+}
 
 function updateUserUI() {
     const user = getUser();
