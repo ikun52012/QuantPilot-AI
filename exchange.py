@@ -287,13 +287,13 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
     except ccxt.InsufficientFunds as e:
         logger.error(f"[Exchange] Insufficient funds: {e}")
-        return {"status": "error", "reason": f"Insufficient funds: {e}"}
+        return {"status": "error", "reason": "Insufficient funds"}
     except ccxt.NetworkError as e:
         logger.error(f"[Exchange] Network error: {e}")
-        return {"status": "error", "reason": f"Network error: {e}"}
+        return {"status": "error", "reason": "Network error"}
     except Exception as e:
         logger.error(f"[Exchange] Order failed: {e}")
-        return {"status": "error", "reason": str(e)}
+        return {"status": "error", "reason": "Order execution failed"}
     finally:
         try:
             exchange.close()
@@ -315,7 +315,7 @@ async def _place_stop_loss(exchange, symbol, side, quantity, stop_price, result)
         logger.info(f"[Exchange] ✅ Stop-loss set at {stop_price}")
     except Exception as e:
         logger.error(f"[Exchange] Failed to set stop-loss: {e}")
-        result["stop_loss_error"] = str(e)
+        result["stop_loss_error"] = "Failed to set stop-loss order"
 
 
 async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
@@ -350,7 +350,7 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
                 "price": tp.price,
                 "qty": round(tp_qty, 6),
                 "qty_pct": tp.qty_pct,
-                "error": str(e),
+                "error": "Failed to place take-profit order",
                 "status": "failed",
             })
 
@@ -374,7 +374,7 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, side: str) -> di
         return {"status": "no_position", "reason": "No open position to close"}
     except Exception as e:
         logger.error(f"[Exchange] Failed to close position: {e}")
-        return {"status": "error", "reason": str(e)}
+        return {"status": "error", "reason": "Failed to close position"}
 
 
 def _simulate_order(decision: TradeDecision) -> dict:
