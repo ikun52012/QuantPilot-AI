@@ -160,6 +160,12 @@ def _check_login_rate_limit(ip: str) -> bool:
         _login_attempts[ip] = attempts
     return True
 
+
+def _clear_login_rate_limit(ip: str):
+    """Clear login attempt counters after a successful login."""
+    with _login_rate_lock:
+        _login_attempts.pop(ip, None)
+
 # Settings file for runtime config changes.
 # Store it under data/ because docker-compose already persists /app/data.
 DATA_DIR = Path(__file__).parent / "data"
@@ -508,7 +514,7 @@ async def api_register(req: RegisterRequest, response: Response):
 
 @app.post("/api/auth/login")
 async def api_login(req: LoginRequest, request: Request, response: Response):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _client_ip(request) or "unknown"
     if not _check_login_rate_limit(client_ip):
         logger.warning(f"[Auth] Rate limit hit for login from {client_ip}")
         raise HTTPException(429, "Too many login attempts. Please wait 5 minutes.")
@@ -522,6 +528,7 @@ async def api_login(req: LoginRequest, request: Request, response: Response):
         raise HTTPException(403, "Account is disabled")
 
     update_user_login(user["id"])
+    _clear_login_rate_limit(client_ip)
     token = create_token(user["id"], user["username"], user["role"])
     set_auth_cookie(response, token)
 
@@ -960,8 +967,10 @@ async def api_admin_confirm_payment(payment_id: str, request: Request, admin=Dep
 async def api_admin_reject_payment(payment_id: str, request: Request, admin=Depends(require_admin)):
     conn = get_connection()
     try:
-        conn.execute("UPDATE payments SET status='rejected' WHERE id=?", (payment_id,))
+        cur = conn.execute("UPDATE payments SET status='rejected' WHERE id=?", (payment_id,))
         conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Payment not found")
     finally:
         conn.close()
     _audit(admin, "payment.reject", "payment", payment_id, "Payment rejected", request)
@@ -1087,8 +1096,8 @@ async def api_admin_audit_logs(limit: int = 100, admin=Depends(require_admin)):
 @app.get("/api/status")
 async def api_status(current_user=Depends(get_optional_user)):
     """
-    Public: returns minimal server info.
-    Authenticated: returns full configuration status.
+    Public/user: returns minimal server info.
+    Admin: returns full configuration status.
     """
     base = {
         "name": "TradingView Signal Server",
@@ -1099,6 +1108,12 @@ async def api_status(current_user=Depends(get_optional_user)):
     }
     if not current_user:
         return base
+    if current_user.get("role") != "admin":
+        return {
+            **base,
+            "authenticated": True,
+            "role": current_user.get("role", "user"),
+        }
     ai_key_configured = {
         "openai": bool(settings.ai.openai_api_key),
         "anthropic": bool(settings.ai.anthropic_api_key),

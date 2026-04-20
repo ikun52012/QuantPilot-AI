@@ -1222,17 +1222,17 @@ def validate_and_consume_invite(code: str, user_id: str) -> bool:
             return False
         if _is_expired(row["expires_at"]):
             return False
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE invite_codes
             SET used_count=used_count+1, last_used_by=?, last_used_at=?,
                 is_active=CASE WHEN used_count+1 >= max_uses THEN 0 ELSE is_active END
-            WHERE code=?
+            WHERE code=? AND is_active=1 AND used_count < max_uses
             """,
             (user_id, datetime.utcnow().isoformat(), code),
         )
         conn.commit()
-        return True
+        return cur.rowcount > 0
     finally:
         conn.close()
 
