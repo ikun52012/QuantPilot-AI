@@ -3,11 +3,18 @@ OpenClaw Signal Server - Market Data Fetcher
 Fetches real-time market data from the exchange via ccxt.
 """
 import asyncio
+import time
+import threading
 import ccxt
 from loguru import logger
 from config import settings
 from models import MarketContext
 from exchange import _build_exchange, _resolve_symbol
+
+# ─── TTL cache for market context (per ticker) ───────────────────────────────
+_MARKET_CACHE_TTL = 30  # seconds
+_market_cache: dict[str, tuple[float, MarketContext]] = {}
+_market_cache_lock = threading.Lock()
 
 
 def _get_exchange() -> ccxt.Exchange:
@@ -18,8 +25,24 @@ def _get_exchange() -> ccxt.Exchange:
 async def fetch_market_context(ticker: str) -> MarketContext:
     """
     Fetch comprehensive market context for AI analysis.
-    Gathers price, volume, orderbook, and funding data.
+    Results are cached per ticker for up to 30 s to avoid hammering the exchange
+    on rapid consecutive signals for the same symbol.
     """
+    now = time.monotonic()
+    with _market_cache_lock:
+        entry = _market_cache.get(ticker)
+        if entry and (now - entry[0]) < _MARKET_CACHE_TTL:
+            logger.debug(f"[MarketData] Cache hit for {ticker}")
+            return entry[1]
+
+    context = await _fetch_market_context_live(ticker)
+
+    with _market_cache_lock:
+        _market_cache[ticker] = (time.monotonic(), context)
+    return context
+
+
+async def _fetch_market_context_live(ticker: str) -> MarketContext:
     exchange = _get_exchange()
     symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
 

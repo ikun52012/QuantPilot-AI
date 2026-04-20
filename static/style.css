@@ -2,7 +2,7 @@
    Signal Server - Dashboard Styles
    ======================================== */
 
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap');
+@import url('https://fonts.bunny.net/css?family=outfit:500,600,700,800|inter:300,400,500,600');
 
 :root {
     /* Premium Deep Slate / Midnight Palette */
@@ -1346,3 +1346,48 @@ textarea:focus-visible {
     height: 18px;
     accent-color: var(--accent-blue);
 }
+
+
+/* ── Skeleton Loading ── */
+@keyframes skeleton-shimmer {
+    0%   { background-position: -400px 0; }
+    100% { background-position: 400px 0; }
+}
+.skeleton {
+    background: linear-gradient(90deg, rgba(255,255,255,.04) 25%, rgba(255,255,255,.08) 50%, rgba(255,255,255,.04) 75%);
+    background-size: 800px 100%;
+    animation: skeleton-shimmer 1.4s ease-in-out infinite;
+    border-radius: 6px;
+}
+.skeleton-text  { height: 14px; margin: 6px 0; }
+.skeleton-title { height: 22px; margin-bottom: 10px; width: 60%; }
+.skeleton-chart { height: 180px; border-radius: 12px; }
+.skeleton-card  { padding: 24px; border-radius: 16px; }
+
+/* ── Nav item micro-animation ── */
+.nav-item { transition: background var(--transition), transform 0.15s ease, color var(--transition); }
+.nav-item:hover { transform: translateX(3px); }
+
+/* ── Card animated gradient border on hover ── */
+.card {
+    position: relative;
+    transition: box-shadow var(--transition), transform var(--transition);
+}
+.card:hover {
+    box-shadow: 0 0 0 1px rgba(59,130,246,.3), 0 8px 32px rgba(0,0,0,.4);
+    transform: translateY(-2px);
+}
+
+/* ── KPI value pop-in animation ── */
+@keyframes kpi-pop {
+    0%   { opacity: 0; transform: scale(.85); }
+    60%  { transform: scale(1.05); }
+    100% { opacity: 1; transform: scale(1); }
+}
+.kpi-value { animation: kpi-pop .4s cubic-bezier(.34,1.56,.64,1) both; }
+
+/* ── Toast slide-in ── */
+@keyframes toast-in { from { opacity:0; transform:translateX(40px); } to { opacity:1; transform:none; } }
+@keyframes toast-out { to { opacity:0; transform:translateX(40px); } }
+.toast { animation: toast-in .25s ease forwards; }
+.toast.removing { animation: toast-out .25s ease forwards; }

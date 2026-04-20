@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Register — TradingView Signal Server</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800|inter:300,400,500,600" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
@@ -29,10 +29,12 @@
         .form-group{margin-bottom:18px}
         .form-group label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin-bottom:6px}
         .input-wrap{position:relative}
-        .input-wrap i{position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:18px;color:var(--muted)}
-        .input-wrap input{width:100%;padding:12px 14px 12px 42px;border-radius:10px;border:1px solid var(--border);background:rgba(10,14,23,.6);color:var(--text);font-size:14px;font-family:inherit;transition:border-color .2s}
+        .input-wrap i.icon-left{position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:18px;color:var(--muted)}
+        .input-wrap input{width:100%;padding:12px 42px 12px 42px;border-radius:10px;border:1px solid var(--border);background:rgba(10,14,23,.6);color:var(--text);font-size:14px;font-family:inherit;transition:border-color .2s}
         .input-wrap input:focus{outline:none;border-color:var(--blue)}
         .input-wrap input::placeholder{color:rgba(136,146,168,.5)}
+        .input-wrap .eye-btn{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:4px;line-height:1;transition:color .2s}
+        .input-wrap .eye-btn:hover{color:var(--text)}
         .btn-auth{width:100%;padding:13px;border:none;border-radius:10px;background:var(--gradient);color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .3s;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px}
         .btn-auth:hover{transform:translateY(-2px);box-shadow:0 6px 24px rgba(79,140,255,.35)}
         .btn-auth:disabled{opacity:.6;cursor:not-allowed;transform:none;box-shadow:none}
@@ -64,36 +66,38 @@
             <div class="form-group">
                 <label for="username">Username</label>
                 <div class="input-wrap">
-                    <i class="ri-user-3-line"></i>
+                    <i class="ri-user-3-line icon-left"></i>
                     <input type="text" id="username" name="username" placeholder="Choose a username" required minlength="3" autocomplete="username">
                 </div>
             </div>
             <div class="form-group">
                 <label for="email">Email</label>
                 <div class="input-wrap">
-                    <i class="ri-mail-line"></i>
+                    <i class="ri-mail-line icon-left"></i>
                     <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
                 </div>
             </div>
             <div class="form-group">
                 <label for="password">Password</label>
                 <div class="input-wrap">
-                    <i class="ri-lock-2-line"></i>
+                    <i class="ri-lock-2-line icon-left"></i>
                     <input type="password" id="password" name="password" placeholder="Create a password" required minlength="8" autocomplete="new-password">
+                    <button type="button" class="eye-btn" id="toggle-pw" aria-label="Toggle password visibility"><i class="ri-eye-off-line" id="eye-icon"></i></button>
                 </div>
                 <p class="pw-hint">Minimum 8 characters</p>
             </div>
             <div class="form-group">
                 <label for="confirm-password">Confirm Password</label>
                 <div class="input-wrap">
-                    <i class="ri-lock-check-line"></i>
+                    <i class="ri-lock-check-line icon-left"></i>
                     <input type="password" id="confirm-password" name="confirm-password" placeholder="Confirm password" required autocomplete="new-password">
+                    <button type="button" class="eye-btn" id="toggle-pw2" aria-label="Toggle confirm password visibility"><i class="ri-eye-off-line" id="eye-icon2"></i></button>
                 </div>
             </div>
             <div class="form-group" id="invite-group" style="display:none">
                 <label for="invite-code">Invite Code</label>
                 <div class="input-wrap">
-                    <i class="ri-key-2-line"></i>
+                    <i class="ri-key-2-line icon-left"></i>
                     <input type="text" id="invite-code" name="invite-code" placeholder="Enter invite code">
                 </div>
             </div>
@@ -114,9 +118,27 @@ const sucEl = document.getElementById('success-msg');
 const sucText = document.getElementById('success-text');
 const btn = document.getElementById('btn-register');
 
-if (localStorage.getItem('tvss_token')) {
-    window.location.href = '/dashboard';
+// Redirect if already logged in
+(async () => {
+    try {
+        const r = await fetch('/api/auth/me', { credentials: 'include' });
+        if (r.ok) window.location.href = '/dashboard';
+    } catch (_) {}
+})();
+
+// Password visibility toggles
+function makeEyeToggle(btnId, inputId, iconId) {
+    const t = document.getElementById(btnId);
+    const i = document.getElementById(inputId);
+    const ic = document.getElementById(iconId);
+    t.addEventListener('click', () => {
+        const vis = i.type === 'text';
+        i.type = vis ? 'password' : 'text';
+        ic.className = vis ? 'ri-eye-off-line' : 'ri-eye-line';
+    });
 }
+makeEyeToggle('toggle-pw', 'password', 'eye-icon');
+makeEyeToggle('toggle-pw2', 'confirm-password', 'eye-icon2');
 
 fetch('/api/registration-settings')
     .then(r => r.json())
@@ -148,6 +170,7 @@ form.addEventListener('submit', async (e) => {
         const resp = await fetch('/api/auth/register', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 username: document.getElementById('username').value,
                 email: document.getElementById('email').value,
@@ -161,9 +184,7 @@ form.addEventListener('submit', async (e) => {
             throw new Error(data.detail || 'Registration failed');
         }
 
-        localStorage.setItem('tvss_token', data.token);
-        localStorage.setItem('tvss_user', JSON.stringify(data.user));
-
+        // Token stored in httpOnly cookie — no localStorage needed
         sucText.textContent = 'Account created! Redirecting...';
         sucEl.classList.add('visible');
         setTimeout(() => { window.location.href = '/dashboard'; }, 1000);

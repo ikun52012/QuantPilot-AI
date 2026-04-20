@@ -19,15 +19,25 @@ let userEquityChart = null;
 let currentUserSettings = null;
 
 // ─── Auth Helper ───
-function getToken() { return localStorage.getItem('tvss_token'); }
-function getUser() {
-    try { return JSON.parse(localStorage.getItem('tvss_user') || '{}'); }
-    catch { return {}; }
+// Token lives in httpOnly cookie managed by the server.
+// We keep a lightweight in-memory user profile fetched via /api/auth/me.
+let _cachedUser = null;
+
+async function ensureUser() {
+    if (_cachedUser) return _cachedUser;
+    try {
+        const r = await fetch('/api/auth/me', { credentials: 'include' });
+        if (!r.ok) return null;
+        _cachedUser = await r.json();
+        return _cachedUser;
+    } catch { return null; }
 }
+function getUser() { return _cachedUser || {}; }
 function isAdmin() { return getUser().role === 'admin'; }
 
-function requireAuth() {
-    if (!getToken()) {
+async function requireAuth() {
+    const user = await ensureUser();
+    if (!user) {
         window.location.href = '/login';
         return false;
     }
@@ -35,15 +45,14 @@ function requireAuth() {
 }
 
 async function logout() {
-    try { await fetch('/api/auth/logout', {method:'POST'}); } catch {}
-    localStorage.removeItem('tvss_token');
-    localStorage.removeItem('tvss_user');
+    try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch {}
+    _cachedUser = null;
     window.location.href = '/login';
 }
 
 // ─── Initialization ───
-document.addEventListener('DOMContentLoaded', () => {
-    if (!requireAuth()) return;
+document.addEventListener('DOMContentLoaded', async () => {
+    if (!await requireAuth()) return;
     setupNavigation();
     setupExchangeToggle();
     detectWebhookUrl();
@@ -205,7 +214,12 @@ function renderEquityChart(curve) {
     if (equityChart) equityChart.destroy();
     const gradient = ctx.createLinearGradient(0,0,0,280);
     gradient.addColorStop(0,'rgba(59,130,246,0.3)'); gradient.addColorStop(1,'rgba(59,130,246,0.0)');
-    equityChart = new Chart(ctx, { type:'line', data:{ labels:curve.map((_,i)=>`#${i+1}`), datasets:[{ label:'Cumulative P&L %', data:curve.map(c=>c.cumulative_pnl), borderColor:'#3b82f6', backgroundColor:gradient, borderWidth:2, fill:true, tension:0.4, pointRadius:0, pointHoverRadius:5 }]}, options:chartOptions('P&L %') });
+    const labels = curve.map(c => {
+        if (c.date) return c.date;
+        if (c.timestamp) return new Date(c.timestamp).toLocaleDateString(undefined, {month:'short', day:'numeric'});
+        return '';
+    });
+    equityChart = new Chart(ctx, { type:'line', data:{ labels, datasets:[{ label:'Cumulative P&L %', data:curve.map(c=>c.cumulative_pnl), borderColor:'#3b82f6', backgroundColor:gradient, borderWidth:2, fill:true, tension:0.4, pointRadius:0, pointHoverRadius:5 }]}, options:chartOptions('P&L %') });
 }
 function renderDailyPnlChart(daily) {
     const ctx = document.getElementById('daily-pnl-chart')?.getContext('2d');
@@ -502,9 +516,14 @@ function renderUserEquityChart(curve) {
     const ctx = document.getElementById('user-equity-chart')?.getContext('2d');
     if (!ctx) return;
     if (userEquityChart) userEquityChart.destroy();
+    const labels = curve.map(c => {
+        if (c.date) return c.date;
+        if (c.timestamp) return new Date(c.timestamp).toLocaleDateString(undefined, {month:'short', day:'numeric'});
+        return '';
+    });
     userEquityChart = new Chart(ctx, {
         type:'line',
-        data:{ labels:curve.map((_,i)=>`#${i+1}`), datasets:[{ label:'My P&L %', data:curve.map(c=>c.cumulative_pnl), borderColor:'#10b981', backgroundColor:'rgba(16,185,129,.12)', borderWidth:2, fill:true, tension:.35, pointRadius:0 }] },
+        data:{ labels, datasets:[{ label:'My P&L %', data:curve.map(c=>c.cumulative_pnl), borderColor:'#10b981', backgroundColor:'rgba(16,185,129,.12)', borderWidth:2, fill:true, tension:.35, pointRadius:0 }] },
         options:chartOptions('P&L %')
     });
 }
@@ -575,15 +594,8 @@ async function loadSubscription() {
             fetchAPI('/api/my-payments'),
             fetchAPI('/api/auth/me'),
         ]);
-        const currentUser = getUser();
-        localStorage.setItem('tvss_user', JSON.stringify({
-            ...currentUser,
-            id: me.id,
-            username: me.username,
-            email: me.email,
-            role: me.role,
-            balance_usdt: me.balance_usdt,
-        }));
+        // Merge latest profile into the in-memory cache
+        _cachedUser = { ..._cachedUser, ...me };
         updateUserUI();
         const balance = Number(me.balance_usdt || 0);
         // Current subscription status
@@ -743,6 +755,7 @@ async function adminConfirmPayment(paymentId) {
     catch (err) { showToast(err.message,'error'); }
 }
 async function adminRejectPayment(paymentId) {
+    if (!confirm('Reject this payment? This action cannot be undone.')) return;
     try { await fetchAPI(`/api/admin/payment/${paymentId}/reject`, {method:'POST'}); loadAdmin(); showToast('Payment rejected','warning'); }
     catch (err) { showToast(err.message,'error'); }
 }
@@ -889,9 +902,8 @@ async function saveAdminUser(userId) {
     };
     try {
         const result = await fetchAPI(`/api/admin/user/${encodeURIComponent(userId)}`, { method:'PUT', body:JSON.stringify(data) });
-        const current = getUser();
-        if (current.id === userId && result.user) {
-            localStorage.setItem('tvss_user', JSON.stringify({ ...current, ...result.user }));
+        if (getUser().id === userId && result.user) {
+            _cachedUser = { ..._cachedUser, ...result.user };
             updateUserUI();
         }
         showToast('User account updated.','success','Saved');
@@ -1059,10 +1071,8 @@ function copyUserWebhookSecret() {
 }
 
 async function fetchAPI(path, options = {}) {
-    const token = getToken();
-    const headers = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    const resp = await fetch(`${API}${path}`, { headers, ...options });
+    const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+    const resp = await fetch(`${API}${path}`, { credentials: 'include', headers, ...options, headers });
     if (resp.status === 401) { logout(); throw new Error('Session expired'); }
     if (!resp.ok) {
         const data = await resp.json().catch(()=>({}));

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - TradingView Signal Server</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800|inter:300,400,500,600" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
@@ -29,10 +29,12 @@
         .form-group{margin-bottom:18px}
         .form-group label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin-bottom:6px}
         .input-wrap{position:relative}
-        .input-wrap i{position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:18px;color:var(--muted)}
-        .input-wrap input{width:100%;padding:12px 14px 12px 42px;border-radius:10px;border:1px solid var(--border);background:rgba(10,14,23,.6);color:var(--text);font-size:14px;font-family:inherit;transition:border-color .2s}
+        .input-wrap i.icon-left{position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:18px;color:var(--muted)}
+        .input-wrap input{width:100%;padding:12px 42px 12px 42px;border-radius:10px;border:1px solid var(--border);background:rgba(10,14,23,.6);color:var(--text);font-size:14px;font-family:inherit;transition:border-color .2s}
         .input-wrap input:focus{outline:none;border-color:var(--blue)}
         .input-wrap input::placeholder{color:rgba(136,146,168,.5)}
+        .input-wrap .eye-btn{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:4px;line-height:1;transition:color .2s}
+        .input-wrap .eye-btn:hover{color:var(--text)}
         .btn-auth{width:100%;padding:13px;border:none;border-radius:10px;background:var(--gradient);color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .3s;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px}
         .btn-auth:hover{transform:translateY(-2px);box-shadow:0 6px 24px rgba(79,140,255,.35)}
         .btn-auth:disabled{opacity:.6;cursor:not-allowed;transform:none;box-shadow:none}
@@ -60,15 +62,16 @@
             <div class="form-group">
                 <label for="username">Username</label>
                 <div class="input-wrap">
-                    <i class="ri-user-3-line"></i>
+                    <i class="ri-user-3-line icon-left"></i>
                     <input type="text" id="username" name="username" placeholder="Enter username" required autocomplete="username">
                 </div>
             </div>
             <div class="form-group">
                 <label for="password">Password</label>
                 <div class="input-wrap">
-                    <i class="ri-lock-2-line"></i>
+                    <i class="ri-lock-2-line icon-left"></i>
                     <input type="password" id="password" name="password" placeholder="Enter password" required autocomplete="current-password">
+                    <button type="button" class="eye-btn" id="toggle-pw" aria-label="Toggle password visibility"><i class="ri-eye-off-line" id="eye-icon"></i></button>
                 </div>
             </div>
             <button type="submit" class="btn-auth" id="btn-login">
@@ -85,11 +88,23 @@ const form = document.getElementById('login-form');
 const errEl = document.getElementById('error-msg');
 const errText = document.getElementById('error-text');
 const btn = document.getElementById('btn-login');
+const pwInput = document.getElementById('password');
+const togglePw = document.getElementById('toggle-pw');
+const eyeIcon = document.getElementById('eye-icon');
 
-// Redirect if already logged in
-if (localStorage.getItem('tvss_token')) {
-    window.location.href = '/dashboard';
-}
+// Redirect if already logged in (via cookie — check /api/auth/me)
+(async () => {
+    try {
+        const r = await fetch('/api/auth/me', { credentials: 'include' });
+        if (r.ok) window.location.href = '/dashboard';
+    } catch (_) {}
+})();
+
+togglePw.addEventListener('click', () => {
+    const visible = pwInput.type === 'text';
+    pwInput.type = visible ? 'password' : 'text';
+    eyeIcon.className = visible ? 'ri-eye-off-line' : 'ri-eye-line';
+});
 
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -101,6 +116,7 @@ form.addEventListener('submit', async (e) => {
         const resp = await fetch('/api/auth/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 username: document.getElementById('username').value,
                 password: document.getElementById('password').value,
@@ -112,8 +128,7 @@ form.addEventListener('submit', async (e) => {
             throw new Error(data.detail || 'Login failed');
         }
 
-        localStorage.setItem('tvss_token', data.token);
-        localStorage.setItem('tvss_user', JSON.stringify(data.user));
+        // Token is stored in httpOnly cookie by the server; no localStorage needed
         window.location.href = '/dashboard';
     } catch (err) {
         errText.textContent = err.message;

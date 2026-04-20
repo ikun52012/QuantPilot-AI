@@ -112,6 +112,7 @@ from database import (
     create_redeem_code,
     list_redeem_codes,
     redeem_code_for_user,
+    get_connection,
 )
 from payment import (
     get_payment_address,
@@ -128,6 +129,28 @@ from payment import (
 logger.remove()
 logger.add(sys.stdout, level="INFO", format="{time:HH:mm:ss} | {level:<7} | {message}")
 logger.add("logs/server_{time:YYYY-MM-DD}.log", rotation="1 day", retention="30 days", level="DEBUG")
+
+# ─────────────────────────────────────────────
+# Simple in-memory login rate limiter
+# ─────────────────────────────────────────────
+_login_attempts: dict[str, list] = {}  # ip -> [timestamp, ...]
+_login_rate_lock = threading.Lock()
+_LOGIN_MAX_ATTEMPTS = 10   # max attempts per window
+_LOGIN_WINDOW_SECS = 300   # 5-minute sliding window
+
+
+def _check_login_rate_limit(ip: str) -> bool:
+    """Returns True if request is allowed, False if rate-limited."""
+    now = datetime.utcnow().timestamp()
+    cutoff = now - _LOGIN_WINDOW_SECS
+    with _login_rate_lock:
+        attempts = [t for t in _login_attempts.get(ip, []) if t > cutoff]
+        if len(attempts) >= _LOGIN_MAX_ATTEMPTS:
+            _login_attempts[ip] = attempts
+            return False
+        attempts.append(now)
+        _login_attempts[ip] = attempts
+    return True
 
 # Settings file for runtime config changes.
 # Store it under data/ because docker-compose already persists /app/data.
@@ -250,7 +273,38 @@ async def lifespan(app: FastAPI):
     else:
         settings.server.webhook_secret = env_webhook_secret
 
+    # ── APScheduler: daily reset at midnight UTC ──
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from pre_filter import reset_daily_counters
+
+    scheduler = AsyncIOScheduler()
+
+    async def _daily_reset_job():
+        """Runs at midnight UTC: reset in-memory daily trade counters."""
+        reset_daily_counters()
+        logger.info("[Scheduler] Daily trade counters reset")
+        # Optional: send Telegram summary
+        try:
+            from trade_logger import get_today_stats
+            stats = get_today_stats()
+            msg = (
+                f"📊 Daily Summary\n"
+                f"Signals: {stats['total_signals']} | Executed: {stats['executed']} | "
+                f"Rejected: {stats['rejected']}"
+            )
+            from notifier import send_telegram
+            await send_telegram(msg)
+        except Exception as exc:
+            logger.debug(f"[Scheduler] Telegram summary skipped: {exc}")
+
+    scheduler.add_job(_daily_reset_job, CronTrigger(hour=0, minute=0, second=0, timezone="UTC"))
+    scheduler.start()
+    logger.info("[Scheduler] APScheduler started — daily reset wired at 00:00 UTC")
+
     yield
+
+    scheduler.shutdown(wait=False)
     logger.info("TradingView Signal Server shutting down...")
 
 
@@ -385,7 +439,12 @@ async def api_register(req: RegisterRequest, response: Response):
 
 
 @app.post("/api/auth/login")
-async def api_login(req: LoginRequest, response: Response):
+async def api_login(req: LoginRequest, request: Request, response: Response):
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_login_rate_limit(client_ip):
+        logger.warning(f"[Auth] Rate limit hit for login from {client_ip}")
+        raise HTTPException(429, "Too many login attempts. Please wait 5 minutes.")
+
     username = req.username.lower().strip()
     user = get_user_by_username(username)
     if not user or not verify_password(req.password, user["password_hash"]):
@@ -806,7 +865,7 @@ async def api_admin_set_user_password(user_id: str, req: AdminPasswordRequest, a
 
 
 @app.get("/api/admin/payments")
-async def api_admin_payments(status: str = None, admin=Depends(require_admin)):
+async def api_admin_payments(status: Optional[str] = None, admin=Depends(require_admin)):
     return get_all_payments(status)
 
 
@@ -822,7 +881,6 @@ async def api_admin_confirm_payment(payment_id: str, admin=Depends(require_admin
 
 @app.post("/api/admin/payment/{payment_id}/reject")
 async def api_admin_reject_payment(payment_id: str, admin=Depends(require_admin)):
-    from database import get_connection
     conn = get_connection()
     try:
         conn.execute("UPDATE payments SET status='rejected' WHERE id=?", (payment_id,))
@@ -934,7 +992,19 @@ async def api_admin_create_redeem_code(req: RedeemCodeCreateRequest, admin=Depen
 # ═══════════════════════════════════════════════
 
 @app.get("/api/status")
-async def api_status():
+async def api_status(current_user=Depends(get_optional_user)):
+    """
+    Public: returns minimal server info.
+    Authenticated: returns full configuration status.
+    """
+    base = {
+        "name": "TradingView Signal Server",
+        "status": "running",
+        "version": "4.0.0",
+        "time": datetime.utcnow().isoformat(),
+    }
+    if not current_user:
+        return base
     ai_key_configured = {
         "openai": bool(settings.ai.openai_api_key),
         "anthropic": bool(settings.ai.anthropic_api_key),
@@ -946,9 +1016,7 @@ async def api_status():
     else:
         active_ai_key_configured = ai_key_configured.get(settings.ai.provider, False)
     return {
-        "name": "TradingView Signal Server",
-        "status": "running",
-        "version": "4.0.0",
+        **base,
         "ai_provider": settings.ai.provider,
         "exchange": settings.exchange.name,
         "live_trading": settings.exchange.live_trading,
@@ -996,7 +1064,6 @@ async def api_status():
             "activation_profit_pct": settings.trailing_stop.activation_profit_pct,
             "trailing_step_pct": settings.trailing_stop.trailing_step_pct,
         },
-        "time": datetime.utcnow().isoformat(),
     }
 
 
@@ -1028,7 +1095,19 @@ async def api_admin_webhook_config(request: Request, admin=Depends(require_admin
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    import time
+    start = time.monotonic()
+    db_ok = False
+    try:
+        c = get_connection()
+        c.execute("SELECT 1").fetchone()
+        c.close()
+        db_ok = True
+    except Exception:
+        pass
+    latency_ms = round((time.monotonic() - start) * 1000, 1)
+    status = "ok" if db_ok else "degraded"
+    return {"status": status, "db": db_ok, "db_latency_ms": latency_ms}
 
 
 # ═══════════════════════════════════════════════
@@ -1120,8 +1199,9 @@ async def webhook(request: Request):
         raise
     except Exception as e:
         logger.exception(f"[Webhook] Pipeline error: {e}")
+        # Sanitize: never leak internal exception text to callers
         await notify_error(f"Pipeline error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal pipeline error. Check server logs.")
 
 
 # ─────────────────────────────────────────────

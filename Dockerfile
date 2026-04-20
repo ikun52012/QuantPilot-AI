@@ -9,8 +9,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create directories for persistent data and logs
-RUN mkdir -p data logs trade_logs
+# Create non-root user and hand over ownership
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
+    && mkdir -p data logs trade_logs \
+    && chown -R appuser:appgroup /app
+
+USER appuser
 
 # Expose port
 EXPOSE 8000

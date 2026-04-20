@@ -43,7 +43,8 @@ def init_database():
                 is_active INTEGER DEFAULT 1,
                 created_at TEXT DEFAULT (datetime('now')),
                 last_login TEXT,
-                settings_json TEXT DEFAULT '{}'
+                settings_json TEXT DEFAULT '{}',
+                webhook_secret TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS subscription_plans (
@@ -124,9 +125,12 @@ def init_database():
 
             CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
             CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+            CREATE INDEX IF NOT EXISTS idx_users_webhook_secret ON users(webhook_secret);
             CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status, end_date);
             CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
             CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
+            CREATE INDEX IF NOT EXISTS idx_payments_sub ON payments(subscription_id, status);
             CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
             CREATE INDEX IF NOT EXISTS idx_invite_codes_active ON invite_codes(is_active);
             CREATE INDEX IF NOT EXISTS idx_redeem_codes_active ON redeem_codes(is_active);
@@ -144,8 +148,25 @@ def init_database():
 def _migrate_schema(conn):
     """Apply additive migrations for older local SQLite databases."""
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
-    if "balance_usdt" not in columns:
-        conn.execute("ALTER TABLE users ADD COLUMN balance_usdt REAL DEFAULT 0")
+    migrations = [
+        ("balance_usdt", "ALTER TABLE users ADD COLUMN balance_usdt REAL DEFAULT 0"),
+        ("webhook_secret", "ALTER TABLE users ADD COLUMN webhook_secret TEXT DEFAULT ''"),
+    ]
+    for col, sql in migrations:
+        if col not in columns:
+            conn.execute(sql)
+    # Backfill webhook_secret column from settings_json for existing users
+    rows = conn.execute(
+        "SELECT id, settings_json FROM users WHERE webhook_secret IS NULL OR webhook_secret = ''"
+    ).fetchall()
+    for row in rows:
+        try:
+            s = json.loads(row["settings_json"] or "{}")
+            secret = s.get("webhook", {}).get("secret", "")
+            if secret:
+                conn.execute("UPDATE users SET webhook_secret=? WHERE id=?", (secret, row["id"]))
+        except Exception:
+            pass
 
 
 def _seed_defaults(conn):
@@ -434,23 +455,47 @@ def ensure_user_webhook_secret(user_id: str) -> str:
     if not secret:
         secret = secrets.token_urlsafe(32)
         update_user_settings(user_id, {"webhook": {"secret": secret}})
+        # Also write to the indexed column for O(1) lookup
+        conn = get_connection()
+        try:
+            conn.execute("UPDATE users SET webhook_secret=? WHERE id=?", (secret, user_id))
+            conn.commit()
+        finally:
+            conn.close()
     return secret
 
 
 def find_user_by_webhook_secret(secret: str) -> dict | None:
+    """O(1) lookup via indexed webhook_secret column."""
     if not secret:
         return None
     conn = get_connection()
     try:
+        # Fast indexed lookup first
+        row = conn.execute(
+            "SELECT id, username, email, role, is_active, webhook_secret FROM users "
+            "WHERE is_active=1 AND webhook_secret=?",
+            (secret,),
+        ).fetchone()
+        if row and secrets.compare_digest(str(row["webhook_secret"]), str(secret)):
+            user = dict(row)
+            user.pop("webhook_secret", None)
+            return user
+        # Fallback: scan settings_json for users whose column wasn't backfilled yet
         rows = conn.execute(
-            "SELECT id, username, email, role, is_active, settings_json FROM users WHERE is_active=1"
+            "SELECT id, username, email, role, is_active, settings_json FROM users "
+            "WHERE is_active=1 AND (webhook_secret IS NULL OR webhook_secret = '')"
         ).fetchall()
         for row in rows:
             try:
                 user_settings = json.loads(row["settings_json"] or "{}")
             except json.JSONDecodeError:
                 continue
-            if secrets.compare_digest(str(user_settings.get("webhook", {}).get("secret", "")), str(secret)):
+            stored = str(user_settings.get("webhook", {}).get("secret", ""))
+            if stored and secrets.compare_digest(stored, str(secret)):
+                # Backfill the column now
+                conn.execute("UPDATE users SET webhook_secret=? WHERE id=?", (stored, row["id"]))
+                conn.commit()
                 user = dict(row)
                 user.pop("settings_json", None)
                 return user

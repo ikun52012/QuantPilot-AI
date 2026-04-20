@@ -53,7 +53,7 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
     Log a trade decision and its execution result.
     Returns the trade ID.
     """
-    trade_id = str(uuid.uuid4())[:8]
+    trade_id = str(uuid.uuid4())
 
     entry = {
         "id": trade_id,
