@@ -137,12 +137,23 @@ The server records webhook events and ignores duplicate payload fingerprints wit
 
 - Runtime admin secrets, webhook secrets, and per-user exchange keys are encrypted at rest with `APP_ENCRYPTION_KEY`. If it is omitted, the app generates a persistent key in `data/app_encryption.key`; back this file up and keep the `data/` volume mounted permanently.
 - Per-user webhook lookup uses a stored hash, so the dashboard can show each user's real secret while the database index does not keep the raw value.
+- Browser write APIs use a double-submit CSRF token in addition to the HttpOnly session cookie.
 - Set `PUBLIC_BASE_URL` to your public HTTPS origin, such as `https://cs.hyzcjs.com`, so dashboard webhook templates stay correct behind Cloudflare or Nginx.
 - Set `COOKIE_SECURE=true` when deploying behind HTTPS.
 - Docker Compose binds the app to `127.0.0.1:8000` by default. Expose it through Nginx, Caddy, Cloudflare Tunnel, or another HTTPS reverse proxy.
 - Trade logs are written to SQLite for long-term querying while legacy JSON logs remain readable.
 - Admin actions are recorded in an audit log and displayed in the Admin System panel.
-- Payment TX hashes are checked for duplicate submission before admin confirmation. Fully automated on-chain confirmation should be connected through a chain-specific watcher/API key workflow.
+- Payment TX hashes are checked for duplicate submission before admin confirmation. Admins can also run best-effort on-chain verification for TRC20, ERC20, BEP20, and Arbitrum from the Pending Payments panel. Aptos is detected but staged for manual/indexer review.
+- Advanced trailing modes are monitored by a scheduled position monitor. Set `POSITION_MONITOR_INTERVAL_SECS` to tune the scan interval, and review the Position Monitor panel after enabling live trading.
+- Backups can be created from the Admin Backup panel. Always keep `data/app_encryption.key` or `APP_ENCRYPTION_KEY`; encrypted secrets cannot be recovered without it.
+
+### Commercial Operation Notes
+
+- Each user has isolated exchange keys, webhook secret, TP settings, trade history, and performance charts.
+- Admins can decide whether a user may enable live trading, plus set max leverage and max position percentage caps.
+- Exchange TP/SL order parameters are tried through exchange-aware candidates. Always test each target exchange with a small paper/live pilot before trusting automation with real size.
+- Webhook Diagnostics shows recent invalid secrets, duplicate alerts, pre-filter blocks, AI rejects, and executed signals so TradingView issues can be traced from the dashboard.
+- For fully unattended payments, configure explorer API keys in `.env` and still keep manual review available for chain/API outages.
 
 ---
 

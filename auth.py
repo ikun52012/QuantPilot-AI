@@ -133,11 +133,17 @@ def verify_token(token: str) -> dict | None:
 from fastapi import Request, HTTPException
 
 AUTH_COOKIE_NAME = "tvss_token"
+CSRF_COOKIE_NAME = "tvss_csrf"
+
+
+def create_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def set_auth_cookie(response, token: str):
     """Set the browser cookie used by page routes."""
     max_age = JWT_EXPIRY_HOURS * 3600
+    csrf_token = create_csrf_token()
     response.set_cookie(
         AUTH_COOKIE_NAME,
         token,
@@ -147,11 +153,21 @@ def set_auth_cookie(response, token: str):
         samesite="lax",
         path="/",
     )
+    response.set_cookie(
+        CSRF_COOKIE_NAME,
+        csrf_token,
+        max_age=max_age,
+        httponly=False,
+        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax",
+        path="/",
+    )
 
 
 def clear_auth_cookie(response):
     """Clear auth cookie on logout."""
     response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/")
 
 
 def get_current_user(request: Request) -> dict:

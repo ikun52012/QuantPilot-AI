@@ -184,7 +184,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
     try:
         leverage = None
         if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
-            leverage = max(1, min(int(round(decision.ai_analysis.recommended_leverage)), 125))
+            max_leverage = max(1, min(int(exchange_config.get("max_leverage") or 125), 125))
+            leverage = max(1, min(int(round(decision.ai_analysis.recommended_leverage)), max_leverage))
             try:
                 await asyncio.to_thread(exchange.set_leverage, leverage, symbol)
                 logger.info(f"[Exchange] Leverage set: {symbol} {leverage}x")
@@ -237,11 +238,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             # Fallback: single TP order
             try:
                 tp_side = "sell" if side == "buy" else "buy"
-                tp_order = await asyncio.to_thread(
-                    exchange.create_order,
-                    symbol=symbol, type="take_profit_market", side=tp_side,
-                    amount=decision.quantity,
-                    params={"stopPrice": decision.take_profit, "closePosition": False},
+                tp_order = await _create_conditional_order(
+                    exchange, symbol, "take_profit", tp_side, decision.quantity, decision.take_profit
                 )
                 result["take_profit_order_id"] = tp_order.get("id")
                 logger.info(f"[Exchange] ✅ Take-profit set at {decision.take_profit}")
@@ -285,6 +283,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             if decision.stop_loss:
                 await _place_stop_loss(exchange, symbol, side, decision.quantity, decision.stop_loss, result)
             result["trailing_stop_mode"] = trailing_mode.value
+            result["trailing_pct"] = decision.trailing_stop.trail_pct if decision.trailing_stop else 0
+            result["trailing_activation_profit_pct"] = decision.trailing_stop.activation_profit_pct if decision.trailing_stop else 0
             result["trailing_stop_note"] = (
                 "Initial SL placed. Trailing adjustments handled by position monitor."
             )
@@ -316,12 +316,7 @@ async def _place_stop_loss(exchange, symbol, side, quantity, stop_price, result)
     """Place a standard stop-loss order."""
     try:
         sl_side = "sell" if side == "buy" else "buy"
-        sl_order = await asyncio.to_thread(
-            exchange.create_order,
-            symbol=symbol, type="stop_market", side=sl_side,
-            amount=quantity,
-            params={"stopPrice": stop_price, "closePosition": False},
-        )
+        sl_order = await _create_conditional_order(exchange, symbol, "stop_loss", sl_side, quantity, stop_price)
         result["stop_loss_order_id"] = sl_order.get("id")
         logger.info(f"[Exchange] ✅ Stop-loss set at {stop_price}")
     except Exception as e:
@@ -339,11 +334,8 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
         if tp_qty <= 0:
             continue
         try:
-            tp_order = await asyncio.to_thread(
-                exchange.create_order,
-                symbol=symbol, type="take_profit_market", side=tp_side,
-                amount=round(tp_qty, 6),
-                params={"stopPrice": tp.price, "closePosition": False},
+            tp_order = await _create_conditional_order(
+                exchange, symbol, "take_profit", tp_side, round(tp_qty, 6), tp.price
             )
             tp_results.append({
                 "level": i + 1,
@@ -366,6 +358,82 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
             })
 
     return tp_results
+
+
+def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: float) -> list[tuple[str, dict]]:
+    """Return exchange-aware conditional-order candidates."""
+    reduce_params = {"reduceOnly": True, "closePosition": False}
+    if kind == "take_profit":
+        candidates = [
+            ("take_profit_market", {**reduce_params, "stopPrice": trigger_price}),
+            ("take_profit", {**reduce_params, "stopPrice": trigger_price}),
+            ("market", {**reduce_params, "triggerPrice": trigger_price, "takeProfitPrice": trigger_price}),
+        ]
+    else:
+        candidates = [
+            ("stop_market", {**reduce_params, "stopPrice": trigger_price}),
+            ("stop", {**reduce_params, "stopPrice": trigger_price}),
+            ("market", {**reduce_params, "triggerPrice": trigger_price, "stopLossPrice": trigger_price}),
+        ]
+    if exchange_id == "okx":
+        key = "tpTriggerPx" if kind == "take_profit" else "slTriggerPx"
+        order_key = "tpOrdPx" if kind == "take_profit" else "slOrdPx"
+        candidates.insert(0, ("market", {**reduce_params, key: trigger_price, order_key: "-1", "tdMode": "cross"}))
+    if exchange_id == "bitget":
+        candidates.insert(0, ("market", {**reduce_params, "triggerPrice": trigger_price, "planType": "profit_plan" if kind == "take_profit" else "loss_plan"}))
+    if exchange_id == "bybit":
+        candidates.insert(0, ("market", {**reduce_params, "triggerPrice": trigger_price, "triggerDirection": 1 if kind == "take_profit" else 2}))
+    return candidates
+
+
+async def _create_conditional_order(exchange, symbol: str, kind: str, side: str, amount: float, trigger_price: float) -> dict:
+    """Try exchange-specific conditional order formats before failing."""
+    exchange_id = getattr(exchange, "id", "").lower()
+    errors = []
+    for order_type, params in _conditional_order_attempts(exchange_id, kind, trigger_price):
+        try:
+            return await asyncio.to_thread(
+                exchange.create_order,
+                symbol=symbol,
+                type=order_type,
+                side=side,
+                amount=amount,
+                params=params,
+            )
+        except Exception as exc:
+            errors.append(f"{order_type}: {exc}")
+            logger.debug(f"[Exchange] {exchange_id} {kind} candidate failed: {order_type} {exc}")
+    raise RuntimeError("; ".join(errors[-3:]) or f"Failed to create {kind} order")
+
+
+async def place_protective_stop(
+    ticker: str,
+    direction: str,
+    quantity: float,
+    stop_price: float,
+    exchange_config: dict | None = None,
+) -> dict:
+    """Place a reduce-only protective stop for an already-open monitored position."""
+    exchange_config = exchange_config or {}
+    if not exchange_config.get("live_trading", settings.exchange.live_trading):
+        return {"status": "simulated", "stop_price": stop_price}
+    exchange = _build_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+        password=exchange_config.get("password") or settings.exchange.password,
+        live=True,
+    )
+    try:
+        symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
+        side = "sell" if str(direction).lower() == SignalDirection.LONG.value else "buy"
+        order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price)
+        return {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price}
+    finally:
+        try:
+            exchange.close()
+        except AttributeError:
+            pass
 
 
 async def _close_position(exchange: ccxt.Exchange, symbol: str, side: str) -> dict:
@@ -474,9 +542,16 @@ async def get_balance() -> dict:
             pass  
 
 
-async def get_ticker(symbol: str) -> dict:
+async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
     """Fetch ticker data for a symbol."""
-    exchange = _build_exchange()
+    exchange_config = exchange_config or {}
+    exchange = _build_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+        password=exchange_config.get("password") or settings.exchange.password,
+        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
+    )
     try:
         resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
         ticker = await asyncio.to_thread(exchange.fetch_ticker, resolved_symbol)

@@ -106,6 +106,10 @@ function safeClassToken(str) {
 function escapeJsSingle(str) {
     return String(str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ');
 }
+function getCookie(name) {
+    const prefix = `${name}=`;
+    return document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith(prefix))?.slice(prefix.length) || '';
+}
 function copyText(text, label = 'Copied') {
     navigator.clipboard.writeText(text).then(() => showToast(label, 'success'));
 }
@@ -498,10 +502,12 @@ async function loadUserPortal() {
 }
 
 function renderUserSettings(data) {
-    const ex = data.exchange || {}, tp = data.take_profit || {}, wh = data.webhook || {};
+    const ex = data.exchange || {}, tp = data.take_profit || {}, wh = data.webhook || {}, controls = data.trade_controls || {};
     setFieldValue('user-exchange', ex.exchange || 'binance');
     setFieldValue('user-live-trading', String(Boolean(ex.live_trading)));
-    setText('user-api-configured', ex.api_configured ? 'Configured' : 'Not configured');
+    const liveSelect = document.getElementById('user-live-trading');
+    if (liveSelect) liveSelect.disabled = !controls.live_trading_allowed;
+    setText('user-api-configured', `${ex.api_configured ? 'Configured' : 'Not configured'} · Live ${controls.live_trading_allowed ? 'allowed' : 'disabled'} · Max ${controls.max_leverage || 20}x`);
     setFieldValue('user-tp-levels', tp.num_levels || 1);
     ['tp1_pct','tp2_pct','tp3_pct','tp4_pct','tp1_qty','tp2_qty','tp3_qty','tp4_qty'].forEach(key => {
         const id = `user-${key.replace('_','-')}`;
@@ -772,12 +778,20 @@ async function adminRejectPayment(paymentId) {
     try { await fetchAPI(`/api/admin/payment/${paymentId}/reject`, {method:'POST'}); loadAdmin(); showToast('Payment rejected','warning'); }
     catch (err) { showToast(err.message,'error'); }
 }
+async function adminVerifyPayment(paymentId) {
+    try {
+        const result = await fetchAPI(`/api/admin/payment/${paymentId}/verify`, {method:'POST'});
+        loadAdmin();
+        const msg = result.verification?.reason || result.status;
+        showToast(msg, result.status === 'confirmed' ? 'success' : 'warning', 'Verification Result');
+    } catch (err) { showToast(err.message,'error','Verification Failed'); }
+}
 
 // ─── Helpers ───
 async function loadAdmin() {
     if (!isAdmin()) { showToast('Admin access required','error'); return; }
     try {
-        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs] = await Promise.all([
+        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs, webhookEvents, backups, monitorState] = await Promise.all([
             fetchAPI('/api/admin/users'),
             fetchAPI('/api/admin/payments'),
             fetchAPI('/api/admin/plans'),
@@ -787,6 +801,9 @@ async function loadAdmin() {
             fetchAPI('/api/admin/redeem-codes'),
             fetchAPI('/api/admin/system'),
             fetchAPI('/api/admin/audit-logs?limit=8'),
+            fetchAPI('/api/admin/webhook-events?limit=30'),
+            fetchAPI('/api/admin/backups'),
+            fetchAPI('/api/admin/position-monitor'),
         ]);
 
         renderAdminUsers(users, plans);
@@ -795,6 +812,9 @@ async function loadAdmin() {
         renderAdminRedeemCodes(redeemCodes || [], plans || []);
         renderAdminPendingPayments(payments || []);
         renderAdminSystem(system || {}, auditLogs || []);
+        renderAdminWebhookEvents(webhookEvents || []);
+        renderAdminBackups(backups || []);
+        renderAdminPositionMonitor(monitorState || {});
     } catch (err) { showToast(err.message, 'error', 'Admin Load Failed'); }
 }
 
@@ -814,10 +834,15 @@ function renderAdminUsers(users, plans) {
         <div class="form-row three-col">
             <div class="form-group"><label for="new-user-role">Role</label><select id="new-user-role" class="select-input"><option value="user">User</option><option value="admin">Admin</option></select></div>
             <div class="form-group"><label for="new-user-balance">Balance USDT</label><input id="new-user-balance" type="number" min="0" step="0.01" value="0" class="text-input"></div>
+            <div class="form-group"><label for="new-user-live">Live Trading</label><select id="new-user-live" class="select-input"><option value="false">Disabled</option><option value="true">Allowed</option></select></div>
+        </div>
+        <div class="form-row three-col">
+            <div class="form-group"><label for="new-user-max-leverage">Max Leverage</label><input id="new-user-max-leverage" type="number" min="1" max="125" step="1" value="20" class="text-input"></div>
+            <div class="form-group"><label for="new-user-max-position">Max Position %</label><input id="new-user-max-position" type="number" min="0.1" max="100" step="0.1" value="10" class="text-input"></div>
             <div class="form-group admin-button-bottom"><button class="btn btn-primary" onclick="createAdminUser()"><i class="ri-user-add-line"></i> Add User</button></div>
         </div>
     </div>`;
-    usersEl.innerHTML = `${createForm}<div class="table-wrapper"><table class="data-table admin-users-table"><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Balance</th><th>Password</th><th>Current Subscription</th><th>Grant Subscription</th><th>Actions</th></tr></thead><tbody>${users.map(u => {
+    usersEl.innerHTML = `${createForm}<div class="table-wrapper"><table class="data-table admin-users-table"><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Balance</th><th>Live Controls</th><th>Password</th><th>Current Subscription</th><th>Grant Subscription</th><th>Actions</th></tr></thead><tbody>${users.map(u => {
         const id = escapeHtml(u.id);
         const jsId = escapeJsSingle(u.id);
         const active = Boolean(u.is_active);
@@ -827,6 +852,7 @@ function renderAdminUsers(users, plans) {
             <td><select id="admin-role-${id}" class="select-input table-input"><option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
             <td><select id="admin-active-${id}" class="select-input table-input"><option value="true" ${active ? 'selected' : ''}>Active</option><option value="false" ${!active ? 'selected' : ''}>Disabled</option></select></td>
             <td><input id="admin-balance-${id}" type="number" class="text-input table-input" value="${Number(u.balance_usdt || 0).toFixed(2)}" min="0" step="0.01"></td>
+            <td><div class="admin-stack"><select id="admin-live-${id}" class="select-input table-input"><option value="false" ${!u.live_trading_allowed ? 'selected' : ''}>Paper only</option><option value="true" ${u.live_trading_allowed ? 'selected' : ''}>Live allowed</option></select><div class="admin-inline"><input id="admin-max-lev-${id}" type="number" class="text-input table-input" min="1" max="125" value="${escapeHtml(u.max_leverage || 20)}"><input id="admin-max-pos-${id}" type="number" class="text-input table-input" min="0.1" max="100" step="0.1" value="${escapeHtml(u.max_position_pct || 10)}"></div></div></td>
             <td><div class="admin-stack"><input id="admin-password-${id}" type="password" class="text-input table-input" placeholder="New password" autocomplete="new-password"><button class="btn btn-sm btn-primary" onclick="resetAdminPassword('${jsId}')">Reset</button></div></td>
             <td>${sub}</td>
             <td><div class="admin-stack"><select id="admin-plan-${id}" class="select-input table-input">${planOptions(plans)}</select><div class="admin-inline"><input id="admin-duration-${id}" type="number" class="text-input table-input" min="0" step="1" placeholder="Plan days"><select id="admin-substatus-${id}" class="select-input table-input"><option value="active">Active</option><option value="pending">Pending</option></select></div><button class="btn btn-sm btn-primary" onclick="grantSubscription('${jsId}')">Grant</button></div></td>
@@ -898,7 +924,7 @@ function renderAdminPendingPayments(payments) {
     const payEl = document.getElementById('admin-payments');
     if (!payEl) return;
     if (pendingPayments.length) {
-        payEl.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>User</th><th>Amount</th><th>Network</th><th>TX Hash</th><th>Date</th><th>Actions</th></tr></thead><tbody>${pendingPayments.map(p => `<tr><td>${escapeHtml(p.username||'--')}</td><td>${escapeHtml(p.amount)} ${escapeHtml(p.currency)}</td><td>${escapeHtml(p.network)}</td><td><code style="font-size:11px">${p.tx_hash?escapeHtml(p.tx_hash.slice(0,20))+'...':'--'}</code></td><td>${escapeHtml(formatDateTime(p.created_at))}</td><td><div class="admin-actions"><button class="btn btn-sm btn-success" onclick="adminConfirmPayment('${escapeJsSingle(p.id)}')">Confirm</button><button class="btn btn-sm btn-danger" onclick="adminRejectPayment('${escapeJsSingle(p.id)}')">Reject</button></div></td></tr>`).join('')}</tbody></table></div>`;
+        payEl.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>User</th><th>Amount</th><th>Network</th><th>TX Hash</th><th>Date</th><th>Actions</th></tr></thead><tbody>${pendingPayments.map(p => `<tr><td>${escapeHtml(p.username||'--')}</td><td>${escapeHtml(p.amount)} ${escapeHtml(p.currency)}</td><td>${escapeHtml(p.network)}</td><td><code style="font-size:11px">${p.tx_hash?escapeHtml(p.tx_hash.slice(0,20))+'...':'--'}</code></td><td>${escapeHtml(formatDateTime(p.created_at))}</td><td><div class="admin-actions"><button class="btn btn-sm btn-primary" onclick="adminVerifyPayment('${escapeJsSingle(p.id)}')">Verify</button><button class="btn btn-sm btn-success" onclick="adminConfirmPayment('${escapeJsSingle(p.id)}')">Confirm</button><button class="btn btn-sm btn-danger" onclick="adminRejectPayment('${escapeJsSingle(p.id)}')">Reject</button></div></td></tr>`).join('')}</tbody></table></div>`;
     } else {
         payEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No pending payments</p>';
     }
@@ -924,6 +950,34 @@ function renderAdminSystem(system, auditLogs) {
     `;
 }
 
+function renderAdminWebhookEvents(events) {
+    const el = document.getElementById('admin-webhook-events');
+    if (!el) return;
+    const rows = events.length ? events.map(e => {
+        const payload = e.payload || {};
+        return `<tr><td>${escapeHtml(formatDateTime(e.created_at))}</td><td>${escapeHtml(e.username || 'admin/global')}</td><td>${escapeHtml(e.ticker || payload.ticker || '--')}</td><td>${escapeHtml(e.direction || payload.direction || '--')}</td><td><span class="badge badge-${safeClassToken(e.status)}">${escapeHtml(e.status)}</span></td><td>${escapeHtml(e.reason || '')}</td><td>${escapeHtml(e.client_ip || '')}</td></tr>`;
+    }).join('') : '<tr><td colspan="7" class="empty-state">No webhook events yet</td></tr>';
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>Time</th><th>User</th><th>Ticker</th><th>Direction</th><th>Status</th><th>Reason</th><th>IP</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderAdminPositionMonitor(state) {
+    const el = document.getElementById('admin-position-monitor');
+    if (!el) return;
+    const keys = Object.keys(state || {}).filter(k => k !== 'last_run_at');
+    const rows = keys.length ? keys.slice(-20).reverse().map(k => {
+        const item = state[k] || {};
+        return `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(item.stop_price || '--')}</td><td>${escapeHtml(item.paper ? 'paper' : 'live')}</td><td>${escapeHtml(formatDateTime(item.updated_at))}</td></tr>`;
+    }).join('') : '<tr><td colspan="4" class="empty-state">No trailing-stop adjustments yet</td></tr>';
+    el.innerHTML = `<div class="settings-form"><div class="form-row"><button class="btn btn-primary" onclick="runPositionMonitor()"><i class="ri-play-line"></i> Run Monitor Now</button><span class="hint">Last run: ${escapeHtml(formatDateTime(state.last_run_at))}</span></div><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Trade Rule</th><th>Stop</th><th>Mode</th><th>Updated</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
+function renderAdminBackups(backups) {
+    const el = document.getElementById('admin-backups');
+    if (!el) return;
+    const rows = backups.length ? backups.map(b => `<tr><td>${escapeHtml(b.filename)}</td><td>${formatNum(Number(b.size || 0) / 1024)} KB</td><td>${escapeHtml(formatDateTime(b.created_at))}</td><td><div class="admin-actions"><button class="btn btn-sm" onclick="downloadBackup('${escapeJsSingle(b.filename)}')">Download</button><button class="btn btn-sm btn-warning" onclick="stageRestore('${escapeJsSingle(b.filename)}')">Stage Restore</button></div></td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No backups yet</td></tr>';
+    el.innerHTML = `<div class="settings-form"><div class="form-row"><button class="btn btn-primary" onclick="createBackup()"><i class="ri-archive-line"></i> Create Backup</button><span class="hint">Restore is staged only; stop the service before replacing live database files.</span></div><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Backup</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
 function planOptions(plans, selected = '', emptyLabel = 'Select plan...') {
     return `<option value="">${escapeHtml(emptyLabel)}</option>${plans.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === selected ? 'selected' : ''}>${escapeHtml(p.name)} (${formatNum(p.price_usdt)} USDT)</option>`).join('')}`;
 }
@@ -935,6 +989,9 @@ async function saveAdminUser(userId) {
         role: document.getElementById(`admin-role-${userId}`)?.value || 'user',
         is_active: document.getElementById(`admin-active-${userId}`)?.value === 'true',
         balance_usdt: parseFloat(document.getElementById(`admin-balance-${userId}`)?.value) || 0,
+        live_trading_allowed: document.getElementById(`admin-live-${userId}`)?.value === 'true',
+        max_leverage: parseInt(document.getElementById(`admin-max-lev-${userId}`)?.value) || 20,
+        max_position_pct: parseFloat(document.getElementById(`admin-max-pos-${userId}`)?.value) || 10,
     };
     try {
         const result = await fetchAPI(`/api/admin/user/${encodeURIComponent(userId)}`, { method:'PUT', body:JSON.stringify(data) });
@@ -955,6 +1012,9 @@ async function createAdminUser() {
         role: document.getElementById('new-user-role')?.value || 'user',
         is_active: true,
         balance_usdt: parseFloat(document.getElementById('new-user-balance')?.value) || 0,
+        live_trading_allowed: document.getElementById('new-user-live')?.value === 'true',
+        max_leverage: parseInt(document.getElementById('new-user-max-leverage')?.value) || 20,
+        max_position_pct: parseFloat(document.getElementById('new-user-max-position')?.value) || 10,
     };
     try {
         await fetchAPI('/api/admin/users', { method:'POST', body:JSON.stringify(data) });
@@ -1004,6 +1064,34 @@ async function grantSubscription(userId) {
         showToast('Subscription updated.','success','Saved');
         loadAdmin();
     } catch (err) { showToast(err.message,'error','Grant Failed'); }
+}
+
+async function runPositionMonitor() {
+    try {
+        const result = await fetchAPI('/api/admin/position-monitor/run', { method:'POST' });
+        showToast(`Checked ${result.checked || 0}, adjusted ${result.adjusted || 0}.`, 'success', 'Monitor Complete');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Monitor Failed'); }
+}
+
+async function createBackup() {
+    try {
+        const backup = await fetchAPI('/api/admin/backups', { method:'POST' });
+        showToast(backup.filename, 'success', 'Backup Created');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Backup Failed'); }
+}
+
+function downloadBackup(filename) {
+    window.location.href = `/api/admin/backups/${encodeURIComponent(filename)}`;
+}
+
+async function stageRestore(filename) {
+    if (!confirm('Stage this backup for restore? You must stop the service before replacing live files.')) return;
+    try {
+        const result = await fetchAPI(`/api/admin/backups/${encodeURIComponent(filename)}/restore`, { method:'POST' });
+        showToast(result.message || result.status, 'warning', 'Restore Staged');
+    } catch (err) { showToast(err.message,'error','Restore Failed'); }
 }
 
 async function savePaymentAddress(network) {
@@ -1108,6 +1196,9 @@ function copyUserWebhookSecret() {
 
 async function fetchAPI(path, options = {}) {
     const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+    const method = String(options.method || 'GET').toUpperCase();
+    const csrf = getCookie('tvss_csrf');
+    if (!['GET','HEAD','OPTIONS'].includes(method) && csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
     const resp = await fetch(`${API}${path}`, { credentials: 'include', headers, ...options, headers });
     if (resp.status === 401) { logout(); throw new Error('Session expired'); }
     if (!resp.ok) {

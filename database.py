@@ -55,7 +55,10 @@ def init_database():
                 last_login TEXT,
                 settings_json TEXT DEFAULT '{}',
                 webhook_secret TEXT DEFAULT '',
-                webhook_secret_hash TEXT DEFAULT ''
+                webhook_secret_hash TEXT DEFAULT '',
+                live_trading_allowed INTEGER DEFAULT 0,
+                max_leverage INTEGER DEFAULT 20,
+                max_position_pct REAL DEFAULT 10
             );
 
             CREATE TABLE IF NOT EXISTS subscription_plans (
@@ -207,6 +210,9 @@ def _migrate_schema(conn):
         ("balance_usdt", "ALTER TABLE users ADD COLUMN balance_usdt REAL DEFAULT 0"),
         ("webhook_secret", "ALTER TABLE users ADD COLUMN webhook_secret TEXT DEFAULT ''"),
         ("webhook_secret_hash", "ALTER TABLE users ADD COLUMN webhook_secret_hash TEXT DEFAULT ''"),
+        ("live_trading_allowed", "ALTER TABLE users ADD COLUMN live_trading_allowed INTEGER DEFAULT 0"),
+        ("max_leverage", "ALTER TABLE users ADD COLUMN max_leverage INTEGER DEFAULT 20"),
+        ("max_position_pct", "ALTER TABLE users ADD COLUMN max_position_pct REAL DEFAULT 10"),
     ]
     for col, sql in migrations:
         if col not in columns:
@@ -363,7 +369,11 @@ def get_all_users() -> list[dict]:
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT id, username, email, role, balance_usdt, is_active, created_at, last_login FROM users ORDER BY created_at DESC"
+            """
+            SELECT id, username, email, role, balance_usdt, is_active, created_at, last_login,
+                   live_trading_allowed, max_leverage, max_position_pct
+            FROM users ORDER BY created_at DESC
+            """
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -396,6 +406,9 @@ def update_user_admin(
     role: str,
     is_active: bool,
     balance_usdt: float,
+    live_trading_allowed: bool = False,
+    max_leverage: int = 20,
+    max_position_pct: float = 10.0,
 ) -> dict:
     """Admin edit for account profile and balance."""
     conn = get_connection()
@@ -407,13 +420,27 @@ def update_user_admin(
         conn.execute(
             """
             UPDATE users
-            SET username=?, email=?, role=?, is_active=?, balance_usdt=?
+            SET username=?, email=?, role=?, is_active=?, balance_usdt=?,
+                live_trading_allowed=?, max_leverage=?, max_position_pct=?
             WHERE id=?
             """,
-            (username, email, role, 1 if is_active else 0, balance_usdt, user_id),
+            (
+                username, email, role, 1 if is_active else 0, balance_usdt,
+                1 if live_trading_allowed else 0,
+                max(1, min(int(max_leverage or 1), 125)),
+                max(0.1, min(float(max_position_pct or 10.0), 100.0)),
+                user_id,
+            ),
         )
         conn.commit()
-        row = conn.execute("SELECT id, username, email, role, balance_usdt, is_active FROM users WHERE id=?", (user_id,)).fetchone()
+        row = conn.execute(
+            """
+            SELECT id, username, email, role, balance_usdt, is_active,
+                   live_trading_allowed, max_leverage, max_position_pct
+            FROM users WHERE id=?
+            """,
+            (user_id,),
+        ).fetchone()
         if not row:
             raise ValueError("User not found")
         return dict(row)
@@ -437,6 +464,9 @@ def create_user_admin(
     role: str = "user",
     is_active: bool = True,
     balance_usdt: float = 0.0,
+    live_trading_allowed: bool = False,
+    max_leverage: int = 20,
+    max_position_pct: float = 10.0,
 ) -> dict:
     """Create a user from the admin panel with editable account fields."""
     conn = get_connection()
@@ -448,10 +478,18 @@ def create_user_admin(
         normalized_email = email.lower().strip()
         conn.execute(
             """
-            INSERT INTO users (id, username, email, password_hash, role, is_active, balance_usdt)
-            VALUES (?,?,?,?,?,?,?)
+            INSERT INTO users
+                (id, username, email, password_hash, role, is_active, balance_usdt,
+                 live_trading_allowed, max_leverage, max_position_pct)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
-            (user_id, normalized_username, normalized_email, password_hash, role, 1 if is_active else 0, balance_usdt),
+            (
+                user_id, normalized_username, normalized_email, password_hash, role,
+                1 if is_active else 0, balance_usdt,
+                1 if live_trading_allowed else 0,
+                max(1, min(int(max_leverage or 1), 125)),
+                max(0.1, min(float(max_position_pct or 10.0), 100.0)),
+            ),
         )
         conn.commit()
         return {
@@ -461,6 +499,9 @@ def create_user_admin(
             "role": role,
             "is_active": 1 if is_active else 0,
             "balance_usdt": balance_usdt,
+            "live_trading_allowed": 1 if live_trading_allowed else 0,
+            "max_leverage": max(1, min(int(max_leverage or 1), 125)),
+            "max_position_pct": max(0.1, min(float(max_position_pct or 10.0), 100.0)),
         }
     except sqlite3.IntegrityError as e:
         if "username" in str(e):
@@ -926,6 +967,23 @@ def submit_payment_tx(payment_id: str, user_id: str, tx_hash: str) -> bool:
         conn.close()
 
 
+def get_payment_by_id(payment_id: str) -> dict | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT p.*, u.username, u.email
+            FROM payments p
+            LEFT JOIN users u ON p.user_id=u.id
+            WHERE p.id=?
+            """,
+            (payment_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def payment_tx_hash_exists(tx_hash: str, exclude_payment_id: str = "") -> bool:
     tx_hash = (tx_hash or "").strip()
     if not tx_hash:
@@ -1109,6 +1167,43 @@ def record_webhook_event(
         )
         conn.commit()
         return event_id
+    finally:
+        conn.close()
+
+
+def get_webhook_events(limit: int = 100, status: str = "", user_id: str | None = None) -> list[dict]:
+    limit = max(1, min(int(limit or 100), 500))
+    clauses = []
+    params: list = []
+    if status:
+        clauses.append("we.status=?")
+        params.append(status)
+    if user_id is not None:
+        clauses.append("we.user_id=?")
+        params.append(user_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT we.*, u.username
+            FROM webhook_events we
+            LEFT JOIN users u ON we.user_id=u.id
+            {where}
+            ORDER BY we.created_at DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.pop("payload_json") or "{}")
+            except json.JSONDecodeError:
+                item["payload"] = {}
+            result.append(item)
+        return result
     finally:
         conn.close()
 

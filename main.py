@@ -64,6 +64,7 @@ from notifier import (
 from trade_logger import log_trade, get_today_stats, get_today_trades, get_trade_history
 from analytics import calculate_performance, get_daily_pnl, get_trade_distribution, invalidate_performance_cache
 from auth import (
+    CSRF_COOKIE_NAME,
     hash_password,
     verify_password,
     create_token,
@@ -104,6 +105,7 @@ from database import (
     confirm_payment,
     get_pending_payment_for_subscription,
     submit_payment_tx,
+    get_payment_by_id,
     payment_tx_hash_exists,
     get_user_payments,
     get_all_payments,
@@ -113,6 +115,7 @@ from database import (
     get_admin_audit_logs,
     has_recent_webhook_event,
     record_webhook_event,
+    get_webhook_events,
     create_invite_code,
     list_invite_codes,
     is_invite_code_valid,
@@ -122,6 +125,9 @@ from database import (
     redeem_code_for_user,
     get_connection,
 )
+from backups import create_backup, list_backups, backup_path, stage_restore
+from chain_verify import verify_payment_tx
+from position_monitor import get_monitor_state, run_position_monitor_once
 from payment import (
     get_payment_address,
     set_payment_address,
@@ -372,7 +378,22 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.debug(f"[Scheduler] Telegram summary skipped: {exc}")
 
+    async def _position_monitor_job():
+        try:
+            users = get_all_users()
+            user_configs = {}
+            for u in users:
+                cfg = get_user_settings(u["id"])
+                if cfg:
+                    user_configs[u["id"]] = cfg
+            result = await run_position_monitor_once(user_configs)
+            if result.get("adjusted"):
+                logger.info(f"[PositionMonitor] Adjusted {result['adjusted']} protective stop(s)")
+        except Exception as exc:
+            logger.debug(f"[PositionMonitor] Scheduled run skipped: {exc}")
+
     scheduler.add_job(_daily_reset_job, CronTrigger(hour=0, minute=0, second=0, timezone="UTC"))
+    scheduler.add_job(_position_monitor_job, "interval", seconds=int(os.getenv("POSITION_MONITOR_INTERVAL_SECS", "60")))
     scheduler.start()
     logger.info("[Scheduler] APScheduler started — daily reset wired at 00:00 UTC")
 
@@ -391,6 +412,21 @@ app = FastAPI(
     version="4.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return await call_next(request)
+    if request.url.path in {"/webhook", "/api/auth/login", "/api/auth/register", "/api/auth/logout"}:
+        return await call_next(request)
+    if request.cookies.get("tvss_token"):
+        cookie_token = request.cookies.get(CSRF_COOKIE_NAME, "")
+        header_token = request.headers.get("x-csrf-token", "")
+        if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token):
+            return JSONResponse(status_code=403, content={"detail": "CSRF token missing or invalid"})
+    return await call_next(request)
+
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -719,6 +755,7 @@ async def api_redeem_code(req: RedeemCodeRequest, user=Depends(get_current_user)
 
 def _public_user_settings(user_id: str, request: Request | None = None) -> dict:
     user_settings = get_user_settings(user_id)
+    db_user = get_user_by_id(user_id) or {}
     if not (user_settings.get("webhook") or {}).get("secret"):
         ensure_user_webhook_secret(user_id)
         user_settings = get_user_settings(user_id)
@@ -726,11 +763,17 @@ def _public_user_settings(user_id: str, request: Request | None = None) -> dict:
     tp_cfg = user_settings.get("take_profit") or {}
     webhook_secret = user_settings.get("webhook", {}).get("secret", "")
     webhook_url = (_public_base_url(request) + "/webhook") if request else "/webhook"
+    live_allowed = bool(db_user.get("live_trading_allowed", 0))
     return {
         "exchange": {
             "exchange": exchange_cfg.get("exchange", settings.exchange.name),
-            "live_trading": bool(exchange_cfg.get("live_trading", False)),
+            "live_trading": bool(exchange_cfg.get("live_trading", False)) and live_allowed,
             "api_configured": bool(exchange_cfg.get("api_key") and exchange_cfg.get("api_secret")),
+        },
+        "trade_controls": {
+            "live_trading_allowed": live_allowed,
+            "max_leverage": int(db_user.get("max_leverage") or 20),
+            "max_position_pct": float(db_user.get("max_position_pct") or 10.0),
         },
         "take_profit": {
             "num_levels": tp_cfg.get("num_levels", settings.take_profit.num_levels),
@@ -761,10 +804,18 @@ async def api_user_save_exchange(req: UserExchangeSettingsRequest, user=Depends(
     exchange_name = req.exchange.lower().strip()
     if exchange_name not in get_supported_exchanges():
         raise HTTPException(400, f"Unsupported exchange: {req.exchange}")
+    db_user = get_user_by_id(user["sub"]) or {}
+    if req.live_trading:
+        if not db_user.get("live_trading_allowed", 0):
+            raise HTTPException(403, "Live trading is not enabled for your account")
+        if not get_user_active_subscription(user["sub"]):
+            raise HTTPException(403, "An active subscription is required for live trading")
     current = get_user_settings(user["sub"]).get("exchange") or {}
     updates = {
         "exchange": exchange_name,
         "live_trading": req.live_trading,
+        "max_leverage": int(db_user.get("max_leverage") or 20),
+        "max_position_pct": float(db_user.get("max_position_pct") or 10.0),
         "api_key": req.api_key or current.get("api_key", ""),
         "api_secret": req.api_secret or current.get("api_secret", ""),
         "password": req.password or current.get("password", ""),
@@ -803,6 +854,9 @@ class AdminUserUpdateRequest(BaseModel):
     role: str = "user"
     is_active: bool = True
     balance_usdt: float = Field(default=0.0, ge=0.0)
+    live_trading_allowed: bool = False
+    max_leverage: int = Field(default=20, ge=1, le=125)
+    max_position_pct: float = Field(default=10.0, ge=0.1, le=100.0)
 
 
 class AdminUserCreateRequest(BaseModel):
@@ -812,6 +866,9 @@ class AdminUserCreateRequest(BaseModel):
     role: str = "user"
     is_active: bool = True
     balance_usdt: float = Field(default=0.0, ge=0.0)
+    live_trading_allowed: bool = False
+    max_leverage: int = Field(default=20, ge=1, le=125)
+    max_position_pct: float = Field(default=10.0, ge=0.1, le=100.0)
 
 
 class AdminSubscriptionRequest(BaseModel):
@@ -862,6 +919,9 @@ async def api_admin_create_user(req: AdminUserCreateRequest, request: Request, a
             role=req.role,
             is_active=req.is_active,
             balance_usdt=req.balance_usdt,
+            live_trading_allowed=req.live_trading_allowed,
+            max_leverage=req.max_leverage,
+            max_position_pct=req.max_position_pct,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -900,6 +960,9 @@ async def api_admin_update_user(user_id: str, req: AdminUserUpdateRequest, reque
             role=req.role,
             is_active=req.is_active,
             balance_usdt=req.balance_usdt,
+            live_trading_allowed=req.live_trading_allowed,
+            max_leverage=req.max_leverage,
+            max_position_pct=req.max_position_pct,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -961,6 +1024,29 @@ async def api_admin_confirm_payment(payment_id: str, request: Request, admin=Dep
     logger.info(f"[Admin] Payment {payment_id} confirmed")
     _audit(admin, "payment.confirm", "payment", payment_id, "Payment confirmed", request)
     return {"status": "confirmed"}
+
+
+@app.post("/api/admin/payment/{payment_id}/verify")
+async def api_admin_verify_payment(payment_id: str, request: Request, admin=Depends(require_admin)):
+    payment = get_payment_by_id(payment_id)
+    if not payment:
+        raise HTTPException(404, "Payment not found")
+    try:
+        result = await verify_payment_tx(
+            network=payment.get("network", ""),
+            tx_hash=payment.get("tx_hash", ""),
+            expected_address=payment.get("wallet_address", ""),
+            expected_amount=float(payment.get("amount") or 0),
+            currency=payment.get("currency", "USDT"),
+        )
+    except Exception as exc:
+        result = {"verified": False, "status": "verifier_error", "reason": f"Verification provider error: {exc}"}
+    if result.get("verified"):
+        confirm_payment(payment_id)
+        _audit(admin, "payment.auto_confirm", "payment", payment_id, result.get("reason", "Payment verified"), request)
+        return {"status": "confirmed", "verification": result}
+    _audit(admin, "payment.verify", "payment", payment_id, result.get("reason", "Payment not verified"), request)
+    return {"status": "not_verified", "verification": result}
 
 
 @app.post("/api/admin/payment/{payment_id}/reject")
@@ -1087,6 +1173,64 @@ async def api_admin_create_redeem_code(req: RedeemCodeCreateRequest, request: Re
 @app.get("/api/admin/audit-logs")
 async def api_admin_audit_logs(limit: int = 100, admin=Depends(require_admin)):
     return get_admin_audit_logs(limit)
+
+
+@app.get("/api/admin/webhook-events")
+async def api_admin_webhook_events(limit: int = 100, status: str = "", admin=Depends(require_admin)):
+    return get_webhook_events(limit=limit, status=status)
+
+
+@app.get("/api/admin/backups")
+async def api_admin_backups(admin=Depends(require_admin)):
+    return list_backups()
+
+
+@app.post("/api/admin/backups")
+async def api_admin_create_backup(request: Request, admin=Depends(require_admin)):
+    backup = create_backup()
+    _audit(admin, "backup.create", "backup", backup["filename"], "Backup created", request)
+    return backup
+
+
+@app.get("/api/admin/backups/{filename}")
+async def api_admin_download_backup(filename: str, admin=Depends(require_admin)):
+    try:
+        path = backup_path(filename)
+    except FileNotFoundError:
+        raise HTTPException(404, "Backup not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return FileResponse(path, filename=path.name, media_type="application/zip")
+
+
+@app.post("/api/admin/backups/{filename}/restore")
+async def api_admin_stage_restore(filename: str, request: Request, admin=Depends(require_admin)):
+    try:
+        result = stage_restore(filename)
+    except FileNotFoundError:
+        raise HTTPException(404, "Backup not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _audit(admin, "backup.stage_restore", "backup", filename, result.get("message", ""), request)
+    return result
+
+
+@app.get("/api/admin/position-monitor")
+async def api_admin_position_monitor_state(admin=Depends(require_admin)):
+    return get_monitor_state()
+
+
+@app.post("/api/admin/position-monitor/run")
+async def api_admin_run_position_monitor(request: Request, admin=Depends(require_admin)):
+    users = get_all_users()
+    user_configs = {}
+    for u in users:
+        cfg = get_user_settings(u["id"])
+        if cfg:
+            user_configs[u["id"]] = cfg
+    result = await run_position_monitor_once(user_configs)
+    _audit(admin, "position_monitor.run", "system", "position_monitor", f"checked={result.get('checked')}, adjusted={result.get('adjusted')}", request)
+    return result
 
 
 # ═══════════════════════════════════════════════
@@ -1315,6 +1459,15 @@ async def webhook(request: Request):
                 raise HTTPException(status_code=403, detail="Invalid webhook secret")
         user_id = webhook_user["id"] if webhook_user else None
         user_settings = get_user_settings(user_id) if user_id else {}
+        if user_id:
+            db_user = get_user_by_id(user_id) or {}
+            user_settings.setdefault("exchange", {})
+            user_settings["exchange"]["max_leverage"] = int(db_user.get("max_leverage") or 20)
+            user_settings["exchange"]["max_position_pct"] = float(db_user.get("max_position_pct") or settings.risk.max_position_pct)
+            if user_settings["exchange"].get("live_trading") and (
+                not db_user.get("live_trading_allowed", 0) or not get_user_active_subscription(user_id)
+            ):
+                user_settings["exchange"]["live_trading"] = False
         fingerprint = _webhook_fingerprint(body, user_id)
         safe_body = {k: v for k, v in body.items() if k != "secret"}
         if has_recent_webhook_event(fingerprint, minutes=10):
@@ -1468,7 +1621,7 @@ def _make_decision(signal, analysis, market, user_settings: dict | None = None) 
 
     stop_loss = _build_stop_loss(analysis, entry, direction, user_settings=user_settings)
     size_multiplier = _clamp(analysis.position_size_pct, 0.0, 1.0)
-    qty = _calc_qty(entry, stop_loss, market) * size_multiplier
+    qty = _calc_qty(entry, stop_loss, market, user_settings=user_settings) * size_multiplier
     if qty <= 0:
         return TradeDecision(
             execute=False, ticker=signal.ticker,
@@ -1551,19 +1704,20 @@ def _build_trailing_config() -> TrailingStopConfig:
     )
 
 
-def _calc_qty(entry, stop_loss, market, risk_pct=1.0):
+def _calc_qty(entry, stop_loss, market, risk_pct=1.0, user_settings: dict | None = None):
     if not entry or entry <= 0:
         return 0.0
     account_equity = max(settings.risk.account_equity_usdt, 0)
     if account_equity <= 0:
         return 0.0
+    max_position_pct = ((user_settings or {}).get("exchange") or {}).get("max_position_pct", settings.risk.max_position_pct)
     if stop_loss and stop_loss > 0:
         risk_per_unit = abs(entry - stop_loss)
         if risk_per_unit > 0:
             risk_capital = account_equity * risk_pct * 0.01
-            max_qty = (account_equity * settings.risk.max_position_pct * 0.01) / entry
+            max_qty = (account_equity * float(max_position_pct) * 0.01) / entry
             return min(risk_capital / risk_per_unit, max_qty)
-    return (account_equity * settings.risk.max_position_pct * 0.01) / entry
+    return (account_equity * float(max_position_pct) * 0.01) / entry
 
 
 def _clamp(value, low, high):
