@@ -47,7 +47,7 @@ async function requireAuth() {
 async function logout() {
     try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch {}
     _cachedUser = null;
-    window.location.href = '/login';
+    window.location.href = '/login?logged_out=1';
 }
 
 // ─── Initialization ───

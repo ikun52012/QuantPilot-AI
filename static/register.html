@@ -120,6 +120,7 @@ const btn = document.getElementById('btn-register');
 
 // Redirect if already logged in
 (async () => {
+    if (new URLSearchParams(window.location.search).get('logged_out') === '1') return;
     try {
         const r = await fetch('/api/auth/me', { credentials: 'include' });
         if (r.ok) window.location.href = '/dashboard';

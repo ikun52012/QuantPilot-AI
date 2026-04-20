@@ -140,16 +140,38 @@ def create_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def set_auth_cookie(response, token: str):
+def _request_is_https(request: Request | None = None) -> bool:
+    if not request:
+        return False
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    cf_visitor = request.headers.get("cf-visitor", "").lower()
+    return forwarded_proto == "https" or request.url.scheme == "https" or '"scheme":"https"' in cf_visitor
+
+
+def _cookie_secure(request: Request | None = None) -> bool:
+    mode = os.getenv("COOKIE_SECURE", "auto").lower().strip()
+    if mode in {"force", "always"}:
+        return True
+    if mode in {"false", "0", "no", "off"}:
+        return False
+    if _request_is_https(request):
+        return True
+    # In auto/true mode, do not force Secure when this request appears to be HTTP.
+    # This prevents login loops on direct-IP, local, or proxy setups missing x-forwarded-proto.
+    return False
+
+
+def set_auth_cookie(response, token: str, request: Request | None = None):
     """Set the browser cookie used by page routes."""
     max_age = JWT_EXPIRY_HOURS * 3600
     csrf_token = create_csrf_token()
+    secure = _cookie_secure(request)
     response.set_cookie(
         AUTH_COOKIE_NAME,
         token,
         max_age=max_age,
         httponly=True,
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        secure=secure,
         samesite="lax",
         path="/",
     )
@@ -158,16 +180,17 @@ def set_auth_cookie(response, token: str):
         csrf_token,
         max_age=max_age,
         httponly=False,
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        secure=secure,
         samesite="lax",
         path="/",
     )
 
 
-def clear_auth_cookie(response):
+def clear_auth_cookie(response, request: Request | None = None):
     """Clear auth cookie on logout."""
-    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
-    response.delete_cookie(CSRF_COOKIE_NAME, path="/")
+    secure = _cookie_secure(request)
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="lax")
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure, samesite="lax")
 
 
 def get_current_user(request: Request) -> dict:

@@ -511,7 +511,7 @@ class UserTakeProfitSettingsRequest(BaseModel):
 
 
 @app.post("/api/auth/register")
-async def api_register(req: RegisterRequest, response: Response):
+async def api_register(req: RegisterRequest, request: Request, response: Response):
     username = req.username.lower().strip()
     email = req.email.lower().strip()
     if len(username) < 3:
@@ -542,7 +542,7 @@ async def api_register(req: RegisterRequest, response: Response):
         update_user_status(user["id"], False)
         raise HTTPException(400, "Invalid or expired invite code")
     token = create_token(user["id"], user["username"], user["role"])
-    set_auth_cookie(response, token)
+    set_auth_cookie(response, token, request)
 
     logger.info(f"[Auth] New user registered: {username}")
     return {"token": token, "user": {"id": user["id"], "username": user["username"], "email": email, "role": user["role"]}}
@@ -566,15 +566,15 @@ async def api_login(req: LoginRequest, request: Request, response: Response):
     update_user_login(user["id"])
     _clear_login_rate_limit(client_ip)
     token = create_token(user["id"], user["username"], user["role"])
-    set_auth_cookie(response, token)
+    set_auth_cookie(response, token, request)
 
     logger.info(f"[Auth] User logged in: {username}")
     return {"token": token, "user": {"id": user["id"], "username": user["username"], "email": user["email"], "role": user["role"]}}
 
 
 @app.post("/api/auth/logout")
-async def api_logout(response: Response):
-    clear_auth_cookie(response)
+async def api_logout(request: Request, response: Response):
+    clear_auth_cookie(response, request)
     return {"status": "ok"}
 
 

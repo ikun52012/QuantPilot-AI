@@ -94,6 +94,7 @@ const eyeIcon = document.getElementById('eye-icon');
 
 // Redirect if already logged in (via cookie — check /api/auth/me)
 (async () => {
+    if (new URLSearchParams(window.location.search).get('logged_out') === '1') return;
     try {
         const r = await fetch('/api/auth/me', { credentials: 'include' });
         if (r.ok) window.location.href = '/dashboard';
