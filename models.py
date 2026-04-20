@@ -163,6 +163,7 @@ class AIAnalysis(BaseModel):
     tp3_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)
     tp4_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)
     position_size_pct: float = Field(default=1.0, ge=0.0, le=1.0)  # suggested position size as % of default
+    recommended_leverage: float = Field(default=1.0, ge=1.0, le=125.0)
     risk_score: float = Field(default=0.5, ge=0.0, le=1.0)
     market_condition: str = ""          # trending / ranging / volatile / calm
     warnings: list[str] = Field(default_factory=list)

@@ -261,7 +261,8 @@ async function loadHistory() {
             const status = t.order_status||t.status||'--', pnl = t.pnl_pct||0;
             const time = t.timestamp ? new Date(t.timestamp).toLocaleString() : '--';
             const statusClass = safeClassToken(status);
-            return `<tr><td>${escapeHtml(time)}</td><td><strong>${escapeHtml(t.ticker||'--')}</strong></td><td><span class="badge ${isLong?'badge-long':'badge-short'}">${escapeHtml(dir)}</span></td><td>${t.entry_price?'$'+formatNum(t.entry_price):'--'}</td><td>${t.stop_loss?'$'+formatNum(t.stop_loss):'--'}</td><td>${t.take_profit?'$'+formatNum(t.take_profit):'--'}</td><td>${(conf*100).toFixed(0)}%</td><td><span class="badge badge-${statusClass}">${escapeHtml(status)}</span></td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">${pnl?pnl.toFixed(2)+'%':'--'}</td></tr>`;
+            const leverage = t.ai?.recommended_leverage ? ` / ${Number(t.ai.recommended_leverage).toFixed(1)}x` : '';
+            return `<tr><td>${escapeHtml(time)}</td><td><strong>${escapeHtml(t.ticker||'--')}</strong></td><td><span class="badge ${isLong?'badge-long':'badge-short'}">${escapeHtml(dir)}</span></td><td>${t.entry_price?'$'+formatNum(t.entry_price):'--'}</td><td>${t.stop_loss?'$'+formatNum(t.stop_loss):'--'}</td><td>${t.take_profit?'$'+formatNum(t.take_profit):'--'}</td><td>${(conf*100).toFixed(0)}%${escapeHtml(leverage)}</td><td><span class="badge badge-${statusClass}">${escapeHtml(status)}</span></td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">${pnl?pnl.toFixed(2)+'%':'--'}</td></tr>`;
         }).join('');
     } catch (err) { showToast(err.message, 'error', 'History Load Failed'); }
 }
@@ -292,6 +293,7 @@ function setupExchangeToggle() {
     const sel = document.getElementById('set-exchange');
     sel?.addEventListener('change', toggleExchangePasswordField);
     document.getElementById('set-ai-provider')?.addEventListener('change', toggleCustomAIFields);
+    document.querySelectorAll('input[name="ai-risk-profile"]').forEach(el => el.addEventListener('change', toggleRiskProfileHint));
 }
 
 function toggleExchangePasswordField() {
@@ -312,6 +314,16 @@ function toggleExitModeFields() {
     const customFields = document.getElementById('custom-exit-fields');
     if (aiFields) aiFields.style.display = mode === 'ai' ? 'block' : 'none';
     if (customFields) customFields.style.display = mode === 'custom' ? 'block' : 'none';
+}
+
+function toggleRiskProfileHint() {
+    const profile = document.querySelector('input[name="ai-risk-profile"]:checked')?.value || 'balanced';
+    const hints = {
+        conservative: 'Conservative: stricter filtering, 1:2 target R/R, leverage usually 1x-5x and capped at 10x.',
+        balanced: 'Balanced: clean setups, 1:1.5 target R/R, leverage usually 2x-10x and capped at 20x.',
+        aggressive: 'Aggressive: more momentum opportunities, 1:1.2 target R/R, leverage usually 5x-20x and capped at 50x.',
+    };
+    setText('ai-risk-profile-hint', `${hints[profile]} AI will include recommended_leverage in each analysis result.`);
 }
 
 async function loadSettings() {
@@ -360,7 +372,11 @@ async function loadSettings() {
         const mode = risk.exit_management_mode === 'custom' ? 'custom' : 'ai';
         const modeEl = document.getElementById(`exit-mode-${mode}`);
         if (modeEl) modeEl.checked = true;
+        const profile = ['conservative','balanced','aggressive'].includes(risk.ai_risk_profile) ? risk.ai_risk_profile : 'balanced';
+        const profileEl = document.getElementById(`ai-risk-${profile}`);
+        if (profileEl) profileEl.checked = true;
         toggleExitModeFields();
+        toggleRiskProfileHint();
         if (isAdmin()) loadAdminWebhookConfig();
     } catch (e) { console.error('Settings load error:', e); }
 }
@@ -399,11 +415,13 @@ async function saveAISettings() { await saveSettings('/api/settings/ai', { provi
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
 async function saveRiskSettings() {
     const mode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';
+    const profile = document.querySelector('input[name="ai-risk-profile"]:checked')?.value || 'balanced';
     await saveSettings('/api/settings/risk', {
         max_position_pct: parseFloat(document.getElementById('set-max-pos').value) || 10,
         max_daily_trades: parseInt(document.getElementById('set-max-trades').value) || 10,
         max_daily_loss_pct: parseFloat(document.getElementById('set-max-loss').value) || 5,
         exit_management_mode: mode,
+        ai_risk_profile: profile,
         custom_stop_loss_pct: parseFloat(document.getElementById('set-custom-sl').value) || 1.5,
         ai_exit_system_prompt: document.getElementById('set-ai-exit-prompt').value || '',
     });

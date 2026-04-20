@@ -50,6 +50,7 @@ You MUST respond in valid JSON format with these exact fields:
     "tp3_qty_pct": 25.0,
     "tp4_qty_pct": 25.0,
     "position_size_pct": 0.1-1.0,
+    "recommended_leverage": 1-125,
     "risk_score": 0.0-1.0,
     "market_condition": "trending_up" | "trending_down" | "ranging" | "volatile" | "calm",
     "warnings": ["list of risk warnings"]
@@ -57,10 +58,15 @@ You MUST respond in valid JSON format with these exact fields:
 
 Key rules:
 - If confidence < 0.4, always recommend "reject"
+- Reject trades whose realistic reward/risk is below the active profile requirement
+- Stop loss must be placed beyond a logical invalidation area, not at a random fixed distance
+- For long trades, stop loss must be below entry and take profits above entry
+- For short trades, stop loss must be above entry and take profits below entry
 - If funding rate is extreme (>0.05% or <-0.05%), warn about it
 - If 1h price change > 5%, reduce position_size_pct
 - If RSI > 75 and signal is long, be skeptical. If RSI < 25 and signal is short, be skeptical.
 - If orderbook is heavily imbalanced against the signal direction, warn about it
+- recommended_leverage is only a recommendation for the operator and must decrease as risk_score/volatility rises
 - NEVER recommend more than position_size_pct = 1.0
 - For take-profit levels: space them based on ATR and volatility
   - In trending markets, use wider TP spacing
@@ -70,9 +76,33 @@ Key rules:
 Respond ONLY with the JSON object, no other text."""
 
 
+RISK_PROFILE_PROMPTS = {
+    "conservative": """AI risk profile: CONSERVATIVE.
+- Filter aggressively; reject marginal, late, overextended, or noisy trades.
+- Require realistic total reward/risk of at least 1:2 before execute/modify.
+- Prefer 1x-5x leverage; never recommend above 10x.
+- Use wider volatility-aware stops, smaller position_size_pct, and fewer trades.
+- If market structure is unclear, reject instead of forcing a plan.""",
+    "balanced": """AI risk profile: BALANCED.
+- Trade only clean setups with acceptable confirmation and liquidity.
+- Require realistic total reward/risk of at least 1:1.5 before execute/modify.
+- Prefer 2x-10x leverage; never recommend above 20x.
+- Balance capital protection with reasonable participation.
+- Modify entries/exits when the signal is usable but raw levels are weak.""",
+    "aggressive": """AI risk profile: AGGRESSIVE.
+- Accept more momentum/breakout opportunities, but never ignore invalidation.
+- Require realistic total reward/risk of at least 1:1.2 before execute/modify.
+- Prefer 5x-20x leverage; never recommend above 50x.
+- Use tighter invalidation and faster TP scaling when volatility is high.
+- Still reject trades with impossible stops, severe spread, or strong opposite orderbook pressure.""",
+}
+
+
 def _get_effective_system_prompt() -> str:
     """Return system prompt with optional custom additions."""
     base = SYSTEM_PROMPT
+    profile = settings.risk.ai_risk_profile.lower().strip()
+    base += "\n\n" + RISK_PROFILE_PROMPTS.get(profile, RISK_PROFILE_PROMPTS["balanced"])
     if settings.risk.exit_management_mode == "ai":
         base += (
             "\n\nExit management mode: AI-generated exits are enabled. "
@@ -430,6 +460,7 @@ def _parse_response(raw: str) -> AIAnalysis:
             tp3_qty_pct=float(data.get("tp3_qty_pct", 25.0)),
             tp4_qty_pct=float(data.get("tp4_qty_pct", 25.0)),
             position_size_pct=float(data.get("position_size_pct", 1.0)),
+            recommended_leverage=float(data.get("recommended_leverage", 1.0)),
             risk_score=float(data.get("risk_score", 0.5)),
             market_condition=data.get("market_condition", ""),
             warnings=warnings,

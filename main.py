@@ -218,6 +218,7 @@ async def lifespan(app: FastAPI):
         settings.risk.max_daily_trades = rs["risk"].get("max_daily_trades", settings.risk.max_daily_trades)
         settings.risk.max_daily_loss_pct = rs["risk"].get("max_daily_loss_pct", settings.risk.max_daily_loss_pct)
         settings.risk.exit_management_mode = rs["risk"].get("exit_management_mode", settings.risk.exit_management_mode)
+        settings.risk.ai_risk_profile = rs["risk"].get("ai_risk_profile", settings.risk.ai_risk_profile)
         settings.risk.custom_stop_loss_pct = rs["risk"].get("custom_stop_loss_pct", settings.risk.custom_stop_loss_pct)
         settings.risk.ai_exit_system_prompt = rs["risk"].get("ai_exit_system_prompt", settings.risk.ai_exit_system_prompt)
     if rs.get("take_profit"):
@@ -974,6 +975,7 @@ async def api_status():
             "max_daily_trades": settings.risk.max_daily_trades,
             "max_daily_loss_pct": settings.risk.max_daily_loss_pct,
             "exit_management_mode": settings.risk.exit_management_mode,
+            "ai_risk_profile": settings.risk.ai_risk_profile,
             "custom_stop_loss_pct": settings.risk.custom_stop_loss_pct,
             "ai_exit_system_prompt": settings.risk.ai_exit_system_prompt,
         },
@@ -1371,6 +1373,7 @@ class RiskSettingsRequest(BaseModel):
     max_daily_trades: int = Field(default=10, ge=0, le=1000)
     max_daily_loss_pct: float = Field(default=5.0, ge=0.1, le=100.0)
     exit_management_mode: str = "ai"
+    ai_risk_profile: str = "balanced"
     custom_stop_loss_pct: float = Field(default=1.5, ge=0.1, le=100.0)
     ai_exit_system_prompt: str = Field(default="", max_length=4000)
 
@@ -1485,10 +1488,13 @@ async def save_telegram_settings(req: TelegramSettingsRequest, admin=Depends(req
 async def save_risk_settings(req: RiskSettingsRequest, admin=Depends(require_admin)):
     if req.exit_management_mode not in ("ai", "custom"):
         raise HTTPException(400, "exit_management_mode must be ai or custom")
+    if req.ai_risk_profile not in ("conservative", "balanced", "aggressive"):
+        raise HTTPException(400, "ai_risk_profile must be conservative, balanced, or aggressive")
     settings.risk.max_position_pct = req.max_position_pct
     settings.risk.max_daily_trades = req.max_daily_trades
     settings.risk.max_daily_loss_pct = req.max_daily_loss_pct
     settings.risk.exit_management_mode = req.exit_management_mode
+    settings.risk.ai_risk_profile = req.ai_risk_profile
     settings.risk.custom_stop_loss_pct = req.custom_stop_loss_pct
     settings.risk.ai_exit_system_prompt = req.ai_exit_system_prompt
     _save_runtime_settings({
@@ -1497,6 +1503,7 @@ async def save_risk_settings(req: RiskSettingsRequest, admin=Depends(require_adm
             "max_daily_trades": req.max_daily_trades,
             "max_daily_loss_pct": req.max_daily_loss_pct,
             "exit_management_mode": req.exit_management_mode,
+            "ai_risk_profile": req.ai_risk_profile,
             "custom_stop_loss_pct": req.custom_stop_loss_pct,
             "ai_exit_system_prompt": req.ai_exit_system_prompt,
         }

@@ -12,6 +12,7 @@ AI-powered crypto signal server for TradingView webhooks. It includes exchange e
 - Invite-only registration can be switched on/off from the admin panel.
 - Card codes can redeem account balance, subscription access, or both.
 - Risk exits can be AI-generated or custom fixed stop-loss based.
+- AI risk style can be switched between Conservative, Balanced, and Aggressive, with leverage recommendations logged.
 - Multi take-profit levels, trailing stop modes, analytics, Telegram notifications, and multi-exchange support.
 
 ## Quick Start
@@ -131,6 +132,14 @@ Exit management modes:
 - `ai`: AI must return stop loss and take-profit targets.
 - `custom`: server uses configured custom stop-loss percent and take-profit distances.
 
+AI risk styles:
+
+- `conservative`: stricter filtering, target reward/risk around 1:2, leverage usually 1x-5x.
+- `balanced`: clean setups, target reward/risk around 1:1.5, leverage usually 2x-10x.
+- `aggressive`: more momentum opportunities, target reward/risk around 1:1.2, leverage usually 5x-20x.
+
+AI responses include `recommended_leverage`, which is stored in trade logs with the analysis result.
+
 Take-profit and trailing-stop features:
 
 - TP1 to TP4 with independent close percentages.
@@ -171,6 +180,7 @@ Settings can come from:
 | `MAX_DAILY_TRADES` | Max daily trades | `10` |
 | `MAX_DAILY_LOSS_PCT` | Max daily loss percent | `5.0` |
 | `EXIT_MANAGEMENT_MODE` | `ai` or `custom` | `ai` |
+| `AI_RISK_PROFILE` | `conservative`, `balanced`, or `aggressive` | `balanced` |
 | `CUSTOM_STOP_LOSS_PCT` | Fixed stop loss percent in custom mode | `1.5` |
 | `AI_EXIT_SYSTEM_PROMPT` | Extra prompt for AI-generated SL/TP | see `.env.example` |
 | `PAYMENT_ADDRESS_TRC20` | USDT TRC20 receiving address | empty |

@@ -86,6 +86,7 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
             "market_condition": decision.ai_analysis.market_condition,
             "warnings": decision.ai_analysis.warnings,
             "position_size_pct": decision.ai_analysis.position_size_pct,
+            "recommended_leverage": decision.ai_analysis.recommended_leverage,
         }
 
     # Save to today's log file

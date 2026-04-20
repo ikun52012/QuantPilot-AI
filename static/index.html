@@ -626,6 +626,36 @@
                             </label>
                         </div>
                     </div>
+                    <div class="form-group">
+                        <label>AI Risk Style</label>
+                        <div class="option-card-grid">
+                            <label class="option-card">
+                                <input type="radio" name="ai-risk-profile" id="ai-risk-conservative" value="conservative" onchange="toggleRiskProfileHint()">
+                                <span class="option-card-icon"><i class="ri-shield-star-line"></i></span>
+                                <span class="option-card-copy">
+                                    <strong>Conservative</strong>
+                                    <small>Strict filtering, 1:2 target R/R, suggested leverage usually 1x-5x.</small>
+                                </span>
+                            </label>
+                            <label class="option-card">
+                                <input type="radio" name="ai-risk-profile" id="ai-risk-balanced" value="balanced" checked onchange="toggleRiskProfileHint()">
+                                <span class="option-card-icon"><i class="ri-scales-3-line"></i></span>
+                                <span class="option-card-copy">
+                                    <strong>Balanced</strong>
+                                    <small>Clean setups, 1:1.5 target R/R, suggested leverage usually 2x-10x.</small>
+                                </span>
+                            </label>
+                            <label class="option-card">
+                                <input type="radio" name="ai-risk-profile" id="ai-risk-aggressive" value="aggressive" onchange="toggleRiskProfileHint()">
+                                <span class="option-card-icon"><i class="ri-rocket-line"></i></span>
+                                <span class="option-card-copy">
+                                    <strong>Aggressive</strong>
+                                    <small>More momentum trades, 1:1.2 target R/R, suggested leverage usually 5x-20x.</small>
+                                </span>
+                            </label>
+                        </div>
+                        <p class="hint" id="ai-risk-profile-hint">AI will include a recommended leverage value in every analysis result.</p>
+                    </div>
                     <div id="ai-exit-fields" class="form-group">
                         <label for="set-ai-exit-prompt">AI Exit Prompt</label>
                         <textarea id="set-ai-exit-prompt" class="text-input" rows="3" placeholder="Tell AI how to generate stop loss and take-profit levels."></textarea>
