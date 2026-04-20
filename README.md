@@ -158,7 +158,7 @@ The server records webhook events and ignores duplicate payload fingerprints wit
 - Runtime admin secrets, webhook secrets, and per-user exchange keys are encrypted at rest with `APP_ENCRYPTION_KEY`. If it is omitted, the app generates a persistent key in `data/app_encryption.key`; back this file up and keep the `data/` volume mounted permanently.
 - Per-user webhook lookup uses a stored hash, so the dashboard can show each user's real secret while the database index does not keep the raw value.
 - Browser write APIs use a double-submit CSRF token in addition to the HttpOnly session cookie.
-- Leave `PUBLIC_BASE_URL` empty to auto-detect the current domain from request/proxy headers. Set it only if auto-detection is wrong, such as `https://cs.hyzcjs.com`.
+- Leave `PUBLIC_BASE_URL` empty to auto-detect the current domain from request/proxy headers. Set it only if auto-detection is wrong, such as `https://127.0.0.1`.
 - Set `COOKIE_SECURE=true` when deploying behind HTTPS.
 - Docker Compose binds the app to `127.0.0.1:8000` by default. Expose it through Nginx, Caddy, Cloudflare Tunnel, or another HTTPS reverse proxy.
 - Trade logs are written to SQLite for long-term querying while legacy JSON logs remain readable.
