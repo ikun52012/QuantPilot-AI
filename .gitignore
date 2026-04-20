@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+data/
+trade_logs/
+logs/
+*.egg-info/
+.venv/
+venv/
+runtime_settings.json

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - TradingView Signal Server</title>
+    <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800|inter:300,400,500,600" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{
+            --bg:#020617;--card:rgba(15,23,42,.65);--border:rgba(255,255,255,.08);
+            --text:#f8fafc;--muted:#94a3b8;--blue:#3b82f6;--purple:#a855f7;--cyan:#06b6d4;
+            --green:#10b981;--red:#f43f5e;--gradient:linear-gradient(135deg,#3b82f6,#a855f7,#06b6d4);
+        }
+        html{height:100%}
+        body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden}
+        h1,h2,h3{font-family:'Outfit',sans-serif;}
+        .bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:linear-gradient(rgba(59,130,246,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,.03) 1px,transparent 1px);background-size:60px 60px}
+        .bg-glow{position:fixed;z-index:0;pointer-events:none;width:500px;height:500px;border-radius:50%;filter:blur(120px);opacity:.35}
+        .g1{top:-200px;left:-100px;background:rgba(59,130,246,.18)}.g2{bottom:-200px;right:-100px;background:rgba(168,85,247,.14)}
+        .auth-container{position:relative;z-index:1;width:100%;max-width:420px;padding:20px}
+        .auth-card{background:var(--card);border:1px solid var(--border);border-radius:24px;padding:40px 36px;backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);box-shadow:0 12px 40px rgba(0,0,0,.5);position:relative;overflow:hidden;}
+        .auth-card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.15),transparent)}
+        .auth-logo{text-align:center;margin-bottom:28px}
+        .auth-logo i{font-size:36px;background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .auth-logo h1{font-size:24px;font-weight:700;margin-top:8px}
+        .auth-logo p{color:var(--muted);font-size:14px;margin-top:4px}
+        .form-group{margin-bottom:18px}
+        .form-group label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin-bottom:6px}
+        .input-wrap{position:relative}
+        .input-wrap i.icon-left{position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:18px;color:var(--muted)}
+        .input-wrap input{width:100%;padding:12px 42px 12px 42px;border-radius:10px;border:1px solid var(--border);background:rgba(10,14,23,.6);color:var(--text);font-size:14px;font-family:inherit;transition:border-color .2s}
+        .input-wrap input:focus{outline:none;border-color:var(--blue)}
+        .input-wrap input::placeholder{color:rgba(136,146,168,.5)}
+        .input-wrap .eye-btn{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:4px;line-height:1;transition:color .2s}
+        .input-wrap .eye-btn:hover{color:var(--text)}
+        .btn-auth{width:100%;padding:13px;border:none;border-radius:10px;background:var(--gradient);color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .3s;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px}
+        .btn-auth:hover{transform:translateY(-2px);box-shadow:0 6px 24px rgba(79,140,255,.35)}
+        .btn-auth:disabled{opacity:.6;cursor:not-allowed;transform:none;box-shadow:none}
+        .auth-footer{text-align:center;margin-top:20px;font-size:13px;color:var(--muted)}
+        .auth-footer a{color:var(--blue);text-decoration:none;font-weight:600}
+        .auth-footer a:hover{text-decoration:underline}
+        .error-msg{display:none;padding:10px 14px;border-radius:8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);color:var(--red);font-size:13px;margin-bottom:16px;align-items:center;gap:8px}
+        .error-msg.visible{display:flex}
+        .back-link{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:13px;text-decoration:none;margin-bottom:16px;transition:color .2s}
+        .back-link:hover{color:var(--text)}
+    </style>
+</head>
+<body>
+<div class="bg-grid"></div><div class="bg-glow g1"></div><div class="bg-glow g2"></div>
+<div class="auth-container">
+    <a href="/" class="back-link"><i class="ri-arrow-left-line"></i> Back to Home</a>
+    <div class="auth-card">
+        <div class="auth-logo">
+            <i class="ri-signal-tower-fill"></i>
+            <h1>Welcome Back</h1>
+            <p>Sign in to TradingView Signal Server</p>
+        </div>
+        <div class="error-msg" id="error-msg"><i class="ri-error-warning-line"></i><span id="error-text"></span></div>
+        <form id="login-form" autocomplete="on">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <div class="input-wrap">
+                    <i class="ri-user-3-line icon-left"></i>
+                    <input type="text" id="username" name="username" placeholder="Enter username" required autocomplete="username">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <div class="input-wrap">
+                    <i class="ri-lock-2-line icon-left"></i>
+                    <input type="password" id="password" name="password" placeholder="Enter password" required autocomplete="current-password">
+                    <button type="button" class="eye-btn" id="toggle-pw" aria-label="Toggle password visibility"><i class="ri-eye-off-line" id="eye-icon"></i></button>
+                </div>
+            </div>
+            <button type="submit" class="btn-auth" id="btn-login">
+                <i class="ri-login-box-line"></i> Sign In
+            </button>
+        </form>
+        <div class="auth-footer">
+            Don't have an account? <a href="/register">Create one</a>
+        </div>
+    </div>
+</div>
+<script>
+const form = document.getElementById('login-form');
+const errEl = document.getElementById('error-msg');
+const errText = document.getElementById('error-text');
+const btn = document.getElementById('btn-login');
+const pwInput = document.getElementById('password');
+const togglePw = document.getElementById('toggle-pw');
+const eyeIcon = document.getElementById('eye-icon');
+
+// Redirect if already logged in (via cookie — check /api/auth/me)
+(async () => {
+    try {
+        const r = await fetch('/api/auth/me', { credentials: 'include' });
+        if (r.ok) window.location.href = '/dashboard';
+    } catch (_) {}
+})();
+
+togglePw.addEventListener('click', () => {
+    const visible = pwInput.type === 'text';
+    pwInput.type = visible ? 'password' : 'text';
+    eyeIcon.className = visible ? 'ri-eye-off-line' : 'ri-eye-line';
+});
+
+form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errEl.classList.remove('visible');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ri-loader-4-line"></i> Signing in...';
+
+    try {
+        const resp = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+                username: document.getElementById('username').value,
+                password: document.getElementById('password').value,
+            }),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            throw new Error(data.detail || 'Login failed');
+        }
+
+        // Token is stored in httpOnly cookie by the server; no localStorage needed
+        window.location.href = '/dashboard';
+    } catch (err) {
+        errText.textContent = err.message;
+        errEl.classList.add('visible');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-login-box-line"></i> Sign In';
+    }
+});
+</script>
+</body>
+</html>
