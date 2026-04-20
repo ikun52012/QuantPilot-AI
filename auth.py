@@ -79,7 +79,6 @@ def create_token(user_id: str, username: str, role: str = "user") -> str:
     now = int(time.time())
     payload = {
         "sub": user_id,
-        "username": username,
         "role": role,
         "iat": now,
         "exp": now + (JWT_EXPIRY_HOURS * 3600),
