@@ -17,6 +17,8 @@ Usage:
 import sys
 import json
 import hmac
+import os
+import hashlib
 import secrets
 import threading
 from datetime import datetime
@@ -31,6 +33,7 @@ from pydantic import BaseModel, Field, ValidationError
 from typing import Optional
 
 from config import settings
+from security import decrypt_settings_payload, encrypt_settings_payload
 from models import (
     TradingViewSignal,
     TradeDecision,
@@ -101,10 +104,15 @@ from database import (
     confirm_payment,
     get_pending_payment_for_subscription,
     submit_payment_tx,
+    payment_tx_hash_exists,
     get_user_payments,
     get_all_payments,
     get_admin_setting,
     set_admin_setting,
+    add_admin_audit_log,
+    get_admin_audit_logs,
+    has_recent_webhook_event,
+    record_webhook_event,
     create_invite_code,
     list_invite_codes,
     is_invite_code_valid,
@@ -178,7 +186,7 @@ def _load_runtime_settings() -> dict:
         if not path.exists():
             continue
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return decrypt_settings_payload(json.loads(path.read_text(encoding="utf-8")))
         except Exception as e:
             logger.warning(f"[Settings] Failed to read {path.name}: {e}")
     return {}
@@ -190,8 +198,66 @@ def _save_runtime_settings(data: dict):
         current = _load_runtime_settings()
         current.update(data)
         tmp_path = SETTINGS_FILE.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.write_text(
+            json.dumps(encrypt_settings_payload(current), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         tmp_path.replace(SETTINGS_FILE)
+
+
+def _public_base_url(request: Request | None = None) -> str:
+    if settings.server.public_base_url:
+        return settings.server.public_base_url.rstrip("/")
+    if request:
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+        forwarded_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+        if forwarded_host:
+            proto = forwarded_proto or request.url.scheme
+            return f"{proto}://{forwarded_host}".rstrip("/")
+        return str(request.base_url).rstrip("/")
+    return ""
+
+
+def _client_ip(request: Request | None) -> str:
+    if not request:
+        return ""
+    forwarded = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+def _audit(admin: dict, action: str, target_type: str = "", target_id: str = "", summary: str = "", request: Request | None = None):
+    try:
+        add_admin_audit_log(
+            admin_id=admin.get("sub", ""),
+            admin_username=admin.get("username", ""),
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            summary=summary,
+            client_ip=_client_ip(request),
+        )
+    except Exception as e:
+        logger.debug(f"[Audit] Could not write audit log: {e}")
+
+
+def _webhook_fingerprint(body: dict, user_id: str | None) -> str:
+    scope = user_id or "admin"
+    fields = {
+        "scope": scope,
+        "secret_hash": hashlib.sha256(str(body.get("secret", "")).strip().encode()).hexdigest()[:16],
+        "ticker": str(body.get("ticker", "")).upper().strip(),
+        "direction": str(body.get("direction", "")).lower().strip(),
+        "timeframe": str(body.get("timeframe", "")).strip(),
+        "price": body.get("price"),
+        "strategy": str(body.get("strategy", "")).strip(),
+        "message": str(body.get("message", "")).strip(),
+        "alert_id": str(body.get("alert_id") or body.get("order_id") or body.get("id") or "").strip(),
+        "bar_time": str(body.get("bar_time") or body.get("time") or body.get("timestamp") or "").strip(),
+    }
+    raw = json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 # ─────────────────────────────────────────────
@@ -261,6 +327,8 @@ async def lifespan(app: FastAPI):
         settings.trailing_stop.trail_pct = ts.get("trail_pct", settings.trailing_stop.trail_pct)
         settings.trailing_stop.activation_profit_pct = ts.get("activation_profit_pct", settings.trailing_stop.activation_profit_pct)
         settings.trailing_stop.trailing_step_pct = ts.get("trailing_step_pct", settings.trailing_stop.trailing_step_pct)
+    if rs:
+        _save_runtime_settings(rs)
 
     env_webhook_secret = (settings.server.webhook_secret or "").strip()
     if _is_placeholder_webhook_secret(env_webhook_secret):
@@ -612,6 +680,8 @@ async def api_submit_tx(req: PaymentSubmitRequest, user=Depends(get_current_user
     """Submit a transaction hash for payment verification."""
     payment_id = req.payment_id
     tx_hash = req.tx_hash.strip()
+    if payment_tx_hash_exists(tx_hash, exclude_payment_id=payment_id):
+        raise HTTPException(400, "This transaction hash has already been submitted")
 
     # The admin will need to verify the tx manually.
     if not submit_payment_tx(payment_id, user["sub"], tx_hash):
@@ -648,7 +718,7 @@ def _public_user_settings(user_id: str, request: Request | None = None) -> dict:
     exchange_cfg = user_settings.get("exchange") or {}
     tp_cfg = user_settings.get("take_profit") or {}
     webhook_secret = user_settings.get("webhook", {}).get("secret", "")
-    webhook_url = str(request.base_url).rstrip("/") + "/webhook" if request else "/webhook"
+    webhook_url = (_public_base_url(request) + "/webhook") if request else "/webhook"
     return {
         "exchange": {
             "exchange": exchange_cfg.get("exchange", settings.exchange.name),
@@ -776,7 +846,7 @@ async def api_admin_users(admin=Depends(require_admin)):
 
 
 @app.post("/api/admin/users")
-async def api_admin_create_user(req: AdminUserCreateRequest, admin=Depends(require_admin)):
+async def api_admin_create_user(req: AdminUserCreateRequest, request: Request, admin=Depends(require_admin)):
     try:
         user = create_user_admin(
             username=req.username,
@@ -789,11 +859,12 @@ async def api_admin_create_user(req: AdminUserCreateRequest, admin=Depends(requi
     except ValueError as e:
         raise HTTPException(400, str(e))
     logger.info(f"[Admin] User {user['username']} created by {admin['username']}")
+    _audit(admin, "user.create", "user", user["id"], f"Created user {user['username']}", request)
     return {"status": "created", "user": user}
 
 
 @app.post("/api/admin/user/{user_id}/toggle")
-async def api_admin_toggle_user(user_id: str, admin=Depends(require_admin)):
+async def api_admin_toggle_user(user_id: str, request: Request, admin=Depends(require_admin)):
     user = get_user_by_id(user_id)
     if not user:
         raise HTTPException(404, "User not found")
@@ -803,11 +874,12 @@ async def api_admin_toggle_user(user_id: str, admin=Depends(require_admin)):
         raise HTTPException(400, "Admin accounts cannot be toggled from this endpoint")
     new_status = not bool(user.get("is_active", 1))
     update_user_status(user_id, new_status)
+    _audit(admin, "user.toggle", "user", user_id, f"is_active={new_status}", request)
     return {"status": "ok", "is_active": new_status}
 
 
 @app.put("/api/admin/user/{user_id}")
-async def api_admin_update_user(user_id: str, req: AdminUserUpdateRequest, admin=Depends(require_admin)):
+async def api_admin_update_user(user_id: str, req: AdminUserUpdateRequest, request: Request, admin=Depends(require_admin)):
     existing = get_user_by_id(user_id)
     if not existing:
         raise HTTPException(404, "User not found")
@@ -824,11 +896,12 @@ async def api_admin_update_user(user_id: str, req: AdminUserUpdateRequest, admin
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    _audit(admin, "user.update", "user", user_id, f"Updated {updated['username']}", request)
     return {"status": "updated", "user": updated}
 
 
 @app.delete("/api/admin/user/{user_id}")
-async def api_admin_delete_user(user_id: str, admin=Depends(require_admin)):
+async def api_admin_delete_user(user_id: str, request: Request, admin=Depends(require_admin)):
     if user_id == admin["sub"]:
         raise HTTPException(400, "You cannot delete your own account")
     try:
@@ -838,11 +911,12 @@ async def api_admin_delete_user(user_id: str, admin=Depends(require_admin)):
     if not deleted:
         raise HTTPException(404, "User not found")
     logger.info(f"[Admin] User {user_id} deleted by {admin['username']}")
+    _audit(admin, "user.delete", "user", user_id, "Deleted user", request)
     return {"status": "deleted"}
 
 
 @app.post("/api/admin/user/{user_id}/subscription")
-async def api_admin_set_user_subscription(user_id: str, req: AdminSubscriptionRequest, admin=Depends(require_admin)):
+async def api_admin_set_user_subscription(user_id: str, req: AdminSubscriptionRequest, request: Request, admin=Depends(require_admin)):
     if not get_user_by_id(user_id):
         raise HTTPException(404, "User not found")
     if req.status not in ("active", "pending"):
@@ -851,16 +925,18 @@ async def api_admin_set_user_subscription(user_id: str, req: AdminSubscriptionRe
         sub = set_user_subscription(user_id, req.plan_id, req.status, req.duration_days or None)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    _audit(admin, "subscription.grant", "user", user_id, f"plan={req.plan_id}, status={req.status}", request)
     return {"status": "saved", "subscription": sub}
 
 
 @app.post("/api/admin/user/{user_id}/password")
-async def api_admin_set_user_password(user_id: str, req: AdminPasswordRequest, admin=Depends(require_admin)):
+async def api_admin_set_user_password(user_id: str, req: AdminPasswordRequest, request: Request, admin=Depends(require_admin)):
     if not get_user_by_id(user_id):
         raise HTTPException(404, "User not found")
     if not update_user_password_hash(user_id, hash_password(req.password)):
         raise HTTPException(404, "User not found")
     logger.info(f"[Admin] Password reset for user {user_id} by {admin['username']}")
+    _audit(admin, "user.password_reset", "user", user_id, "Password reset", request)
     return {"status": "saved"}
 
 
@@ -870,23 +946,25 @@ async def api_admin_payments(status: Optional[str] = None, admin=Depends(require
 
 
 @app.post("/api/admin/payment/{payment_id}/confirm")
-async def api_admin_confirm_payment(payment_id: str, admin=Depends(require_admin)):
+async def api_admin_confirm_payment(payment_id: str, request: Request, admin=Depends(require_admin)):
     try:
         confirm_payment(payment_id)
     except ValueError as e:
         raise HTTPException(404, str(e))
     logger.info(f"[Admin] Payment {payment_id} confirmed")
+    _audit(admin, "payment.confirm", "payment", payment_id, "Payment confirmed", request)
     return {"status": "confirmed"}
 
 
 @app.post("/api/admin/payment/{payment_id}/reject")
-async def api_admin_reject_payment(payment_id: str, admin=Depends(require_admin)):
+async def api_admin_reject_payment(payment_id: str, request: Request, admin=Depends(require_admin)):
     conn = get_connection()
     try:
         conn.execute("UPDATE payments SET status='rejected' WHERE id=?", (payment_id,))
         conn.commit()
     finally:
         conn.close()
+    _audit(admin, "payment.reject", "payment", payment_id, "Payment rejected", request)
     return {"status": "rejected"}
 
 
@@ -901,8 +979,9 @@ class PlanRequest(BaseModel):
 
 
 @app.post("/api/admin/plans")
-async def api_admin_create_plan(req: PlanRequest, admin=Depends(require_admin)):
+async def api_admin_create_plan(req: PlanRequest, request: Request, admin=Depends(require_admin)):
     plan = create_subscription_plan(req.name, req.description, req.price_usdt, req.duration_days, req.features, req.max_signals_per_day)
+    _audit(admin, "plan.create", "plan", plan["id"], f"Created plan {req.name}", request)
     return plan
 
 
@@ -912,15 +991,17 @@ async def api_admin_get_plans(admin=Depends(require_admin)):
 
 
 @app.put("/api/admin/plans/{plan_id}")
-async def api_admin_update_plan(plan_id: str, req: PlanRequest, admin=Depends(require_admin)):
+async def api_admin_update_plan(plan_id: str, req: PlanRequest, request: Request, admin=Depends(require_admin)):
     update_subscription_plan(plan_id, name=req.name, description=req.description, price_usdt=req.price_usdt,
                              duration_days=req.duration_days, features=req.features, max_signals_per_day=req.max_signals_per_day)
+    _audit(admin, "plan.update", "plan", plan_id, f"Updated plan {req.name}", request)
     return {"status": "updated"}
 
 
 @app.delete("/api/admin/plans/{plan_id}")
-async def api_admin_delete_plan(plan_id: str, admin=Depends(require_admin)):
+async def api_admin_delete_plan(plan_id: str, request: Request, admin=Depends(require_admin)):
     delete_subscription_plan(plan_id)
+    _audit(admin, "plan.delete", "plan", plan_id, "Plan disabled", request)
     return {"status": "deleted"}
 
 
@@ -936,12 +1017,14 @@ async def api_admin_get_addresses(admin=Depends(require_admin)):
 
 
 @app.post("/api/admin/payment-addresses")
-async def api_admin_set_address(req: PaymentAddressRequest, admin=Depends(require_admin)):
+async def api_admin_set_address(req: PaymentAddressRequest, request: Request, admin=Depends(require_admin)):
     try:
         set_payment_address(req.network, req.address)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"status": "saved", "network": req.network.upper().strip()}
+    network = req.network.upper().strip()
+    _audit(admin, "payment_address.update", "payment_address", network, "Payment address updated", request)
+    return {"status": "saved", "network": network}
 
 
 @app.get("/api/admin/registration")
@@ -950,8 +1033,9 @@ async def api_admin_registration(admin=Depends(require_admin)):
 
 
 @app.post("/api/admin/registration")
-async def api_admin_save_registration(req: RegistrationSettingsRequest, admin=Depends(require_admin)):
+async def api_admin_save_registration(req: RegistrationSettingsRequest, request: Request, admin=Depends(require_admin)):
     set_admin_setting("registration_invite_required", "true" if req.invite_required else "false")
+    _audit(admin, "registration.update", "settings", "registration", f"invite_required={req.invite_required}", request)
     return {"status": "saved", "invite_required": req.invite_required}
 
 
@@ -961,8 +1045,10 @@ async def api_admin_invite_codes(admin=Depends(require_admin)):
 
 
 @app.post("/api/admin/invite-codes")
-async def api_admin_create_invite_code(req: InviteCodeRequest, admin=Depends(require_admin)):
-    return create_invite_code(req.note, req.max_uses, req.expires_at, admin["sub"])
+async def api_admin_create_invite_code(req: InviteCodeRequest, request: Request, admin=Depends(require_admin)):
+    code = create_invite_code(req.note, req.max_uses, req.expires_at, admin["sub"])
+    _audit(admin, "invite.create", "invite_code", code["code"], "Invite code generated", request)
+    return code
 
 
 @app.get("/api/admin/redeem-codes")
@@ -971,11 +1057,11 @@ async def api_admin_redeem_codes(admin=Depends(require_admin)):
 
 
 @app.post("/api/admin/redeem-codes")
-async def api_admin_create_redeem_code(req: RedeemCodeCreateRequest, admin=Depends(require_admin)):
+async def api_admin_create_redeem_code(req: RedeemCodeCreateRequest, request: Request, admin=Depends(require_admin)):
     if not req.plan_id and req.balance_usdt <= 0:
         raise HTTPException(400, "Choose a subscription plan or set balance_usdt")
     try:
-        return create_redeem_code(
+        code = create_redeem_code(
             plan_id=req.plan_id,
             duration_days=req.duration_days,
             balance_usdt=req.balance_usdt,
@@ -983,8 +1069,15 @@ async def api_admin_create_redeem_code(req: RedeemCodeCreateRequest, admin=Depen
             expires_at=req.expires_at,
             created_by=admin["sub"],
         )
+        _audit(admin, "redeem.create", "redeem_code", code["code"], "Card code generated", request)
+        return code
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/admin/audit-logs")
+async def api_admin_audit_logs(limit: int = 100, admin=Depends(require_admin)):
+    return get_admin_audit_logs(limit)
 
 
 # ═══════════════════════════════════════════════
@@ -1002,6 +1095,7 @@ async def api_status(current_user=Depends(get_optional_user)):
         "status": "running",
         "version": "4.0.0",
         "time": datetime.utcnow().isoformat(),
+        "public_base_url": _public_base_url(None),
     }
     if not current_user:
         return base
@@ -1085,7 +1179,7 @@ def _tradingview_template(secret: str) -> str:
 
 @app.get("/api/admin/webhook-config")
 async def api_admin_webhook_config(request: Request, admin=Depends(require_admin)):
-    webhook_url = str(request.base_url).rstrip("/") + "/webhook"
+    webhook_url = _public_base_url(request) + "/webhook"
     return {
         "webhook_url": webhook_url,
         "secret": settings.server.webhook_secret,
@@ -1110,6 +1204,59 @@ async def health():
     return {"status": status, "db": db_ok, "db_latency_ms": latency_ms}
 
 
+def _git_commit() -> str:
+    try:
+        head = (Path(__file__).parent / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            ref = head.split(" ", 1)[1]
+            return (Path(__file__).parent / ".git" / ref).read_text(encoding="utf-8").strip()[:12]
+        return head[:12]
+    except Exception:
+        return os.getenv("APP_VERSION", "")
+
+
+def _writable_status(path: Path) -> dict:
+    path.mkdir(parents=True, exist_ok=True)
+    probe = path / ".write_test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return {"path": str(path), "writable": True}
+    except Exception as e:
+        return {"path": str(path), "writable": False, "error": str(e)}
+
+
+@app.get("/api/admin/system")
+async def api_admin_system(request: Request, admin=Depends(require_admin)):
+    db_ok = False
+    try:
+        c = get_connection()
+        c.execute("SELECT 1").fetchone()
+        c.close()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {
+        "version": "4.0.0",
+        "commit": _git_commit(),
+        "public_base_url": _public_base_url(request),
+        "webhook_url": _public_base_url(request) + "/webhook",
+        "live_trading": settings.exchange.live_trading,
+        "db": {"ok": db_ok},
+        "storage": {
+            "data": _writable_status(DATA_DIR),
+            "runtime_settings": {**_writable_status(DATA_DIR), "path": str(SETTINGS_FILE), "exists": SETTINGS_FILE.exists()},
+            "logs": _writable_status(Path(__file__).parent / "logs"),
+            "trade_logs": _writable_status(Path(__file__).parent / "trade_logs"),
+        },
+        "security": {
+            "cookie_secure": os.getenv("COOKIE_SECURE", "false").lower() == "true",
+            "public_base_url_configured": bool(settings.server.public_base_url),
+            "encryption_key_configured": bool(os.getenv("APP_ENCRYPTION_KEY", "")),
+        },
+    }
+
+
 # ═══════════════════════════════════════════════
 # MAIN WEBHOOK ENDPOINT
 # ═══════════════════════════════════════════════
@@ -1132,15 +1279,42 @@ async def webhook(request: Request):
 
         logger.info(f"[Webhook] Signal: {signal.ticker} {signal.direction.value} @ {signal.price}")
         webhook_user = None
+        client_ip = _client_ip(request)
         if settings.server.webhook_secret and hmac.compare_digest(signal.secret, settings.server.webhook_secret):
             pass
         else:
             webhook_user = find_user_by_webhook_secret(signal.secret)
             if not webhook_user:
-                logger.warning(f"[Webhook] Invalid secret from {request.client.host}")
+                safe_body = {k: v for k, v in body.items() if k != "secret"}
+                record_webhook_event(
+                    fingerprint=_webhook_fingerprint(body, None),
+                    status="invalid_secret",
+                    status_code=403,
+                    ticker=signal.ticker,
+                    direction=signal.direction.value,
+                    reason="Invalid webhook secret",
+                    client_ip=client_ip,
+                    payload=safe_body,
+                )
+                logger.warning(f"[Webhook] Invalid secret from {client_ip}")
                 raise HTTPException(status_code=403, detail="Invalid webhook secret")
         user_id = webhook_user["id"] if webhook_user else None
         user_settings = get_user_settings(user_id) if user_id else {}
+        fingerprint = _webhook_fingerprint(body, user_id)
+        safe_body = {k: v for k, v in body.items() if k != "secret"}
+        if has_recent_webhook_event(fingerprint, minutes=10):
+            record_webhook_event(
+                fingerprint=fingerprint,
+                status="duplicate",
+                status_code=200,
+                user_id=user_id,
+                ticker=signal.ticker,
+                direction=signal.direction.value,
+                reason="Duplicate webhook ignored",
+                client_ip=client_ip,
+                payload=safe_body,
+            )
+            return JSONResponse(content={"status": "duplicate", "reason": "Duplicate webhook ignored"})
 
         await notify_signal_received(signal.ticker, signal.direction.value, signal.price)
 
@@ -1152,6 +1326,7 @@ async def webhook(request: Request):
             signal, market,
             max_daily_trades=settings.risk.max_daily_trades,
             max_daily_loss_pct=settings.risk.max_daily_loss_pct,
+            user_id=user_id,
         )
 
         if not filter_result.passed:
@@ -1161,6 +1336,17 @@ async def webhook(request: Request):
                 reason=f"Pre-filter: {filter_result.reason}", signal=signal,
             )
             trade_id = log_trade(decision, {"status": "blocked_by_prefilter"}, user_id=user_id)
+            record_webhook_event(
+                fingerprint=fingerprint,
+                status="blocked",
+                status_code=200,
+                user_id=user_id,
+                ticker=signal.ticker,
+                direction=signal.direction.value,
+                reason=filter_result.reason,
+                client_ip=client_ip,
+                payload=safe_body,
+            )
             return JSONResponse(content={
                 "status": "blocked", "trade_id": trade_id,
                 "reason": filter_result.reason, "checks": filter_result.checks,
@@ -1183,9 +1369,21 @@ async def webhook(request: Request):
 
         trade_id = log_trade(decision, order_result, user_id=user_id)
         invalidate_performance_cache()
+        final_status = "executed" if decision.execute else "rejected"
+        record_webhook_event(
+            fingerprint=fingerprint,
+            status=final_status,
+            status_code=200,
+            user_id=user_id,
+            ticker=signal.ticker,
+            direction=signal.direction.value,
+            reason=decision.reason,
+            client_ip=client_ip,
+            payload=safe_body,
+        )
 
         return JSONResponse(content={
-            "status": "executed" if decision.execute else "rejected",
+            "status": final_status,
             "trade_id": trade_id,
             "ai_confidence": analysis.confidence,
             "ai_recommendation": analysis.recommendation,
@@ -1478,7 +1676,7 @@ class TrailingStopSettingsRequest(BaseModel):
 
 
 @app.post("/api/settings/exchange")
-async def save_exchange_settings(req: ExchangeSettingsRequest, admin=Depends(require_admin)):
+async def save_exchange_settings(req: ExchangeSettingsRequest, request: Request, admin=Depends(require_admin)):
     if req.exchange:
         exchange_name = req.exchange.lower().strip()
         if exchange_name not in get_supported_exchanges():
@@ -1497,11 +1695,12 @@ async def save_exchange_settings(req: ExchangeSettingsRequest, admin=Depends(req
         "password": settings.exchange.password,
     }})
     logger.info(f"[Settings] Exchange updated: {settings.exchange.name}")
+    _audit(admin, "settings.exchange", "settings", "exchange", f"exchange={settings.exchange.name}", request)
     return {"status": "saved", "exchange": settings.exchange.name}
 
 
 @app.post("/api/settings/ai")
-async def save_ai_settings(req: AISettingsRequest, admin=Depends(require_admin)):
+async def save_ai_settings(req: AISettingsRequest, request: Request, admin=Depends(require_admin)):
     valid_providers = {"openai", "anthropic", "deepseek", "custom", req.custom_provider_name}
     if req.provider:
         provider = req.provider.lower().strip()
@@ -1547,11 +1746,12 @@ async def save_ai_settings(req: AISettingsRequest, admin=Depends(require_admin))
         }
     })
     logger.info(f"[Settings] AI provider updated: {settings.ai.provider}")
+    _audit(admin, "settings.ai", "settings", "ai", f"provider={settings.ai.provider}", request)
     return {"status": "saved", "provider": settings.ai.provider}
 
 
 @app.post("/api/settings/telegram")
-async def save_telegram_settings(req: TelegramSettingsRequest, admin=Depends(require_admin)):
+async def save_telegram_settings(req: TelegramSettingsRequest, request: Request, admin=Depends(require_admin)):
     if req.bot_token:
         settings.telegram.bot_token = req.bot_token
     if req.chat_id:
@@ -1561,11 +1761,12 @@ async def save_telegram_settings(req: TelegramSettingsRequest, admin=Depends(req
         "chat_id": settings.telegram.chat_id,
     }})
     logger.info("[Settings] Telegram updated")
+    _audit(admin, "settings.telegram", "settings", "telegram", "Telegram settings updated", request)
     return {"status": "saved"}
 
 
 @app.post("/api/settings/risk")
-async def save_risk_settings(req: RiskSettingsRequest, admin=Depends(require_admin)):
+async def save_risk_settings(req: RiskSettingsRequest, request: Request, admin=Depends(require_admin)):
     if req.exit_management_mode not in ("ai", "custom"):
         raise HTTPException(400, "exit_management_mode must be ai or custom")
     if req.ai_risk_profile not in ("conservative", "balanced", "aggressive"):
@@ -1589,11 +1790,12 @@ async def save_risk_settings(req: RiskSettingsRequest, admin=Depends(require_adm
         }
     })
     logger.info("[Settings] Risk settings updated")
+    _audit(admin, "settings.risk", "settings", "risk", f"profile={req.ai_risk_profile}, mode={req.exit_management_mode}", request)
     return {"status": "saved"}
 
 
 @app.post("/api/settings/take-profit")
-async def save_take_profit_settings(req: TakeProfitSettingsRequest, admin=Depends(require_admin)):
+async def save_take_profit_settings(req: TakeProfitSettingsRequest, request: Request, admin=Depends(require_admin)):
     active_qty = [req.tp1_qty, req.tp2_qty, req.tp3_qty, req.tp4_qty][:req.num_levels]
     if any(q <= 0 for q in active_qty):
         raise HTTPException(400, "Active TP close percentages must be greater than 0")
@@ -1619,11 +1821,12 @@ async def save_take_profit_settings(req: TakeProfitSettingsRequest, admin=Depend
         }
     })
     logger.info(f"[Settings] Take-profit updated: {req.num_levels} levels")
+    _audit(admin, "settings.take_profit", "settings", "take_profit", f"levels={req.num_levels}", request)
     return {"status": "saved", "num_levels": req.num_levels}
 
 
 @app.post("/api/settings/trailing-stop")
-async def save_trailing_stop_settings(req: TrailingStopSettingsRequest, admin=Depends(require_admin)):
+async def save_trailing_stop_settings(req: TrailingStopSettingsRequest, request: Request, admin=Depends(require_admin)):
     try:
         TrailingStopMode(req.mode)
     except ValueError:
@@ -1640,6 +1843,7 @@ async def save_trailing_stop_settings(req: TrailingStopSettingsRequest, admin=De
         }
     })
     logger.info(f"[Settings] Trailing stop updated: {req.mode}")
+    _audit(admin, "settings.trailing_stop", "settings", "trailing_stop", f"mode={req.mode}", request)
     return {"status": "saved", "mode": req.mode}
 
 
@@ -1667,7 +1871,8 @@ async def _process_internal(signal):
     market = await fetch_market_context(signal.ticker)
     fr = run_pre_filter(signal, market,
         max_daily_trades=settings.risk.max_daily_trades,
-        max_daily_loss_pct=settings.risk.max_daily_loss_pct)
+        max_daily_loss_pct=settings.risk.max_daily_loss_pct,
+        user_id=None)
     if not fr.passed:
         return {"status": "blocked", "reason": fr.reason}
 

@@ -95,6 +95,11 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
         logs = _load_logs(log_path)
         logs.append(entry)
         _save_logs(log_path, logs)
+    try:
+        from database import insert_trade_log
+        insert_trade_log(entry)
+    except Exception as e:
+        logger.warning(f"[TradeLog] SQLite write skipped: {e}")
 
     logger.info(f"[TradeLog] Saved trade {trade_id} → {log_path.name}")
     return trade_id
@@ -102,7 +107,7 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
 
 def get_today_trades(user_id: str | None = None) -> list[dict]:
     """Get all trades from today."""
-    return _filter_user(_load_logs(_get_log_file()), user_id)
+    return get_trade_history(1, user_id=user_id)
 
 
 def get_today_pnl(user_id: str | None = None) -> float:
@@ -127,6 +132,13 @@ def get_today_stats(user_id: str | None = None) -> dict:
 
 def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
     """Get trade history for the last N days."""
+    db_trades = []
+    try:
+        from database import get_trade_logs
+        db_trades = get_trade_logs(days, user_id=user_id)
+    except Exception:
+        db_trades = []
+
     all_trades = []
     days = max(1, min(int(days), 365))
     for i in range(days):
@@ -135,7 +147,16 @@ def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
         path = LOGS_DIR / f"trades_{date_str}.json"
         trades = _load_logs(path)
         all_trades.extend(_filter_user(trades, user_id))
-    return all_trades
+    by_id = {t.get("id"): t for t in all_trades if t.get("id")}
+    for trade in db_trades:
+        trade_id = trade.get("id")
+        if trade_id:
+            by_id[trade_id] = trade
+        else:
+            all_trades.append(trade)
+    merged = list(by_id.values()) + [t for t in all_trades if not t.get("id")]
+    merged.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+    return merged
 
 
 def get_recent_trade_results(limit: int = 5, user_id: str | None = None) -> list[dict]:

@@ -8,3 +8,4 @@ python-telegram-bot==21.9
 apscheduler==3.11.0
 aiofiles==24.1.0
 loguru==0.7.3
+cryptography>=42.0.0

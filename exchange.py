@@ -182,6 +182,15 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
     symbol = await asyncio.to_thread(_resolve_symbol, exchange, decision.ticker)
 
     try:
+        leverage = None
+        if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
+            leverage = max(1, min(int(round(decision.ai_analysis.recommended_leverage)), 125))
+            try:
+                await asyncio.to_thread(exchange.set_leverage, leverage, symbol)
+                logger.info(f"[Exchange] Leverage set: {symbol} {leverage}x")
+            except Exception as e:
+                logger.warning(f"[Exchange] Could not set leverage for {symbol}: {e}")
+
         if decision.direction in [SignalDirection.LONG]:
             side = "buy"
         elif decision.direction in [SignalDirection.SHORT]:
@@ -215,6 +224,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "quantity": decision.quantity,
             "entry_price": order.get("average", decision.entry_price),
         }
+        if leverage:
+            result["recommended_leverage"] = leverage
 
         # ── Multi Take-Profit Orders ──
         if decision.take_profit_levels:

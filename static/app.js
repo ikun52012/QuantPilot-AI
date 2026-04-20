@@ -777,7 +777,7 @@ async function adminRejectPayment(paymentId) {
 async function loadAdmin() {
     if (!isAdmin()) { showToast('Admin access required','error'); return; }
     try {
-        const [users, payments, plans, addresses, registration, invites, redeemCodes] = await Promise.all([
+        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs] = await Promise.all([
             fetchAPI('/api/admin/users'),
             fetchAPI('/api/admin/payments'),
             fetchAPI('/api/admin/plans'),
@@ -785,6 +785,8 @@ async function loadAdmin() {
             fetchAPI('/api/admin/registration'),
             fetchAPI('/api/admin/invite-codes'),
             fetchAPI('/api/admin/redeem-codes'),
+            fetchAPI('/api/admin/system'),
+            fetchAPI('/api/admin/audit-logs?limit=8'),
         ]);
 
         renderAdminUsers(users, plans);
@@ -792,6 +794,7 @@ async function loadAdmin() {
         renderAdminRegistration(registration || {}, invites || []);
         renderAdminRedeemCodes(redeemCodes || [], plans || []);
         renderAdminPendingPayments(payments || []);
+        renderAdminSystem(system || {}, auditLogs || []);
     } catch (err) { showToast(err.message, 'error', 'Admin Load Failed'); }
 }
 
@@ -899,6 +902,26 @@ function renderAdminPendingPayments(payments) {
     } else {
         payEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No pending payments</p>';
     }
+}
+
+function renderAdminSystem(system, auditLogs) {
+    const el = document.getElementById('admin-system');
+    if (!el) return;
+    const storage = system.storage || {};
+    const storageRows = Object.entries(storage)
+        .map(([name, item]) => `<tr><td>${escapeHtml(name)}</td><td>${escapeHtml(item.path || '')}</td><td><span class="badge badge-${item.writable === false ? 'error' : 'active'}">${item.writable === false ? 'Blocked' : 'OK'}</span></td></tr>`)
+        .join('');
+    const auditRows = auditLogs.length ? auditLogs.map(a => `<tr><td>${escapeHtml(formatDateTime(a.created_at))}</td><td>${escapeHtml(a.admin_username || '--')}</td><td>${escapeHtml(a.action)}</td><td>${escapeHtml(a.target_type || '')}:${escapeHtml(a.target_id || '')}</td><td>${escapeHtml(a.summary || '')}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No audit events yet</td></tr>';
+    el.innerHTML = `
+        <div class="metrics-table">
+            <div class="metric-item"><span class="metric-label">Version</span><span class="metric-value">${escapeHtml(system.version || '--')}</span></div>
+            <div class="metric-item"><span class="metric-label">Commit</span><span class="metric-value">${escapeHtml(system.commit || '--')}</span></div>
+            <div class="metric-item"><span class="metric-label">Webhook</span><span class="metric-value">${escapeHtml(system.webhook_url || '--')}</span></div>
+            <div class="metric-item"><span class="metric-label">Live Trading</span><span class="metric-value">${system.live_trading ? 'YES' : 'NO'}</span></div>
+        </div>
+        <div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Storage</th><th>Path</th><th>Status</th></tr></thead><tbody>${storageRows}</tbody></table></div>
+        <div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Time</th><th>Admin</th><th>Action</th><th>Target</th><th>Summary</th></tr></thead><tbody>${auditRows}</tbody></table></div>
+    `;
 }
 
 function planOptions(plans, selected = '', emptyLabel = 'Select plan...') {

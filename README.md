@@ -108,8 +108,41 @@ Here are the high-frequency variables you must pay attention to:
 
 1. Craft your high-win-rate strategy chart in TradingView.
 2. Open the "Create Alert" dialog.
-3. Under the Notifications tab, check `Webhook URL` -> Enter `http://<your_server_ip_or_domain>:8000/webhook`.
+3. Under the Notifications tab, check `Webhook URL` -> Enter your HTTPS endpoint, for example `https://<your-domain>/webhook`.
 4. The "Message" box requires a structured JSON Payload. To view your specific authenticated Payload template, please log into the platform and check your User Settings dashboard.
+
+Minimal long signal:
+
+```json
+{
+  "secret": "copy-from-dashboard",
+  "ticker": "{{ticker}}",
+  "exchange": "{{exchange}}",
+  "direction": "long",
+  "price": {{close}},
+  "timeframe": "{{interval}}",
+  "strategy": "{{strategy.order.comment}}",
+  "message": "{{strategy.order.action}} {{ticker}} @ {{close}}",
+  "bar_time": "{{time}}"
+}
+```
+
+For short signals, change only `"direction": "short"`.
+
+The server records webhook events and ignores duplicate payload fingerprints within the retry window, which helps prevent repeated TradingView deliveries from placing duplicate orders.
+
+---
+
+## Production Hardening
+
+- Runtime admin secrets, webhook secrets, and per-user exchange keys are encrypted at rest with `APP_ENCRYPTION_KEY`. If it is omitted, the app generates a persistent key in `data/app_encryption.key`; back this file up and keep the `data/` volume mounted permanently.
+- Per-user webhook lookup uses a stored hash, so the dashboard can show each user's real secret while the database index does not keep the raw value.
+- Set `PUBLIC_BASE_URL` to your public HTTPS origin, such as `https://cs.hyzcjs.com`, so dashboard webhook templates stay correct behind Cloudflare or Nginx.
+- Set `COOKIE_SECURE=true` when deploying behind HTTPS.
+- Docker Compose binds the app to `127.0.0.1:8000` by default. Expose it through Nginx, Caddy, Cloudflare Tunnel, or another HTTPS reverse proxy.
+- Trade logs are written to SQLite for long-term querying while legacy JSON logs remain readable.
+- Admin actions are recorded in an audit log and displayed in the Admin System panel.
+- Payment TX hashes are checked for duplicate submission before admin confirmation. Fully automated on-chain confirmation should be connected through a chain-specific watcher/API key workflow.
 
 ---
 

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 from models import TradingViewSignal, MarketContext, PreFilterResult, SignalDirection
 from trade_logger import get_today_pnl, get_recent_trade_results
+from database import count_today_executed_trades
 
 # ─────────────────────────────────────────────
 # In-memory state for tracking
@@ -47,6 +48,7 @@ def run_pre_filter(
     market: MarketContext,
     max_daily_trades: int = 10,
     max_daily_loss_pct: float = 5.0,
+    user_id: str | None = None,
 ) -> PreFilterResult:
     """
     Run 14 fast rule-based checks on the incoming signal.
@@ -58,13 +60,16 @@ def run_pre_filter(
     reasons = []
 
     # ── Check 1: Daily trade limit ──
-    with _state_lock:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        if today != _daily_trade_date:
-            reset_daily_counters()
-        daily_count_snapshot = _daily_trade_count
+    try:
+        daily_count_snapshot = count_today_executed_trades(user_id=user_id)
+    except Exception:
+        with _state_lock:
+            today = datetime.utcnow().strftime("%Y-%m-%d")
+            if today != _daily_trade_date:
+                reset_daily_counters()
+            daily_count_snapshot = _daily_trade_count
 
-    daily_ok = daily_count_snapshot < max_daily_trades
+    daily_ok = True if max_daily_trades <= 0 else daily_count_snapshot < max_daily_trades
     checks["daily_trade_limit"] = {
         "passed": daily_ok,
         "current": daily_count_snapshot,
@@ -74,7 +79,7 @@ def run_pre_filter(
         reasons.append(f"Daily trade limit reached ({daily_count_snapshot}/{max_daily_trades})")
 
     # ── Check 2: Daily loss limit ──
-    current_pnl = get_today_pnl()
+    current_pnl = get_today_pnl(user_id=user_id)
     loss_ok = current_pnl > -max_daily_loss_pct
     checks["daily_loss_limit"] = {
         "passed": loss_ok,
@@ -85,7 +90,7 @@ def run_pre_filter(
         reasons.append(f"Daily loss limit reached ({current_pnl:.2f}% / -{max_daily_loss_pct}%)")
 
     # ── Check 3: Duplicate signal cooldown ──
-    cooldown_ok = _check_cooldown(signal, cooldown_seconds=300)
+    cooldown_ok = _check_cooldown(signal, cooldown_seconds=300, user_id=user_id)
     checks["cooldown"] = {"passed": cooldown_ok}
     if not cooldown_ok:
         reasons.append("Duplicate signal within 5-minute cooldown")
@@ -253,7 +258,7 @@ def run_pre_filter(
     # ── Check 13: Consecutive Loss Protection ──
     consec_ok = True
     try:
-        recent_results = get_recent_trade_results(limit=5)
+        recent_results = get_recent_trade_results(limit=5, user_id=user_id)
         if len(recent_results) >= 3:
             # If last 3 trades were all losses, block the next one
             last_three = recent_results[:3]
@@ -272,7 +277,7 @@ def run_pre_filter(
 
     # ── Check 14: Same-Direction Signal Saturation ──
     saturation_ok = True
-    same_dir_count = _count_recent_same_direction(signal, window_minutes=60)
+    same_dir_count = _count_recent_same_direction(signal, window_minutes=60, user_id=user_id)
     if same_dir_count >= 3:
         saturation_ok = False
 
@@ -323,6 +328,7 @@ def run_pre_filter(
         # Record this signal (thread-safe)
         with _state_lock:
             _recent_signals.append({
+                "user_id": user_id or "admin",
                 "ticker": signal.ticker,
                 "direction": signal.direction,
                 "timestamp": datetime.utcnow(),
@@ -341,23 +347,29 @@ def run_pre_filter(
     )
 
 
-def _check_cooldown(signal: TradingViewSignal, cooldown_seconds: int = 300) -> bool:
+def _check_cooldown(signal: TradingViewSignal, cooldown_seconds: int = 300, user_id: str | None = None) -> bool:
     """Check if we received a similar signal recently (thread-safe)."""
     cutoff = datetime.utcnow() - timedelta(seconds=cooldown_seconds)
+    scope = user_id or "admin"
     with _state_lock:
         global _recent_signals
         _recent_signals = [s for s in _recent_signals if s["timestamp"] > cutoff]
         for s in _recent_signals:
-            if s["ticker"] == signal.ticker and s["direction"] == signal.direction:
+            if (
+                s.get("user_id", "admin") == scope
+                and s["ticker"] == signal.ticker
+                and s["direction"] == signal.direction
+            ):
                 return False
     return True
 
 
-def _count_recent_same_direction(signal: TradingViewSignal, window_minutes: int = 60) -> int:
+def _count_recent_same_direction(signal: TradingViewSignal, window_minutes: int = 60, user_id: str | None = None) -> int:
     """Count how many signals of the same direction we received recently (thread-safe)."""
     cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    scope = user_id or "admin"
     with _state_lock:
         return sum(
             1 for s in _recent_signals
-            if s["timestamp"] > cutoff and s["direction"] == signal.direction
+            if s["timestamp"] > cutoff and s.get("user_id", "admin") == scope and s["direction"] == signal.direction
         )

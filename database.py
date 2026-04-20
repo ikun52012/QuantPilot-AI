@@ -7,11 +7,21 @@ import json
 import uuid
 import os
 import secrets
+import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from loguru import logger
+from security import decrypt_settings_payload, decrypt_value, encrypt_settings_payload, encrypt_value
 
 DB_PATH = Path(__file__).parent / "data" / "server.db"
+ADMIN_SENSITIVE_SETTINGS = {"webhook_secret"}
+
+
+def _webhook_secret_hash(secret: str) -> str:
+    secret = str(secret or "").strip()
+    if not secret:
+        return ""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
 def _ensure_db_dir():
@@ -44,7 +54,8 @@ def init_database():
                 created_at TEXT DEFAULT (datetime('now')),
                 last_login TEXT,
                 settings_json TEXT DEFAULT '{}',
-                webhook_secret TEXT DEFAULT ''
+                webhook_secret TEXT DEFAULT '',
+                webhook_secret_hash TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS subscription_plans (
@@ -123,9 +134,48 @@ def init_database():
                 FOREIGN KEY (redeemed_by) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS trades (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                timestamp TEXT NOT NULL,
+                ticker TEXT DEFAULT '',
+                direction TEXT DEFAULT '',
+                execute INTEGER DEFAULT 0,
+                order_status TEXT DEFAULT '',
+                pnl_pct REAL DEFAULT 0,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS webhook_events (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                fingerprint TEXT NOT NULL,
+                ticker TEXT DEFAULT '',
+                direction TEXT DEFAULT '',
+                status TEXT NOT NULL,
+                status_code INTEGER DEFAULT 200,
+                reason TEXT DEFAULT '',
+                client_ip TEXT DEFAULT '',
+                payload_json TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+                id TEXT PRIMARY KEY,
+                admin_id TEXT,
+                admin_username TEXT DEFAULT '',
+                action TEXT NOT NULL,
+                target_type TEXT DEFAULT '',
+                target_id TEXT DEFAULT '',
+                summary TEXT DEFAULT '',
+                client_ip TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
             CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
             CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
             CREATE INDEX IF NOT EXISTS idx_users_webhook_secret ON users(webhook_secret);
+            CREATE INDEX IF NOT EXISTS idx_users_webhook_secret_hash ON users(webhook_secret_hash);
             CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
             CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions(user_id, status, end_date);
             CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
@@ -134,6 +184,11 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
             CREATE INDEX IF NOT EXISTS idx_invite_codes_active ON invite_codes(is_active);
             CREATE INDEX IF NOT EXISTS idx_redeem_codes_active ON redeem_codes(is_active);
+            CREATE INDEX IF NOT EXISTS idx_trades_user_time ON trades(user_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_trades_time ON trades(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_webhook_fingerprint_time ON webhook_events(fingerprint, created_at);
+            CREATE INDEX IF NOT EXISTS idx_webhook_user_time ON webhook_events(user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_admin_audit_time ON admin_audit_logs(created_at);
         """)
         _migrate_schema(conn)
         conn.commit()
@@ -151,22 +206,47 @@ def _migrate_schema(conn):
     migrations = [
         ("balance_usdt", "ALTER TABLE users ADD COLUMN balance_usdt REAL DEFAULT 0"),
         ("webhook_secret", "ALTER TABLE users ADD COLUMN webhook_secret TEXT DEFAULT ''"),
+        ("webhook_secret_hash", "ALTER TABLE users ADD COLUMN webhook_secret_hash TEXT DEFAULT ''"),
     ]
     for col, sql in migrations:
         if col not in columns:
             conn.execute(sql)
-    # Backfill webhook_secret column from settings_json for existing users
+    # Backfill webhook_secret_hash from legacy plaintext columns or settings_json.
     rows = conn.execute(
-        "SELECT id, settings_json FROM users WHERE webhook_secret IS NULL OR webhook_secret = ''"
+        "SELECT id, settings_json, webhook_secret FROM users WHERE webhook_secret_hash IS NULL OR webhook_secret_hash = ''"
     ).fetchall()
     for row in rows:
         try:
-            s = json.loads(row["settings_json"] or "{}")
-            secret = s.get("webhook", {}).get("secret", "")
+            s = decrypt_settings_payload(json.loads(row["settings_json"] or "{}"))
+            secret = str(row["webhook_secret"] or "") or s.get("webhook", {}).get("secret", "")
             if secret:
-                conn.execute("UPDATE users SET webhook_secret=? WHERE id=?", (secret, row["id"]))
+                conn.execute(
+                    "UPDATE users SET webhook_secret_hash=?, webhook_secret='' WHERE id=?",
+                    (_webhook_secret_hash(secret), row["id"]),
+                )
         except Exception:
             pass
+    # Opportunistically encrypt existing per-user sensitive settings.
+    rows = conn.execute("SELECT id, settings_json FROM users WHERE settings_json IS NOT NULL AND settings_json <> '{}'").fetchall()
+    for row in rows:
+        try:
+            settings = json.loads(row["settings_json"] or "{}")
+            encrypted = encrypt_settings_payload(decrypt_settings_payload(settings))
+            encoded = json.dumps(encrypted, ensure_ascii=False)
+            if encoded != (row["settings_json"] or "{}"):
+                conn.execute("UPDATE users SET settings_json=? WHERE id=?", (encoded, row["id"]))
+        except Exception:
+            pass
+    # Encrypt sensitive admin settings, including the global webhook secret.
+    rows = conn.execute("SELECT key, value FROM admin_settings").fetchall()
+    for row in rows:
+        if row["key"] in ADMIN_SENSITIVE_SETTINGS:
+            encrypted = encrypt_value(decrypt_value(row["value"] or ""))
+            if encrypted != (row["value"] or ""):
+                conn.execute(
+                    "UPDATE admin_settings SET value=?, updated_at=? WHERE key=?",
+                    (encrypted, datetime.utcnow().isoformat(), row["key"]),
+                )
 
 
 def _seed_defaults(conn):
@@ -420,7 +500,7 @@ def get_user_settings(user_id: str) -> dict:
         if not row:
             return {}
         try:
-            return json.loads(row["settings_json"] or "{}")
+            return decrypt_settings_payload(json.loads(row["settings_json"] or "{}"))
         except json.JSONDecodeError:
             return {}
     finally:
@@ -439,7 +519,7 @@ def update_user_settings(user_id: str, updates: dict) -> dict:
     try:
         cur = conn.execute(
             "UPDATE users SET settings_json=? WHERE id=?",
-            (json.dumps(current, ensure_ascii=False), user_id),
+            (json.dumps(encrypt_settings_payload(current), ensure_ascii=False), user_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -455,47 +535,69 @@ def ensure_user_webhook_secret(user_id: str) -> str:
     if not secret:
         secret = secrets.token_urlsafe(32)
         update_user_settings(user_id, {"webhook": {"secret": secret}})
-        # Also write to the indexed column for O(1) lookup
-        conn = get_connection()
-        try:
-            conn.execute("UPDATE users SET webhook_secret=? WHERE id=?", (secret, user_id))
-            conn.commit()
-        finally:
-            conn.close()
+    # Store only a hash in the indexed column for O(1) lookup without plaintext at rest.
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE users SET webhook_secret_hash=?, webhook_secret='' WHERE id=?",
+            (_webhook_secret_hash(secret), user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return secret
 
 
 def find_user_by_webhook_secret(secret: str) -> dict | None:
-    """O(1) lookup via indexed webhook_secret column."""
+    """O(1) lookup via indexed webhook secret hash."""
     secret = str(secret or "").strip()
     if not secret:
         return None
+    secret_hash = _webhook_secret_hash(secret)
     conn = get_connection()
     try:
-        # Fast indexed lookup first
+        # Fast indexed lookup first. The plaintext legacy column is intentionally not used for new writes.
         row = conn.execute(
-            "SELECT id, username, email, role, is_active, webhook_secret FROM users "
-            "WHERE is_active=1 AND webhook_secret=?",
-            (secret,),
+            "SELECT id, username, email, role, is_active, webhook_secret_hash FROM users "
+            "WHERE is_active=1 AND webhook_secret_hash=?",
+            (secret_hash,),
         ).fetchone()
-        if row and secrets.compare_digest(str(row["webhook_secret"]), str(secret)):
+        if row and secrets.compare_digest(str(row["webhook_secret_hash"]), secret_hash):
             user = dict(row)
-            user.pop("webhook_secret", None)
+            user.pop("webhook_secret_hash", None)
             return user
-        # Fallback: scan settings_json for users whose column wasn't backfilled yet
+        # Legacy fallback for databases that still have plaintext webhook_secret.
+        rows = conn.execute(
+            "SELECT id, username, email, role, is_active, webhook_secret FROM users "
+            "WHERE is_active=1 AND webhook_secret IS NOT NULL AND webhook_secret <> ''"
+        ).fetchall()
+        for row in rows:
+            stored = str(row["webhook_secret"] or "")
+            if stored and secrets.compare_digest(stored, secret):
+                conn.execute(
+                    "UPDATE users SET webhook_secret_hash=?, webhook_secret='' WHERE id=?",
+                    (secret_hash, row["id"]),
+                )
+                conn.commit()
+                user = dict(row)
+                user.pop("webhook_secret", None)
+                return user
+        # Fallback: scan encrypted settings_json for users whose hash was not backfilled yet.
         rows = conn.execute(
             "SELECT id, username, email, role, is_active, settings_json FROM users "
-            "WHERE is_active=1 AND (webhook_secret IS NULL OR webhook_secret = '')"
+            "WHERE is_active=1 AND (webhook_secret_hash IS NULL OR webhook_secret_hash = '')"
         ).fetchall()
         for row in rows:
             try:
-                user_settings = json.loads(row["settings_json"] or "{}")
+                user_settings = decrypt_settings_payload(json.loads(row["settings_json"] or "{}"))
             except json.JSONDecodeError:
                 continue
             stored = str(user_settings.get("webhook", {}).get("secret", ""))
             if stored and secrets.compare_digest(stored, str(secret)):
-                # Backfill the column now
-                conn.execute("UPDATE users SET webhook_secret=? WHERE id=?", (stored, row["id"]))
+                conn.execute(
+                    "UPDATE users SET webhook_secret_hash=?, webhook_secret='' WHERE id=?",
+                    (secret_hash, row["id"]),
+                )
                 conn.commit()
                 user = dict(row)
                 user.pop("settings_json", None)
@@ -824,6 +926,24 @@ def submit_payment_tx(payment_id: str, user_id: str, tx_hash: str) -> bool:
         conn.close()
 
 
+def payment_tx_hash_exists(tx_hash: str, exclude_payment_id: str = "") -> bool:
+    tx_hash = (tx_hash or "").strip()
+    if not tx_hash:
+        return False
+    conn = get_connection()
+    try:
+        if exclude_payment_id:
+            row = conn.execute(
+                "SELECT id FROM payments WHERE LOWER(tx_hash)=LOWER(?) AND id<>? LIMIT 1",
+                (tx_hash, exclude_payment_id),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT id FROM payments WHERE LOWER(tx_hash)=LOWER(?) LIMIT 1", (tx_hash,)).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def get_user_payments(user_id: str) -> list[dict]:
     conn = get_connection()
     try:
@@ -859,19 +979,193 @@ def get_admin_setting(key: str, default: str = "") -> str:
     conn = get_connection()
     try:
         row = conn.execute("SELECT value FROM admin_settings WHERE key=?", (key,)).fetchone()
-        return row["value"] if row else default
+        value = row["value"] if row else default
+        if key in ADMIN_SENSITIVE_SETTINGS:
+            return decrypt_value(value)
+        return value
     finally:
         conn.close()
 
 
 def set_admin_setting(key: str, value: str):
+    stored_value = encrypt_value(value) if key in ADMIN_SENSITIVE_SETTINGS else value
     conn = get_connection()
     try:
         conn.execute(
             "INSERT OR REPLACE INTO admin_settings (key, value, updated_at) VALUES (?,?,?)",
-            (key, value, datetime.utcnow().isoformat()),
+            (key, stored_value, datetime.utcnow().isoformat()),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ─────────────────────────────────────────────
+# Trade, webhook, and audit logs
+# ─────────────────────────────────────────────
+def insert_trade_log(entry: dict):
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO trades
+                (id, user_id, timestamp, ticker, direction, execute, order_status, pnl_pct, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                entry.get("id"),
+                entry.get("user_id"),
+                entry.get("timestamp") or datetime.utcnow().isoformat(),
+                entry.get("ticker", ""),
+                entry.get("direction", ""),
+                1 if entry.get("execute") else 0,
+                entry.get("order_status", ""),
+                float(entry.get("pnl_pct") or 0.0),
+                json.dumps(entry, ensure_ascii=False, default=str),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_trade_logs(days: int = 30, user_id: str | None = None) -> list[dict]:
+    since = (datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)) - 1)).strftime("%Y-%m-%d")
+    conn = get_connection()
+    try:
+        if user_id is None:
+            rows = conn.execute(
+                "SELECT payload_json FROM trades WHERE timestamp >= ? ORDER BY timestamp DESC",
+                (since,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT payload_json FROM trades WHERE user_id=? AND timestamp >= ? ORDER BY timestamp DESC",
+                (user_id, since),
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                result.append(json.loads(row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+        return result
+    finally:
+        conn.close()
+
+
+def count_today_executed_trades(user_id: str | None = None) -> int:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    statuses = ("filled", "simulated", "closed")
+    conn = get_connection()
+    try:
+        if user_id is None:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE timestamp >= ? AND execute=1 AND order_status IN (?,?,?)",
+                (today, *statuses),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE user_id=? AND timestamp >= ? AND execute=1 AND order_status IN (?,?,?)",
+                (user_id, today, *statuses),
+            ).fetchone()
+        return int(row[0] or 0)
+    finally:
+        conn.close()
+
+
+def record_webhook_event(
+    fingerprint: str,
+    status: str,
+    status_code: int = 200,
+    user_id: str | None = None,
+    ticker: str = "",
+    direction: str = "",
+    reason: str = "",
+    client_ip: str = "",
+    payload: dict | None = None,
+) -> str:
+    event_id = str(uuid.uuid4())
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO webhook_events
+                (id, user_id, fingerprint, ticker, direction, status, status_code, reason, client_ip, payload_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                event_id,
+                user_id,
+                fingerprint,
+                ticker,
+                direction,
+                status,
+                status_code,
+                reason,
+                client_ip,
+                json.dumps(payload or {}, ensure_ascii=False, default=str),
+            ),
+        )
+        conn.commit()
+        return event_id
+    finally:
+        conn.close()
+
+
+def has_recent_webhook_event(fingerprint: str, minutes: int = 10) -> bool:
+    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT id FROM webhook_events
+            WHERE fingerprint=? AND status IN ('processed', 'blocked', 'rejected', 'executed')
+              AND datetime(created_at) >= datetime(?)
+            LIMIT 1
+            """,
+            (fingerprint, cutoff),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def add_admin_audit_log(
+    admin_id: str,
+    admin_username: str,
+    action: str,
+    target_type: str = "",
+    target_id: str = "",
+    summary: str = "",
+    client_ip: str = "",
+) -> str:
+    audit_id = str(uuid.uuid4())
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO admin_audit_logs
+                (id, admin_id, admin_username, action, target_type, target_id, summary, client_ip)
+            VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (audit_id, admin_id, admin_username, action, target_type, target_id, summary, client_ip),
+        )
+        conn.commit()
+        return audit_id
+    finally:
+        conn.close()
+
+
+def get_admin_audit_logs(limit: int = 100) -> list[dict]:
+    limit = max(1, min(int(limit), 500))
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM admin_audit_logs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
     finally:
         conn.close()
 
