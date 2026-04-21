@@ -1224,7 +1224,7 @@ async function fetchAPI(path, options = {}) {
     const method = String(options.method || 'GET').toUpperCase();
     const csrf = getCookie('tvss_csrf');
     if (!['GET','HEAD','OPTIONS'].includes(method) && csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
-    const resp = await fetch(`${API}${path}`, { credentials: 'include', cache: 'no-store', headers, ...options });
+    const resp = await fetch(`${API}${path}`, { credentials: 'include', cache: 'no-store', ...options, headers });
     if (resp.status === 401) { logout(); throw new Error('Session expired'); }
     if (!resp.ok) {
         const data = await resp.json().catch(()=>({}));

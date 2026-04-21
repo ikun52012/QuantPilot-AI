@@ -3,6 +3,7 @@ Signal Server - User Router
 User-facing routes for dashboard, settings, and trading.
 """
 import json
+import copy
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -300,7 +301,7 @@ async def get_history(
         payload = {}
         try:
             payload = json.loads(t.payload_json) if t.payload_json else {}
-        except:
+        except (TypeError, json.JSONDecodeError):
             pass
 
         signal = payload.get("signal", {})
@@ -383,7 +384,20 @@ async def get_user_settings(
 
     settings_data = _load_user_settings(db_user)
 
-    exchange = settings_data.setdefault("exchange", {})
+    webhook = settings_data.setdefault("webhook", {})
+    if not webhook.get("secret"):
+        from core.security import generate_webhook_secret, webhook_secret_hash
+        webhook["secret"] = generate_webhook_secret()
+        db_user.webhook_secret_hash = webhook_secret_hash(webhook["secret"])
+        await _save_user_settings(db, db_user, settings_data)
+    elif not db_user.webhook_secret_hash:
+        from core.security import webhook_secret_hash
+        db_user.webhook_secret_hash = webhook_secret_hash(webhook["secret"])
+        await db.commit()
+
+    response_data = copy.deepcopy(settings_data)
+
+    exchange = response_data.setdefault("exchange", {})
     exchange.setdefault("name", exchange.get("exchange") or settings.exchange.name)
     exchange.setdefault("exchange", exchange.get("name") or settings.exchange.name)
     exchange["api_configured"] = bool(exchange.get("api_key") and exchange.get("api_secret"))
@@ -391,12 +405,7 @@ async def get_user_settings(
     exchange.pop("api_secret", None)
     exchange.pop("password", None)
 
-    webhook = settings_data.setdefault("webhook", {})
-    if not webhook.get("secret"):
-        from core.security import generate_webhook_secret, webhook_secret_hash
-        webhook["secret"] = generate_webhook_secret()
-        db_user.webhook_secret_hash = webhook_secret_hash(webhook["secret"])
-        await _save_user_settings(db, db_user, settings_data)
+    webhook = response_data.setdefault("webhook", {})
     base_url = str(request.base_url).rstrip("/")
     webhook.setdefault("url", f"{base_url}/webhook")
     if webhook.get("secret"):
@@ -412,14 +421,14 @@ async def get_user_settings(
         }, indent=2))
 
     subscription = await get_user_active_subscription(db, db_user.id)
-    settings_data["trade_controls"] = {
+    response_data["trade_controls"] = {
         "live_trading_allowed": bool(db_user.live_trading_allowed and subscription),
         "max_leverage": db_user.max_leverage or 20,
         "max_position_pct": db_user.max_position_pct or 10,
         "subscription_active": bool(subscription),
     }
 
-    return settings_data
+    return response_data
 
 
 @router.put("/settings")
@@ -585,7 +594,7 @@ async def get_webhook_secret(
     try:
         settings_data = json.loads(db_user.settings_json or "{}")
         settings_data = decrypt_settings_payload(settings_data)
-    except:
+    except (TypeError, json.JSONDecodeError):
         pass
 
     secret = (settings_data.get("webhook") or {}).get("secret", "")

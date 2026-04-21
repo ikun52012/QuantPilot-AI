@@ -297,12 +297,100 @@ class DatabaseManager:
         """Apply lightweight additive migrations for deployments without Alembic."""
         inspector = inspect(sync_conn)
         tables = set(inspector.get_table_names())
-        if "positions" not in tables:
-            return
 
-        existing = {column["name"] for column in inspector.get_columns("positions")}
-        columns = {
+        def add_missing_columns(table_name: str, columns: dict[str, str]) -> None:
+            if table_name not in tables:
+                return
+            existing = {column["name"] for column in inspector.get_columns(table_name)}
+            for name, ddl in columns.items():
+                if name not in existing:
+                    sync_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}"))
+
+        add_missing_columns("users", {
+            "balance_usdt": "FLOAT DEFAULT 0",
+            "is_active": "BOOLEAN DEFAULT true",
+            "created_at": "TIMESTAMP",
+            "last_login": "TIMESTAMP",
+            "settings_json": "TEXT DEFAULT '{}'",
+            "webhook_secret": "VARCHAR(128) DEFAULT ''",
+            "webhook_secret_hash": "VARCHAR(64) DEFAULT ''",
+            "live_trading_allowed": "BOOLEAN DEFAULT false",
+            "max_leverage": "INTEGER DEFAULT 20",
+            "max_position_pct": "FLOAT DEFAULT 10",
+            "token_version": "INTEGER DEFAULT 0",
+            "password_changed_at": "TIMESTAMP",
+        })
+        add_missing_columns("subscription_plans", {
+            "description": "TEXT DEFAULT ''",
+            "features_json": "TEXT DEFAULT '[]'",
+            "is_active": "BOOLEAN DEFAULT true",
+            "max_signals_per_day": "INTEGER DEFAULT 0",
+            "created_at": "TIMESTAMP",
+        })
+        add_missing_columns("subscriptions", {
+            "status": "VARCHAR(20) DEFAULT 'pending'",
+            "start_date": "TIMESTAMP",
+            "end_date": "TIMESTAMP",
+            "created_at": "TIMESTAMP",
+        })
+        add_missing_columns("payments", {
+            "subscription_id": "VARCHAR(36)",
+            "currency": "VARCHAR(12) DEFAULT 'USDT'",
+            "network": "VARCHAR(20) DEFAULT 'TRC20'",
+            "tx_hash": "VARCHAR(200) DEFAULT ''",
+            "wallet_address": "VARCHAR(128) DEFAULT ''",
+            "status": "VARCHAR(20) DEFAULT 'pending'",
+            "created_at": "TIMESTAMP",
+            "confirmed_at": "TIMESTAMP",
+            "expires_at": "TIMESTAMP",
+        })
+        add_missing_columns("trades", {
+            "user_id": "VARCHAR(36)",
+            "timestamp": "TIMESTAMP",
+            "ticker": "VARCHAR(40) DEFAULT ''",
+            "direction": "VARCHAR(20) DEFAULT ''",
+            "execute": "BOOLEAN DEFAULT false",
+            "order_status": "VARCHAR(20) DEFAULT ''",
+            "pnl_pct": "FLOAT DEFAULT 0",
+            "payload_json": "TEXT DEFAULT '{}'",
+        })
+        add_missing_columns("webhook_events", {
+            "user_id": "VARCHAR(36)",
+            "fingerprint": "VARCHAR(64) DEFAULT ''",
+            "ticker": "VARCHAR(40) DEFAULT ''",
+            "direction": "VARCHAR(20) DEFAULT ''",
+            "status_code": "INTEGER DEFAULT 200",
+            "reason": "TEXT DEFAULT ''",
+            "client_ip": "VARCHAR(45) DEFAULT ''",
+            "payload_json": "TEXT DEFAULT '{}'",
+            "created_at": "TIMESTAMP",
+        })
+        add_missing_columns("invite_codes", {
+            "note": "TEXT DEFAULT ''",
+            "max_uses": "INTEGER DEFAULT 1",
+            "used_count": "INTEGER DEFAULT 0",
+            "is_active": "BOOLEAN DEFAULT true",
+            "created_at": "TIMESTAMP",
+            "expires_at": "TIMESTAMP",
+            "created_by": "VARCHAR(36)",
+            "last_used_by": "VARCHAR(36)",
+            "last_used_at": "TIMESTAMP",
+        })
+        add_missing_columns("redeem_codes", {
+            "plan_id": "VARCHAR(36)",
+            "duration_days": "INTEGER DEFAULT 0",
+            "balance_usdt": "FLOAT DEFAULT 0",
+            "note": "TEXT DEFAULT ''",
+            "is_active": "BOOLEAN DEFAULT true",
+            "redeemed_by": "VARCHAR(36)",
+            "redeemed_at": "TIMESTAMP",
+            "created_at": "TIMESTAMP",
+            "expires_at": "TIMESTAMP",
+            "created_by": "VARCHAR(36)",
+        })
+        add_missing_columns("positions", {
             "remaining_quantity": "FLOAT DEFAULT 0",
+            "open_trade_id": "VARCHAR(36)",
             "entry_order_id": "VARCHAR(128) DEFAULT ''",
             "stop_loss": "FLOAT",
             "take_profit_json": "TEXT DEFAULT '[]'",
@@ -317,10 +405,14 @@ class DatabaseManager:
             "last_price": "FLOAT",
             "close_reason": "VARCHAR(80) DEFAULT ''",
             "updated_at": "TIMESTAMP",
-        }
-        for name, ddl in columns.items():
-            if name not in existing:
-                sync_conn.execute(text(f"ALTER TABLE positions ADD COLUMN {name} {ddl}"))
+            "exit_price": "FLOAT",
+            "pnl_pct": "FLOAT DEFAULT 0",
+            "closed_at": "TIMESTAMP",
+            "close_trade_id": "VARCHAR(36)",
+        })
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_webhook_secret_hash ON users(webhook_secret_hash)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_trades_user_timestamp ON trades(user_id, timestamp)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_webhook_fingerprint_created ON webhook_events(fingerprint, created_at)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status)"))
 

@@ -123,6 +123,27 @@ def _parse_expiry(expires_at: str = "", expires_days: int = 30) -> Optional[date
     return None
 
 
+def _validate_role(role: str) -> str:
+    role = str(role or "user").lower().strip()
+    if role not in {"user", "admin"}:
+        raise HTTPException(400, "Role must be user or admin")
+    return role
+
+
+def _validate_subscription_status(status: str) -> str:
+    status = str(status or "active").lower().strip()
+    if status not in {"active", "pending", "cancelled", "expired"}:
+        raise HTTPException(400, "Invalid subscription status")
+    return status
+
+
+async def _admin_count(db: AsyncSession) -> int:
+    result = await db.execute(
+        select(func.count()).select_from(UserModel).where(UserModel.role == "admin")
+    )
+    return int(result.scalar() or 0)
+
+
 # ─────────────────────────────────────────────
 # User Management
 # ─────────────────────────────────────────────
@@ -194,6 +215,7 @@ async def create_user(
     ok, reason = validate_password_strength(req.password, username=req.username, email=req.email)
     if not ok:
         raise HTTPException(400, reason)
+    role = _validate_role(req.role)
 
     # Create user
     pw_hash = hash_password(req.password)
@@ -202,7 +224,7 @@ async def create_user(
         req.username,
         req.email,
         pw_hash,
-        req.role,
+        role,
     )
 
     # Update additional fields
@@ -244,18 +266,29 @@ async def update_user(
         if existing:
             raise HTTPException(400, "Email already registered")
 
+    new_role = _validate_role(req.role)
+    if user.role == "admin" and new_role != "admin" and await _admin_count(db) <= 1:
+        raise HTTPException(400, "Cannot demote the last admin account")
+    if user.role == "admin" and not req.is_active and await _admin_count(db) <= 1:
+        raise HTTPException(400, "Cannot disable the last admin account")
+    if user.id == admin.get("sub") and (new_role != "admin" or not req.is_active):
+        raise HTTPException(400, "Use another admin account to change your own admin access")
+
+    old_role = user.role
+    old_active = bool(user.is_active)
+
     # Update fields
     user.username = req.username.lower().strip()
     user.email = req.email.lower().strip()
-    user.role = req.role
+    user.role = new_role
     user.is_active = req.is_active
     user.balance_usdt = req.balance_usdt
     user.live_trading_allowed = req.live_trading_allowed
     user.max_leverage = req.max_leverage
     user.max_position_pct = req.max_position_pct
 
-    # Bump token version if status changed
-    if not req.is_active:
+    # Bump token version if auth-relevant fields changed.
+    if old_role != user.role or old_active != bool(user.is_active):
         user.token_version = (user.token_version or 0) + 1
 
     await db.commit()
@@ -291,14 +324,12 @@ async def delete_user(
     user = await get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(404, "User not found")
+    if user.id == admin.get("sub"):
+        raise HTTPException(400, "Use another admin account to delete your own user")
 
     # Prevent deleting last admin
     if user.role == "admin":
-        result = await db.execute(
-            select(func.count()).select_from(UserModel).where(UserModel.role == "admin")
-        )
-        admin_count = result.scalar()
-        if admin_count <= 1:
+        if await _admin_count(db) <= 1:
             raise HTTPException(400, "Cannot delete the last admin account")
 
     await db.execute(
@@ -330,8 +361,8 @@ async def toggle_user(
     user = await get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(404, "User not found")
-    if user.role == "admin":
-        raise HTTPException(400, "Admin accounts must be updated explicitly")
+    if user.role == "admin" and (user.id == admin.get("sub") or await _admin_count(db) <= 1):
+        raise HTTPException(400, "Admin accounts must be updated explicitly from another admin account")
     user.is_active = not bool(user.is_active)
     user.token_version = (user.token_version or 0) + 1
     await db.commit()
@@ -375,15 +406,16 @@ async def grant_user_subscription(
     plan = await db.get(SubscriptionPlanModel, req.plan_id)
     if not plan:
         raise HTTPException(404, "Plan not found")
+    status = _validate_subscription_status(req.status)
 
     now = datetime.now(timezone.utc)
     duration_days = req.duration_days or plan.duration_days
     sub = SubscriptionModel(
         user_id=user_id,
         plan_id=plan.id,
-        status=req.status,
-        start_date=now if req.status == "active" else None,
-        end_date=(now + timedelta(days=duration_days)) if req.status == "active" else None,
+        status=status,
+        start_date=now if status == "active" else None,
+        end_date=(now + timedelta(days=duration_days)) if status == "active" else None,
     )
     db.add(sub)
     await db.commit()
@@ -494,12 +526,25 @@ async def delete_plan(
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a subscription plan."""
-    await db.execute(
-        delete(SubscriptionPlanModel).where(SubscriptionPlanModel.id == plan_id)
+    """Delete an unused plan, or deactivate it if historical rows reference it."""
+    plan = await db.get(SubscriptionPlanModel, plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+
+    sub_count = await db.scalar(
+        select(func.count()).select_from(SubscriptionModel).where(SubscriptionModel.plan_id == plan_id)
     )
+    redeem_count = await db.scalar(
+        select(func.count()).select_from(RedeemCodeModel).where(RedeemCodeModel.plan_id == plan_id)
+    )
+    if int(sub_count or 0) or int(redeem_count or 0):
+        plan.is_active = False
+        result = {"status": "deactivated", "reason": "Plan has historical subscriptions or card codes"}
+    else:
+        await db.delete(plan)
+        result = {"status": "deleted"}
     await db.commit()
-    return {"status": "ok"}
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -838,6 +883,10 @@ async def confirm_payment(
     payment = await db.get(PaymentModel, payment_id)
     if not payment:
         raise HTTPException(404, "Payment not found")
+    if payment.status == "confirmed":
+        return {"status": "confirmed"}
+    if payment.status == "rejected":
+        raise HTTPException(400, "Rejected payments cannot be confirmed")
     await _activate_payment_subscription(db, payment)
     await db.commit()
     await _add_audit_log(db, admin, "confirm_payment", "payment", payment_id, f"Confirmed payment {payment_id}", request)
@@ -854,6 +903,8 @@ async def reject_payment(
     payment = await db.get(PaymentModel, payment_id)
     if not payment:
         raise HTTPException(404, "Payment not found")
+    if payment.status == "confirmed":
+        raise HTTPException(400, "Confirmed payments cannot be rejected")
     payment.status = "rejected"
     await db.commit()
     await _add_audit_log(db, admin, "reject_payment", "payment", payment_id, f"Rejected payment {payment_id}", request)
@@ -870,6 +921,10 @@ async def verify_payment(
     payment = await db.get(PaymentModel, payment_id)
     if not payment:
         raise HTTPException(404, "Payment not found")
+    if payment.status == "confirmed":
+        return {"status": "confirmed", "verification": {"verified": True, "status": "confirmed"}}
+    if payment.status == "rejected":
+        raise HTTPException(400, "Rejected payments cannot be verified")
     if not payment.tx_hash:
         raise HTTPException(400, "Payment has no transaction hash")
 

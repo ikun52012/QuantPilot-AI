@@ -125,6 +125,7 @@ class SignalProcessor:
 
         # Compute fingerprint for deduplication
         fingerprint = compute_webhook_fingerprint(raw_body or signal.model_dump(), user_id)
+        user_settings = await self._load_user_settings(user_id)
 
         # Check for duplicate
         if await has_recent_webhook_event(self.session, fingerprint, window_secs=300):
@@ -142,7 +143,7 @@ class SignalProcessor:
             market = await fetch_market_context(signal.ticker)
 
             # Step 2: Run pre-filter
-            prefilter_result = await self._run_prefilter(signal, market, user_id)
+            prefilter_result = await self._run_prefilter(signal, market, user_id, user_settings)
 
             if not prefilter_result.passed:
                 await self._record_and_notify_blocked(
@@ -158,11 +159,11 @@ class SignalProcessor:
             analysis = await self._run_ai_analysis(signal, market)
 
             # Step 4: Build trade decision
-            decision = self._build_trade_decision(signal, analysis, market, user_id)
+            decision = self._build_trade_decision(signal, analysis, market, user_id, user_settings)
 
             # Step 5: Execute trade
             if decision.execute:
-                result = await self._execute_trade(decision, user_id)
+                result = await self._execute_trade(decision, user_id, user_settings)
             else:
                 result = {"status": "rejected", "reason": decision.reason}
 
@@ -207,17 +208,17 @@ class SignalProcessor:
         signal: TradingViewSignal,
         market: MarketContext,
         user_id: Optional[str],
+        user_settings: Optional[dict] = None,
     ) -> "PreFilterResult":
         """Run pre-filter checks."""
         # Get user settings for limits
         max_daily_trades = settings.risk.max_daily_trades
         max_daily_loss = settings.risk.max_daily_loss_pct
 
-        if user_id:
-            user = await get_user_by_id(self.session, user_id)
-            if user:
-                # Could load user-specific settings here
-                pass
+        user_risk = (user_settings or {}).get("risk") or {}
+        if user_risk:
+            max_daily_trades = int(user_risk.get("max_daily_trades") or max_daily_trades)
+            max_daily_loss = float(user_risk.get("max_daily_loss_pct") or max_daily_loss)
 
         result = await run_pre_filter_async(
             signal=signal,
@@ -265,6 +266,7 @@ class SignalProcessor:
         analysis: AIAnalysis,
         market: MarketContext,
         user_id: Optional[str],
+        user_settings: Optional[dict] = None,
     ) -> TradeDecision:
         """Build trade decision from signal and analysis."""
         decision = TradeDecision(
@@ -286,35 +288,43 @@ class SignalProcessor:
             decision.reason = f"Low confidence: {analysis.confidence:.2f}"
             return decision
 
+        if (
+            analysis.suggested_direction
+            and analysis.suggested_direction != signal.direction
+            and signal.direction in {SignalDirection.LONG, SignalDirection.SHORT}
+        ):
+            decision.execute = False
+            decision.reason = (
+                f"AI suggested {analysis.suggested_direction.value} but signal was "
+                f"{signal.direction.value}; rejecting direction conflict"
+            )
+            return decision
+
         # Set execute flag
         decision.execute = analysis.recommendation in ("execute", "modify")
 
-        # Set stop loss
-        if analysis.suggested_stop_loss:
-            decision.stop_loss = analysis.suggested_stop_loss
-
-        # Set take profit levels
-        if analysis.suggested_tp1:
-            from models import TakeProfitLevel
-            levels = []
-            if analysis.suggested_tp1:
-                levels.append(TakeProfitLevel(price=analysis.suggested_tp1, qty_pct=analysis.tp1_qty_pct))
-            if analysis.suggested_tp2:
-                levels.append(TakeProfitLevel(price=analysis.suggested_tp2, qty_pct=analysis.tp2_qty_pct))
-            if analysis.suggested_tp3:
-                levels.append(TakeProfitLevel(price=analysis.suggested_tp3, qty_pct=analysis.tp3_qty_pct))
-            if analysis.suggested_tp4:
-                levels.append(TakeProfitLevel(price=analysis.suggested_tp4, qty_pct=analysis.tp4_qty_pct))
-            decision.take_profit_levels = levels
+        if decision.execute:
+            self._apply_exit_plan(decision, signal, analysis, user_settings or {})
+            if signal.direction in {SignalDirection.LONG, SignalDirection.SHORT}:
+                if not decision.stop_loss:
+                    decision.execute = False
+                    decision.reason = "No valid stop loss available for opening trade"
+                    return decision
+                if not decision.take_profit_levels:
+                    decision.execute = False
+                    decision.reason = "No valid take-profit target available for opening trade"
+                    return decision
 
         # Set trailing stop
-        if settings.trailing_stop.mode != "none":
+        trailing_cfg = (user_settings or {}).get("trailing_stop") or {}
+        trailing_mode = str(trailing_cfg.get("mode") or settings.trailing_stop.mode)
+        if trailing_mode != "none":
             from models import TrailingStopConfig, TrailingStopMode
             decision.trailing_stop = TrailingStopConfig(
-                mode=TrailingStopMode(settings.trailing_stop.mode),
-                trail_pct=settings.trailing_stop.trail_pct,
-                activation_profit_pct=settings.trailing_stop.activation_profit_pct,
-                trailing_step_pct=settings.trailing_stop.trailing_step_pct,
+                mode=TrailingStopMode(trailing_mode),
+                trail_pct=float(trailing_cfg.get("trail_pct") or settings.trailing_stop.trail_pct),
+                activation_profit_pct=float(trailing_cfg.get("activation_profit_pct") or settings.trailing_stop.activation_profit_pct),
+                trailing_step_pct=float(trailing_cfg.get("trailing_step_pct") or settings.trailing_stop.trailing_step_pct),
             )
 
         # Calculate position size
@@ -326,6 +336,145 @@ class SignalProcessor:
 
         decision.reason = analysis.reasoning
         return decision
+
+    def _apply_exit_plan(
+        self,
+        decision: TradeDecision,
+        signal: TradingViewSignal,
+        analysis: AIAnalysis,
+        user_settings: dict,
+    ) -> None:
+        """Apply either custom configured exits or validated AI-generated exits."""
+        if signal.direction not in {SignalDirection.LONG, SignalDirection.SHORT}:
+            return
+
+        risk_cfg = user_settings.get("risk") or {}
+        exit_mode = str(risk_cfg.get("exit_management_mode") or settings.risk.exit_management_mode)
+        if exit_mode == "custom":
+            self._apply_custom_exit_plan(decision, signal, user_settings)
+            return
+
+        decision.stop_loss = self._valid_stop_loss(signal.direction, signal.price, analysis.suggested_stop_loss)
+
+        raw_levels = [
+            (analysis.suggested_tp1, analysis.tp1_qty_pct),
+            (analysis.suggested_tp2, analysis.tp2_qty_pct),
+            (analysis.suggested_tp3, analysis.tp3_qty_pct),
+            (analysis.suggested_tp4, analysis.tp4_qty_pct),
+        ]
+        max_levels = self._max_tp_levels(user_settings)
+        decision.take_profit_levels = self._build_take_profit_levels(signal.direction, signal.price, raw_levels, max_levels)
+        if decision.take_profit_levels:
+            decision.take_profit = decision.take_profit_levels[0].price
+
+    def _apply_custom_exit_plan(self, decision: TradeDecision, signal: TradingViewSignal, user_settings: dict) -> None:
+        """Build fixed percentage SL/TP exits from admin configuration."""
+        entry = float(signal.price or 0)
+        if entry <= 0:
+            return
+
+        risk_cfg = user_settings.get("risk") or {}
+        tp_cfg = user_settings.get("take_profit") or {}
+        stop_pct = max(0.01, float(risk_cfg.get("custom_stop_loss_pct") or settings.risk.custom_stop_loss_pct or 0))
+        tp1_pct = float(tp_cfg.get("tp1_pct") or settings.take_profit.tp1_pct)
+        tp2_pct = float(tp_cfg.get("tp2_pct") or settings.take_profit.tp2_pct)
+        tp3_pct = float(tp_cfg.get("tp3_pct") or settings.take_profit.tp3_pct)
+        tp4_pct = float(tp_cfg.get("tp4_pct") or settings.take_profit.tp4_pct)
+        tp1_qty = float(tp_cfg.get("tp1_qty") or settings.take_profit.tp1_qty)
+        tp2_qty = float(tp_cfg.get("tp2_qty") or settings.take_profit.tp2_qty)
+        tp3_qty = float(tp_cfg.get("tp3_qty") or settings.take_profit.tp3_qty)
+        tp4_qty = float(tp_cfg.get("tp4_qty") or settings.take_profit.tp4_qty)
+
+        if signal.direction == SignalDirection.LONG:
+            decision.stop_loss = round(entry * (1 - stop_pct / 100.0), 8)
+            raw_levels = [
+                (entry * (1 + tp1_pct / 100.0), tp1_qty),
+                (entry * (1 + tp2_pct / 100.0), tp2_qty),
+                (entry * (1 + tp3_pct / 100.0), tp3_qty),
+                (entry * (1 + tp4_pct / 100.0), tp4_qty),
+            ]
+        else:
+            decision.stop_loss = round(entry * (1 + stop_pct / 100.0), 8)
+            raw_levels = [
+                (entry * (1 - tp1_pct / 100.0), tp1_qty),
+                (entry * (1 - tp2_pct / 100.0), tp2_qty),
+                (entry * (1 - tp3_pct / 100.0), tp3_qty),
+                (entry * (1 - tp4_pct / 100.0), tp4_qty),
+            ]
+
+        decision.take_profit_levels = self._build_take_profit_levels(
+            signal.direction,
+            entry,
+            raw_levels,
+            self._max_tp_levels(user_settings),
+        )
+        if decision.take_profit_levels:
+            decision.take_profit = decision.take_profit_levels[0].price
+
+    def _build_take_profit_levels(
+        self,
+        direction: SignalDirection,
+        entry: float,
+        raw_levels: list[tuple[Optional[float], float]],
+        max_levels: int,
+    ) -> list:
+        """Validate TP direction and cap cumulative close quantity to 100%."""
+        from models import TakeProfitLevel
+
+        levels = []
+        remaining_pct = 100.0
+        for price, qty_pct in raw_levels[:max_levels]:
+            price = self._valid_take_profit(direction, entry, price)
+            if not price:
+                continue
+            qty = max(0.0, min(float(qty_pct or 0.0), remaining_pct))
+            if qty <= 0:
+                continue
+            levels.append(TakeProfitLevel(price=round(price, 8), qty_pct=round(qty, 4)))
+            remaining_pct -= qty
+            if remaining_pct <= 0:
+                break
+
+        if not levels and raw_levels:
+            fallback = self._valid_take_profit(direction, entry, raw_levels[0][0])
+            if fallback:
+                levels.append(TakeProfitLevel(price=round(fallback, 8), qty_pct=100.0))
+        return levels
+
+    @staticmethod
+    def _max_tp_levels(user_settings: dict) -> int:
+        tp_cfg = user_settings.get("take_profit") or {}
+        return max(1, min(int(tp_cfg.get("num_levels") or settings.take_profit.num_levels or 1), 4))
+
+    @staticmethod
+    def _valid_stop_loss(direction: SignalDirection, entry: float, price: Optional[float]) -> Optional[float]:
+        try:
+            value = float(price or 0)
+            entry = float(entry or 0)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0 or entry <= 0:
+            return None
+        if direction == SignalDirection.LONG and value < entry:
+            return value
+        if direction == SignalDirection.SHORT and value > entry:
+            return value
+        return None
+
+    @staticmethod
+    def _valid_take_profit(direction: SignalDirection, entry: float, price: Optional[float]) -> Optional[float]:
+        try:
+            value = float(price or 0)
+            entry = float(entry or 0)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0 or entry <= 0:
+            return None
+        if direction == SignalDirection.LONG and value > entry:
+            return value
+        if direction == SignalDirection.SHORT and value < entry:
+            return value
+        return None
 
     def _calculate_position_size(
         self,
@@ -357,6 +506,7 @@ class SignalProcessor:
         self,
         decision: TradeDecision,
         user_id: Optional[str],
+        user_settings: Optional[dict] = None,
     ) -> dict:
         """Execute the trade on the exchange."""
         exchange_config = {
@@ -370,14 +520,10 @@ class SignalProcessor:
         if user_id:
             user = await get_user_by_id(self.session, user_id)
             if user:
-                user_settings = {}
-                try:
-                    raw_settings = json.loads(user.settings_json or "{}")
-                    user_settings = decrypt_settings_payload(raw_settings)
-                except Exception as exc:
-                    logger.warning(f"[Signal] Could not load user exchange settings: {exc}")
+                if user_settings is None:
+                    user_settings = await self._load_user_settings(user_id)
 
-                user_exchange = user_settings.get("exchange") or {}
+                user_exchange = (user_settings or {}).get("exchange") or {}
                 exchange_config.update({
                     "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
                     "api_key": user_exchange.get("api_key") or settings.exchange.api_key,
@@ -431,6 +577,21 @@ class SignalProcessor:
         await notify_trade_executed(decision, result)
 
         return result
+
+    async def _load_user_settings(self, user_id: Optional[str]) -> dict:
+        """Load decrypted per-user settings once for this webhook."""
+        if not user_id:
+            return {}
+        user = await get_user_by_id(self.session, user_id)
+        if not user:
+            return {}
+        try:
+            raw_settings = json.loads(user.settings_json or "{}")
+            settings_data = decrypt_settings_payload(raw_settings)
+            return settings_data if isinstance(settings_data, dict) else {}
+        except Exception as exc:
+            logger.warning(f"[Signal] Could not load user settings: {exc}")
+            return {}
 
     def _apply_position_limits(self, decision: TradeDecision, exchange_config: dict) -> None:
         """Cap final quantity by the account and user max-position limits."""

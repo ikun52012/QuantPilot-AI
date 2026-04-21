@@ -308,7 +308,7 @@ async def _calculate_ai_stats(trades: list) -> dict:
                     high_conf_trades.append(trade.pnl_pct or 0)
                 elif confidence < 0.5:
                     low_conf_trades.append(trade.pnl_pct or 0)
-        except:
+        except (TypeError, json.JSONDecodeError, ValueError):
             pass
 
     def win_rate(trade_list):

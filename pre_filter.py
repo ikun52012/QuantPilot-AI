@@ -4,6 +4,8 @@ Fast, free, rule-based checks BEFORE calling the AI.
 Enhanced v2: 14 intelligent filters that block 70-85% of low-quality signals.
 """
 import threading
+import concurrent.futures
+import json
 from datetime import datetime, timedelta, timezone
 from loguru import logger
 from models import TradingViewSignal, MarketContext, PreFilterResult, SignalDirection
@@ -57,6 +59,71 @@ async def count_today_executed_trades_async(user_id: str | None = None) -> int:
             if today != _daily_trade_date:
                 reset_daily_counters()
             return _daily_trade_count
+
+
+def _trade_is_closed(trade) -> bool:
+    status = str(getattr(trade, "order_status", "") or "").lower()
+    direction = str(getattr(trade, "direction", "") or "").lower()
+    if direction.startswith("close_"):
+        return True
+    if status in {"closed", "paper_closed", "exchange_closed", "tp_hit", "sl_hit"}:
+        return True
+    try:
+        payload = json.loads(getattr(trade, "payload_json", "") or "{}")
+        return payload.get("position_event") == "closed" or bool(payload.get("close_reason"))
+    except Exception:
+        return False
+
+
+async def get_today_pnl_async(user_id: str | None = None) -> float:
+    """Return today's realised PnL from the database, falling back to JSON logs."""
+    from core.database import db_manager, TradeModel
+    from sqlalchemy import select
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        async with db_manager.async_session_factory() as session:
+            query = select(TradeModel).where(
+                TradeModel.timestamp >= today_start,
+                TradeModel.execute == True,
+            )
+            if user_id:
+                query = query.where(TradeModel.user_id == user_id)
+            result = await session.execute(query)
+            trades = result.scalars().all()
+            return sum(float(t.pnl_pct or 0.0) for t in trades if _trade_is_closed(t))
+    except Exception as e:
+        logger.warning(f"[PreFilter] Database PnL failed, using JSON fallback: {e}")
+        return get_today_pnl(user_id=user_id)
+
+
+async def get_recent_trade_results_async(limit: int = 5, user_id: str | None = None) -> list[dict]:
+    """Get recent realised trade results from the database, falling back to JSON logs."""
+    from core.database import db_manager, TradeModel
+    from sqlalchemy import select
+
+    try:
+        async with db_manager.async_session_factory() as session:
+            query = select(TradeModel).where(TradeModel.execute == True)
+            if user_id:
+                query = query.where(TradeModel.user_id == user_id)
+            query = query.order_by(TradeModel.timestamp.desc()).limit(max(limit * 4, limit))
+            result = await session.execute(query)
+            rows = []
+            for trade in result.scalars().all():
+                if not _trade_is_closed(trade):
+                    continue
+                rows.append({
+                    "id": trade.id,
+                    "timestamp": trade.timestamp.isoformat() if trade.timestamp else "",
+                    "pnl_pct": float(trade.pnl_pct or 0.0),
+                })
+                if len(rows) >= limit:
+                    break
+            return rows
+    except Exception as e:
+        logger.warning(f"[PreFilter] Database recent results failed, using JSON fallback: {e}")
+        return get_recent_trade_results(limit=limit, user_id=user_id)
 
 
 def count_today_executed_trades(user_id: str | None = None) -> int:
@@ -124,7 +191,7 @@ async def run_pre_filter_async(
         reasons.append(f"Daily trade limit reached ({daily_count_snapshot}/{max_daily_trades})")
 
     # ── Check 2: Daily loss limit ──
-    current_pnl = get_today_pnl(user_id=user_id)
+    current_pnl = await get_today_pnl_async(user_id=user_id)
     loss_ok = current_pnl > -max_daily_loss_pct
     checks["daily_loss_limit"] = {
         "passed": loss_ok,
@@ -303,7 +370,7 @@ async def run_pre_filter_async(
     # ── Check 13: Consecutive Loss Protection ──
     consec_ok = True
     try:
-        recent_results = get_recent_trade_results(limit=5, user_id=user_id)
+        recent_results = await get_recent_trade_results_async(limit=5, user_id=user_id)
         if len(recent_results) >= 3:
             # If last 3 trades were all losses, block the next one
             last_three = recent_results[:3]

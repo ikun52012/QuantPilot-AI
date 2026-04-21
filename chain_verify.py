@@ -2,6 +2,7 @@
 Signal Server - Chain Verification
 Verify blockchain transactions for payment confirmation.
 """
+import os
 import httpx
 from datetime import datetime, timezone
 from typing import Optional
@@ -32,6 +33,16 @@ EXPLORER_APIS = {
         "url": "https://api.mainnet-beta.solana.com",
         "method": "getTransaction",
     },
+    "APT": {
+        "url": "",
+        "manual": True,
+    },
+}
+
+EVM_USDT_CONTRACTS = {
+    "ERC20": {"0xdac17f958d2ee523a2206206994597c13d831ec7"},
+    "BEP20": {"0x55d398326f99059ff775485246999027b3197955"},
+    "ARBITRUM": {"0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"},
 }
 
 
@@ -123,7 +134,7 @@ async def _verify_trc20(
 
             try:
                 amount = float(amount_str) / 1e6  # USDT has 6 decimals
-            except:
+            except (TypeError, ValueError):
                 amount = 0
 
             if expected_address and to_address.lower() != expected_address.lower():
@@ -150,23 +161,30 @@ async def _verify_evm(
     expected_amount: Optional[float],
     expected_address: Optional[str],
 ) -> dict:
-    """Verify EVM chain transaction (ETH, BSC, Arbitrum)."""
+    """Verify EVM USDT token transfer details, not just transaction success."""
     config = EXPLORER_APIS.get(network, {})
     base_url = config.get("url", "")
     key_env = config.get("key_env", "")
     api_key = os.getenv(key_env, "")
 
+    if not expected_address or not expected_amount:
+        return {
+            "verified": False,
+            "status": "manual_review",
+            "reason": "Expected amount/address required for EVM auto-verification",
+        }
+
     async with httpx.AsyncClient(timeout=30.0) as client:
-        params = {
+        receipt_params = {
             "module": "transaction",
             "action": "gettxreceiptstatus",
             "txhash": tx_hash,
         }
 
         if api_key:
-            params["apikey"] = api_key
+            receipt_params["apikey"] = api_key
 
-        resp = await client.get(base_url, params=params)
+        resp = await client.get(base_url, params=receipt_params)
 
         if resp.status_code != 200:
             return {"verified": False, "status": "error", "reason": "API error"}
@@ -174,16 +192,65 @@ async def _verify_evm(
         data = resp.json()
         status = data.get("result", {}).get("status", "0")
 
-        if status == "1":
+        if status == "0":
+            return {"verified": False, "status": "failed"}
+        if status != "1":
+            return {"verified": False, "status": "pending"}
+
+        token_params = {
+            "module": "account",
+            "action": "tokentx",
+            "txhash": tx_hash,
+        }
+        if api_key:
+            token_params["apikey"] = api_key
+
+        token_resp = await client.get(base_url, params=token_params)
+        if token_resp.status_code != 200:
+            return {"verified": False, "status": "error", "reason": "Token transfer API error"}
+
+        token_data = token_resp.json()
+        transfers = token_data.get("result") or []
+        if not isinstance(transfers, list):
+            return {
+                "verified": False,
+                "status": "manual_review",
+                "reason": "Explorer did not return token transfer details",
+            }
+
+        expected_contracts = EVM_USDT_CONTRACTS.get(network, set())
+        expected_to = expected_address.lower().strip()
+        min_amount = max(0.0, float(expected_amount) - 0.01)
+
+        for transfer in transfers:
+            contract = str(transfer.get("contractAddress") or "").lower()
+            if expected_contracts and contract not in expected_contracts:
+                continue
+            to_address = str(transfer.get("to") or "").lower()
+            if to_address != expected_to:
+                continue
+            try:
+                decimals = int(transfer.get("tokenDecimal") or 6)
+                amount = int(str(transfer.get("value") or "0")) / (10 ** decimals)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if amount < min_amount:
+                continue
             return {
                 "verified": True,
                 "status": "confirmed",
-                "note": "Basic verification passed. Full verification requires token transfer analysis.",
+                "amount": amount,
+                "to_address": transfer.get("to", ""),
+                "from_address": transfer.get("from", ""),
+                "token": transfer.get("tokenSymbol", "USDT"),
+                "block_number": transfer.get("blockNumber"),
             }
-        elif status == "0":
-            return {"verified": False, "status": "failed"}
-        else:
-            return {"verified": False, "status": "pending"}
+
+        return {
+            "verified": False,
+            "status": "no_matching_transfer",
+            "reason": "No USDT transfer matched expected address and amount",
+        }
 
 
 async def _verify_solana(
@@ -228,6 +295,3 @@ async def _verify_solana(
                 "status": "pending",
                 "confirmations": status.get("confirmations", 0),
             }
-
-
-import os
