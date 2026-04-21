@@ -20,10 +20,10 @@ from core.database import (
     get_db, get_all_users, get_user_by_id, update_user_status,
     get_user_by_username, get_user_by_email, update_user_password_hash, set_admin_setting, get_admin_setting,
     AdminAuditLogModel, AdminSettingModel, UserModel, SubscriptionPlanModel, SubscriptionModel, PaymentModel,
-    WebhookEventModel, TradeModel, InviteCodeModel, RedeemCodeModel,
+    WebhookEventModel, TradeModel, PositionModel, InviteCodeModel, RedeemCodeModel,
     seed_defaults,
 )
-from core.security import hash_password, validate_password_strength, generate_webhook_secret, webhook_secret_hash
+from core.security import hash_password, validate_password_strength, generate_webhook_secret, webhook_secret_hash, is_placeholder_webhook_secret
 from core.auth import require_admin
 from core.config import settings
 
@@ -301,6 +301,15 @@ async def delete_user(
         if admin_count <= 1:
             raise HTTPException(400, "Cannot delete the last admin account")
 
+    await db.execute(
+        update(RedeemCodeModel)
+        .where(RedeemCodeModel.redeemed_by == user_id)
+        .values(redeemed_by=None)
+    )
+    await db.execute(delete(PaymentModel).where(PaymentModel.user_id == user_id))
+    await db.execute(delete(SubscriptionModel).where(SubscriptionModel.user_id == user_id))
+    await db.execute(delete(TradeModel).where(TradeModel.user_id == user_id))
+    await db.execute(delete(PositionModel).where(PositionModel.user_id == user_id))
     await db.execute(delete(UserModel).where(UserModel.id == user_id))
     await db.commit()
 
@@ -536,7 +545,7 @@ async def get_webhook_config(
     """Get webhook configuration."""
     secret = await get_admin_setting(db, "webhook_secret", "")
 
-    if not secret:
+    if is_placeholder_webhook_secret(secret):
         secret = generate_webhook_secret()
         await set_admin_setting(db, "webhook_secret", secret)
         await db.commit()
@@ -664,6 +673,8 @@ async def create_invite_code(
 ):
     """Create an invite code."""
     code_value = (req.code or _generate_code("INV")).upper().strip()
+    if await db.get(InviteCodeModel, code_value):
+        raise HTTPException(400, "Invite code already exists")
 
     code = InviteCodeModel(
         code=code_value,
@@ -741,6 +752,8 @@ async def create_redeem_code(
     if not req.plan_id and req.balance_usdt <= 0:
         raise HTTPException(400, "Choose a plan or balance amount")
     code_value = (req.code or _generate_code("CARD")).upper().strip()
+    if await db.get(RedeemCodeModel, code_value):
+        raise HTTPException(400, "Redeem code already exists")
     code = RedeemCodeModel(
         code=code_value,
         plan_id=req.plan_id or None,

@@ -2,6 +2,8 @@
 Signal Server - Authentication Router
 User registration, login, and session management.
 """
+from datetime import timezone
+
 from fastapi import APIRouter, Request, Response, HTTPException, Depends
 from pydantic import BaseModel, Field
 from loguru import logger
@@ -35,6 +37,12 @@ class LoginRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=8, max_length=256)
+
+
+def _as_utc(dt):
+    if dt and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ─────────────────────────────────────────────
@@ -88,7 +96,7 @@ async def register(
         if not invite:
             raise HTTPException(400, "Invalid or expired invite code")
 
-        if invite.expires_at and invite.expires_at < datetime.now(timezone.utc):
+        if invite.expires_at and _as_utc(invite.expires_at) < datetime.now(timezone.utc):
             raise HTTPException(400, "Invite code has expired")
 
         if invite.max_uses > 0 and invite.used_count >= invite.max_uses:

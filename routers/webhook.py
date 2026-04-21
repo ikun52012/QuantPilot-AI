@@ -13,6 +13,7 @@ from core.config import settings
 from core.auth import get_optional_user
 from models import TradingViewSignal
 from services.signal_processor import SignalProcessor, verify_webhook_signature
+from core.security import is_placeholder_webhook_secret
 
 
 router = APIRouter(prefix="", tags=["webhook"])
@@ -73,7 +74,7 @@ async def webhook(
     if not user_id:
         # Check admin secret
         admin_secret = await get_admin_setting(db, "webhook_secret", settings.server.webhook_secret)
-        if not admin_secret or secret != admin_secret:
+        if is_placeholder_webhook_secret(admin_secret) or secret != admin_secret:
             logger.warning(f"[Webhook] Invalid secret from {client_ip}")
             raise HTTPException(401, "Invalid webhook secret")
 

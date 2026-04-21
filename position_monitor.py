@@ -47,6 +47,27 @@ def _loads_list(value) -> list:
         return []
 
 
+def _has_partial_position_fills(position: PositionModel) -> bool:
+    return any(
+        str(level.get("status") or "").lower() in {"hit", "filled", "closed"}
+        for level in _loads_list(position.take_profit_json)
+        if isinstance(level, dict)
+    )
+
+
+def _effective_remaining_quantity(position: PositionModel, opened_qty: float) -> float:
+    remaining_qty = _safe_float(position.remaining_quantity, opened_qty)
+    if remaining_qty > 0:
+        return remaining_qty
+    if (
+        position.status == "open"
+        and _safe_float(position.realized_pnl_pct) == 0
+        and not _has_partial_position_fills(position)
+    ):
+        return opened_qty
+    return 0.0
+
+
 def _symbol_key(symbol: str) -> str:
     return str(symbol or "").upper().replace("/", "").replace(":", "").replace("-", "").replace("_", "")
 
@@ -197,7 +218,7 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
     hit_levels = _hit_take_profit_levels(direction, tp_levels, high, low)
     if hit_levels:
         opened_qty = max(_safe_float(position.quantity), 0.0)
-        remaining_qty = _safe_float(position.remaining_quantity, opened_qty)
+        remaining_qty = _effective_remaining_quantity(position, opened_qty)
         for level in hit_levels:
             qty_pct = max(0.0, _safe_float(level.get("qty_pct"), 100.0))
             qty = min(remaining_qty, opened_qty * (qty_pct / 100.0)) if opened_qty > 0 else 0.0
@@ -307,12 +328,51 @@ async def _find_recent_close_order(position: PositionModel, exchange_config: dic
     order_ids = set(_loads_list(position.take_profit_order_ids_json))
     if position.stop_loss_order_id:
         order_ids.add(position.stop_loss_order_id)
-    if not order_ids:
-        return orders[0] if orders else None
     for order in orders:
-        if str(order.get("id") or "") in order_ids:
+        if str(order.get("id") or "") in order_ids and _order_has_close_status(order):
+            return order
+    if order_ids:
+        return None
+
+    for order in orders:
+        if _order_matches_position_close(position, order):
             return order
     return None
+
+
+def _order_matches_position_close(position: PositionModel, order: dict) -> bool:
+    if not _order_has_close_status(order):
+        return False
+
+    if not _symbols_match(position.ticker, order.get("symbol")):
+        return False
+
+    order_side = str(order.get("side") or "").lower()
+    expected_side = "sell" if str(position.direction).lower() == "long" else "buy"
+    if not order_side or order_side != expected_side:
+        return False
+
+    order_ts = _safe_float(order.get("timestamp"))
+    opened_at = position.opened_at
+    if order_ts <= 0 or not opened_at:
+        return False
+    if opened_at.tzinfo is None:
+        opened_at = opened_at.replace(tzinfo=timezone.utc)
+    opened_ms = opened_at.timestamp() * 1000
+    if order_ts < opened_ms:
+        return False
+
+    return True
+
+
+def _order_has_close_status(order: dict) -> bool:
+    return str(order.get("status") or "").lower() in {"closed", "filled"}
+
+
+def _symbols_match(left: str, right: str) -> bool:
+    left_key = _symbol_key(left)
+    right_key = _symbol_key(right)
+    return bool(left_key and right_key and (left_key in right_key or right_key in left_key))
 
 
 def _close_reason_for_order(position: PositionModel, order: Optional[dict]) -> str:
@@ -328,7 +388,7 @@ def _close_reason_for_order(position: PositionModel, order: Optional[dict]) -> s
 
 def _update_unrealized(position: PositionModel, mark_price: float) -> None:
     opened_qty = max(_safe_float(position.quantity), 0.0)
-    remaining_qty = _safe_float(position.remaining_quantity, opened_qty)
+    remaining_qty = _effective_remaining_quantity(position, opened_qty)
     remaining_weight = min(1.0, max(0.0, remaining_qty / opened_qty)) if opened_qty > 0 else 1.0
     open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, position.leverage) * remaining_weight
     position.last_price = mark_price
@@ -362,7 +422,7 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
     result = await place_protective_stop(
         ticker=position.ticker,
         direction=position.direction,
-        quantity=_safe_float(position.remaining_quantity, position.quantity),
+        quantity=_effective_remaining_quantity(position, _safe_float(position.quantity)),
         stop_price=new_stop,
         exchange_config=exchange_config,
     )

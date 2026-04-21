@@ -319,7 +319,7 @@ class SignalProcessor:
 
         # Calculate position size
         decision.quantity = self._calculate_position_size(
-            market.current_price,
+            market.current_price or signal.price,
             analysis.position_size_pct,
             analysis.recommended_leverage,
         )

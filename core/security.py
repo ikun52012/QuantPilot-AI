@@ -212,6 +212,22 @@ def generate_webhook_secret() -> str:
     return secrets.token_urlsafe(32)
 
 
+def is_placeholder_webhook_secret(secret: str) -> bool:
+    """Return True for documentation/example webhook secrets that must not be accepted."""
+    normalized = str(secret or "").strip().lower()
+    if not normalized:
+        return True
+    placeholders = {
+        "replace-with-a-long-random-webhook-secret",
+        "replace-with-long-random-webhook-secret",
+        "your-webhook-secret",
+        "{{your-webhook-secret}}",
+        "changeme",
+        "change-me",
+    }
+    return normalized in placeholders or normalized.startswith("replace-with-")
+
+
 def webhook_secret_hash(secret: str) -> str:
     """Hash a webhook secret for storage."""
     secret = str(secret or "").strip()

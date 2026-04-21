@@ -595,6 +595,32 @@ def _loads_list(value: Any) -> list:
         return []
 
 
+def _has_partial_position_fills(position: PositionModel) -> bool:
+    levels = _loads_list(position.take_profit_json)
+    return any(
+        str(level.get("status") or "").lower() in {"hit", "filled", "closed"}
+        for level in levels
+        if isinstance(level, dict)
+    )
+
+
+def _effective_remaining_quantity(position: PositionModel, opened_qty: float) -> float:
+    remaining_qty = _safe_float(position.remaining_quantity, opened_qty)
+    if remaining_qty > 0:
+        return remaining_qty
+
+    # Older deployments may have open positions created before
+    # remaining_quantity existed. Treat those as fully open only if no partial
+    # TP has ever been recorded; otherwise zero really means fully settled.
+    if (
+        position.status == "open"
+        and _safe_float(position.realized_pnl_pct) == 0
+        and not _has_partial_position_fills(position)
+    ):
+        return opened_qty
+    return 0.0
+
+
 def _take_profit_levels_from_entry(entry: dict) -> list[dict]:
     order_details = entry.get("order_details") or {}
     analysis = entry.get("analysis") or {}
@@ -654,8 +680,7 @@ async def close_position_async(
     """Close a tracked position and return realised leveraged PnL percentage."""
     exit_price = _safe_float(exit_price)
     opened_qty = max(_safe_float(position.quantity), 0.0)
-    remaining_qty = _safe_float(position.remaining_quantity, opened_qty)
-    remaining_qty = opened_qty if remaining_qty <= 0 and position.status == "open" else remaining_qty
+    remaining_qty = _effective_remaining_quantity(position, opened_qty)
     remaining_weight = min(1.0, max(0.0, remaining_qty / opened_qty)) if opened_qty > 0 else 1.0
     remaining_pnl = _position_pnl_pct(
         str(position.direction or "long").lower(),

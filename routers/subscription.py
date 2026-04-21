@@ -47,6 +47,12 @@ class RedeemCodeRequest(BaseModel):
     code: str = Field(min_length=4, max_length=80)
 
 
+def _as_utc(dt):
+    if dt and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 # ─────────────────────────────────────────────
 # Public Routes
 # ─────────────────────────────────────────────
@@ -389,7 +395,7 @@ async def redeem_code(
     if code.redeemed_by:
         raise HTTPException(400, "Code has already been redeemed")
 
-    if code.expires_at and code.expires_at < datetime.now(timezone.utc):
+    if code.expires_at and _as_utc(code.expires_at) < datetime.now(timezone.utc):
         raise HTTPException(400, "Code has expired")
 
     # Get user
@@ -402,21 +408,26 @@ async def redeem_code(
         db_user.balance_usdt = (db_user.balance_usdt or 0) + code.balance_usdt
 
     subscription_payload = None
-    if code.plan_id and code.duration_days > 0:
-        # Create subscription
+    if code.plan_id:
+        plan = await db.get(SubscriptionPlanModel, code.plan_id)
+        if not plan:
+            raise HTTPException(404, "Subscription plan not found")
+        duration_days = code.duration_days or plan.duration_days
+        if duration_days <= 0:
+            raise HTTPException(400, "Redeem code has no subscription duration")
+
         subscription = SubscriptionModel(
             user_id=user["sub"],
             plan_id=code.plan_id,
             status="active",
             start_date=datetime.now(timezone.utc),
-            end_date=datetime.now(timezone.utc) + timedelta(days=code.duration_days),
+            end_date=datetime.now(timezone.utc) + timedelta(days=duration_days),
         )
         db.add(subscription)
-        plan = await db.get(SubscriptionPlanModel, code.plan_id)
         subscription_payload = {
             "plan_id": code.plan_id,
             "plan_name": plan.name if plan else "",
-            "duration_days": code.duration_days,
+            "duration_days": duration_days,
             "end_date": subscription.end_date.isoformat() if subscription.end_date else None,
         }
 
@@ -432,5 +443,5 @@ async def redeem_code(
         "balance_usdt": code.balance_usdt,
         "balance_added": code.balance_usdt,
         "subscription": subscription_payload,
-        "subscription_days": code.duration_days if code.plan_id else 0,
+        "subscription_days": subscription_payload["duration_days"] if subscription_payload else 0,
     }
