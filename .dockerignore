@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+data/
+logs/
+trade_logs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+node_modules/
+*.zip

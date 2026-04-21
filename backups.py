@@ -3,7 +3,7 @@ Local backup helpers for persistent runtime data.
 """
 import shutil
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -22,19 +22,22 @@ def _safe_name(name: str) -> str:
 
 def create_backup() -> dict:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     path = BACKUP_DIR / f"signal-server-backup-{stamp}.zip"
     items = [
         DATA_DIR / "server.db",
         DATA_DIR / "runtime_settings.json",
         DATA_DIR / "app_encryption.key",
-        ROOT / ".env",
     ]
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item in items:
             if item.exists() and item.is_file():
                 zf.write(item, item.name)
-    return {"filename": path.name, "size": path.stat().st_size, "created_at": datetime.utcnow().isoformat()}
+        zf.writestr(
+            "BACKUP_NOTES.txt",
+            ".env is intentionally excluded because it can contain API keys, JWT secrets, and payment credentials.\n",
+        )
+    return {"filename": path.name, "size": path.stat().st_size, "created_at": datetime.now(timezone.utc).isoformat()}
 
 
 def list_backups() -> list[dict]:
@@ -44,7 +47,7 @@ def list_backups() -> list[dict]:
         result.append({
             "filename": path.name,
             "size": path.stat().st_size,
-            "created_at": datetime.utcfromtimestamp(path.stat().st_mtime).isoformat(),
+            "created_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
         })
     return result
 

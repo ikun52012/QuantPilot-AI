@@ -6,6 +6,7 @@ This is the brain of the system.
 import asyncio
 import json
 import httpx
+import os
 from loguru import logger
 from config import settings
 from models import TradingViewSignal, MarketContext, AIAnalysis
@@ -14,6 +15,12 @@ from models import TradingViewSignal, MarketContext, AIAnalysis
 _AI_MAX_RETRIES = 3
 _AI_BASE_DELAY = 1.0  # seconds; doubled each attempt
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_AI_TIMEOUT = httpx.Timeout(
+    connect=float(os.getenv("AI_CONNECT_TIMEOUT_SECS", "10")),
+    read=float(os.getenv("AI_READ_TIMEOUT_SECS", "90")),
+    write=float(os.getenv("AI_WRITE_TIMEOUT_SECS", "30")),
+    pool=float(os.getenv("AI_POOL_TIMEOUT_SECS", "10")),
+)
 
 
 # ─────────────────────────────────────────────
@@ -220,7 +227,7 @@ async def _with_retry(coro_factory, label: str) -> str:
 async def _call_openai(system: str, user: str) -> str:
     """Call OpenAI/compatible API with automatic retry."""
     async def _do():
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={
@@ -248,7 +255,7 @@ async def _call_openai(system: str, user: str) -> str:
 async def _call_anthropic(system: str, user: str) -> str:
     """Call Anthropic Claude API with automatic retry."""
     async def _do():
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
@@ -276,7 +283,7 @@ async def _call_anthropic(system: str, user: str) -> str:
 async def _call_deepseek(system: str, user: str) -> str:
     """Call DeepSeek API (OpenAI-compatible) with automatic retry."""
     async def _do():
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 headers={
@@ -303,7 +310,7 @@ async def _call_deepseek(system: str, user: str) -> str:
 async def _call_custom(system: str, user: str) -> str:
     """Call custom AI provider API with automatic retry."""
     async def _do():
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             # Check if custom provider is properly configured
             if not settings.ai.custom_provider_api_url:
                 raise ValueError("Custom AI provider API URL is not configured")

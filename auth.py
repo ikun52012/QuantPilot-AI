@@ -9,6 +9,7 @@ import hmac
 import json
 import base64
 import secrets
+import re
 from datetime import datetime, timedelta
 from loguru import logger
 
@@ -34,6 +35,17 @@ elif JWT_SECRET == _LEGACY_DEFAULT_JWT_SECRET:
 # ─────────────────────────────────────────────
 _HASH_ITERATIONS = 260_000  # OWASP minimum for PBKDF2-SHA256
 _SALT_SIZE = 32
+_COMMON_PASSWORDS = {
+    "123456",
+    "12345678",
+    "123456789",
+    "password",
+    "qwerty123",
+    "admin123",
+    "admin123456",
+    "letmein123",
+    "tradingview",
+}
 
 
 def hash_password(password: str) -> str:
@@ -59,6 +71,33 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+def validate_password_strength(password: str, username: str = "", email: str = "") -> tuple[bool, str]:
+    """Return a user-facing validation result for account passwords."""
+    password = password or ""
+    lowered = password.lower()
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters"
+    if len(password) > 256:
+        return False, "Password is too long"
+    if lowered in _COMMON_PASSWORDS:
+        return False, "Password is too common"
+    if username and username.lower() in lowered:
+        return False, "Password cannot contain the username"
+    local_email = (email or "").split("@", 1)[0].lower()
+    if local_email and local_email in lowered:
+        return False, "Password cannot contain the email name"
+    checks = [
+        (re.search(r"[a-z]", password), "a lowercase letter"),
+        (re.search(r"[A-Z]", password), "an uppercase letter"),
+        (re.search(r"\d", password), "a number"),
+        (re.search(r"[^A-Za-z0-9]", password), "a special character"),
+    ]
+    missing = [label for ok, label in checks if not ok]
+    if missing:
+        return False, "Password must include " + ", ".join(missing)
+    return True, ""
+
+
 # ─────────────────────────────────────────────
 # JWT token (minimal, no third-party dependency)
 # ─────────────────────────────────────────────
@@ -73,7 +112,7 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s)
 
 
-def create_token(user_id: str, username: str, role: str = "user") -> str:
+def create_token(user_id: str, username: str, role: str = "user", token_version: int = 0) -> str:
     """Create a JWT token."""
     header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
     now = int(time.time())
@@ -81,6 +120,7 @@ def create_token(user_id: str, username: str, role: str = "user") -> str:
         "sub": user_id,
         "username": username,
         "role": role,
+        "ver": int(token_version or 0),
         "iat": now,
         "exp": now + (JWT_EXPIRY_HOURS * 3600),
     }
@@ -225,6 +265,8 @@ def get_current_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="User no longer exists")
     if not db_user.get("is_active", 1):
         raise HTTPException(status_code=403, detail="Account is disabled")
+    if int(payload.get("ver", 0)) != int(db_user.get("token_version") or 0):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
 
     payload["username"] = db_user["username"]
     payload["role"] = db_user["role"]
@@ -257,6 +299,8 @@ def get_optional_user(request: Request) -> dict | None:
     except Exception:
         return None
     if not db_user or not db_user.get("is_active", 1):
+        return None
+    if int(payload.get("ver", 0)) != int(db_user.get("token_version") or 0):
         return None
     payload["username"] = db_user["username"]
     payload["role"] = db_user["role"]

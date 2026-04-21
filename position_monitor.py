@@ -2,7 +2,7 @@
 Position monitor for advanced trailing-stop modes.
 """
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
@@ -32,6 +32,27 @@ def _save_state(state: dict):
     tmp.replace(STATE_FILE)
 
 
+def _prune_state(state: dict, retention_days: int = 14) -> dict:
+    cutoff = datetime.utcnow() - timedelta(days=retention_days)
+    pruned = {}
+    for key, value in state.items():
+        if key == "last_run_at":
+            pruned[key] = value
+            continue
+        if not isinstance(value, dict):
+            continue
+        updated_at = value.get("updated_at")
+        if not updated_at:
+            pruned[key] = value
+            continue
+        try:
+            if datetime.fromisoformat(str(updated_at)) >= cutoff:
+                pruned[key] = value
+        except ValueError:
+            pruned[key] = value
+    return pruned
+
+
 def get_monitor_state() -> dict:
     return _load_state()
 
@@ -39,7 +60,7 @@ def get_monitor_state() -> dict:
 async def run_position_monitor_once(user_configs: dict[str, dict] | None = None) -> dict:
     """Scan recent executed trades and adjust protective stops when rules trigger."""
     user_configs = user_configs or {}
-    state = _load_state()
+    state = _prune_state(_load_state())
     stats = {"checked": 0, "adjusted": 0, "skipped": 0, "errors": 0, "events": []}
     trades = get_trade_history(days=7)
     for trade in trades:

@@ -104,7 +104,13 @@ function safeClassToken(str) {
     return String(str || '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
 }
 function escapeJsSingle(str) {
-    return String(str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ');
+    return String(str || '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\r?\n/g, ' ');
 }
 function getCookie(name) {
     const prefix = `${name}=`;
@@ -829,7 +835,7 @@ function renderAdminUsers(users, plans) {
         <div class="form-row three-col">
             <div class="form-group"><label for="new-user-username">Username</label><input id="new-user-username" class="text-input" placeholder="username"></div>
             <div class="form-group"><label for="new-user-email">Email</label><input id="new-user-email" class="text-input" placeholder="user@example.com"></div>
-            <div class="form-group"><label for="new-user-password">Password</label><input id="new-user-password" type="password" class="text-input" placeholder="min 6 chars"></div>
+            <div class="form-group"><label for="new-user-password">Password</label><input id="new-user-password" type="password" class="text-input" placeholder="Upper/lower/number/symbol"></div>
         </div>
         <div class="form-row three-col">
             <div class="form-group"><label for="new-user-role">Role</label><select id="new-user-role" class="select-input"><option value="user">User</option><option value="admin">Admin</option></select></div>

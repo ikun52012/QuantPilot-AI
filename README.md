@@ -120,7 +120,10 @@ Here are the high-frequency variables you must pay attention to:
 *   **`EXCHANGE`**: Default platform egress, like `binance`. If operating as a SaaS provider, tenant users can also enter their own Exchange Keys in their web dashboard.
 *   **`LIVE_TRADING`**: Critical! Set to `true` for production live trading, and strictly keep it `false` for paper trading during sandbox strategy testing.
 *   **`JWT_SECRET`** & **`WEBHOOK_SECRET`**: The authorization lifelines of the entire server. **Must be set to unbreakable, random, ultra-long hashes!**
+*   **`WEBHOOK_HMAC_SECRET`**: Optional strict webhook body signature secret. If set, webhook senders must include `X-TVSS-Signature: sha256=<hmac_sha256_raw_body>`.
 *   **`DEFAULT_ADMIN_PASSWORD`**: The default super-admin password generated on first run (Default: 123456). Please change this immediately after your first successful login.
+*   **`PREFILTER_DISABLED_CHECKS`**: Optional comma-separated list of pre-filter rule keys to bypass, for example `spread,market_hours`.
+*   **`AI_READ_TIMEOUT_SECS`**: AI provider read timeout. Default is 90 seconds for larger prompts and congested model providers.
 
 ---
 
@@ -149,7 +152,7 @@ Minimal long signal:
 
 For short signals, change only `"direction": "short"`.
 
-The server records webhook events and ignores duplicate payload fingerprints within the retry window, which helps prevent repeated TradingView deliveries from placing duplicate orders.
+The server records webhook events and reserves duplicate payload fingerprints atomically in SQLite before running AI/exchange logic. This protects against TradingView retries or concurrent duplicate deliveries placing repeated orders.
 
 ---
 
@@ -158,14 +161,20 @@ The server records webhook events and ignores duplicate payload fingerprints wit
 - Runtime admin secrets, webhook secrets, and per-user exchange keys are encrypted at rest with `APP_ENCRYPTION_KEY`. If it is omitted, the app generates a persistent key in `data/app_encryption.key`; back this file up and keep the `data/` volume mounted permanently.
 - Per-user webhook lookup uses a stored hash, so the dashboard can show each user's real secret while the database index does not keep the raw value.
 - Browser write APIs use a double-submit CSRF token in addition to the HttpOnly session cookie.
-- Leave `PUBLIC_BASE_URL` empty to auto-detect the current domain from request/proxy headers. Set it only if auto-detection is wrong, such as `https://127.0.0.1`.
+- Login and registration endpoints use IP sliding-window rate limits. Passwords must include lowercase, uppercase, number, and symbol characters.
+- JWT sessions carry a token version. Disabling a user, changing role/active state, or resetting a password revokes older sessions immediately.
+- SQLite uses WAL, foreign keys, and a busy timeout for better webhook concurrency. The current database layer remains SQLite-based; PostgreSQL is still the recommended next step for very high-volume multi-instance deployments.
+- Leave `PUBLIC_BASE_URL` empty to auto-detect the current domain from request/proxy headers. Set it only if auto-detection is wrong, such as `https://cs.hyzcjs.com` or `https://127.0.0.1`.
+- Optional webhook HMAC verification is available through `WEBHOOK_HMAC_SECRET`. Normal TradingView JSON `secret` verification remains supported when HMAC is not configured.
 - Set `COOKIE_SECURE=true` when deploying behind HTTPS.
 - Docker Compose binds the app to `127.0.0.1:8000` by default. Expose it through Nginx, Caddy, Cloudflare Tunnel, or another HTTPS reverse proxy.
-- Trade logs are written to SQLite for long-term querying while legacy JSON logs remain readable.
+- Trade logs are written to SQLite as the source of truth while legacy JSON logs remain a best-effort readable mirror.
+- A lightweight position ledger tracks open and close signals and computes realized `pnl_pct` on matching close signals, keeping each user's analytics isolated.
 - Admin actions are recorded in an audit log and displayed in the Admin System panel.
+- `/health` performs database, writable storage, disk-space, AI configuration, and exchange configuration checks. `/metrics` exposes basic Prometheus-style counters for operational monitoring.
 - Payment TX hashes are checked for duplicate submission before admin confirmation. Admins can also run best-effort on-chain verification for TRC20, ERC20, BEP20, and Arbitrum from the Pending Payments panel. Aptos is detected but staged for manual/indexer review.
 - Advanced trailing modes are monitored by a scheduled position monitor. Set `POSITION_MONITOR_INTERVAL_SECS` to tune the scan interval, and review the Position Monitor panel after enabling live trading.
-- Backups can be created from the Admin Backup panel. Always keep `data/app_encryption.key` or `APP_ENCRYPTION_KEY`; encrypted secrets cannot be recovered without it.
+- Backups can be created from the Admin Backup panel. `.env` is intentionally excluded from backup ZIP files; always keep `data/app_encryption.key` or `APP_ENCRYPTION_KEY`; encrypted secrets cannot be recovered without it.
 
 ### Commercial Operation Notes
 

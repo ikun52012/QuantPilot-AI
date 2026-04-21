@@ -27,6 +27,14 @@ def _set_cache(key: str, value: dict):
     _performance_cache[key] = (value, time.time())
 
 
+def _finite(value: float, default: float = 0.0) -> float:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
+
+
 def invalidate_performance_cache():
     """Call this after a new trade is logged to ensure fresh metrics."""
     _performance_cache.clear()
@@ -49,7 +57,13 @@ def calculate_performance(days: int = 30, user_id: str | None = None) -> dict:
 
 def _calculate_performance_impl(days: int = 30, user_id: str | None = None) -> dict:
     trades = get_trade_history(days, user_id=user_id)
-    executed = [t for t in trades if t.get("execute") and t.get("order_status") in ("filled", "simulated")]
+    executed = [t for t in trades if t.get("execute") and t.get("order_status") in ("filled", "simulated", "closed")]
+    realized = [
+        t for t in executed
+        if str(t.get("direction") or "").lower() in {"close_long", "close_short"} or (t.get("pnl_pct") not in (None, 0, 0.0))
+    ]
+    if realized:
+        executed = realized
 
     if not executed:
         return _empty_metrics()
@@ -136,9 +150,9 @@ def _calculate_performance_impl(days: int = 30, user_id: str | None = None) -> d
         "expectancy_pct": round(expectancy, 4),
         "max_drawdown_pct": round(max_dd, 4),
         "max_drawdown_duration_trades": max_dd_duration,
-        "sharpe_ratio": round(sharpe, 4),
-        "sortino_ratio": round(sortino, 4),
-        "calmar_ratio": round(calmar, 4),
+        "sharpe_ratio": round(_finite(sharpe), 4),
+        "sortino_ratio": round(_finite(sortino), 4),
+        "calmar_ratio": round(_finite(calmar), 4),
         "max_consecutive_wins": max_consec_wins,
         "max_consecutive_losses": max_consec_losses,
         "avg_duration_minutes": avg_duration,
@@ -251,7 +265,7 @@ def _calculate_sortino_ratio(returns: list[float], risk_free_rate: float = 0.0) 
     mean_ret = sum(returns) / len(returns) - risk_free_rate
     downside = [r for r in returns if r < 0]
     if not downside:
-        return float("inf") if mean_ret > 0 else 0.0
+        return 0.0
     downside_dev = math.sqrt(sum(d ** 2 for d in downside) / len(downside))
     if downside_dev == 0:
         return 0.0

@@ -1,10 +1,12 @@
 """
-OpenClaw Signal Server - Market Data Fetcher
+TradingView Signal Server - Market Data Fetcher
 Fetches real-time market data from the exchange via ccxt.
 """
 import asyncio
+import inspect
 import time
 import threading
+from collections import OrderedDict
 import ccxt
 from loguru import logger
 from config import settings
@@ -13,7 +15,8 @@ from exchange import _build_exchange, _resolve_symbol
 
 # ─── TTL cache for market context (per ticker) ───────────────────────────────
 _MARKET_CACHE_TTL = 30  # seconds
-_market_cache: dict[str, tuple[float, MarketContext]] = {}
+_MARKET_CACHE_MAX_SIZE = 500
+_market_cache: OrderedDict[str, tuple[float, MarketContext]] = OrderedDict()
 _market_cache_lock = threading.Lock()
 
 
@@ -32,6 +35,7 @@ async def fetch_market_context(ticker: str) -> MarketContext:
     with _market_cache_lock:
         entry = _market_cache.get(ticker)
         if entry and (now - entry[0]) < _MARKET_CACHE_TTL:
+            _market_cache.move_to_end(ticker)
             logger.debug(f"[MarketData] Cache hit for {ticker}")
             return entry[1]
 
@@ -39,7 +43,19 @@ async def fetch_market_context(ticker: str) -> MarketContext:
 
     with _market_cache_lock:
         _market_cache[ticker] = (time.monotonic(), context)
+        _market_cache.move_to_end(ticker)
+        while len(_market_cache) > _MARKET_CACHE_MAX_SIZE:
+            _market_cache.popitem(last=False)
     return context
+
+
+async def _close_exchange(exchange):
+    close = getattr(exchange, "close", None)
+    if not close:
+        return
+    result = await asyncio.to_thread(close)
+    if inspect.isawaitable(result):
+        await result
 
 
 async def _fetch_market_context_live(ticker: str) -> MarketContext:
@@ -126,7 +142,7 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
         return MarketContext(ticker=ticker, current_price=0.0)
     finally:
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass
 

@@ -8,7 +8,7 @@ import uuid
 import os
 import secrets
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from loguru import logger
 from security import decrypt_settings_payload, decrypt_value, encrypt_settings_payload, encrypt_value
@@ -31,9 +31,12 @@ def _ensure_db_dir():
 def get_connection() -> sqlite3.Connection:
     """Get a database connection with row factory."""
     _ensure_db_dir()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -58,7 +61,9 @@ def init_database():
                 webhook_secret_hash TEXT DEFAULT '',
                 live_trading_allowed INTEGER DEFAULT 0,
                 max_leverage INTEGER DEFAULT 20,
-                max_position_pct REAL DEFAULT 10
+                max_position_pct REAL DEFAULT 10,
+                token_version INTEGER DEFAULT 0,
+                password_changed_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS subscription_plans (
@@ -106,6 +111,11 @@ def init_database():
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS invite_codes (
@@ -163,6 +173,30 @@ def init_database():
                 created_at TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS webhook_idempotency (
+                fingerprint TEXT PRIMARY KEY,
+                user_id TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS positions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                ticker TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                status TEXT DEFAULT 'open',
+                entry_price REAL NOT NULL,
+                quantity REAL DEFAULT 0,
+                opened_at TEXT NOT NULL,
+                open_trade_id TEXT,
+                exit_price REAL,
+                pnl_pct REAL DEFAULT 0,
+                closed_at TEXT,
+                close_trade_id TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS admin_audit_logs (
                 id TEXT PRIMARY KEY,
                 admin_id TEXT,
@@ -191,6 +225,9 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_trades_time ON trades(timestamp);
             CREATE INDEX IF NOT EXISTS idx_webhook_fingerprint_time ON webhook_events(fingerprint, created_at);
             CREATE INDEX IF NOT EXISTS idx_webhook_user_time ON webhook_events(user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_webhook_idempotency_time ON webhook_idempotency(created_at);
+            CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status, opened_at);
+            CREATE INDEX IF NOT EXISTS idx_positions_ticker_status ON positions(ticker, status, opened_at);
             CREATE INDEX IF NOT EXISTS idx_admin_audit_time ON admin_audit_logs(created_at);
         """)
         _migrate_schema(conn)
@@ -205,6 +242,14 @@ def init_database():
 
 def _migrate_schema(conn):
     """Apply additive migrations for older local SQLite databases."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     migrations = [
         ("balance_usdt", "ALTER TABLE users ADD COLUMN balance_usdt REAL DEFAULT 0"),
@@ -213,6 +258,8 @@ def _migrate_schema(conn):
         ("live_trading_allowed", "ALTER TABLE users ADD COLUMN live_trading_allowed INTEGER DEFAULT 0"),
         ("max_leverage", "ALTER TABLE users ADD COLUMN max_leverage INTEGER DEFAULT 20"),
         ("max_position_pct", "ALTER TABLE users ADD COLUMN max_position_pct REAL DEFAULT 10"),
+        ("token_version", "ALTER TABLE users ADD COLUMN token_version INTEGER DEFAULT 0"),
+        ("password_changed_at", "ALTER TABLE users ADD COLUMN password_changed_at TEXT"),
     ]
     for col, sql in migrations:
         if col not in columns:
@@ -253,6 +300,37 @@ def _migrate_schema(conn):
                     "UPDATE admin_settings SET value=?, updated_at=? WHERE key=?",
                     (encrypted, datetime.utcnow().isoformat(), row["key"]),
                 )
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS webhook_idempotency (
+            fingerprint TEXT PRIMARY KEY,
+            user_id TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS positions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            ticker TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            status TEXT DEFAULT 'open',
+            entry_price REAL NOT NULL,
+            quantity REAL DEFAULT 0,
+            opened_at TEXT NOT NULL,
+            open_trade_id TEXT,
+            exit_price REAL,
+            pnl_pct REAL DEFAULT 0,
+            closed_at TEXT,
+            close_trade_id TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_webhook_idempotency_time ON webhook_idempotency(created_at);
+        CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status, opened_at);
+        CREATE INDEX IF NOT EXISTS idx_positions_ticker_status ON positions(ticker, status, opened_at);
+    """)
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)",
+        ("2026-04-21-audit-hardening",),
+    )
 
 
 def _seed_defaults(conn):
@@ -318,7 +396,7 @@ def create_user(username: str, email: str, password_hash: str, role: str = "user
             (user_id, normalized_username, normalized_email, password_hash, role),
         )
         conn.commit()
-        return {"id": user_id, "username": normalized_username, "email": normalized_email, "role": role}
+        return {"id": user_id, "username": normalized_username, "email": normalized_email, "role": role, "token_version": 0}
     except sqlite3.IntegrityError as e:
         if "username" in str(e):
             raise ValueError("Username already exists")
@@ -383,7 +461,10 @@ def get_all_users() -> list[dict]:
 def update_user_status(user_id: str, is_active: bool):
     conn = get_connection()
     try:
-        conn.execute("UPDATE users SET is_active=? WHERE id=?", (1 if is_active else 0, user_id))
+        conn.execute(
+            "UPDATE users SET is_active=?, token_version=COALESCE(token_version,0)+1 WHERE id=?",
+            (1 if is_active else 0, user_id),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -392,7 +473,14 @@ def update_user_status(user_id: str, is_active: bool):
 def update_user_password_hash(user_id: str, password_hash: str) -> bool:
     conn = get_connection()
     try:
-        cur = conn.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, user_id))
+        cur = conn.execute(
+            """
+            UPDATE users
+            SET password_hash=?, password_changed_at=?, token_version=COALESCE(token_version,0)+1
+            WHERE id=?
+            """,
+            (password_hash, datetime.now(timezone.utc).isoformat(), user_id),
+        )
         conn.commit()
         return cur.rowcount > 0
     finally:
@@ -413,15 +501,20 @@ def update_user_admin(
     """Admin edit for account profile and balance."""
     conn = get_connection()
     try:
+        previous = conn.execute("SELECT role, is_active FROM users WHERE id=?", (user_id,)).fetchone()
         username = username.lower().strip()
         email = email.lower().strip()
         if role not in ("user", "admin"):
             raise ValueError("Invalid role")
+        bump_token = previous and (
+            str(previous["role"]) != role or int(previous["is_active"] or 0) != (1 if is_active else 0)
+        )
         conn.execute(
             """
             UPDATE users
             SET username=?, email=?, role=?, is_active=?, balance_usdt=?,
-                live_trading_allowed=?, max_leverage=?, max_position_pct=?
+                live_trading_allowed=?, max_leverage=?, max_position_pct=?,
+                token_version=COALESCE(token_version,0)+?
             WHERE id=?
             """,
             (
@@ -429,6 +522,7 @@ def update_user_admin(
                 1 if live_trading_allowed else 0,
                 max(1, min(int(max_leverage or 1), 125)),
                 max(0.1, min(float(max_position_pct or 10.0), 100.0)),
+                1 if bump_token else 0,
                 user_id,
             ),
         )
@@ -502,6 +596,7 @@ def create_user_admin(
             "live_trading_allowed": 1 if live_trading_allowed else 0,
             "max_leverage": max(1, min(int(max_leverage or 1), 125)),
             "max_position_pct": max(0.1, min(float(max_position_pct or 10.0), 100.0)),
+            "token_version": 0,
         }
     except sqlite3.IntegrityError as e:
         if "username" in str(e):
@@ -527,6 +622,10 @@ def delete_user_admin(user_id: str) -> bool:
         conn.execute("UPDATE redeem_codes SET redeemed_by=NULL WHERE redeemed_by=?", (user_id,))
         conn.execute("DELETE FROM payments WHERE user_id=?", (user_id,))
         conn.execute("DELETE FROM subscriptions WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM trades WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM webhook_events WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM webhook_idempotency WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM positions WHERE user_id=?", (user_id,))
         cur = conn.execute("DELETE FROM users WHERE id=?", (user_id,))
         conn.commit()
         return cur.rowcount > 0
@@ -1064,6 +1163,7 @@ def set_admin_setting(key: str, value: str):
 def insert_trade_log(entry: dict):
     conn = get_connection()
     try:
+        entry = sync_position_from_trade_entry(entry, conn=conn)
         conn.execute(
             """
             INSERT OR REPLACE INTO trades
@@ -1083,6 +1183,148 @@ def insert_trade_log(entry: dict):
             ),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def sync_position_from_trade_entry(entry: dict, conn: sqlite3.Connection | None = None) -> dict:
+    """Maintain a simple open/close position ledger and enrich close trades with realised PnL."""
+    own_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        if not entry.get("execute"):
+            return entry
+        status = str(entry.get("order_status") or "").lower()
+        if status not in {"filled", "simulated", "closed"}:
+            return entry
+        direction = str(entry.get("direction") or "").lower()
+        user_id = entry.get("user_id")
+        ticker = str(entry.get("ticker") or "").upper().strip()
+        if not ticker or direction not in {"long", "short", "close_long", "close_short"}:
+            return entry
+        order_details = entry.get("order_details") or {}
+        entry_price = _safe_float(order_details.get("entry_price") or entry.get("entry_price"))
+        quantity = _safe_float(order_details.get("quantity") or entry.get("quantity"))
+        timestamp = entry.get("timestamp") or datetime.utcnow().isoformat()
+
+        if direction in {"long", "short"} and entry_price > 0:
+            exists = conn.execute(
+                "SELECT id FROM positions WHERE open_trade_id=? LIMIT 1",
+                (entry.get("id"),),
+            ).fetchone()
+            if not exists:
+                position_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO positions
+                        (id, user_id, ticker, direction, status, entry_price, quantity, opened_at, open_trade_id)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                    """,
+                    (position_id, user_id, ticker, direction, "open", entry_price, quantity, timestamp, entry.get("id")),
+                )
+                entry["position_id"] = position_id
+            return entry
+
+        open_direction = "long" if direction == "close_long" else "short"
+        position = conn.execute(
+            """
+            SELECT * FROM positions
+            WHERE status='open'
+              AND direction=?
+              AND ticker=?
+              AND ((? IS NULL AND user_id IS NULL) OR user_id=?)
+            ORDER BY opened_at DESC
+            LIMIT 1
+            """,
+            (open_direction, ticker, user_id, user_id),
+        ).fetchone()
+        if not position:
+            return entry
+        exit_price = _safe_float(
+            order_details.get("exit_price")
+            or order_details.get("average")
+            or order_details.get("entry_price")
+            or entry.get("entry_price")
+        )
+        if exit_price <= 0:
+            return entry
+        open_price = _safe_float(position["entry_price"])
+        if open_price <= 0:
+            return entry
+        pnl_pct = ((exit_price - open_price) / open_price * 100.0) if open_direction == "long" else ((open_price - exit_price) / open_price * 100.0)
+        pnl_pct = round(pnl_pct, 6)
+        entry["pnl_pct"] = pnl_pct
+        entry["position_id"] = position["id"]
+        conn.execute(
+            """
+            UPDATE positions
+            SET status='closed', exit_price=?, pnl_pct=?, closed_at=?, close_trade_id=?
+            WHERE id=?
+            """,
+            (exit_price, pnl_pct, timestamp, entry.get("id"), position["id"]),
+        )
+        return entry
+    finally:
+        if own_conn:
+            conn.commit()
+            conn.close()
+
+
+def acquire_webhook_fingerprint(fingerprint: str, user_id: str | None = None, ttl_minutes: int = 60) -> bool:
+    """Atomically reserve a webhook fingerprint; False means a recent duplicate is already in flight or done."""
+    cutoff = (datetime.utcnow() - timedelta(minutes=max(1, ttl_minutes))).isoformat()
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM webhook_idempotency WHERE datetime(created_at) < datetime(?)", (cutoff,))
+        try:
+            conn.execute(
+                """
+                INSERT INTO webhook_idempotency (fingerprint, user_id, status, created_at, updated_at)
+                VALUES (?, ?, 'processing', datetime('now'), datetime('now'))
+                """,
+                (fingerprint, user_id),
+            )
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return False
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def mark_webhook_fingerprint(fingerprint: str, status: str):
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE webhook_idempotency SET status=?, updated_at=datetime('now') WHERE fingerprint=?",
+            (status, fingerprint),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_operational_counts() -> dict:
+    conn = get_connection()
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        return {
+            "users": int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] or 0),
+            "active_users": int(conn.execute("SELECT COUNT(*) FROM users WHERE is_active=1").fetchone()[0] or 0),
+            "trades_total": int(conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] or 0),
+            "trades_today": int(conn.execute("SELECT COUNT(*) FROM trades WHERE timestamp >= ?", (today,)).fetchone()[0] or 0),
+            "webhook_events_today": int(conn.execute("SELECT COUNT(*) FROM webhook_events WHERE created_at >= ?", (today,)).fetchone()[0] or 0),
+            "open_positions": int(conn.execute("SELECT COUNT(*) FROM positions WHERE status='open'").fetchone()[0] or 0),
+        }
     finally:
         conn.close()
 

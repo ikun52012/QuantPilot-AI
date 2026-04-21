@@ -4,10 +4,20 @@ Supports: Binance, OKX, Bybit, Bitget, Gate.io, Coinbase
 Enhanced with multi-TP and trailing-stop execution
 """
 import asyncio
+import inspect
 import ccxt
 from loguru import logger
 from config import settings
 from models import TradeDecision, SignalDirection, TrailingStopMode
+
+
+async def _close_exchange(exchange):
+    close = getattr(exchange, "close", None)
+    if not close:
+        return
+    result = await asyncio.to_thread(close)
+    if inspect.isawaitable(result):
+        await result
 
 
 # ─────────────────────────────────────────────
@@ -307,7 +317,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         return {"status": "error", "reason": "Order execution failed"}
     finally:
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass  
 
@@ -431,7 +441,7 @@ async def place_protective_stop(
         return {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price}
     finally:
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass
 
@@ -513,7 +523,7 @@ async def get_account_balance() -> dict:
         return {}
     finally:
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass  
 
@@ -537,7 +547,7 @@ async def get_balance() -> dict:
         return {}
     finally:
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass  
 
@@ -571,7 +581,7 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
         return {}
     finally:
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass  
 
@@ -620,7 +630,7 @@ async def get_open_positions() -> list[dict]:
         return []
     finally:
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass  
 
@@ -656,7 +666,7 @@ async def get_recent_orders(symbol: str = None, limit: int = 50) -> list[dict]:
         return []
     finally:
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass  
 
@@ -678,7 +688,7 @@ async def test_exchange_connection(
         )
         balance = await asyncio.to_thread(exchange.fetch_balance)
         try:
-            exchange.close()
+            await _close_exchange(exchange)
         except AttributeError:
             pass  
         return {"success": True, "message": f"Connected to {exchange_id} successfully"}

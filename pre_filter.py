@@ -49,6 +49,7 @@ def run_pre_filter(
     max_daily_trades: int = 10,
     max_daily_loss_pct: float = 5.0,
     user_id: str | None = None,
+    disabled_checks: set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> PreFilterResult:
     """
     Run 14 fast rule-based checks on the incoming signal.
@@ -320,9 +321,15 @@ def run_pre_filter(
             reasons.append(f"EMA trend ({trend}) conflicts with {signal.direction.value} (diff={ema_diff_pct:.2f}%)")
 
     # ── Final verdict ──
+    disabled = {str(item).strip() for item in (disabled_checks or []) if str(item).strip()}
+    for name in disabled:
+        if name in checks:
+            checks[name]["disabled"] = True
+            checks[name]["passed"] = True
     all_passed = all(c.get("passed", True) for c in checks.values())
     total_checks = len(checks)
     passed_checks = sum(1 for c in checks.values() if c.get("passed", True))
+    failed_names = [name for name, c in checks.items() if not c.get("passed", True)]
 
     if all_passed:
         # Record this signal (thread-safe)
@@ -340,9 +347,10 @@ def run_pre_filter(
             f"{signal.ticker} {signal.direction}: {'; '.join(reasons)}"
         )
 
+    final_reason = "; ".join(reasons) if reasons and not disabled else "; ".join(failed_names)
     return PreFilterResult(
         passed=all_passed,
-        reason="; ".join(reasons) if reasons else f"All {total_checks} checks passed",
+        reason=final_reason if final_reason else f"All {total_checks} checks passed",
         checks=checks,
     )
 

@@ -5,7 +5,7 @@ Persists all trade decisions and results to JSON files.
 import json
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from loguru import logger
 from models import TradeLog, TradeDecision
@@ -19,7 +19,7 @@ _file_lock = threading.Lock()
 
 def _get_log_file() -> Path:
     """Get today's log file path."""
-    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return LOGS_DIR / f"trades_{date_str}.json"
 
 
@@ -57,7 +57,7 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
 
     entry = {
         "id": trade_id,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "user_id": user_id,
         "ticker": decision.ticker,
         "direction": decision.direction.value if decision.direction else "unknown",
@@ -89,17 +89,23 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
             "recommended_leverage": decision.ai_analysis.recommended_leverage,
         }
 
-    # Save to today's log file
-    log_path = _get_log_file()
-    with _file_lock:
-        logs = _load_logs(log_path)
-        logs.append(entry)
-        _save_logs(log_path, logs)
     try:
-        from database import insert_trade_log
+        from database import insert_trade_log, sync_position_from_trade_entry
+        entry = sync_position_from_trade_entry(entry)
         insert_trade_log(entry)
     except Exception as e:
-        logger.warning(f"[TradeLog] SQLite write skipped: {e}")
+        logger.error(f"[TradeLog] SQLite write failed: {e}")
+        raise
+
+    # Keep a JSON mirror for compatibility and manual inspection; SQLite is the source of truth.
+    log_path = _get_log_file()
+    try:
+        with _file_lock:
+            logs = _load_logs(log_path)
+            logs.append(entry)
+            _save_logs(log_path, logs)
+    except Exception as e:
+        logger.warning(f"[TradeLog] JSON mirror write skipped: {e}")
 
     logger.info(f"[TradeLog] Saved trade {trade_id} → {log_path.name}")
     return trade_id
@@ -142,7 +148,7 @@ def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
     all_trades = []
     days = max(1, min(int(days), 365))
     for i in range(days):
-        date = datetime.utcnow() - timedelta(days=i)
+        date = datetime.now(timezone.utc) - timedelta(days=i)
         date_str = date.strftime("%Y-%m-%d")
         path = LOGS_DIR / f"trades_{date_str}.json"
         trades = _load_logs(path)

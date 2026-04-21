@@ -21,12 +21,15 @@ import hmac
 import hashlib
 import secrets
 import threading
+import re
+import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Response
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
@@ -68,6 +71,7 @@ from auth import (
     CSRF_COOKIE_NAME,
     hash_password,
     verify_password,
+    validate_password_strength,
     create_token,
     set_auth_cookie,
     clear_auth_cookie,
@@ -115,8 +119,11 @@ from database import (
     add_admin_audit_log,
     get_admin_audit_logs,
     has_recent_webhook_event,
+    acquire_webhook_fingerprint,
+    mark_webhook_fingerprint,
     record_webhook_event,
     get_webhook_events,
+    get_operational_counts,
     create_invite_code,
     list_invite_codes,
     is_invite_code_valid,
@@ -142,8 +149,24 @@ from payment import (
 # Logging setup
 # ─────────────────────────────────────────────
 logger.remove()
-logger.add(sys.stdout, level="INFO", format="{time:HH:mm:ss} | {level:<7} | {message}")
-logger.add("logs/server_{time:YYYY-MM-DD}.log", rotation="1 day", retention="30 days", level="DEBUG")
+_SENSITIVE_LOG_RE = re.compile(r"(?i)(api[_-]?key|api[_-]?secret|secret|password|token)(['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+")
+
+
+def _sanitize_log_record(record):
+    record["message"] = _SENSITIVE_LOG_RE.sub(r"\1\2***", record["message"])
+    return True
+
+
+logger.add(sys.stdout, level="INFO", format="{time:HH:mm:ss} | {level:<7} | {message}", filter=_sanitize_log_record)
+logger.add(
+    "logs/server_{time:YYYY-MM-DD}.log",
+    rotation="100 MB",
+    retention="30 days",
+    level="DEBUG",
+    filter=_sanitize_log_record,
+)
+if os.getenv("JSON_LOGS", "false").lower() == "true":
+    logger.add("logs/server.jsonl", rotation="100 MB", retention="30 days", level="INFO", serialize=True, filter=_sanitize_log_record)
 
 # ─────────────────────────────────────────────
 # Simple in-memory login rate limiter
@@ -152,6 +175,10 @@ _login_attempts: dict[str, list] = {}  # ip -> [timestamp, ...]
 _login_rate_lock = threading.Lock()
 _LOGIN_MAX_ATTEMPTS = 10   # max attempts per window
 _LOGIN_WINDOW_SECS = 300   # 5-minute sliding window
+_register_attempts: dict[str, list] = {}
+_register_rate_lock = threading.Lock()
+_REGISTER_MAX_ATTEMPTS = 5
+_REGISTER_WINDOW_SECS = 600
 
 
 def _check_login_rate_limit(ip: str) -> bool:
@@ -172,6 +199,19 @@ def _clear_login_rate_limit(ip: str):
     """Clear login attempt counters after a successful login."""
     with _login_rate_lock:
         _login_attempts.pop(ip, None)
+
+
+def _check_register_rate_limit(ip: str) -> bool:
+    now = datetime.utcnow().timestamp()
+    cutoff = now - _REGISTER_WINDOW_SECS
+    with _register_rate_lock:
+        attempts = [t for t in _register_attempts.get(ip, []) if t > cutoff]
+        if len(attempts) >= _REGISTER_MAX_ATTEMPTS:
+            _register_attempts[ip] = attempts
+            return False
+        attempts.append(now)
+        _register_attempts[ip] = attempts
+        return True
 
 # Settings file for runtime config changes.
 # Store it under data/ because docker-compose already persists /app/data.
@@ -270,20 +310,42 @@ def _audit(admin: dict, action: str, target_type: str = "", target_id: str = "",
 
 def _webhook_fingerprint(body: dict, user_id: str | None) -> str:
     scope = user_id or "admin"
+    alert_id = str(body.get("alert_id") or body.get("order_id") or body.get("id") or "").strip()
     fields = {
         "scope": scope,
         "secret_hash": hashlib.sha256(str(body.get("secret", "")).strip().encode()).hexdigest()[:16],
         "ticker": str(body.get("ticker", "")).upper().strip(),
         "direction": str(body.get("direction", "")).lower().strip(),
         "timeframe": str(body.get("timeframe", "")).strip(),
-        "price": body.get("price"),
+        "price": round(float(body.get("price") or 0), 8),
         "strategy": str(body.get("strategy", "")).strip(),
         "message": str(body.get("message", "")).strip(),
-        "alert_id": str(body.get("alert_id") or body.get("order_id") or body.get("id") or "").strip(),
-        "bar_time": str(body.get("bar_time") or body.get("time") or body.get("timestamp") or "").strip(),
     }
+    if alert_id:
+        fields = {"scope": scope, "secret_hash": fields["secret_hash"], "alert_id": alert_id}
     raw = json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _verify_webhook_signature(request: Request, raw_body: bytes) -> bool:
+    hmac_secret = os.getenv("WEBHOOK_HMAC_SECRET", "").strip()
+    if not hmac_secret:
+        return True
+    supplied = (
+        request.headers.get("x-tvss-signature", "")
+        or request.headers.get("x-signal-signature", "")
+        or request.headers.get("x-webhook-signature", "")
+    ).strip()
+    if not supplied:
+        return False
+    digest = hmac.new(hmac_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    expected = f"sha256={digest}"
+    return hmac.compare_digest(supplied, expected) or hmac.compare_digest(supplied, digest)
+
+
+def _disabled_pre_filter_checks() -> set[str]:
+    raw = get_admin_setting("pre_filter_disabled_checks", os.getenv("PREFILTER_DISABLED_CHECKS", ""))
+    return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 # ─────────────────────────────────────────────
@@ -413,7 +475,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    scheduler.shutdown(wait=False)
+    scheduler.shutdown(wait=True)
     logger.info("TradingView Signal Server shutting down...")
 
 
@@ -562,12 +624,17 @@ class UserTakeProfitSettingsRequest(BaseModel):
 @app.post("/api/auth/register")
 async def api_register(req: RegisterRequest, request: Request, response: Response):
     _apply_no_store_headers(response)
+    client_ip = _client_ip(request) or "unknown"
+    if not _check_register_rate_limit(client_ip):
+        logger.warning(f"[Auth] Rate limit hit for registration from {client_ip}")
+        raise HTTPException(429, "Too many registration attempts. Please wait 10 minutes.")
     username = req.username.lower().strip()
     email = req.email.lower().strip()
     if len(username) < 3:
         raise HTTPException(400, "Username must be at least 3 characters")
-    if len(req.password) < 8:
-        raise HTTPException(400, "Password must be at least 8 characters")
+    ok, reason = validate_password_strength(req.password, username=username, email=email)
+    if not ok:
+        raise HTTPException(400, reason)
     if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
         raise HTTPException(400, "Invalid email address")
 
@@ -591,7 +658,7 @@ async def api_register(req: RegisterRequest, request: Request, response: Respons
     if invite_required and not validate_and_consume_invite(invite_code, user["id"]):
         update_user_status(user["id"], False)
         raise HTTPException(400, "Invalid or expired invite code")
-    token = create_token(user["id"], user["username"], user["role"])
+    token = create_token(user["id"], user["username"], user["role"], user.get("token_version", 0))
     set_auth_cookie(response, token, request)
 
     logger.info(f"[Auth] New user registered: {username}")
@@ -616,7 +683,7 @@ async def api_login(req: LoginRequest, request: Request, response: Response):
 
     update_user_login(user["id"])
     _clear_login_rate_limit(client_ip)
-    token = create_token(user["id"], user["username"], user["role"])
+    token = create_token(user["id"], user["username"], user["role"], user.get("token_version", 0))
     set_auth_cookie(response, token, request)
 
     logger.info(f"[Auth] User logged in: {username}")
@@ -915,7 +982,7 @@ class AdminUserUpdateRequest(BaseModel):
 class AdminUserCreateRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     email: str = Field(min_length=5, max_length=254)
-    password: str = Field(min_length=6, max_length=256)
+    password: str = Field(min_length=8, max_length=256)
     role: str = "user"
     is_active: bool = True
     balance_usdt: float = Field(default=0.0, ge=0.0)
@@ -931,7 +998,7 @@ class AdminSubscriptionRequest(BaseModel):
 
 
 class AdminPasswordRequest(BaseModel):
-    password: str = Field(min_length=6, max_length=256)
+    password: str = Field(min_length=8, max_length=256)
 
 
 class RegistrationSettingsRequest(BaseModel):
@@ -964,6 +1031,9 @@ async def api_admin_users(admin=Depends(require_admin)):
 
 @app.post("/api/admin/users")
 async def api_admin_create_user(req: AdminUserCreateRequest, request: Request, admin=Depends(require_admin)):
+    ok, reason = validate_password_strength(req.password, username=req.username, email=req.email)
+    if not ok:
+        raise HTTPException(400, reason)
     try:
         user = create_user_admin(
             username=req.username,
@@ -1054,8 +1124,12 @@ async def api_admin_set_user_subscription(user_id: str, req: AdminSubscriptionRe
 
 @app.post("/api/admin/user/{user_id}/password")
 async def api_admin_set_user_password(user_id: str, req: AdminPasswordRequest, request: Request, admin=Depends(require_admin)):
-    if not get_user_by_id(user_id):
+    db_user = get_user_by_id(user_id)
+    if not db_user:
         raise HTTPException(404, "User not found")
+    ok, reason = validate_password_strength(req.password, username=db_user.get("username", ""), email=db_user.get("email", ""))
+    if not ok:
+        raise HTTPException(400, reason)
     if not update_user_password_hash(user_id, hash_password(req.password)):
         raise HTTPException(404, "User not found")
     logger.info(f"[Admin] Password reset for user {user_id} by {admin['username']}")
@@ -1402,19 +1476,55 @@ async def api_admin_webhook_config(request: Request, admin=Depends(require_admin
 
 @app.get("/health")
 async def health():
-    import time
     start = time.monotonic()
     db_ok = False
+    db_error = ""
     try:
         c = get_connection()
         c.execute("SELECT 1").fetchone()
         c.close()
         db_ok = True
-    except Exception:
-        pass
+    except Exception as exc:
+        db_error = str(exc)
     latency_ms = round((time.monotonic() - start) * 1000, 1)
-    status = "ok" if db_ok else "degraded"
-    return {"status": status, "db": db_ok, "db_latency_ms": latency_ms}
+    data_status = _writable_status(DATA_DIR)
+    logs_status = _writable_status(Path(__file__).parent / "logs")
+    disk = shutil.disk_usage(DATA_DIR if DATA_DIR.exists() else Path(__file__).parent)
+    checks = {
+        "db": {"ok": db_ok, "latency_ms": latency_ms, **({"error": db_error} if db_error else {})},
+        "storage": {"data_writable": data_status.get("writable", False), "logs_writable": logs_status.get("writable", False)},
+        "disk": {"free_mb": round(disk.free / 1024 / 1024, 1), "ok": disk.free > 256 * 1024 * 1024},
+        "ai": {"configured": bool(settings.ai.provider), "provider": settings.ai.provider},
+        "exchange": {"name": settings.exchange.name, "live_trading": settings.exchange.live_trading},
+    }
+    ok = db_ok and checks["storage"]["data_writable"] and checks["storage"]["logs_writable"] and checks["disk"]["ok"]
+    return {"status": "ok" if ok else "degraded", "checks": checks}
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics():
+    counts = get_operational_counts()
+    lines = [
+        "# HELP signal_server_users_total Total users.",
+        "# TYPE signal_server_users_total gauge",
+        f"signal_server_users_total {counts['users']}",
+        "# HELP signal_server_active_users_total Active users.",
+        "# TYPE signal_server_active_users_total gauge",
+        f"signal_server_active_users_total {counts['active_users']}",
+        "# HELP signal_server_trades_total Total stored trades.",
+        "# TYPE signal_server_trades_total counter",
+        f"signal_server_trades_total {counts['trades_total']}",
+        "# HELP signal_server_trades_today Trades stored today.",
+        "# TYPE signal_server_trades_today gauge",
+        f"signal_server_trades_today {counts['trades_today']}",
+        "# HELP signal_server_webhook_events_today Webhook events today.",
+        "# TYPE signal_server_webhook_events_today gauge",
+        f"signal_server_webhook_events_today {counts['webhook_events_today']}",
+        "# HELP signal_server_open_positions Open tracked positions.",
+        "# TYPE signal_server_open_positions gauge",
+        f"signal_server_open_positions {counts['open_positions']}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _git_commit() -> str:
@@ -1480,9 +1590,14 @@ async def webhook(request: Request):
     Main webhook endpoint for TradingView alerts.
     Pipeline: Parse → Market Data → Pre-Filter → AI Analysis → Decision → Execute → Log
     """
+    fingerprint = ""
     try:
+        raw_body = await request.body()
+        if not _verify_webhook_signature(request, raw_body):
+            logger.warning(f"[Webhook] Invalid HMAC signature from {_client_ip(request)}")
+            raise HTTPException(status_code=403, detail="Invalid webhook signature")
         try:
-            body = await request.json()
+            body = json.loads(raw_body.decode("utf-8"))
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
         try:
@@ -1524,7 +1639,7 @@ async def webhook(request: Request):
                 user_settings["exchange"]["live_trading"] = False
         fingerprint = _webhook_fingerprint(body, user_id)
         safe_body = {k: v for k, v in body.items() if k != "secret"}
-        if has_recent_webhook_event(fingerprint, minutes=10):
+        if has_recent_webhook_event(fingerprint, minutes=10) or not acquire_webhook_fingerprint(fingerprint, user_id=user_id, ttl_minutes=60):
             record_webhook_event(
                 fingerprint=fingerprint,
                 status="duplicate",
@@ -1549,6 +1664,7 @@ async def webhook(request: Request):
             max_daily_trades=settings.risk.max_daily_trades,
             max_daily_loss_pct=settings.risk.max_daily_loss_pct,
             user_id=user_id,
+            disabled_checks=_disabled_pre_filter_checks(),
         )
 
         if not filter_result.passed:
@@ -1569,6 +1685,7 @@ async def webhook(request: Request):
                 client_ip=client_ip,
                 payload=safe_body,
             )
+            mark_webhook_fingerprint(fingerprint, "blocked")
             return JSONResponse(content={
                 "status": "blocked", "trade_id": trade_id,
                 "reason": filter_result.reason, "checks": filter_result.checks,
@@ -1603,6 +1720,7 @@ async def webhook(request: Request):
             client_ip=client_ip,
             payload=safe_body,
         )
+        mark_webhook_fingerprint(fingerprint, final_status)
 
         return JSONResponse(content={
             "status": final_status,
@@ -1619,6 +1737,8 @@ async def webhook(request: Request):
         raise
     except Exception as e:
         logger.exception(f"[Webhook] Pipeline error: {e}")
+        if fingerprint:
+            mark_webhook_fingerprint(fingerprint, "error")
         # Sanitize: never leak internal exception text to callers
         await notify_error(f"Pipeline error: {e}")
         raise HTTPException(status_code=500, detail="Internal pipeline error. Check server logs.")
@@ -2095,7 +2215,8 @@ async def _process_internal(signal):
     fr = run_pre_filter(signal, market,
         max_daily_trades=settings.risk.max_daily_trades,
         max_daily_loss_pct=settings.risk.max_daily_loss_pct,
-        user_id=None)
+        user_id=None,
+        disabled_checks=_disabled_pre_filter_checks())
     if not fr.passed:
         return {"status": "blocked", "reason": fr.reason}
 
