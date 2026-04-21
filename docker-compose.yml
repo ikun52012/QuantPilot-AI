@@ -1,18 +1,34 @@
+version: "3.8"
+
 services:
-  openclaw:
-    build: .
-    container_name: openclaw-signal-server
+  # ─────────────────────────────────────────────
+  # Signal Server
+  # ─────────────────────────────────────────────
+  signal-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: signal-server
     restart: unless-stopped
     ports:
       - "127.0.0.1:8000:8000"
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://signal:signal@postgres:5432/signal_server
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_ENABLED=true
     volumes:
-      - ./data:/app/data                # persist users, subscriptions, payments, runtime settings
-      - ./trade_logs:/app/trade_logs    # persist trade logs
-      - ./logs:/app/logs                # persist server logs
+      - ./data:/app/data
+      - ./trade_logs:/app/trade_logs
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -22,3 +38,105 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - signal-network
+
+  # ─────────────────────────────────────────────
+  # PostgreSQL Database (Production)
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: signal-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: signal
+      POSTGRES_PASSWORD: signal
+      POSTGRES_DB: signal_server
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signal -d signal_server"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - signal-network
+
+  # ─────────────────────────────────────────────
+  # Redis Cache
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: signal-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - signal-network
+
+  # ─────────────────────────────────────────────
+  # Prometheus (Optional - Metrics)
+  # ─────────────────────────────────────────────
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: signal-prometheus
+  #   restart: unless-stopped
+  #   command:
+  #     - '--config.file=/etc/prometheus/prometheus.yml'
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml
+  #     - prometheus-data:/prometheus
+  #   ports:
+  #     - "127.0.0.1:9090:9090"
+  #   networks:
+  #     - signal-network
+
+  # ─────────────────────────────────────────────
+  # Grafana (Optional - Dashboards)
+  # ─────────────────────────────────────────────
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: signal-grafana
+  #   restart: unless-stopped
+  #   environment:
+  #     - GF_SECURITY_ADMIN_PASSWORD=admin
+  #   volumes:
+  #     - grafana-data:/var/lib/grafana
+  #   ports:
+  #     - "127.0.0.1:3000:3000"
+  #   depends_on:
+  #     - prometheus
+  #   networks:
+  #     - signal-network
+
+# ─────────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────────
+networks:
+  signal-network:
+    driver: bridge
+
+# ─────────────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────────────
+volumes:
+  postgres-data:
+  redis-data:
+  # prometheus-data:
+  # grafana-data:

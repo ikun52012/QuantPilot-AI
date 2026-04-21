@@ -8,7 +8,7 @@ import json
 import httpx
 import os
 from loguru import logger
-from config import settings
+from core.config import settings
 from models import TradingViewSignal, MarketContext, AIAnalysis
 
 # Retry configuration for AI API calls

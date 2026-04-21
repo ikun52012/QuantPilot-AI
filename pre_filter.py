@@ -4,11 +4,11 @@ Fast, free, rule-based checks BEFORE calling the AI.
 Enhanced v2: 14 intelligent filters that block 70-85% of low-quality signals.
 """
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from loguru import logger
 from models import TradingViewSignal, MarketContext, PreFilterResult, SignalDirection
 from trade_logger import get_today_pnl, get_recent_trade_results
-from database import count_today_executed_trades
+
 
 # ─────────────────────────────────────────────
 # In-memory state for tracking
@@ -24,14 +24,14 @@ def reset_daily_counters():
     """Reset daily counters at midnight. Must be called with _state_lock held."""
     global _daily_trade_count, _daily_trade_date, _daily_pnl
     _daily_trade_count = 0
-    _daily_trade_date = datetime.utcnow().strftime("%Y-%m-%d")
+    _daily_trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     _daily_pnl = 0.0
 
 
 def increment_trade_count():
     global _daily_trade_count, _daily_trade_date
     with _state_lock:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != _daily_trade_date:
             reset_daily_counters()
         _daily_trade_count += 1
@@ -43,7 +43,51 @@ def update_daily_pnl(pnl: float):
     pass
 
 
-def run_pre_filter(
+async def count_today_executed_trades_async(user_id: str | None = None) -> int:
+    """Count today's executed trades from the async database."""
+    from core.database import db_manager, count_today_executed_trades
+
+    try:
+        async with db_manager.async_session_factory() as session:
+            return await count_today_executed_trades(session, user_id)
+    except Exception as e:
+        logger.warning(f"[PreFilter] Database count failed, using in-memory fallback: {e}")
+        with _state_lock:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if today != _daily_trade_date:
+                reset_daily_counters()
+            return _daily_trade_count
+
+
+def count_today_executed_trades(user_id: str | None = None) -> int:
+    """
+    Synchronous wrapper for count_today_executed_trades_async.
+
+    DEPRECATED: This function uses asyncio.run() in a thread pool which can cause issues.
+    Prefer using count_today_executed_trades_async() directly in async contexts.
+    """
+    import asyncio
+    import warnings
+
+    warnings.warn(
+        "count_today_executed_trades() is deprecated. Use count_today_executed_trades_async() instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
+    try:
+        loop = asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                count_today_executed_trades_async(user_id)
+            )
+            return future.result()
+    except RuntimeError:
+        return asyncio.run(count_today_executed_trades_async(user_id))
+
+
+async def run_pre_filter_async(
     signal: TradingViewSignal,
     market: MarketContext,
     max_daily_trades: int = 10,
@@ -52,7 +96,7 @@ def run_pre_filter(
     disabled_checks: set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> PreFilterResult:
     """
-    Run 14 fast rule-based checks on the incoming signal.
+    Run 14 fast rule-based checks on the incoming signal (async version).
     Returns PreFilterResult with pass/fail and detailed reasons.
     """
     global _daily_trade_count, _daily_trade_date
@@ -62,10 +106,10 @@ def run_pre_filter(
 
     # ── Check 1: Daily trade limit ──
     try:
-        daily_count_snapshot = count_today_executed_trades(user_id=user_id)
+        daily_count_snapshot = await count_today_executed_trades_async(user_id=user_id)
     except Exception:
         with _state_lock:
-            today = datetime.utcnow().strftime("%Y-%m-%d")
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if today != _daily_trade_date:
                 reset_daily_counters()
             daily_count_snapshot = _daily_trade_count
@@ -230,7 +274,7 @@ def run_pre_filter(
 
     # ── Check 12: Weekend / Low Liquidity Hours Guard ──
     time_ok = True
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     is_weekend = now_utc.weekday() >= 5  # Saturday=5, Sunday=6
 
     # Check for known low-liquidity hours (UTC 21:00-01:00)
@@ -338,7 +382,7 @@ def run_pre_filter(
                 "user_id": user_id or "admin",
                 "ticker": signal.ticker,
                 "direction": signal.direction,
-                "timestamp": datetime.utcnow(),
+                "timestamp": datetime.now(timezone.utc),
             })
         logger.info(f"[PreFilter] ✅ PASSED ({passed_checks}/{total_checks}) - {signal.ticker} {signal.direction}")
     else:
@@ -355,9 +399,46 @@ def run_pre_filter(
     )
 
 
+def run_pre_filter(
+    signal: TradingViewSignal,
+    market: MarketContext,
+    max_daily_trades: int = 10,
+    max_daily_loss_pct: float = 5.0,
+    user_id: str | None = None,
+    disabled_checks: set[str] | list[str] | tuple[str, ...] | None = None,
+) -> PreFilterResult:
+    """
+    Synchronous wrapper for run_pre_filter_async.
+
+    DEPRECATED: This function uses asyncio.run() in a thread pool which can cause issues.
+    Prefer using run_pre_filter_async() directly in async contexts.
+
+    NOTE: The services/signal_processor.py already uses run_pre_filter_async().
+    """
+    import asyncio
+    import warnings
+
+    warnings.warn(
+        "run_pre_filter() is deprecated. Use run_pre_filter_async() instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
+    try:
+        loop = asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                run_pre_filter_async(signal, market, max_daily_trades, max_daily_loss_pct, user_id, disabled_checks)
+            )
+            return future.result()
+    except RuntimeError:
+        return asyncio.run(run_pre_filter_async(signal, market, max_daily_trades, max_daily_loss_pct, user_id, disabled_checks))
+
+
 def _check_cooldown(signal: TradingViewSignal, cooldown_seconds: int = 300, user_id: str | None = None) -> bool:
     """Check if we received a similar signal recently (thread-safe)."""
-    cutoff = datetime.utcnow() - timedelta(seconds=cooldown_seconds)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)
     scope = user_id or "admin"
     with _state_lock:
         global _recent_signals
@@ -374,7 +455,7 @@ def _check_cooldown(signal: TradingViewSignal, cooldown_seconds: int = 300, user
 
 def _count_recent_same_direction(signal: TradingViewSignal, window_minutes: int = 60, user_id: str | None = None) -> int:
     """Count how many signals of the same direction we received recently (thread-safe)."""
-    cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
     scope = user_id or "admin"
     with _state_lock:
         return sum(

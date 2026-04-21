@@ -1,10 +1,12 @@
 """
 TradingView Signal Server - Trade Logger
 Persists all trade decisions and results to JSON files.
+Enhanced with async database support.
 """
 import json
 import threading
 import uuid
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from loguru import logger
@@ -48,11 +50,13 @@ def _filter_user(trades: list[dict], user_id: str | None = None) -> list[dict]:
     return [t for t in trades if t.get("user_id") == user_id]
 
 
-def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None = None) -> str:
+async def log_trade_async(decision: TradeDecision, order_result: dict, user_id: str | None = None) -> str:
     """
-    Log a trade decision and its execution result.
+    Log a trade decision and its execution result (async version).
     Returns the trade ID.
     """
+    from core.database import db_manager, insert_trade_log_async
+
     trade_id = str(uuid.uuid4())
 
     entry = {
@@ -89,15 +93,16 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
             "recommended_leverage": decision.ai_analysis.recommended_leverage,
         }
 
+    # Write to database
     try:
-        from database import insert_trade_log, sync_position_from_trade_entry
-        entry = sync_position_from_trade_entry(entry)
-        insert_trade_log(entry)
+        async with db_manager.async_session_factory() as session:
+            entry = await insert_trade_log_async(session, entry)
+            await session.commit()
     except Exception as e:
-        logger.error(f"[TradeLog] SQLite write failed: {e}")
-        raise
+        logger.error(f"[TradeLog] Database write failed: {e}")
+        # Continue to write JSON mirror even if DB fails
 
-    # Keep a JSON mirror for compatibility and manual inspection; SQLite is the source of truth.
+    # Keep a JSON mirror for compatibility and manual inspection
     log_path = _get_log_file()
     try:
         with _file_lock:
@@ -109,6 +114,36 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
 
     logger.info(f"[TradeLog] Saved trade {trade_id} → {log_path.name}")
     return trade_id
+
+
+def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None = None) -> str:
+    """
+    Log a trade decision and its execution result (sync wrapper for backward compatibility).
+
+    DEPRECATED: This function uses asyncio.run() which can cause issues in async contexts.
+    Prefer using log_trade_async() directly.
+
+    Returns the trade ID.
+    """
+    import asyncio
+    import warnings
+
+    warnings.warn(
+        "log_trade() is deprecated. Use log_trade_async() instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
+    try:
+        loop = asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                log_trade_async(decision, order_result, user_id)
+            )
+            return future.result()
+    except RuntimeError:
+        return asyncio.run(log_trade_async(decision, order_result, user_id))
 
 
 def get_today_trades(user_id: str | None = None) -> list[dict]:
@@ -137,14 +172,7 @@ def get_today_stats(user_id: str | None = None) -> dict:
 
 
 def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
-    """Get trade history for the last N days."""
-    db_trades = []
-    try:
-        from database import get_trade_logs
-        db_trades = get_trade_logs(days, user_id=user_id)
-    except Exception:
-        db_trades = []
-
+    """Get trade history for the last N days from JSON files."""
     all_trades = []
     days = max(1, min(int(days), 365))
     for i in range(days):
@@ -153,14 +181,34 @@ def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
         path = LOGS_DIR / f"trades_{date_str}.json"
         trades = _load_logs(path)
         all_trades.extend(_filter_user(trades, user_id))
-    by_id = {t.get("id"): t for t in all_trades if t.get("id")}
+
+    # Sort by timestamp descending
+    all_trades.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+    return all_trades
+
+
+async def get_trade_history_async(days: int = 7, user_id: str | None = None) -> list[dict]:
+    """Get trade history for the last N days from database (async)."""
+    from core.database import db_manager, get_trade_logs_async
+
+    try:
+        async with db_manager.async_session_factory() as session:
+            db_trades = await get_trade_logs_async(session, days, user_id)
+    except Exception as e:
+        logger.warning(f"[TradeLog] Database read failed, falling back to JSON: {e}")
+        return get_trade_history(days, user_id)
+
+    # Merge with JSON logs for completeness
+    json_trades = get_trade_history(days, user_id)
+
+    # Deduplicate by ID
+    by_id = {t.get("id"): t for t in json_trades if t.get("id")}
     for trade in db_trades:
         trade_id = trade.get("id")
         if trade_id:
             by_id[trade_id] = trade
-        else:
-            all_trades.append(trade)
-    merged = list(by_id.values()) + [t for t in all_trades if not t.get("id")]
+
+    merged = list(by_id.values())
     merged.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
     return merged
 

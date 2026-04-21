@@ -21,7 +21,7 @@ This system is equipped with a stunning "Midnight Glassmorphism" interactive fro
   - Create and manage paid subscription plans. Features built-in multi-chain USDT transaction hash verification (TRC20, ERC20, BEP20, Solana, etc.), invite codes, and a free-trial ecosystem for a closed-loop business model.
 - **⚡ Multi-Exchange Live & Paper Trading Engine (Powered by ccxt)**
   - Out-of-the-box support for Binance, OKX, Bybit, Bitget, Gate.io, and Coinbase.
-  - Fully controlled via environment variables or individual user settings for Paper Trading (local simulated records) and Live Trading (high-concurrency real order placements).
+  - Fully controlled via environment variables, the admin dashboard, or individual user settings for Local Paper Trading, Exchange Sandbox/Testnet Trading, and Live Trading.
 - **🎯 Smart Tiered Risk Management & Trailing Stops (Multi-TP)**
   - Customize up to 4 sequential stages (TP1 to TP4) of tiered position closing to secure bounce profits.
   - In-house developed smart trailing stop module that steps up the hard stop-loss based on percentage steps, letting your profits run.
@@ -79,7 +79,7 @@ cp .env.example .env
 nano .env # Setup API keys for Exchanges, AI, Telegram Bot, etc.
 
 # 4. Ignite! 🔥
-python main.py
+uvicorn app:app --host 0.0.0.0 --port 8000
 # Set UVICORN_RELOAD=true only for local auto-reload development.
 ```
 Visit `http://0.0.0.0:8000` locally or on your LAN to access the quant dashboard!
@@ -97,7 +97,7 @@ Username: admin
 Password: 123456
 ```
 
-Change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` before exposing the service to the internet. `WEBHOOK_SECRET` can be left empty; the app will generate a persistent admin webhook secret and show it in Admin Settings. Keep `UVICORN_RELOAD=false` in deployments.
+**⚠️ SECURITY WARNING:** The default password `123456` is intentionally weak for initial setup only. You MUST change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` to strong, unique values before exposing the service to the internet. Failure to do so puts your trading accounts and funds at extreme risk.
 
 ### 3. One-Click Docker Deployment
 When you are ready to deploy it as a 24/7 cloud miner:
@@ -118,7 +118,8 @@ _Note: Generated SQLite databases and critical logs will be persistently mapped 
 Here are the high-frequency variables you must pay attention to:
 *   **`AI_PROVIDER`**: Model integration base. Valid fields are `openai`, `anthropic`, `deepseek`, or `custom` for your own base (if `custom`, ensure you fill out the related custom fields below it).
 *   **`EXCHANGE`**: Default platform egress, like `binance`. If operating as a SaaS provider, tenant users can also enter their own Exchange Keys in their web dashboard.
-*   **`LIVE_TRADING`**: Critical! Set to `true` for production live trading, and strictly keep it `false` for paper trading during sandbox strategy testing.
+*   **`LIVE_TRADING`**: Critical! Keep `false` for Local Paper Trading. Set `true` only when you want the server to send orders through exchange APIs.
+*   **`EXCHANGE_SANDBOX_MODE`**: Set to `true` together with `LIVE_TRADING=true` to route supported exchanges to testnet/sandbox endpoints. This is different from Local Paper Trading because real API calls are still sent, but to the exchange test environment.
 *   **`JWT_SECRET`** & **`WEBHOOK_SECRET`**: The authorization lifelines of the entire server. **Must be set to unbreakable, random, ultra-long hashes!**
 *   **`WEBHOOK_HMAC_SECRET`**: Optional strict webhook body signature secret. If set, webhook senders must include `X-TVSS-Signature: sha256=<hmac_sha256_raw_body>`.
 *   **`DEFAULT_ADMIN_PASSWORD`**: The default super-admin password generated on first run (Default: 123456). Please change this immediately after your first successful login.
@@ -159,6 +160,7 @@ The server records webhook events and reserves duplicate payload fingerprints at
 ## Production Hardening
 
 - Runtime admin secrets, webhook secrets, and per-user exchange keys are encrypted at rest with `APP_ENCRYPTION_KEY`. If it is omitted, the app generates a persistent key in `data/app_encryption.key`; back this file up and keep the `data/` volume mounted permanently.
+- Admin dashboard settings are persisted in the database and reapplied on startup. In Exchange Configuration, choose `Local Paper Trading` for no exchange orders, `Exchange API Trading + sandbox/testnet` for supported exchange demo environments, or `Exchange API Trading` without sandbox for real live orders.
 - Per-user webhook lookup uses a stored hash, so the dashboard can show each user's real secret while the database index does not keep the raw value.
 - Browser write APIs use a double-submit CSRF token in addition to the HttpOnly session cookie.
 - Login and registration endpoints use IP sliding-window rate limits. Passwords must include lowercase, uppercase, number, and symbol characters.

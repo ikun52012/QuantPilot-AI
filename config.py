@@ -1,5 +1,16 @@
 """
 Signal Server - Configuration
+
+⚠️ DEPRECATED: This file is the legacy configuration module.
+Please use core/config.py instead, which provides:
+    - Pydantic Settings with validation
+    - Type-safe configuration
+    - Environment variable loading with nested delimiter
+
+To import:
+    from core.config import settings
+
+This file is kept for backward compatibility and will be removed in a future version.
 """
 import os
 from pathlib import Path
@@ -37,6 +48,7 @@ class ExchangeConfig(BaseModel):
     api_secret: str = os.getenv("EXCHANGE_API_SECRET", "") or os.getenv("BINANCE_API_SECRET", "")
     password: str = os.getenv("EXCHANGE_PASSWORD", "")  # OKX/Bitget passphrase
     live_trading: bool = os.getenv("LIVE_TRADING", "false").lower() == "true"
+    sandbox_mode: bool = os.getenv("EXCHANGE_SANDBOX_MODE", "false").lower() == "true"
 
 
 class TelegramConfig(BaseModel):

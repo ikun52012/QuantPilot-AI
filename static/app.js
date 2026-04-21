@@ -185,7 +185,7 @@ async function loadDashboard() {
         ]);
         if (status.live_trading) {
             const el = document.getElementById('trading-mode');
-            el.innerHTML = '<span class="mode-dot live"></span><span>LIVE Trading</span>';
+            el.innerHTML = `<span class="mode-dot live"></span><span>${status.exchange_sandbox_mode ? 'Sandbox Trading' : 'LIVE Trading'}</span>`;
             el.style.background = 'var(--accent-red-bg)';
             el.style.color = 'var(--accent-red)';
         }
@@ -219,7 +219,7 @@ function renderMetrics(perf) {
 
 async function loadRecentSignals() {
     try {
-        const trades = await fetchAPI('/trades');
+        const trades = await fetchAPI('/api/trades');
         const container = document.getElementById('recent-signals');
         if (!trades.length) { container.innerHTML = '<div class="empty-state" style="padding:40px;text-align:center;color:var(--text-muted)">No signals today</div>'; return; }
         container.innerHTML = trades.slice(-20).reverse().map(t => {
@@ -268,7 +268,7 @@ function setChartPeriod(evt, days) {
 // ─── Positions ───
 async function loadPositions() {
     try {
-        const [positions, balance] = await Promise.all([fetchAPI('/api/positions'), fetchAPI('/balance')]);
+        const [positions, balance] = await Promise.all([fetchAPI('/api/positions'), fetchAPI('/api/balance')]);
         const tbody = document.getElementById('positions-body');
         if (!positions.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No open positions</td></tr>'; }
         else { tbody.innerHTML = positions.map(p => {
@@ -367,6 +367,9 @@ async function loadSettings() {
     try {
         const status = await fetchAPI('/api/status');
         if (document.getElementById('set-exchange') && status.exchange) document.getElementById('set-exchange').value = status.exchange;
+        setFieldValue('set-live-trading', String(Boolean(status.live_trading)));
+        const sandbox = document.getElementById('set-exchange-sandbox');
+        if (sandbox) sandbox.checked = Boolean(status.exchange_sandbox_mode);
         toggleExchangePasswordField();
         setSecretPlaceholder('set-api-key', status.exchange_api_configured, 'Enter API Key');
         setSecretPlaceholder('set-api-secret', status.exchange_api_configured, 'Enter API Secret');
@@ -440,14 +443,27 @@ async function testConnection() {
     const result = document.getElementById('conn-result');
     btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line"></i> Testing...';
     try {
-        const resp = await fetchAPI('/api/test-connection', { method:'POST', body:JSON.stringify({ exchange:document.getElementById('set-exchange').value, api_key:document.getElementById('set-api-key').value, api_secret:document.getElementById('set-api-secret').value, password:document.getElementById('set-password').value })});
+        const resp = await fetchAPI('/api/test-connection', { method:'POST', body:JSON.stringify({
+            exchange: document.getElementById('set-exchange').value,
+            api_key: document.getElementById('set-api-key').value,
+            api_secret: document.getElementById('set-api-secret').value,
+            password: document.getElementById('set-password').value,
+            sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false
+        })});
         result.className = `conn-result ${resp.success?'success':'error'}`;
         result.textContent = resp.message;
     } catch (e) { result.className = 'conn-result error'; result.textContent = `Failed: ${e.message}`; }
     btn.disabled = false; btn.innerHTML = '<i class="ri-link"></i> Test Connection';
 }
 
-async function saveExchangeSettings() { await saveSettings('/api/settings/exchange', { exchange:document.getElementById('set-exchange').value, api_key:document.getElementById('set-api-key').value, api_secret:document.getElementById('set-api-secret').value, password:document.getElementById('set-password').value }, 'btn-save-exchange'); }
+async function saveExchangeSettings() { await saveSettings('/api/settings/exchange', {
+    exchange: document.getElementById('set-exchange').value,
+    api_key: document.getElementById('set-api-key').value,
+    api_secret: document.getElementById('set-api-secret').value,
+    password: document.getElementById('set-password').value,
+    live_trading: document.getElementById('set-live-trading')?.value === 'true',
+    sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false
+}, 'btn-save-exchange'); }
 async function saveAISettings() { await saveSettings('/api/settings/ai', { provider:document.getElementById('set-ai-provider').value, api_key:document.getElementById('set-ai-key').value, temperature:parseFloat(document.getElementById('set-ai-temp').value)||0.3, max_tokens:parseInt(document.getElementById('set-ai-tokens').value)||1000, custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'' }, 'btn-save-ai'); }
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
 async function saveRiskSettings() {
@@ -509,11 +525,13 @@ async function loadUserPortal() {
 
 function renderUserSettings(data) {
     const ex = data.exchange || {}, tp = data.take_profit || {}, wh = data.webhook || {}, controls = data.trade_controls || {};
-    setFieldValue('user-exchange', ex.exchange || 'binance');
+    setFieldValue('user-exchange', ex.exchange || ex.name || 'binance');
     setFieldValue('user-live-trading', String(Boolean(ex.live_trading)));
+    const sandbox = document.getElementById('user-sandbox-mode');
+    if (sandbox) sandbox.checked = Boolean(ex.sandbox_mode);
     const liveSelect = document.getElementById('user-live-trading');
     if (liveSelect) liveSelect.disabled = !controls.live_trading_allowed;
-    setText('user-api-configured', `${ex.api_configured ? 'Configured' : 'Not configured'} · Live ${controls.live_trading_allowed ? 'allowed' : 'disabled'} · Max ${controls.max_leverage || 20}x`);
+    setText('user-api-configured', `${ex.api_configured ? 'Configured' : 'Not configured'} · Live ${controls.live_trading_allowed ? 'allowed' : 'disabled'} · ${ex.sandbox_mode ? 'Sandbox' : 'Live endpoints'} · Max ${controls.max_leverage || 20}x`);
     setFieldValue('user-tp-levels', tp.num_levels || 1);
     ['tp1_pct','tp2_pct','tp3_pct','tp4_pct','tp1_qty','tp2_qty','tp3_qty','tp4_qty'].forEach(key => {
         const id = `user-${key.replace('_','-')}`;
@@ -574,6 +592,7 @@ async function saveUserExchangeSettings() {
     const data = {
         exchange: document.getElementById('user-exchange')?.value || 'binance',
         live_trading: document.getElementById('user-live-trading')?.value === 'true',
+        sandbox_mode: document.getElementById('user-sandbox-mode')?.checked || false,
         api_key: document.getElementById('user-api-key')?.value || '',
         api_secret: document.getElementById('user-api-secret')?.value || '',
         password: document.getElementById('user-api-password')?.value || '',

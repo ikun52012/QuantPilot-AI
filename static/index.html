@@ -340,6 +340,23 @@
                         <label for="set-password">Passphrase <span class="hint">(OKX / Bitget)</span></label>
                         <input type="password" id="set-password" class="text-input" placeholder="Enter Passphrase">
                     </div>
+                    <div class="form-row two-col">
+                        <div class="form-group">
+                            <label for="set-live-trading">Order Mode</label>
+                            <select id="set-live-trading" class="select-input">
+                                <option value="false">Local Paper Trading</option>
+                                <option value="true">Exchange API Trading</option>
+                            </select>
+                            <p class="hint">Paper mode records simulated orders locally and never sends exchange orders.</p>
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="set-exchange-sandbox">
+                                <span>Use exchange sandbox / testnet</span>
+                            </label>
+                            <p class="hint">When Exchange API Trading is enabled, route orders to the exchange testnet where supported.</p>
+                        </div>
+                    </div>
                     <div class="form-row">
                         <button class="btn btn-primary" onclick="testConnection()" id="btn-test-conn">
                             <i class="ri-link"></i> Test Connection
@@ -738,6 +755,15 @@
                         <div class="form-group"><label for="user-exchange">Exchange</label><select id="user-exchange" class="select-input"><option value="binance">Binance</option><option value="okx">OKX</option><option value="bybit">Bybit</option><option value="bitget">Bitget</option><option value="gate">Gate.io</option><option value="coinbase">Coinbase</option></select></div>
                         <div class="form-group"><label for="user-live-trading">Trading Mode</label><select id="user-live-trading" class="select-input"><option value="false">Paper Trading</option><option value="true">Live Trading</option></select></div>
                         <div class="form-group"><label>Saved Keys</label><div class="hint" id="user-api-configured">Not configured</div></div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="user-sandbox-mode">
+                                <span>Use exchange sandbox / testnet for my live orders</span>
+                            </label>
+                            <p class="hint">Only applies when Live Trading is enabled and the selected exchange supports testnet.</p>
+                        </div>
                     </div>
                     <div class="form-row three-col">
                         <div class="form-group"><label for="user-api-key">API Key</label><input type="password" id="user-api-key" class="text-input" placeholder="Leave blank to keep saved key"></div>

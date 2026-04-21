@@ -1,5 +1,16 @@
 """
 Security helpers for encrypted-at-rest runtime and user secrets.
+
+⚠️ DEPRECATED: This file is the legacy security module.
+Please use core/security.py instead, which provides:
+    - Fernet encryption for sensitive data
+    - Webhook secret hashing
+    - Settings payload encryption/decryption
+
+To import:
+    from core.security import encrypt_value, decrypt_value, hash_password, webhook_secret_hash
+
+This file is kept for backward compatibility and will be removed in a future version.
 """
 import base64
 import hashlib

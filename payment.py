@@ -1,164 +1,150 @@
 """
-TradingView Signal Server - Crypto Payment Module
-Handles USDT/USDC payment address generation and verification.
+Signal Server - Payment Module (Enhanced)
+Crypto payment handling with multi-chain support.
 """
-import os
-import hashlib
-import time
+import json
+from typing import Optional
 from loguru import logger
-from database import get_admin_setting, set_admin_setting
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-# ─────────────────────────────────────────────
+from core.database import AdminSettingModel
+
+
 # Supported payment networks
-# ─────────────────────────────────────────────
 SUPPORTED_NETWORKS = {
-    "TRC20": {
-        "name": "Tron (TRC20)",
-        "currencies": ["USDT", "USDC"],
-        "confirmation_time": "~3 minutes",
-        "fee": "~1 USDT",
-    },
-    "ERC20": {
-        "name": "Ethereum (ERC20)",
-        "currencies": ["USDT", "USDC"],
-        "confirmation_time": "~5 minutes",
-        "fee": "~5-20 USDT (gas)",
-    },
-    "BEP20": {
-        "name": "BSC (BEP20)",
-        "currencies": ["USDT", "USDC"],
-        "confirmation_time": "~3 minutes",
-        "fee": "~0.5 USDT",
-    },
-    "ARBITRUM": {
-        "name": "Arbitrum One",
-        "currencies": ["USDT", "USDC"],
-        "confirmation_time": "~1 minute",
-        "fee": "~0.1 USDT",
-    },
-    "APT": {
-        "name": "Aptos (APT)",
-        "currencies": ["USDT", "USDC"],
-        "confirmation_time": "~1 minute",
-        "fee": "~0.01 APT",
-    },
-    "SOL": {
-        "name": "Solana (SPL)",
-        "currencies": ["USDT", "USDC"],
-        "confirmation_time": "~1 minute",
-        "fee": "~0.01 USDT",
-    },
-    "BTC": {
-        "name": "Bitcoin",
-        "currencies": ["BTC"],
-        "confirmation_time": "~30 minutes",
-        "fee": "variable",
-    },
+    "TRC20": {"name": "Tron (TRC20)", "currency": "USDT", "confirmations": 20},
+    "ERC20": {"name": "Ethereum (ERC20)", "currency": "USDT", "confirmations": 12},
+    "BEP20": {"name": "BSC (BEP20)", "currency": "USDT", "confirmations": 12},
+    "ARBITRUM": {"name": "Arbitrum One", "currency": "USDT", "confirmations": 12},
+    "SOL": {"name": "Solana (SPL)", "currency": "USDT", "confirmations": 32},
+    "APT": {"name": "Aptos (APT)", "currency": "USDT", "confirmations": 1},
 }
 
 
-def get_payment_address(network: str = "TRC20") -> str:
-    """
-    Get the admin's payment receiving address for the specified network.
-    Addresses are stored in admin_settings.
-    """
-    network = network.upper().strip()
-    if network not in SUPPORTED_NETWORKS:
-        return ""
-    key = f"payment_address_{network}"
-    addr = get_admin_setting(key, "")
+async def get_payment_address(
+    session: AsyncSession,
+    currency: str,
+    network: str,
+) -> Optional[str]:
+    """Get payment wallet address for a currency/network."""
+    key = f"payment_address_{currency}_{network}".upper()
 
-    # Fall back to environment variables
-    if not addr:
-        env_key = f"PAYMENT_ADDRESS_{network}"
-        addr = os.getenv(env_key, "")
+    result = await session.execute(
+        select(AdminSettingModel).where(AdminSettingModel.key == key)
+    )
+    setting = result.scalar_one_or_none()
 
-    return addr
+    if setting:
+        return setting.value
 
+    # Fallback to legacy key format
+    legacy_key = f"payment_address_{network}".lower()
+    result = await session.execute(
+        select(AdminSettingModel).where(AdminSettingModel.key == legacy_key)
+    )
+    setting = result.scalar_one_or_none()
 
-def set_payment_address(network: str, address: str):
-    """Set the admin's payment address for a network."""
-    network = network.upper().strip()
-    address = address.strip()
-    if network not in SUPPORTED_NETWORKS:
-        raise ValueError(f"Unsupported payment network: {network}")
-    if not address:
-        raise ValueError("Payment address cannot be empty")
-    key = f"payment_address_{network}"
-    set_admin_setting(key, address)
-    logger.info(f"[Payment] Updated {network} address: {address[:8]}...{address[-6:]}")
+    return setting.value if setting else None
 
 
-def get_all_payment_addresses() -> dict:
+async def set_payment_address(
+    session: AsyncSession,
+    currency: str,
+    network: str,
+    address: str,
+) -> bool:
+    """Set payment wallet address."""
+    key = f"payment_address_{currency}_{network}".upper()
+
+    result = await session.execute(
+        select(AdminSettingModel).where(AdminSettingModel.key == key)
+    )
+    setting = result.scalar_one_or_none()
+
+    if setting:
+        setting.value = address
+    else:
+        setting = AdminSettingModel(key=key, value=address)
+        session.add(setting)
+
+    await session.commit()
+    return True
+
+
+async def get_all_payment_addresses(session: AsyncSession) -> dict:
     """Get all configured payment addresses."""
-    result = {}
-    for network in SUPPORTED_NETWORKS:
-        addr = get_payment_address(network)
-        if addr:
-            result[network] = {
-                "address": addr,
-                "network_name": SUPPORTED_NETWORKS[network]["name"],
-                "currencies": SUPPORTED_NETWORKS[network]["currencies"],
+    result = await session.execute(
+        select(AdminSettingModel).where(AdminSettingModel.key.like("payment_address_%"))
+    )
+    settings = result.scalars().all()
+
+    addresses = {}
+    for setting in settings:
+        # Parse key: payment_address_CURRENCY_NETWORK
+        parts = setting.key.replace("payment_address_", "").split("_")
+        if len(parts) >= 2:
+            network = parts[-1]
+            currency = "_".join(parts[:-1])
+            addresses[f"{currency}_{network}"] = {
+                "currency": currency,
+                "network": network,
+                "address": setting.value,
             }
-    return result
 
-
-def generate_payment_memo(user_id: str, payment_id: str) -> str:
-    """
-    Generate a unique payment memo/tag for identification.
-    This helps match incoming payments to users.
-    """
-    raw = f"{user_id}:{payment_id}:{int(time.time())}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:12].upper()
-
-
-def create_payment_request(user_id: str, plan_price: float, currency: str = "USDT",
-                            network: str = "TRC20") -> dict:
-    """
-    Create a payment request with address and memo.
-    Returns payment details for the user.
-    """
-    network = network.upper().strip()
-    currency = currency.upper().strip()
-    network_info = SUPPORTED_NETWORKS.get(network)
-    if not network_info:
-        return {"error": f"Unsupported payment network: {network}"}
-    if currency not in network_info["currencies"]:
-        return {"error": f"{currency} is not supported on {network}"}
-
-    address = get_payment_address(network)
-    if not address:
-        return {"error": f"No payment address configured for {network}"}
-
-    return {
-        "address": address,
-        "amount": plan_price,
-        "currency": currency,
-        "network": network,
-        "network_name": network_info.get("name", network),
-        "confirmation_time": network_info.get("confirmation_time", "varies"),
-        "fee_estimate": network_info.get("fee", "varies"),
-        "instructions": [
-            f"Send exactly {plan_price} {currency} to the address below",
-            f"Network: {network_info.get('name', network)}",
-            "After sending, submit the transaction hash (TX ID)",
-            "Your subscription will be activated after admin confirmation",
-        ]
-    }
+    return addresses
 
 
 def get_supported_payment_options() -> list[dict]:
-    """Return list of supported payment networks and currencies."""
-    result = []
-    for network_id, info in SUPPORTED_NETWORKS.items():
-        addr = get_payment_address(network_id)
-        if addr:  # Only show networks with configured addresses
-            result.append({
-                "network": network_id,
-                "name": info["name"],
-                "currencies": info["currencies"],
-                "confirmation_time": info["confirmation_time"],
-                "fee": info["fee"],
-                "available": True,
-            })
-    return result
+    """Get list of supported payment options."""
+    return [
+        {
+            "network": network,
+            "name": info["name"],
+            "currency": info["currency"],
+            "confirmations": info["confirmations"],
+        }
+        for network, info in SUPPORTED_NETWORKS.items()
+    ]
+
+
+async def create_payment_request(
+    session: AsyncSession,
+    amount: float,
+    currency: str,
+    network: str,
+    user_id: str,
+    subscription_id: Optional[str] = None,
+) -> dict:
+    """Create a payment request."""
+    from datetime import datetime, timezone, timedelta
+    from core.database import PaymentModel
+    import uuid
+
+    address = await get_payment_address(session, currency, network)
+    if not address:
+        raise ValueError(f"No payment address configured for {currency}/{network}")
+
+    payment = PaymentModel(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        subscription_id=subscription_id,
+        amount=amount,
+        currency=currency,
+        network=network,
+        wallet_address=address,
+        status="pending",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+    )
+
+    session.add(payment)
+    await session.commit()
+
+    return {
+        "payment_id": payment.id,
+        "amount": payment.amount,
+        "currency": payment.currency,
+        "network": payment.network,
+        "wallet_address": payment.wallet_address,
+        "expires_at": payment.expires_at.isoformat() if payment.expires_at else None,
+    }

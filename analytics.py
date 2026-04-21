@@ -1,316 +1,282 @@
 """
-Signal Server - Performance Analytics
-Calculates Sharpe ratio, Sortino ratio, max drawdown, win rate, profit factor, etc.
+Signal Server - Analytics Module (Enhanced)
+Performance analytics and trade statistics.
 """
-import math
-import time
-from datetime import datetime, timedelta
-from pathlib import Path
-from trade_logger import get_trade_history, get_today_trades
+import json
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from collections import defaultdict
 
-# ─────────────────────────────────────────────
-# Simple in-memory cache for performance calculations
-# ─────────────────────────────────────────────
-_CACHE_TTL = 60  # seconds
-_performance_cache: dict[str, tuple[object, float]] = {}
+from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 
-
-def _get_cached(key: str) -> object | None:
-    """Return cached value if still fresh, otherwise None."""
-    entry = _performance_cache.get(key)
-    if entry and (time.time() - entry[1]) < _CACHE_TTL:
-        return entry[0]
-    return None
+from core.database import TradeModel
 
 
-def _set_cache(key: str, value: dict):
-    _performance_cache[key] = (value, time.time())
-
-
-def _finite(value: float, default: float = 0.0) -> float:
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return default
-    return value if math.isfinite(value) else default
-
-
-def invalidate_performance_cache():
-    """Call this after a new trade is logged to ensure fresh metrics."""
-    _performance_cache.clear()
-
-
-def calculate_performance(days: int = 30, user_id: str | None = None) -> dict:
+async def calculate_performance(
+    session: AsyncSession,
+    days: int = 30,
+    user_id: Optional[str] = None,
+) -> dict:
     """
-    Calculate comprehensive performance metrics from trade history.
-    Results are cached for up to 60 seconds to avoid redundant computation.
+    Calculate comprehensive performance metrics.
     """
-    cache_key = f"perf_{days}_{user_id or 'all'}"
-    cached = _get_cached(cache_key)
-    if cached is not None:
-        return cached
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-    result = _calculate_performance_impl(days, user_id=user_id)
-    _set_cache(cache_key, result)
-    return result
+    # Build query
+    query = select(TradeModel).where(TradeModel.timestamp >= cutoff)
+    if user_id:
+        query = query.where(TradeModel.user_id == user_id)
 
+    result = await session.execute(query.order_by(TradeModel.timestamp))
+    trades = result.scalars().all()
 
-def _calculate_performance_impl(days: int = 30, user_id: str | None = None) -> dict:
-    trades = get_trade_history(days, user_id=user_id)
-    executed = [t for t in trades if t.get("execute") and t.get("order_status") in ("filled", "simulated", "closed")]
-    realized = [
-        t for t in executed
-        if str(t.get("direction") or "").lower() in {"close_long", "close_short"} or (t.get("pnl_pct") not in (None, 0, 0.0))
-    ]
-    if realized:
-        executed = realized
+    if not trades:
+        return _empty_performance()
 
-    if not executed:
-        return _empty_metrics()
+    # Calculate metrics
+    total_trades = len(trades)
+    executed_trades = [t for t in trades if t.execute]
+    closed_trades = [t for t in executed_trades if _is_closed_trade(t)]
+    open_trades = len(executed_trades) - len(closed_trades)
 
-    # Extract PnL data
-    pnl_list = []
-    equity_curve = []
-    cumulative = 0.0
+    # PnL calculations
+    pnls = [t.pnl_pct for t in closed_trades if t.pnl_pct is not None]
+    total_pnl = sum(pnls) if pnls else 0
 
-    for t in executed:
-        pnl = t.get("pnl_pct", 0.0) or 0.0
-        pnl_list.append(pnl)
-        cumulative += pnl
-        equity_curve.append({
-            "timestamp": t.get("timestamp", ""),
-            "pnl": round(pnl, 4),
-            "cumulative_pnl": round(cumulative, 4),
-        })
+    # Win/Loss
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    breakeven = [p for p in pnls if p == 0]
 
-    # Basic stats
-    total_trades = len(pnl_list)
-    winning = [p for p in pnl_list if p > 0]
-    losing = [p for p in pnl_list if p < 0]
-    breakeven = [p for p in pnl_list if p == 0]
+    win_rate = (len(wins) / len(pnls) * 100) if pnls else 0
 
-    win_count = len(winning)
-    loss_count = len(losing)
-    win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0.0
+    # Average win/loss
+    avg_win = sum(wins) / len(wins) if wins else 0
+    avg_loss = sum(losses) / len(losses) if losses else 0
 
-    avg_win = (sum(winning) / win_count) if win_count > 0 else 0.0
-    avg_loss = (sum(losing) / loss_count) if loss_count > 0 else 0.0
-    total_pnl = sum(pnl_list)
+    # Risk/Reward
+    risk_reward = abs(avg_win / avg_loss) if avg_loss != 0 else 0
 
     # Profit factor
-    gross_profit = sum(winning) if winning else 0.0
-    gross_loss = abs(sum(losing)) if losing else 0.0
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf") if gross_profit > 0 else 0.0
+    gross_profit = sum(wins) if wins else 0
+    gross_loss = abs(sum(losses)) if losses else 0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
 
-    # Expectancy (average PnL per trade)
-    expectancy = total_pnl / total_trades if total_trades > 0 else 0.0
+    # Drawdown
+    equity_curve = _calculate_equity_curve(pnls)
+    max_drawdown = _calculate_max_drawdown(equity_curve)
 
-    # Risk/Reward ratio
-    risk_reward = abs(avg_win / avg_loss) if avg_loss != 0 else float("inf") if avg_win > 0 else 0.0
+    # Sharpe Ratio (simplified, assuming 0% risk-free rate)
+    if len(pnls) > 1:
+        import statistics
+        std = statistics.stdev(pnls) if len(pnls) > 1 else 0
+        avg_pnl = sum(pnls) / len(pnls)
+        sharpe = (avg_pnl / std * (252 ** 0.5)) if std > 0 else 0
+    else:
+        sharpe = 0
 
-    # Max drawdown
-    max_dd, max_dd_duration = _calculate_max_drawdown(pnl_list)
-
-    # Sharpe ratio (annualized, assuming daily returns)
-    sharpe = _calculate_sharpe_ratio(pnl_list)
-
-    # Sortino ratio (only penalizes downside volatility)
-    sortino = _calculate_sortino_ratio(pnl_list)
-
-    # Calmar ratio (return / max drawdown)
-    calmar = (total_pnl / abs(max_dd)) if max_dd != 0 else 0.0
+    # Sortino Ratio
+    negative_returns = [p for p in pnls if p < 0]
+    if negative_returns:
+        import statistics
+        downside_std = statistics.stdev(negative_returns) if len(negative_returns) > 1 else 0
+        avg_pnl = sum(pnls) / len(pnls)
+        sortino = (avg_pnl / downside_std * (252 ** 0.5)) if downside_std > 0 else 0
+    else:
+        sortino = sharpe
 
     # Consecutive wins/losses
-    max_consec_wins, max_consec_losses = _calculate_consecutive(pnl_list)
+    max_consec_wins, max_consec_losses = _calculate_consecutive(pnls)
 
-    # Best/worst trade
-    best_trade = max(pnl_list) if pnl_list else 0.0
-    worst_trade = min(pnl_list) if pnl_list else 0.0
+    # Best/worst trades
+    best_trade = max(pnls) if pnls else 0
+    worst_trade = min(pnls) if pnls else 0
 
-    # Average holding time (if available)
-    avg_duration = _calculate_avg_duration(executed)
-
-    # AI confidence correlation
-    ai_stats = _calculate_ai_stats(executed)
+    # AI stats
+    ai_stats = await _calculate_ai_stats(trades)
 
     return {
-        "period_days": days,
         "total_trades": total_trades,
-        "winning_trades": win_count,
-        "losing_trades": loss_count,
+        "executed_trades": len(executed_trades),
+        "closed_trades": len(closed_trades),
+        "open_trades": open_trades,
+        "total_pnl_pct": round(total_pnl, 2),
+        "win_rate": round(win_rate, 1),
+        "winning_trades": len(wins),
+        "losing_trades": len(losses),
         "breakeven_trades": len(breakeven),
-        "win_rate": round(win_rate, 2),
-        "total_pnl_pct": round(total_pnl, 4),
-        "avg_win_pct": round(avg_win, 4),
-        "avg_loss_pct": round(avg_loss, 4),
-        "best_trade_pct": round(best_trade, 4),
-        "worst_trade_pct": round(worst_trade, 4),
-        "profit_factor": round(profit_factor, 4) if profit_factor != float("inf") else "∞",
-        "risk_reward_ratio": round(risk_reward, 4) if risk_reward != float("inf") else "∞",
-        "expectancy_pct": round(expectancy, 4),
-        "max_drawdown_pct": round(max_dd, 4),
-        "max_drawdown_duration_trades": max_dd_duration,
-        "sharpe_ratio": round(_finite(sharpe), 4),
-        "sortino_ratio": round(_finite(sortino), 4),
-        "calmar_ratio": round(_finite(calmar), 4),
+        "avg_win_pct": round(avg_win, 2),
+        "avg_loss_pct": round(avg_loss, 2),
+        "risk_reward_ratio": round(risk_reward, 2),
+        "profit_factor": round(profit_factor, 2),
+        "max_drawdown_pct": round(max_drawdown, 2),
+        "sharpe_ratio": round(sharpe, 2),
+        "sortino_ratio": round(sortino, 2),
+        "best_trade_pct": round(best_trade, 2),
+        "worst_trade_pct": round(worst_trade, 2),
         "max_consecutive_wins": max_consec_wins,
         "max_consecutive_losses": max_consec_losses,
-        "avg_duration_minutes": avg_duration,
-        "gross_profit_pct": round(gross_profit, 4),
-        "gross_loss_pct": round(gross_loss, 4),
         "equity_curve": equity_curve,
         "ai_stats": ai_stats,
     }
 
 
-def get_daily_pnl(days: int = 30, user_id: str | None = None) -> list[dict]:
-    """Get daily aggregated PnL for charting."""
-    cache_key = f"daily_pnl_{days}_{user_id or 'all'}"
-    cached = _get_cached(cache_key)
-    if cached is not None:
-        return cached
-    trades = get_trade_history(days, user_id=user_id)
-    daily = {}
+async def get_daily_pnl(
+    session: AsyncSession,
+    days: int = 30,
+    user_id: Optional[str] = None,
+) -> list[dict]:
+    """Get daily PnL breakdown."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-    for t in trades:
-        if not t.get("execute"):
-            continue
-        ts = t.get("timestamp", "")
-        if not ts:
-            continue
-        date = ts[:10]  # YYYY-MM-DD
-        if date not in daily:
-            daily[date] = {"date": date, "trades": 0, "pnl": 0.0, "wins": 0, "losses": 0}
-        daily[date]["trades"] += 1
-        pnl = t.get("pnl_pct", 0.0) or 0.0
-        daily[date]["pnl"] += pnl
-        if pnl > 0:
-            daily[date]["wins"] += 1
-        elif pnl < 0:
-            daily[date]["losses"] += 1
+    query = select(TradeModel).where(TradeModel.timestamp >= cutoff)
+    if user_id:
+        query = query.where(TradeModel.user_id == user_id)
 
-    result = sorted(daily.values(), key=lambda x: x["date"])
-    # Add cumulative
-    cum = 0.0
-    for d in result:
-        cum += d["pnl"]
-        d["cumulative_pnl"] = round(cum, 4)
-        d["pnl"] = round(d["pnl"], 4)
+    result = await session.execute(query)
+    trades = result.scalars().all()
 
-    _set_cache(cache_key, result)
-    return result
+    # Group by day
+    daily_pnl = defaultdict(float)
+    for trade in trades:
+        if trade.pnl_pct is not None and _is_closed_trade(trade):
+            day = trade.timestamp.strftime("%Y-%m-%d")
+            daily_pnl[day] += trade.pnl_pct
+
+    # Fill missing days
+    all_days = []
+    for i in range(days):
+        day = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
+        all_days.append(day)
+
+    return [
+        {"date": day, "pnl": round(daily_pnl.get(day, 0), 2)}
+        for day in sorted(all_days)
+    ]
 
 
-def get_trade_distribution() -> dict:
-    """Get trade distribution by ticker, direction, hour, etc."""
-    trades = get_trade_history(30)
-    executed = [t for t in trades if t.get("execute")]
+async def get_trade_distribution(
+    session: AsyncSession,
+    user_id: Optional[str] = None,
+) -> dict:
+    """Get trade distribution by ticker and direction."""
+    query = select(TradeModel)
+    if user_id:
+        query = query.where(TradeModel.user_id == user_id)
 
-    by_ticker = {}
-    by_direction = {"long": 0, "short": 0, "close_long": 0, "close_short": 0}
-    by_hour = {str(h).zfill(2): 0 for h in range(24)}
-    by_ai_recommendation = {"execute": 0, "modify": 0, "reject": 0}
+    result = await session.execute(query)
+    trades = result.scalars().all()
 
-    for t in executed:
-        # By ticker
-        ticker = t.get("ticker", "unknown")
-        by_ticker[ticker] = by_ticker.get(ticker, 0) + 1
+    by_ticker = defaultdict(lambda: {"long": 0, "short": 0, "pnl": 0})
+    by_direction = {"long": 0, "short": 0}
 
-        # By direction
-        direction = t.get("direction", "").lower()
-        if direction in by_direction:
+    for trade in trades:
+        if trade.ticker and trade.direction:
+            direction = "long" if "long" in trade.direction.lower() else "short"
+            by_ticker[trade.ticker][direction] += 1
             by_direction[direction] += 1
-
-        # By hour
-        ts = t.get("timestamp", "")
-        if len(ts) >= 13:
-            hour = ts[11:13]
-            if hour in by_hour:
-                by_hour[hour] += 1
-
-        # By AI recommendation
-        ai = t.get("ai", {})
-        rec = ai.get("recommendation", "")
-        if rec in by_ai_recommendation:
-            by_ai_recommendation[rec] += 1
+            if trade.pnl_pct and _is_closed_trade(trade):
+                by_ticker[trade.ticker]["pnl"] += trade.pnl_pct
 
     return {
-        "by_ticker": by_ticker,
+        "by_ticker": dict(by_ticker),
         "by_direction": by_direction,
-        "by_hour": by_hour,
-        "by_ai_recommendation": by_ai_recommendation,
     }
 
 
-# ─────────────────────────────────────────────
-# Internal calculation functions
-# ─────────────────────────────────────────────
-
-def _calculate_sharpe_ratio(returns: list[float], risk_free_rate: float = 0.0) -> float:
-    """Calculate annualized Sharpe ratio."""
-    if len(returns) < 2:
-        return 0.0
-    mean_ret = sum(returns) / len(returns) - risk_free_rate
-    std_dev = _std_dev(returns)
-    if std_dev == 0:
-        return 0.0
-    # Annualize: assume ~365 trading days for crypto
-    return (mean_ret / std_dev) * math.sqrt(365)
-
-
-def _calculate_sortino_ratio(returns: list[float], risk_free_rate: float = 0.0) -> float:
-    """Calculate annualized Sortino ratio (only downside deviation)."""
-    if len(returns) < 2:
-        return 0.0
-    mean_ret = sum(returns) / len(returns) - risk_free_rate
-    downside = [r for r in returns if r < 0]
-    if not downside:
-        return 0.0
-    downside_dev = math.sqrt(sum(d ** 2 for d in downside) / len(downside))
-    if downside_dev == 0:
-        return 0.0
-    return (mean_ret / downside_dev) * math.sqrt(365)
+def _empty_performance() -> dict:
+    """Return empty performance metrics."""
+    return {
+        "total_trades": 0,
+        "executed_trades": 0,
+        "closed_trades": 0,
+        "open_trades": 0,
+        "total_pnl_pct": 0,
+        "win_rate": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "breakeven_trades": 0,
+        "avg_win_pct": 0,
+        "avg_loss_pct": 0,
+        "risk_reward_ratio": 0,
+        "profit_factor": 0,
+        "max_drawdown_pct": 0,
+        "sharpe_ratio": 0,
+        "sortino_ratio": 0,
+        "best_trade_pct": 0,
+        "worst_trade_pct": 0,
+        "max_consecutive_wins": 0,
+        "max_consecutive_losses": 0,
+        "equity_curve": [],
+        "ai_stats": {},
+    }
 
 
-def _calculate_max_drawdown(returns: list[float]) -> tuple[float, int]:
-    """Calculate maximum drawdown and its duration in trades."""
-    if not returns:
-        return 0.0, 0
-
-    cumulative = 0.0
-    peak = 0.0
-    max_dd = 0.0
-    max_dd_dur = 0
-    current_dur = 0
-
-    for r in returns:
-        cumulative += r
-        if cumulative > peak:
-            peak = cumulative
-            current_dur = 0
-        dd = cumulative - peak
-        if dd < max_dd:
-            max_dd = dd
-        if cumulative < peak:
-            current_dur += 1
-            max_dd_dur = max(max_dd_dur, current_dur)
-
-    return max_dd, max_dd_dur
+def _is_closed_trade(trade) -> bool:
+    status = str(getattr(trade, "order_status", "") or "").lower()
+    direction = str(getattr(trade, "direction", "") or "").lower()
+    if direction.startswith("close_"):
+        return True
+    if status in {"closed", "paper_closed", "exchange_closed", "tp_hit", "sl_hit"}:
+        return True
+    try:
+        payload = json.loads(trade.payload_json) if trade.payload_json else {}
+        return payload.get("position_event") == "closed" or bool(payload.get("close_reason"))
+    except Exception:
+        return False
 
 
-def _calculate_consecutive(pnl_list: list[float]) -> tuple[int, int]:
+def _calculate_equity_curve(pnls: list[float]) -> list[dict]:
+    """Calculate cumulative equity curve."""
+    curve = []
+    cumulative = 0
+    for i, pnl in enumerate(pnls):
+        cumulative += pnl
+        curve.append({
+            "trade": i + 1,
+            "pnl": pnl,
+            "cumulative_pnl": round(cumulative, 2),
+        })
+    return curve
+
+
+def _calculate_max_drawdown(equity_curve: list[dict]) -> float:
+    """Calculate maximum drawdown percentage."""
+    if not equity_curve:
+        return 0
+
+    peak = 0
+    max_dd = 0
+
+    for point in equity_curve:
+        cum_pnl = point["cumulative_pnl"]
+        if cum_pnl > peak:
+            peak = cum_pnl
+        drawdown = peak - cum_pnl
+        if drawdown > max_dd:
+            max_dd = drawdown
+
+    return max_dd
+
+
+def _calculate_consecutive(pnls: list[float]) -> tuple[int, int]:
     """Calculate max consecutive wins and losses."""
+    if not pnls:
+        return 0, 0
+
     max_wins = 0
     max_losses = 0
     current_wins = 0
     current_losses = 0
 
-    for p in pnl_list:
-        if p > 0:
+    for pnl in pnls:
+        if pnl > 0:
             current_wins += 1
             current_losses = 0
             max_wins = max(max_wins, current_wins)
-        elif p < 0:
+        elif pnl < 0:
             current_losses += 1
             current_wins = 0
             max_losses = max(max_losses, current_losses)
@@ -321,82 +287,53 @@ def _calculate_consecutive(pnl_list: list[float]) -> tuple[int, int]:
     return max_wins, max_losses
 
 
-def _calculate_avg_duration(trades: list[dict]) -> float | None:
-    """Calculate average trade duration in minutes."""
-    durations = []
-    for t in trades:
-        start = t.get("timestamp")
-        end = t.get("close_timestamp")
-        if start and end:
-            try:
-                s = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                e = datetime.fromisoformat(end.replace("Z", "+00:00"))
-                durations.append((e - s).total_seconds() / 60)
-            except (ValueError, TypeError):
-                pass
-    if durations:
-        return round(sum(durations) / len(durations), 1)
-    return None
+async def _calculate_ai_stats(trades: list) -> dict:
+    """Calculate AI performance statistics."""
+    high_conf_trades = []
+    low_conf_trades = []
+    all_confidences = []
 
+    for trade in trades:
+        if not _is_closed_trade(trade):
+            continue
+        try:
+            payload = json.loads(trade.payload_json) if trade.payload_json else {}
+            analysis = payload.get("analysis", {})
+            confidence = analysis.get("confidence")
 
-def _calculate_ai_stats(trades: list[dict]) -> dict:
-    """Analyze AI prediction accuracy."""
-    high_conf = [t for t in trades if t.get("ai", {}).get("confidence", 0) >= 0.7]
-    low_conf = [t for t in trades if 0 < t.get("ai", {}).get("confidence", 0) < 0.5]
+            if confidence is not None:
+                all_confidences.append(confidence)
 
-    def _win_rate(subset):
-        if not subset:
-            return 0.0
-        wins = sum(1 for t in subset if (t.get("pnl_pct", 0) or 0) > 0)
-        return round(wins / len(subset) * 100, 2)
+                if confidence >= 0.7:
+                    high_conf_trades.append(trade.pnl_pct or 0)
+                elif confidence < 0.5:
+                    low_conf_trades.append(trade.pnl_pct or 0)
+        except:
+            pass
+
+    def win_rate(trade_list):
+        if not trade_list:
+            return 0
+        wins = sum(1 for p in trade_list if p > 0)
+        return (wins / len(trade_list)) * 100
 
     return {
-        "high_confidence_trades": len(high_conf),
-        "high_confidence_win_rate": _win_rate(high_conf),
-        "low_confidence_trades": len(low_conf),
-        "low_confidence_win_rate": _win_rate(low_conf),
-        "avg_confidence": round(
-            sum(t.get("ai", {}).get("confidence", 0) for t in trades) / len(trades), 4
-        ) if trades else 0.0,
+        "high_confidence_trades": len(high_conf_trades),
+        "low_confidence_trades": len(low_conf_trades),
+        "high_confidence_win_rate": win_rate(high_conf_trades),
+        "low_confidence_win_rate": win_rate(low_conf_trades),
+        "avg_confidence": sum(all_confidences) / len(all_confidences) if all_confidences else 0,
     }
 
 
-def _std_dev(data: list[float]) -> float:
-    """Calculate standard deviation."""
-    if len(data) < 2:
-        return 0.0
-    mean = sum(data) / len(data)
-    variance = sum((x - mean) ** 2 for x in data) / (len(data) - 1)
-    return math.sqrt(variance)
+# Cache invalidation
+_performance_cache = {}
+_cache_time = {}
 
 
-def _empty_metrics() -> dict:
-    """Return empty metrics when no data available."""
-    return {
-        "period_days": 0,
-        "total_trades": 0,
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "breakeven_trades": 0,
-        "win_rate": 0.0,
-        "total_pnl_pct": 0.0,
-        "avg_win_pct": 0.0,
-        "avg_loss_pct": 0.0,
-        "best_trade_pct": 0.0,
-        "worst_trade_pct": 0.0,
-        "profit_factor": 0.0,
-        "risk_reward_ratio": 0.0,
-        "expectancy_pct": 0.0,
-        "max_drawdown_pct": 0.0,
-        "max_drawdown_duration_trades": 0,
-        "sharpe_ratio": 0.0,
-        "sortino_ratio": 0.0,
-        "calmar_ratio": 0.0,
-        "max_consecutive_wins": 0,
-        "max_consecutive_losses": 0,
-        "avg_duration_minutes": None,
-        "gross_profit_pct": 0.0,
-        "gross_loss_pct": 0.0,
-        "equity_curve": [],
-        "ai_stats": {},
-    }
+def invalidate_performance_cache(user_id: Optional[str] = None):
+    """Invalidate performance cache."""
+    global _performance_cache, _cache_time
+    key = user_id or "global"
+    _performance_cache.pop(key, None)
+    _cache_time.pop(key, None)

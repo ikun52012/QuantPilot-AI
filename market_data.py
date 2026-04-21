@@ -9,7 +9,7 @@ import threading
 from collections import OrderedDict
 import ccxt
 from loguru import logger
-from config import settings
+from core.config import settings
 from models import MarketContext
 from exchange import _build_exchange, _resolve_symbol
 

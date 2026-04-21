@@ -1,6 +1,17 @@
 """
 TradingView Signal Server - Authentication Module
 JWT-based auth with PBKDF2 password hashing.
+
+⚠️ DEPRECATED: This file is the legacy authentication module.
+Please use core/auth.py instead, which provides:
+    - Async-compatible JWT authentication
+    - FastAPI dependencies for route protection
+    - Password hashing and verification
+
+To import:
+    from core.auth import hash_password, verify_password, get_current_user, require_admin
+
+This file is kept for backward compatibility and will be removed in a future version.
 """
 import os
 import time

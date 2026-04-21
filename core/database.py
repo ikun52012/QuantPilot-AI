@@ -1,0 +1,1027 @@
+"""
+Signal Server - Database Layer (Enhanced)
+Async SQLAlchemy with PostgreSQL/SQLite support.
+"""
+import json
+import uuid
+import os
+import secrets
+import hashlib
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Any
+from pathlib import Path
+
+from sqlalchemy import (
+    create_engine, Column, String, Integer, Float, Boolean, DateTime, Text, ForeignKey, Index, inspect, text
+)
+from sqlalchemy.dialects.sqlite import JSON as SQLiteJSON
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase, relationship, selectinload
+from sqlalchemy import select, update, delete, and_, or_, event
+from loguru import logger
+
+from core.config import settings
+
+
+class Base(DeclarativeBase):
+    """SQLAlchemy declarative base."""
+    pass
+
+
+# ─────────────────────────────────────────────
+# Models
+# ─────────────────────────────────────────────
+
+class UserModel(Base):
+    """User database model."""
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username = Column(String(32), unique=True, nullable=False, index=True)
+    email = Column(String(254), unique=True, nullable=False, index=True)
+    password_hash = Column(String(256), nullable=False)
+    role = Column(String(20), default="user")
+    balance_usdt = Column(Float, default=0.0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_login = Column(DateTime, nullable=True)
+    settings_json = Column(Text, default="{}")
+    webhook_secret = Column(String(128), default="")
+    webhook_secret_hash = Column(String(64), default="", index=True)
+    live_trading_allowed = Column(Boolean, default=False)
+    max_leverage = Column(Integer, default=20)
+    max_position_pct = Column(Float, default=10.0)
+    token_version = Column(Integer, default=0)
+    password_changed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    subscriptions = relationship("SubscriptionModel", back_populates="user", lazy="dynamic")
+    payments = relationship("PaymentModel", back_populates="user", lazy="dynamic")
+    trades = relationship("TradeModel", back_populates="user", lazy="dynamic")
+
+
+class SubscriptionPlanModel(Base):
+    """Subscription plan model."""
+    __tablename__ = "subscription_plans"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(100), nullable=False)
+    description = Column(Text, default="")
+    price_usdt = Column(Float, nullable=False)
+    duration_days = Column(Integer, nullable=False)
+    features_json = Column(Text, default="[]")
+    is_active = Column(Boolean, default=True)
+    max_signals_per_day = Column(Integer, default=0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    subscriptions = relationship("SubscriptionModel", back_populates="plan", lazy="dynamic")
+
+
+class SubscriptionModel(Base):
+    """User subscription model."""
+    __tablename__ = "subscriptions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    plan_id = Column(String(36), ForeignKey("subscription_plans.id"), nullable=False)
+    status = Column(String(20), default="pending", index=True)
+    start_date = Column(DateTime, nullable=True)
+    end_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("UserModel", back_populates="subscriptions")
+    plan = relationship("SubscriptionPlanModel", back_populates="subscriptions")
+
+
+class PaymentModel(Base):
+    """Payment model."""
+    __tablename__ = "payments"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    subscription_id = Column(String(36), ForeignKey("subscriptions.id"), nullable=True)
+    amount = Column(Float, nullable=False)
+    currency = Column(String(12), default="USDT")
+    network = Column(String(20), default="TRC20")
+    tx_hash = Column(String(200), default="")
+    wallet_address = Column(String(128), default="")
+    status = Column(String(20), default="pending", index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    confirmed_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+
+    user = relationship("UserModel", back_populates="payments")
+
+
+class TradeModel(Base):
+    """Trade log model."""
+    __tablename__ = "trades"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    ticker = Column(String(40), default="")
+    direction = Column(String(20), default="")
+    execute = Column(Boolean, default=False)
+    order_status = Column(String(20), default="")
+    pnl_pct = Column(Float, default=0.0)
+    payload_json = Column(Text, nullable=False)
+
+    user = relationship("UserModel", back_populates="trades")
+
+
+class WebhookEventModel(Base):
+    """Webhook event log model."""
+    __tablename__ = "webhook_events"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), nullable=True, index=True)
+    fingerprint = Column(String(64), nullable=False, index=True)
+    ticker = Column(String(40), default="")
+    direction = Column(String(20), default="")
+    status = Column(String(20), nullable=False)
+    status_code = Column(Integer, default=200)
+    reason = Column(Text, default="")
+    client_ip = Column(String(45), default="")
+    payload_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class AdminSettingModel(Base):
+    """Admin settings model."""
+    __tablename__ = "admin_settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class AdminAuditLogModel(Base):
+    """Admin audit log model."""
+    __tablename__ = "admin_audit_logs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    admin_id = Column(String(36), nullable=True)
+    admin_username = Column(String(32), default="")
+    action = Column(String(100), nullable=False)
+    target_type = Column(String(50), default="")
+    target_id = Column(String(36), default="")
+    summary = Column(Text, default="")
+    client_ip = Column(String(45), default="")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class InviteCodeModel(Base):
+    """Invite code model."""
+    __tablename__ = "invite_codes"
+
+    code = Column(String(80), primary_key=True)
+    note = Column(Text, default="")
+    max_uses = Column(Integer, default=1)
+    used_count = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime, nullable=True)
+    created_by = Column(String(36), nullable=True)
+    last_used_by = Column(String(36), nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+
+
+class RedeemCodeModel(Base):
+    """Redeem code model."""
+    __tablename__ = "redeem_codes"
+
+    code = Column(String(80), primary_key=True)
+    plan_id = Column(String(36), ForeignKey("subscription_plans.id"), nullable=True)
+    duration_days = Column(Integer, default=0)
+    balance_usdt = Column(Float, default=0.0)
+    note = Column(Text, default="")
+    is_active = Column(Boolean, default=True, index=True)
+    redeemed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    redeemed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime, nullable=True)
+    created_by = Column(String(36), nullable=True)
+
+
+class PositionModel(Base):
+    """Position tracking model."""
+    __tablename__ = "positions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), nullable=True, index=True)
+    ticker = Column(String(40), nullable=False, index=True)
+    direction = Column(String(20), nullable=False)
+    status = Column(String(20), default="open", index=True)
+    entry_price = Column(Float, nullable=False)
+    quantity = Column(Float, default=0.0)
+    remaining_quantity = Column(Float, default=0.0)
+    opened_at = Column(DateTime, nullable=False)
+    open_trade_id = Column(String(36), nullable=True)
+    entry_order_id = Column(String(128), default="")
+    stop_loss = Column(Float, nullable=True)
+    take_profit_json = Column(Text, default="[]")
+    stop_loss_order_id = Column(String(128), default="")
+    take_profit_order_ids_json = Column(Text, default="[]")
+    exchange = Column(String(40), default="")
+    live_trading = Column(Boolean, default=False)
+    sandbox_mode = Column(Boolean, default=False)
+    leverage = Column(Float, default=1.0)
+    realized_pnl_pct = Column(Float, default=0.0)
+    current_pnl_pct = Column(Float, default=0.0)
+    last_price = Column(Float, nullable=True)
+    close_reason = Column(String(80), default="")
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    exit_price = Column(Float, nullable=True)
+    pnl_pct = Column(Float, default=0.0)
+    closed_at = Column(DateTime, nullable=True)
+    close_trade_id = Column(String(36), nullable=True)
+
+
+# ─────────────────────────────────────────────
+# Database Engine & Session
+# ─────────────────────────────────────────────
+
+class DatabaseManager:
+    """Async database manager."""
+
+    def __init__(self):
+        self.engine = None
+        self.async_session_factory = None
+
+    async def init(self):
+        """Initialize database engine and create tables."""
+        db_url = settings.database.url
+        is_sqlite = "sqlite" in db_url
+
+        # Ensure data directory exists for SQLite
+        if is_sqlite:
+            db_path = db_url.split("///")[-1]
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+        engine_kwargs = {"echo": settings.database.echo}
+        if "postgresql" in db_url:
+            engine_kwargs.update(
+                pool_size=settings.database.pool_size,
+                max_overflow=settings.database.max_overflow,
+            )
+        elif is_sqlite:
+            engine_kwargs["connect_args"] = {"timeout": 30}
+
+        self.engine = create_async_engine(db_url, **engine_kwargs)
+
+        if is_sqlite:
+            @event.listens_for(self.engine.sync_engine, "connect")
+            def _set_sqlite_pragmas(dbapi_connection, connection_record):
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.close()
+
+        self.async_session_factory = async_sessionmaker(
+            self.engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+
+        # Create tables
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._ensure_schema)
+
+        logger.info(f"[Database] Initialized: {db_url.split('@')[-1] if '@' in db_url else db_url}")
+
+    @staticmethod
+    def _ensure_schema(sync_conn):
+        """Apply lightweight additive migrations for deployments without Alembic."""
+        inspector = inspect(sync_conn)
+        tables = set(inspector.get_table_names())
+        if "positions" not in tables:
+            return
+
+        existing = {column["name"] for column in inspector.get_columns("positions")}
+        columns = {
+            "remaining_quantity": "FLOAT DEFAULT 0",
+            "entry_order_id": "VARCHAR(128) DEFAULT ''",
+            "stop_loss": "FLOAT",
+            "take_profit_json": "TEXT DEFAULT '[]'",
+            "stop_loss_order_id": "VARCHAR(128) DEFAULT ''",
+            "take_profit_order_ids_json": "TEXT DEFAULT '[]'",
+            "exchange": "VARCHAR(40) DEFAULT ''",
+            "live_trading": "BOOLEAN DEFAULT false",
+            "sandbox_mode": "BOOLEAN DEFAULT false",
+            "leverage": "FLOAT DEFAULT 1",
+            "realized_pnl_pct": "FLOAT DEFAULT 0",
+            "current_pnl_pct": "FLOAT DEFAULT 0",
+            "last_price": "FLOAT",
+            "close_reason": "VARCHAR(80) DEFAULT ''",
+            "updated_at": "TIMESTAMP",
+        }
+        for name, ddl in columns.items():
+            if name not in existing:
+                sync_conn.execute(text(f"ALTER TABLE positions ADD COLUMN {name} {ddl}"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status)"))
+
+    async def close(self):
+        """Close database connections."""
+        if self.engine:
+            await self.engine.dispose()
+
+    async def get_session(self) -> AsyncSession:
+        """Get a new database session."""
+        return self.async_session_factory()
+
+
+# Global database manager
+db_manager = DatabaseManager()
+
+
+async def get_db() -> AsyncSession:
+    """FastAPI dependency for database session."""
+    async with db_manager.async_session_factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+# ─────────────────────────────────────────────
+# Helper Functions
+# ─────────────────────────────────────────────
+
+def _webhook_secret_hash(secret: str) -> str:
+    """Hash webhook secret for secure storage."""
+    secret = str(secret or "").strip()
+    if not secret:
+        return ""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+# ─────────────────────────────────────────────
+# User CRUD
+# ─────────────────────────────────────────────
+
+async def create_user(
+    session: AsyncSession,
+    username: str,
+    email: str,
+    password_hash: str,
+    role: str = "user"
+) -> UserModel:
+    """Create a new user."""
+    user = UserModel(
+        username=username.lower().strip(),
+        email=email.lower().strip(),
+        password_hash=password_hash,
+        role=role,
+    )
+    session.add(user)
+    await session.flush()
+    return user
+
+
+async def get_user_by_username(session: AsyncSession, username: str) -> Optional[UserModel]:
+    """Get user by username."""
+    result = await session.execute(
+        select(UserModel).where(UserModel.username == username.lower().strip())
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_id(session: AsyncSession, user_id: str) -> Optional[UserModel]:
+    """Get user by ID."""
+    result = await session.execute(
+        select(UserModel).where(UserModel.id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_email(session: AsyncSession, email: str) -> Optional[UserModel]:
+    """Get user by email."""
+    result = await session.execute(
+        select(UserModel).where(UserModel.email == email.lower().strip())
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_all_users(session: AsyncSession) -> list[UserModel]:
+    """Get all users."""
+    result = await session.execute(
+        select(UserModel).order_by(UserModel.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def update_user_login(session: AsyncSession, user_id: str):
+    """Update user's last login time."""
+    await session.execute(
+        update(UserModel).where(UserModel.id == user_id).values(last_login=datetime.now(timezone.utc))
+    )
+
+
+async def update_user_status(session: AsyncSession, user_id: str, is_active: bool):
+    """Update user active status."""
+    await session.execute(
+        update(UserModel)
+        .where(UserModel.id == user_id)
+        .values(is_active=is_active, token_version=UserModel.token_version + 1)
+    )
+
+
+async def update_user_password_hash(session: AsyncSession, user_id: str, password_hash: str) -> bool:
+    """Update user password hash."""
+    result = await session.execute(
+        update(UserModel)
+        .where(UserModel.id == user_id)
+        .values(password_hash=password_hash, password_changed_at=datetime.now(timezone.utc), token_version=UserModel.token_version + 1)
+    )
+    return result.rowcount > 0
+
+
+# ─────────────────────────────────────────────
+# Subscription CRUD
+# ─────────────────────────────────────────────
+
+async def get_subscription_plans(session: AsyncSession, active_only: bool = True) -> list[SubscriptionPlanModel]:
+    """Get all subscription plans."""
+    query = select(SubscriptionPlanModel)
+    if active_only:
+        query = query.where(SubscriptionPlanModel.is_active == True)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def get_user_active_subscription(session: AsyncSession, user_id: str) -> Optional[SubscriptionModel]:
+    """Get user's active subscription."""
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        select(SubscriptionModel)
+        .where(
+            SubscriptionModel.user_id == user_id,
+            SubscriptionModel.status == "active",
+            SubscriptionModel.end_date >= now,
+        )
+        .order_by(SubscriptionModel.end_date.desc())
+    )
+    return result.scalar_one_or_none()
+
+
+# ─────────────────────────────────────────────
+# Trade CRUD
+# ─────────────────────────────────────────────
+
+async def log_trade_db(
+    session: AsyncSession,
+    user_id: Optional[str],
+    ticker: str,
+    direction: str,
+    execute: bool,
+    order_status: str,
+    pnl_pct: float,
+    payload: dict,
+) -> TradeModel:
+    """Log a trade to the database and keep the position ledger in sync."""
+    trade_id = str(uuid.uuid4())
+    timestamp = datetime.now(timezone.utc)
+    payload = dict(payload or {})
+    entry = {
+        "id": trade_id,
+        "user_id": user_id,
+        "timestamp": timestamp.isoformat(),
+        "ticker": ticker,
+        "direction": direction,
+        "execute": execute,
+        "order_status": order_status,
+        "pnl_pct": pnl_pct,
+        "signal": payload.get("signal") or {},
+        "analysis": payload.get("analysis") or {},
+        "order_details": payload.get("result") or payload.get("order_details") or {},
+        "exchange_config": payload.get("exchange_config") or payload.get("exchange") or {},
+    }
+
+    entry = await sync_position_from_trade_entry_async(session, entry)
+    payload.update({
+        "position_id": entry.get("position_id"),
+        "position_event": entry.get("position_event"),
+        "close_reason": entry.get("close_reason"),
+        "pnl_pct": float(entry.get("pnl_pct") or 0.0),
+    })
+
+    trade = TradeModel(
+        id=trade_id,
+        user_id=user_id,
+        timestamp=timestamp,
+        ticker=ticker,
+        direction=direction,
+        execute=execute,
+        order_status=entry.get("order_status") or order_status,
+        pnl_pct=float(entry.get("pnl_pct") or 0.0),
+        payload_json=json.dumps(payload, default=str),
+    )
+    session.add(trade)
+    await session.flush()
+    return trade
+
+
+async def count_today_executed_trades(session: AsyncSession, user_id: Optional[str] = None) -> int:
+    """Count today's executed trades."""
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    query = select(TradeModel).where(
+        TradeModel.timestamp >= today_start,
+        TradeModel.execute == True,
+    )
+    if user_id:
+        query = query.where(TradeModel.user_id == user_id)
+    result = await session.execute(query)
+    return len(list(result.scalars().all()))
+
+
+# ─────────────────────────────────────────────
+# Trade Log CRUD (for trade_logger.py)
+# ─────────────────────────────────────────────
+
+async def insert_trade_log_async(session: AsyncSession, entry: dict) -> dict:
+    """
+    Insert a trade log entry into the database.
+    Also syncs position tracking for PnL calculation.
+    Returns the enriched entry.
+    """
+    entry = await sync_position_from_trade_entry_async(session, entry)
+
+    trade = TradeModel(
+        id=entry.get("id") or str(uuid.uuid4()),
+        user_id=entry.get("user_id"),
+        timestamp=datetime.fromisoformat(entry["timestamp"]) if isinstance(entry.get("timestamp"), str) else (entry.get("timestamp") or datetime.now(timezone.utc)),
+        ticker=entry.get("ticker", ""),
+        direction=entry.get("direction", ""),
+        execute=bool(entry.get("execute")),
+        order_status=entry.get("order_status", ""),
+        pnl_pct=float(entry.get("pnl_pct") or 0.0),
+        payload_json=json.dumps(entry, ensure_ascii=False, default=str),
+    )
+    session.add(trade)
+    await session.flush()
+    return entry
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _loads_list(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+
+
+def _take_profit_levels_from_entry(entry: dict) -> list[dict]:
+    order_details = entry.get("order_details") or {}
+    analysis = entry.get("analysis") or {}
+    raw_levels = order_details.get("take_profit_orders") or []
+    levels = []
+
+    for idx, level in enumerate(raw_levels, start=1):
+        price = _safe_float(level.get("price"))
+        if price <= 0:
+            continue
+        levels.append({
+            "level": int(level.get("level") or idx),
+            "price": price,
+            "qty_pct": _safe_float(level.get("qty_pct"), 100.0),
+            "order_id": str(level.get("order_id") or ""),
+            "status": level.get("status") if level.get("status") != "simulated" else "pending",
+        })
+
+    if not levels:
+        for idx in range(1, 5):
+            price = _safe_float(analysis.get(f"suggested_tp{idx}"))
+            if price <= 0:
+                continue
+            levels.append({
+                "level": idx,
+                "price": price,
+                "qty_pct": _safe_float(analysis.get(f"tp{idx}_qty_pct"), 25.0),
+                "order_id": "",
+                "status": "pending",
+            })
+
+    total_qty = sum(max(0.0, _safe_float(level.get("qty_pct"))) for level in levels)
+    if levels and total_qty <= 0:
+        levels[0]["qty_pct"] = 100.0
+
+    return levels
+
+
+def _position_pnl_pct(direction: str, entry_price: float, exit_price: float, leverage: float = 1.0) -> float:
+    if entry_price <= 0 or exit_price <= 0:
+        return 0.0
+    if direction == "short":
+        raw = ((entry_price - exit_price) / entry_price) * 100.0
+    else:
+        raw = ((exit_price - entry_price) / entry_price) * 100.0
+    return raw * max(1.0, _safe_float(leverage, 1.0))
+
+
+async def close_position_async(
+    session: AsyncSession,
+    position: PositionModel,
+    exit_price: float,
+    close_reason: str,
+    close_trade_id: Optional[str] = None,
+    closed_at: Optional[datetime] = None,
+) -> float:
+    """Close a tracked position and return realised leveraged PnL percentage."""
+    exit_price = _safe_float(exit_price)
+    opened_qty = max(_safe_float(position.quantity), 0.0)
+    remaining_qty = _safe_float(position.remaining_quantity, opened_qty)
+    remaining_qty = opened_qty if remaining_qty <= 0 and position.status == "open" else remaining_qty
+    remaining_weight = min(1.0, max(0.0, remaining_qty / opened_qty)) if opened_qty > 0 else 1.0
+    remaining_pnl = _position_pnl_pct(
+        str(position.direction or "long").lower(),
+        _safe_float(position.entry_price),
+        exit_price,
+        _safe_float(position.leverage, 1.0),
+    ) * remaining_weight
+    pnl_pct = round(_safe_float(position.realized_pnl_pct) + remaining_pnl, 6)
+
+    now = closed_at or datetime.now(timezone.utc)
+    position.status = "closed"
+    position.exit_price = exit_price
+    position.pnl_pct = pnl_pct
+    position.current_pnl_pct = pnl_pct
+    position.remaining_quantity = 0.0
+    position.close_reason = close_reason
+    position.closed_at = now
+    position.updated_at = now
+    if close_trade_id:
+        position.close_trade_id = close_trade_id
+    await session.flush()
+    return pnl_pct
+
+
+async def record_position_close_trade_async(
+    session: AsyncSession,
+    position: PositionModel,
+    exit_price: float,
+    close_reason: str,
+    order_status: str = "closed",
+    order_details: Optional[dict] = None,
+) -> TradeModel:
+    """Create a synthetic close trade for TP/SL fills detected by the monitor."""
+    trade_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    pnl_pct = await close_position_async(
+        session=session,
+        position=position,
+        exit_price=exit_price,
+        close_reason=close_reason,
+        close_trade_id=trade_id,
+        closed_at=now,
+    )
+    direction = "close_long" if str(position.direction).lower() == "long" else "close_short"
+    payload = {
+        "position_id": position.id,
+        "open_trade_id": position.open_trade_id,
+        "ticker": position.ticker,
+        "direction": direction,
+        "entry_price": position.entry_price,
+        "exit_price": exit_price,
+        "quantity": position.quantity,
+        "pnl_pct": pnl_pct,
+        "close_reason": close_reason,
+        "order_details": order_details or {},
+    }
+    trade = TradeModel(
+        id=trade_id,
+        user_id=position.user_id,
+        timestamp=now,
+        ticker=position.ticker,
+        direction=direction,
+        execute=True,
+        order_status=order_status,
+        pnl_pct=pnl_pct,
+        payload_json=json.dumps(payload, ensure_ascii=False, default=str),
+    )
+    session.add(trade)
+    await session.flush()
+    return trade
+
+
+async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dict) -> dict:
+    """
+    Maintain a simple open/close position ledger and enrich close trades with realised PnL.
+    Async version for use with SQLAlchemy async session.
+    """
+    if not entry.get("execute"):
+        return entry
+
+    status = str(entry.get("order_status") or "").lower()
+    if status not in {"filled", "simulated", "closed"}:
+        return entry
+
+    direction = str(entry.get("direction") or "").lower()
+    user_id = entry.get("user_id")
+    ticker = str(entry.get("ticker") or "").upper().strip()
+
+    if not ticker or direction not in {"long", "short", "close_long", "close_short"}:
+        return entry
+
+    order_details = entry.get("order_details") or {}
+    analysis = entry.get("analysis") or {}
+    exchange_config = entry.get("exchange_config") or {}
+
+    entry_price = _safe_float(order_details.get("entry_price") or entry.get("entry_price"))
+    quantity = _safe_float(order_details.get("quantity") or entry.get("quantity"))
+    timestamp = entry.get("timestamp") or datetime.now(timezone.utc).isoformat()
+    if isinstance(timestamp, str):
+        opened_at = datetime.fromisoformat(timestamp)
+    else:
+        opened_at = timestamp
+
+    # Opening a new position
+    if direction in {"long", "short"} and entry_price > 0:
+        # Check if position already exists for this trade
+        existing = await session.execute(
+            select(PositionModel).where(PositionModel.open_trade_id == entry.get("id")).limit(1)
+        )
+        position = existing.scalar_one_or_none()
+        if not position:
+            take_profit_levels = _take_profit_levels_from_entry(entry)
+            tp_order_ids = [
+                str(level.get("order_id"))
+                for level in take_profit_levels
+                if level.get("order_id")
+            ]
+            stop_loss = _safe_float(
+                order_details.get("stop_loss") or analysis.get("suggested_stop_loss"),
+                0.0,
+            )
+            leverage = _safe_float(
+                order_details.get("recommended_leverage") or analysis.get("recommended_leverage"),
+                1.0,
+            )
+            live_trading = _safe_bool(exchange_config.get("live_trading"), status != "simulated")
+            position = PositionModel(
+                user_id=user_id,
+                ticker=ticker,
+                direction=direction,
+                status="open",
+                entry_price=entry_price,
+                quantity=quantity,
+                remaining_quantity=quantity,
+                opened_at=opened_at,
+                open_trade_id=entry.get("id"),
+                entry_order_id=str(order_details.get("order_id") or ""),
+                stop_loss=stop_loss if stop_loss > 0 else None,
+                take_profit_json=json.dumps(take_profit_levels, ensure_ascii=False, default=str),
+                stop_loss_order_id=str(order_details.get("stop_loss_order_id") or ""),
+                take_profit_order_ids_json=json.dumps(tp_order_ids, ensure_ascii=False),
+                exchange=str(exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name),
+                live_trading=live_trading,
+                sandbox_mode=_safe_bool(exchange_config.get("sandbox_mode"), False),
+                leverage=max(1.0, leverage),
+                last_price=entry_price,
+                updated_at=opened_at,
+            )
+            session.add(position)
+            await session.flush()
+        entry["position_id"] = position.id
+        entry["position_event"] = "opened"
+        return entry
+
+    # Closing a position
+    open_direction = "long" if direction == "close_long" else "short"
+
+    # Find the matching open position
+    query = select(PositionModel).where(
+        PositionModel.status == "open",
+        PositionModel.direction == open_direction,
+        PositionModel.ticker == ticker,
+    )
+    if user_id:
+        query = query.where(PositionModel.user_id == user_id)
+    else:
+        query = query.where(PositionModel.user_id.is_(None))
+    query = query.order_by(PositionModel.opened_at.desc()).limit(1)
+
+    result = await session.execute(query)
+    position = result.scalar_one_or_none()
+
+    if not position:
+        return entry
+
+    exit_price = _safe_float(
+        order_details.get("exit_price")
+        or order_details.get("average")
+        or order_details.get("entry_price")
+        or entry.get("entry_price")
+    )
+    if exit_price <= 0:
+        return entry
+
+    entry["position_id"] = position.id
+    entry["position_event"] = "closed"
+    entry["close_reason"] = "manual_close"
+    entry["pnl_pct"] = await close_position_async(
+        session=session,
+        position=position,
+        exit_price=exit_price,
+        close_reason="manual_close",
+        close_trade_id=entry.get("id"),
+    )
+    entry["order_status"] = "closed"
+    await session.flush()
+
+    return entry
+
+
+async def get_trade_logs_async(session: AsyncSession, days: int = 30, user_id: Optional[str] = None) -> list[dict]:
+    """Get trade logs for the last N days."""
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days), 365)))
+
+    query = select(TradeModel).where(TradeModel.timestamp >= since)
+    if user_id:
+        query = query.where(TradeModel.user_id == user_id)
+    query = query.order_by(TradeModel.timestamp.desc())
+
+    result = await session.execute(query)
+    trades = result.scalars().all()
+
+    # Parse payload_json for each trade
+    logs = []
+    for trade in trades:
+        try:
+            payload = json.loads(trade.payload_json)
+            logs.append(payload)
+        except (json.JSONDecodeError, TypeError):
+            # Fallback to trade model fields
+            logs.append({
+                "id": trade.id,
+                "user_id": trade.user_id,
+                "timestamp": trade.timestamp.isoformat() if trade.timestamp else None,
+                "ticker": trade.ticker,
+                "direction": trade.direction,
+                "execute": trade.execute,
+                "order_status": trade.order_status,
+                "pnl_pct": trade.pnl_pct,
+            })
+
+    return logs
+
+
+# ─────────────────────────────────────────────
+# Webhook Event CRUD
+# ─────────────────────────────────────────────
+
+async def record_webhook_event(
+    session: AsyncSession,
+    user_id: Optional[str],
+    fingerprint: str,
+    ticker: str,
+    direction: str,
+    status: str,
+    status_code: int,
+    reason: str,
+    client_ip: str,
+    payload: dict,
+) -> WebhookEventModel:
+    """Record a webhook event."""
+    event = WebhookEventModel(
+        user_id=user_id,
+        fingerprint=fingerprint,
+        ticker=ticker,
+        direction=direction,
+        status=status,
+        status_code=status_code,
+        reason=reason,
+        client_ip=client_ip,
+        payload_json=json.dumps(payload, default=str),
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, window_secs: int = 300) -> bool:
+    """Check if a webhook with this fingerprint was recently processed."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_secs)
+    result = await session.execute(
+        select(WebhookEventModel)
+        .where(WebhookEventModel.fingerprint == fingerprint, WebhookEventModel.created_at >= cutoff)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+# ─────────────────────────────────────────────
+# Admin Settings CRUD
+# ─────────────────────────────────────────────
+
+async def get_admin_setting(session: AsyncSession, key: str, default: str = "") -> str:
+    """Get an admin setting value."""
+    result = await session.execute(
+        select(AdminSettingModel).where(AdminSettingModel.key == key)
+    )
+    setting = result.scalar_one_or_none()
+    return setting.value if setting else default
+
+
+async def set_admin_setting(session: AsyncSession, key: str, value: str):
+    """Set an admin setting value."""
+    result = await session.execute(
+        select(AdminSettingModel).where(AdminSettingModel.key == key)
+    )
+    setting = result.scalar_one_or_none()
+    if setting:
+        setting.value = value
+        setting.updated_at = datetime.now(timezone.utc)
+    else:
+        setting = AdminSettingModel(key=key, value=value)
+        session.add(setting)
+
+
+# ─────────────────────────────────────────────
+# Seed Default Data
+# ─────────────────────────────────────────────
+
+async def seed_defaults(session: AsyncSession):
+    """Seed default admin user and subscription plans."""
+    from core.security import hash_password
+
+    # Check for existing admin
+    result = await session.execute(
+        select(UserModel).where(UserModel.role == "admin").limit(1)
+    )
+    admin = result.scalar_one_or_none()
+
+    if not admin:
+        admin = UserModel(
+            username=settings.default_admin_username.lower().strip(),
+            email=settings.default_admin_email.lower().strip(),
+            password_hash=hash_password(settings.default_admin_password),
+            role="admin",
+        )
+        session.add(admin)
+        logger.warning(f"[Database] Default admin created: {admin.username}")
+
+    # Check for existing plans
+    result = await session.execute(select(SubscriptionPlanModel).limit(1))
+    if result.scalar_one_or_none() is None:
+        plans = [
+            SubscriptionPlanModel(
+                name="Free Trial",
+                description="7-day free trial with limited signals",
+                price_usdt=0.0,
+                duration_days=7,
+                features_json=json.dumps(["5 signals/day", "Basic AI analysis"]),
+                max_signals_per_day=5,
+            ),
+            SubscriptionPlanModel(
+                name="Basic Monthly",
+                description="Standard monthly plan",
+                price_usdt=29.99,
+                duration_days=30,
+                features_json=json.dumps(["Unlimited signals", "Full AI analysis", "Email support"]),
+                max_signals_per_day=0,
+            ),
+            SubscriptionPlanModel(
+                name="Pro Monthly",
+                description="Professional monthly plan",
+                price_usdt=79.99,
+                duration_days=30,
+                features_json=json.dumps(["Unlimited signals", "Full AI analysis", "Multi-TP & Trailing Stop", "Priority support"]),
+                max_signals_per_day=0,
+            ),
+            SubscriptionPlanModel(
+                name="Pro Yearly",
+                description="Professional yearly plan (save 30%)",
+                price_usdt=599.99,
+                duration_days=365,
+                features_json=json.dumps(["Everything in Pro Monthly", "30% discount", "Dedicated support"]),
+                max_signals_per_day=0,
+            ),
+        ]
+        for plan in plans:
+            session.add(plan)
+        logger.info("[Database] Default subscription plans created")

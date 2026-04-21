@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import ccxt
 from loguru import logger
-from config import settings
+from core.config import settings
 from models import TradeDecision, SignalDirection, TrailingStopMode
 
 
@@ -70,6 +70,7 @@ def _build_exchange(
     api_secret: str = None,
     password: str = "",
     live: bool = False,
+    sandbox: bool | None = None,
 ) -> ccxt.Exchange:
     """Build CCXT exchange instance with proper configuration."""
     if exchange_id is None:
@@ -97,12 +98,17 @@ def _build_exchange(
     # Create exchange instance
     exchange = exchange_class(exchange_config)
 
-    # Use sandbox mode if not live trading
-    if config.get("has_sandbox", False) and not (live or settings.exchange.live_trading):
+    sandbox_mode = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
+
+    # Exchange sandbox/testnet is explicit. Local paper trading returns before
+    # an exchange object is created, so market data is not silently moved to testnet.
+    if sandbox_mode:
+        if not config.get("has_sandbox", False):
+            raise ValueError(f"{exchange_id} does not support CCXT sandbox/testnet mode")
         try:
             exchange.set_sandbox_mode(True)
         except Exception as e:
-            logger.debug(f"[Exchange] Sandbox mode unavailable for {exchange_id}: {e}")
+            raise ValueError(f"Sandbox mode unavailable for {exchange_id}: {e}") from e
 
     # Set default market type
     if "defaultType" in exchange_config["options"]:
@@ -177,10 +183,14 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
     exchange_config = exchange_config or {}
     live_trading = bool(exchange_config.get("live_trading", settings.exchange.live_trading))
+    sandbox_mode = bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode))
 
     if not live_trading:
         logger.warning("[Exchange] 🔶 PAPER TRADING MODE - not sending real orders")
         return _simulate_order(decision)
+
+    if sandbox_mode:
+        logger.warning("[Exchange] 🧪 EXCHANGE SANDBOX MODE - sending orders to testnet/sandbox")
 
     exchange = _build_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
@@ -188,6 +198,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
         password=exchange_config.get("password") or settings.exchange.password,
         live=live_trading,
+        sandbox=sandbox_mode,
     )
     symbol = await asyncio.to_thread(_resolve_symbol, exchange, decision.ticker)
 
@@ -234,6 +245,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "side": side,
             "quantity": decision.quantity,
             "entry_price": order.get("average", decision.entry_price),
+            "sandbox_mode": sandbox_mode,
         }
         if leverage:
             result["recommended_leverage"] = leverage
@@ -433,6 +445,7 @@ async def place_protective_stop(
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
         password=exchange_config.get("password") or settings.exchange.password,
         live=True,
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
     )
     try:
         symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
@@ -459,7 +472,8 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, side: str) -> di
                     params={"reduceOnly": True},
                 )
                 logger.info(f"[Exchange] ✅ Position closed: {order.get('id')}")
-                return {"status": "closed", "order_id": order.get("id")}
+                exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
+                return {"status": "closed", "order_id": order.get("id"), "exit_price": exit_price}
         return {"status": "no_position", "reason": "No open position to close"}
     except Exception as e:
         logger.error(f"[Exchange] Failed to close position: {e}")
@@ -496,12 +510,32 @@ def _simulate_order(decision: TradeDecision) -> dict:
         "take_profit_orders": tp_info,
         "trailing_stop_mode": trailing_mode if isinstance(trailing_mode, str) else trailing_mode.value,
         "trailing_pct": decision.trailing_stop.trail_pct if decision.trailing_stop else 0,
+        "sandbox_mode": False,
     }
 
 
-async def get_account_balance() -> dict:
+async def get_account_balance(exchange_config: dict | None = None) -> dict:
     """Fetch account balance from exchange."""
-    exchange = _build_exchange()
+    exchange_config = exchange_config or {}
+    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+        return {
+            "mode": "paper",
+            "quote": "USDT",
+            "total_quote": settings.risk.account_equity_usdt,
+            "free_quote": settings.risk.account_equity_usdt,
+            "used_quote": 0.0,
+            "total": {"USDT": settings.risk.account_equity_usdt},
+            "free": {"USDT": settings.risk.account_equity_usdt},
+            "used": {"USDT": 0.0},
+        }
+    exchange = _build_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+        password=exchange_config.get("password") or settings.exchange.password,
+        live=True,
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+    )
     try:
         balance = await asyncio.to_thread(exchange.fetch_balance)
         quote = "USDT" if "USDT" in balance.get("total", {}) else "USD"
@@ -528,9 +562,24 @@ async def get_account_balance() -> dict:
             pass  
 
 
-async def get_balance() -> dict:
+async def get_balance(exchange_config: dict | None = None) -> dict:
     """Fetch account balance from exchange."""
-    exchange = _build_exchange()
+    exchange_config = exchange_config or {}
+    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+        return {
+            "mode": "paper",
+            "total": {"USDT": settings.risk.account_equity_usdt},
+            "free": {"USDT": settings.risk.account_equity_usdt},
+            "used": {"USDT": 0.0},
+        }
+    exchange = _build_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+        password=exchange_config.get("password") or settings.exchange.password,
+        live=True,
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+    )
     try:
         balance = await asyncio.to_thread(exchange.fetch_balance)
         # Extract relevant balance info
@@ -561,6 +610,7 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
         password=exchange_config.get("password") or settings.exchange.password,
         live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
     )
     try:
         resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
@@ -586,9 +636,57 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
             pass  
 
 
-async def get_open_positions() -> list[dict]:
+async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config: dict | None = None) -> dict:
+    """Fetch the latest OHLCV candle for paper-trading TP/SL checks."""
+    exchange_config = exchange_config or {}
+    exchange = _build_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+        password=exchange_config.get("password") or settings.exchange.password,
+        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+    )
+    try:
+        resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
+        candles = await asyncio.to_thread(exchange.fetch_ohlcv, resolved_symbol, timeframe, None, 2)
+        if not candles:
+            ticker = await asyncio.to_thread(exchange.fetch_ticker, resolved_symbol)
+            last = ticker.get("last") or ticker.get("close")
+            return {"symbol": resolved_symbol, "open": last, "high": last, "low": last, "close": last}
+        ts, open_, high, low, close, volume = candles[-1]
+        return {
+            "symbol": resolved_symbol,
+            "timestamp": ts,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        }
+    except Exception as e:
+        logger.error(f"[Exchange] Failed to fetch latest candle for {symbol}: {e}")
+        return {}
+    finally:
+        try:
+            await _close_exchange(exchange)
+        except AttributeError:
+            pass
+
+
+async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
     """Fetch open positions from exchange."""
-    exchange = _build_exchange()
+    exchange_config = exchange_config or {}
+    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+        return []
+    exchange = _build_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+        password=exchange_config.get("password") or settings.exchange.password,
+        live=True,
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+    )
     try:
         positions = await asyncio.to_thread(exchange.fetch_positions)
         result = []
@@ -635,9 +733,19 @@ async def get_open_positions() -> list[dict]:
             pass  
 
 
-async def get_recent_orders(symbol: str = None, limit: int = 50) -> list[dict]:
+async def get_recent_orders(symbol: str = None, limit: int = 50, exchange_config: dict | None = None) -> list[dict]:
     """Fetch recent closed orders from exchange."""
-    exchange = _build_exchange()
+    exchange_config = exchange_config or {}
+    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+        return []
+    exchange = _build_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+        password=exchange_config.get("password") or settings.exchange.password,
+        live=True,
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+    )
     try:
         if symbol:
             resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
@@ -652,6 +760,7 @@ async def get_recent_orders(symbol: str = None, limit: int = 50) -> list[dict]:
                 "side": o.get("side"),
                 "type": o.get("type"),
                 "price": o.get("price"),
+                "average": o.get("average"),
                 "amount": o.get("amount"),
                 "cost": o.get("cost"),
                 "filled": o.get("filled"),
@@ -676,6 +785,7 @@ async def test_exchange_connection(
     api_key: str,
     api_secret: str,
     password: str = "",
+    sandbox_mode: bool = False,
 ) -> dict:
     """Test if exchange API keys are valid."""
     try:
@@ -685,13 +795,15 @@ async def test_exchange_connection(
             api_secret=api_secret,
             password=password,
             live=True,
+            sandbox=sandbox_mode,
         )
         balance = await asyncio.to_thread(exchange.fetch_balance)
         try:
             await _close_exchange(exchange)
         except AttributeError:
             pass  
-        return {"success": True, "message": f"Connected to {exchange_id} successfully"}
+        mode = " sandbox/testnet" if sandbox_mode else ""
+        return {"success": True, "message": f"Connected to {exchange_id}{mode} successfully"}
     except ccxt.AuthenticationError as e:
         return {"success": False, "message": f"Authentication failed: {e}"}
     except Exception as e:

@@ -1,18 +1,19 @@
 """
 TradingView Signal Server v4.0 - Main Application
 
-Complete pipeline:
-  TradingView Webhook → Pre-Filter → AI Analysis → Trade Execution → Notification
+⚠️ DEPRECATED: This file is the legacy monolithic entry point.
+Please use app.py instead, which uses the new modular architecture:
+    - core/config.py - Configuration
+    - core/database.py - Async database layer
+    - core/auth.py - JWT authentication
+    - core/security.py - Encryption utilities
+    - routers/ - API route handlers
+    - services/ - Business logic services
 
-Features:
-  - User auth (JWT) with admin/user roles
-  - Subscription system with crypto payments
-  - Homepage, dashboard, login/register pages
-  - Enhanced pre-filter (15 checks)
-  - Multi-TP, trailing stop, custom AI
+To run the new version:
+    uvicorn app:app --host 0.0.0.0 --port 8000
 
-Usage:
-  uvicorn main:app --host 0.0.0.0 --port 8000
+This file is kept for backward compatibility and will be removed in a future version.
 """
 import os
 import sys

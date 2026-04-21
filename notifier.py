@@ -4,7 +4,7 @@ Sends trading notifications to Telegram.
 """
 import httpx
 from loguru import logger
-from config import settings
+from core.config import settings
 from models import TradeDecision, AIAnalysis
 
 
