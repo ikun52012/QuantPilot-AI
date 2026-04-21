@@ -1,6 +1,17 @@
 """
 TradingView Signal Server - Database Layer
 SQLite database for users, subscriptions, and payments.
+
+⚠️ DEPRECATED: This file is the legacy synchronous database module.
+Please use core/database.py instead, which provides:
+    - Async SQLAlchemy with PostgreSQL/SQLite support
+    - SQLAlchemy ORM models
+    - Async CRUD operations
+
+To import:
+    from core.database import db_manager, get_db, UserModel, TradeModel
+
+This file is kept for backward compatibility with main.py and will be removed in a future version.
 """
 import sqlite3
 import json

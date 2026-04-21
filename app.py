@@ -221,13 +221,11 @@ def _apply_no_store_headers(response):
 async def homepage(request: Request):
     """Serve homepage."""
     from core.auth import get_optional_user
-    from core.database import get_db
 
-    async for db in get_db():
+    async with db_manager.async_session_factory() as db:
         user = await get_optional_user(request, db)
         if user:
             return RedirectResponse(url="/dashboard", status_code=303)
-        break
 
     return _apply_no_store_headers(FileResponse(STATIC_DIR / "home.html"))
 
@@ -236,13 +234,11 @@ async def homepage(request: Request):
 async def dashboard(request: Request):
     """Serve dashboard page."""
     from core.auth import get_optional_user
-    from core.database import get_db
 
-    async for db in get_db():
+    async with db_manager.async_session_factory() as db:
         user = await get_optional_user(request, db)
         if not user:
             return RedirectResponse(url="/login", status_code=303)
-        break
 
     return _apply_no_store_headers(FileResponse(STATIC_DIR / "index.html"))
 
@@ -251,13 +247,11 @@ async def dashboard(request: Request):
 async def login_page(request: Request):
     """Serve login page."""
     from core.auth import get_optional_user
-    from core.database import get_db
 
-    async for db in get_db():
+    async with db_manager.async_session_factory() as db:
         user = await get_optional_user(request, db)
         if user:
             return RedirectResponse(url="/dashboard", status_code=303)
-        break
 
     return _apply_no_store_headers(FileResponse(STATIC_DIR / "login.html"))
 
@@ -266,13 +260,11 @@ async def login_page(request: Request):
 async def register_page(request: Request):
     """Serve register page."""
     from core.auth import get_optional_user
-    from core.database import get_db
 
-    async for db in get_db():
+    async with db_manager.async_session_factory() as db:
         user = await get_optional_user(request, db)
         if user:
             return RedirectResponse(url="/dashboard", status_code=303)
-        break
 
     return _apply_no_store_headers(FileResponse(STATIC_DIR / "register.html"))
 

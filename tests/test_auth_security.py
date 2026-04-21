@@ -6,7 +6,8 @@ try:
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest(f"runtime dependency not installed: {exc.name}")
 
-from auth import create_token, validate_password_strength, verify_token
+from core.auth import create_token, verify_token
+from core.security import validate_password_strength
 
 
 class AuthSecurityTests(unittest.TestCase):

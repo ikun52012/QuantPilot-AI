@@ -1,4 +1,4 @@
-# 📡 TradingView AI Signal Server (v4.0)
+# 📡 TradingView AI Signal Server (v4.1)
 
 ![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
 

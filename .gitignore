@@ -1,10 +1,41 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment & secrets
 .env
+.env.local
+.env.production
+
+# Data & logs
 data/
 trade_logs/
 logs/
-*.egg-info/
-.venv/
-venv/
+
+# Runtime settings
 runtime_settings.json
+
+# Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db

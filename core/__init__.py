@@ -11,12 +11,3 @@ Usage:
     from core.middleware import setup_middleware
     from core.metrics import metrics_endpoint
 """
-
-from core.config import settings
-from core.database import db_manager, get_db
-
-__all__ = [
-    "settings",
-    "db_manager",
-    "get_db",
-]
