@@ -4,7 +4,7 @@ Subscription and payment management.
 """
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Request, HTTPException, Depends, Query
@@ -19,7 +19,7 @@ from core.database import (
 )
 from core.auth import get_current_user
 from core.config import settings
-from core.utils.datetime import utcnow
+from core.utils.datetime import utcnow, to_utc
 
 
 router = APIRouter(prefix="/api", tags=["subscription"])
@@ -49,9 +49,7 @@ class RedeemCodeRequest(BaseModel):
 
 
 def _as_utc(dt):
-    if dt and dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+    return to_utc(dt) if dt else dt
 
 
 # ─────────────────────────────────────────────

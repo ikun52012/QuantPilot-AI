@@ -3,7 +3,9 @@ TradingView Signal Server - Pre-Filter (Rule-Based Layer)
 Fast, free, rule-based checks BEFORE calling the AI.
 Enhanced v2: 14 intelligent filters that block 70-85% of low-quality signals.
 """
+import json
 import threading
+import concurrent.futures
 from datetime import datetime, timedelta
 from loguru import logger
 from models import TradingViewSignal, MarketContext, PreFilterResult, SignalDirection

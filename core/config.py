@@ -223,11 +223,17 @@ class ServerConfig(BaseModel):
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
+        cors_raw = os.getenv("CORS_ORIGINS", "")
+        cors_origins = [s.strip() for s in cors_raw.split(",") if s.strip()] if cors_raw else ["*"]
+        trusted_raw = os.getenv("TRUSTED_HOSTS", "")
+        trusted_hosts = [s.strip() for s in trusted_raw.split(",") if s.strip()] if trusted_raw else ["*"]
         return cls(
             webhook_secret=os.getenv("WEBHOOK_SECRET", ""),
             public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
             host=os.getenv("HOST", "0.0.0.0"),
             port=int(os.getenv("PORT", "8000")),
+            cors_origins=cors_origins,
+            trusted_hosts=trusted_hosts,
         )
 
 

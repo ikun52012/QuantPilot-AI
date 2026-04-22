@@ -239,9 +239,9 @@ def set_auth_cookie(response, token: str, request: Request | None = None):
 
 def clear_auth_cookie(response, request: Request | None = None):
     """Clear auth cookie on logout."""
-    secure = _cookie_secure(request)
-    response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="lax")
-    response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure, samesite="lax")
+    for secure in (False, True):
+        response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="lax")
+        response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure, samesite="lax")
 
 
 def get_current_user(request: Request) -> dict:

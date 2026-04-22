@@ -46,7 +46,7 @@ def utcnow_str(fmt: str = "%Y-%m-%d") -> str:
 
 def make_naive(dt: datetime) -> datetime:
     """
-    Convert timezone-aware datetime to naive datetime.
+    Convert datetime to UTC and strip timezone info.
     
     Args:
         dt: datetime object (may be timezone-aware or naive)
@@ -54,9 +54,7 @@ def make_naive(dt: datetime) -> datetime:
     Returns:
         datetime: Naive datetime object
     """
-    if dt.tzinfo is not None:
-        return dt.replace(tzinfo=None)
-    return dt
+    return to_utc(dt)
 
 
 def to_utc(dt: datetime) -> datetime:
@@ -72,3 +70,19 @@ def to_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def parse_datetime_utc_naive(value) -> datetime:
+    """
+    Parse a datetime or ISO timestamp and return a UTC naive datetime.
+
+    TradingView and browsers often send ISO strings with Z or an explicit
+    offset. Database DateTime columns are intentionally stored as naive UTC,
+    so every parsed value is normalized before it touches SQLAlchemy.
+    """
+    if isinstance(value, datetime):
+        return to_utc(value)
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("empty datetime")
+    return to_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))

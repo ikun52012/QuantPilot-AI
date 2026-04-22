@@ -4,7 +4,7 @@ Tracks open positions, settles paper TP/SL, reconciles exchange closes,
 and keeps realised PnL in the database.
 """
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger

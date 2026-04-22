@@ -191,9 +191,11 @@ def set_auth_cookie(response, token: str, request: Optional[Request] = None):
 
 def clear_auth_cookie(response, request: Optional[Request] = None):
     """Clear authentication cookies."""
-    secure = _cookie_secure(request)
-    response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="lax")
-    response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure, samesite="lax")
+    # Emit both Secure and non-Secure expirations so logout also works when a
+    # reverse proxy changes X-Forwarded-Proto or a browser holds an old cookie.
+    for secure in (False, True):
+        response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="lax")
+        response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure, samesite="lax")
 
 
 # ─────────────────────────────────────────────

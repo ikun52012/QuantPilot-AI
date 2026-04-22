@@ -22,6 +22,7 @@ let currentUserSettings = null;
 // Token lives in httpOnly cookie managed by the server.
 // We keep a lightweight in-memory user profile fetched via /api/auth/me.
 let _cachedUser = null;
+let _sessionRedirecting = false;
 
 async function ensureUser() {
     if (_cachedUser) return _cachedUser;
@@ -38,16 +39,30 @@ function isAdmin() { return getUser().role === 'admin'; }
 async function requireAuth() {
     const user = await ensureUser();
     if (!user) {
-        window.location.replace('/login');
+        redirectToLogin('expired');
         return false;
     }
     return true;
 }
 
-async function logout() {
-    try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch {}
+function redirectToLogin(reason = 'expired') {
+    if (_sessionRedirecting) return;
+    _sessionRedirecting = true;
     _cachedUser = null;
-    window.location.replace('/login');
+    const query = reason ? `?${encodeURIComponent(reason)}=1` : '';
+    window.location.replace(`/login${query}`);
+}
+
+async function logout() {
+    try {
+        const csrf = getCookie('tvss_csrf');
+        await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'include',
+            headers: csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf) } : {},
+        });
+    } catch {}
+    redirectToLogin('logout');
 }
 
 // ─── Initialization ───
@@ -201,7 +216,7 @@ async function loadDashboard() {
         await loadRecentSignals();
     } catch (err) {
         console.error('Dashboard load error:', err);
-        if (err.message.includes('401')) logout();
+        if (err.message.includes('401') || err.message.includes('Session expired')) redirectToLogin('expired');
         else showToast(err.message, 'error', 'Dashboard Load Failed');
     }
 }
@@ -1060,8 +1075,8 @@ async function deleteAdminUser(userId) {
 async function resetAdminPassword(userId) {
     const input = document.getElementById(`admin-password-${userId}`);
     const password = input?.value || '';
-    if (password.length < 6) {
-        showToast('Password must be at least 6 characters.','warning','Invalid Password');
+    if (password.length < 8) {
+        showToast('Password must be at least 8 characters.','warning','Invalid Password');
         return;
     }
     try {
@@ -1225,7 +1240,7 @@ async function fetchAPI(path, options = {}) {
     const csrf = getCookie('tvss_csrf');
     if (!['GET','HEAD','OPTIONS'].includes(method) && csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
     const resp = await fetch(`${API}${path}`, { credentials: 'include', cache: 'no-store', ...options, headers });
-    if (resp.status === 401) { logout(); throw new Error('Session expired'); }
+    if (resp.status === 401) { redirectToLogin('expired'); throw new Error('Session expired'); }
     if (!resp.ok) {
         const data = await resp.json().catch(()=>({}));
         throw new Error(data.detail || `API error: ${resp.status}`);

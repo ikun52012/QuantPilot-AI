@@ -26,7 +26,8 @@ from core.database import (
 from core.security import hash_password, validate_password_strength, generate_webhook_secret, webhook_secret_hash, is_placeholder_webhook_secret
 from core.auth import require_admin
 from core.config import settings
-from core.utils.datetime import utcnow
+from core.utils.datetime import utcnow, to_utc
+from core.request_utils import public_base_url
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -114,9 +115,7 @@ def _parse_expiry(expires_at: str = "", expires_days: int = 30) -> Optional[date
     if expires_at:
         try:
             parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed
+            return to_utc(parsed)
         except ValueError:
             raise HTTPException(400, "Invalid expires_at date")
     if expires_days:
@@ -608,7 +607,7 @@ async def get_webhook_config(
         await db.commit()
 
     # Build template
-    base_url = str(request.base_url).rstrip("/") if request else ""
+    base_url = public_base_url(request) if request else ""
     template = json.dumps({
         "secret": secret,
         "ticker": "{{ticker}}",
@@ -969,7 +968,7 @@ async def get_system_status(
     return {
         "version": settings.app_version,
         "commit": "",
-        "webhook_url": f"{str(request.base_url).rstrip('/')}/webhook",
+        "webhook_url": f"{public_base_url(request)}/webhook",
         "live_trading": settings.exchange.live_trading,
         "exchange_sandbox_mode": settings.exchange.sandbox_mode,
         "storage": {

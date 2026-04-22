@@ -91,6 +91,12 @@ const btn = document.getElementById('btn-login');
 const pwInput = document.getElementById('password');
 const togglePw = document.getElementById('toggle-pw');
 const eyeIcon = document.getElementById('eye-icon');
+const params = new URLSearchParams(window.location.search);
+
+if (params.has('expired')) {
+    errText.textContent = 'Your session expired. Please sign in again.';
+    errEl.classList.add('visible');
+}
 
 togglePw.addEventListener('click', () => {
     const visible = pwInput.type === 'text';

@@ -22,7 +22,7 @@ from sqlalchemy import select, update, delete, and_, or_, event
 from loguru import logger
 
 from core.config import settings
-from core.utils.datetime import utcnow
+from core.utils.datetime import utcnow, parse_datetime_utc_naive
 
 
 class Base(DeclarativeBase):
@@ -676,7 +676,7 @@ async def insert_trade_log_async(session: AsyncSession, entry: dict) -> dict:
     trade = TradeModel(
         id=entry.get("id") or str(uuid.uuid4()),
         user_id=entry.get("user_id"),
-        timestamp=datetime.fromisoformat(entry["timestamp"]) if isinstance(entry.get("timestamp"), str) else (entry.get("timestamp") or utcnow()),
+        timestamp=_db_datetime(entry.get("timestamp")),
         ticker=entry.get("ticker", ""),
         direction=entry.get("direction", ""),
         execute=bool(entry.get("execute")),
@@ -702,6 +702,14 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _db_datetime(value: Any) -> datetime:
+    """Normalize timestamp input for timezone-neutral DB columns."""
+    try:
+        return parse_datetime_utc_naive(value)
+    except (TypeError, ValueError):
+        return utcnow()
 
 
 def _loads_list(value: Any) -> list:
@@ -899,11 +907,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
 
     entry_price = _safe_float(order_details.get("entry_price") or entry.get("entry_price"))
     quantity = _safe_float(order_details.get("quantity") or entry.get("quantity"))
-    timestamp = entry.get("timestamp") or utcnow().isoformat()
-    if isinstance(timestamp, str):
-        opened_at = datetime.fromisoformat(timestamp)
-    else:
-        opened_at = timestamp
+    opened_at = _db_datetime(entry.get("timestamp") or utcnow())
 
     # Opening a new position
     if direction in {"long", "short"} and entry_price > 0:

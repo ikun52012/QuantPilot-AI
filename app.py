@@ -228,6 +228,22 @@ def _apply_no_store_headers(response):
     return response
 
 
+def _forced_login_requested(request: Request) -> bool:
+    return any(key in request.query_params for key in ("expired", "logout", "force"))
+
+
+def _login_response(request: Request):
+    from core.auth import clear_auth_cookie
+
+    response = FileResponse(STATIC_DIR / "login.html")
+    clear_auth_cookie(response, request)
+    return _apply_no_store_headers(response)
+
+
+def _redirect_no_store(url: str):
+    return _apply_no_store_headers(RedirectResponse(url=url, status_code=303))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def homepage(request: Request):
     """Serve homepage."""
@@ -236,7 +252,7 @@ async def homepage(request: Request):
     async with db_manager.async_session_factory() as db:
         user = await get_optional_user(request, db)
         if user:
-            return RedirectResponse(url="/dashboard", status_code=303)
+            return _redirect_no_store("/dashboard")
 
     return _apply_no_store_headers(FileResponse(STATIC_DIR / "home.html"))
 
@@ -249,7 +265,7 @@ async def dashboard(request: Request):
     async with db_manager.async_session_factory() as db:
         user = await get_optional_user(request, db)
         if not user:
-            return RedirectResponse(url="/login", status_code=303)
+            return _redirect_no_store("/login?expired=1")
 
     return _apply_no_store_headers(FileResponse(STATIC_DIR / "index.html"))
 
@@ -259,12 +275,15 @@ async def login_page(request: Request):
     """Serve login page."""
     from core.auth import get_optional_user
 
+    if _forced_login_requested(request):
+        return _login_response(request)
+
     async with db_manager.async_session_factory() as db:
         user = await get_optional_user(request, db)
         if user:
-            return RedirectResponse(url="/dashboard", status_code=303)
+            return _redirect_no_store("/dashboard")
 
-    return _apply_no_store_headers(FileResponse(STATIC_DIR / "login.html"))
+    return _login_response(request)
 
 
 @app.get("/register")
@@ -275,7 +294,7 @@ async def register_page(request: Request):
     async with db_manager.async_session_factory() as db:
         user = await get_optional_user(request, db)
         if user:
-            return RedirectResponse(url="/dashboard", status_code=303)
+            return _redirect_no_store("/dashboard")
 
     return _apply_no_store_headers(FileResponse(STATIC_DIR / "register.html"))
 

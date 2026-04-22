@@ -22,6 +22,7 @@ from core.config import settings
 from core.security import encrypt_settings_payload, decrypt_settings_payload
 from core import runtime_settings
 from core.utils.datetime import utcnow
+from core.request_utils import public_base_url
 
 
 router = APIRouter(prefix="/api", tags=["user"])
@@ -407,7 +408,7 @@ async def get_user_settings(
     exchange.pop("password", None)
 
     webhook = response_data.setdefault("webhook", {})
-    base_url = str(request.base_url).rstrip("/")
+    base_url = public_base_url(request)
     webhook.setdefault("url", f"{base_url}/webhook")
     if webhook.get("secret"):
         webhook.setdefault("template", json.dumps({
