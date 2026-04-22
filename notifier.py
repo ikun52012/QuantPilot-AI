@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - Telegram Notifications
+QuantPilot AI - Telegram Notifications
 Sends trading notifications to Telegram.
 """
 import httpx

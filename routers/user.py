@@ -646,5 +646,5 @@ async def test_telegram(
         raise HTTPException(400, "Telegram bot token or chat ID is not configured")
     from notifier import send_telegram
 
-    await send_telegram("✅ TradingView Signal Server Telegram test message")
+    await send_telegram("✅ QuantPilot AI Telegram test message")
     return {"status": "ok"}

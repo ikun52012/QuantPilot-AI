@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - Authentication Module
+QuantPilot AI - Authentication Module
 JWT-based auth with PBKDF2 password hashing.
 
 ⚠️ DEPRECATED: This file is the legacy authentication module.

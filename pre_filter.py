@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - Pre-Filter (Rule-Based Layer)
+QuantPilot AI - Pre-Filter (Rule-Based Layer)
 Fast, free, rule-based checks BEFORE calling the AI.
 Enhanced v2: 14 intelligent filters that block 70-85% of low-quality signals.
 """

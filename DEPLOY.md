@@ -1,4 +1,4 @@
-# TradingView Signal Server - 部署指南
+# QuantPilot AI - 部署指南
 
 > 版本：v4.1.0 | 最后更新：2026-04
 
@@ -204,7 +204,7 @@ sudo -u signal ./venv/bin/pip install -r requirements.txt
 
 ```ini
 [Unit]
-Description=TradingView Signal Server
+Description=QuantPilot AI
 After=network.target postgresql.service
 
 [Service]

@@ -23,7 +23,7 @@ registry = CollectorRegistry()
 
 APP_INFO = Info(
     "signal_server",
-    "TradingView Signal Server",
+    "QuantPilot AI",
     registry=registry,
 )
 APP_INFO.info({

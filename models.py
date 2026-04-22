@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - Data Models
+QuantPilot AI - Data Models
 """
 from datetime import datetime
 from enum import Enum

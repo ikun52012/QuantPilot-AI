@@ -292,7 +292,7 @@ class RateLimitConfig(BaseModel):
 
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
-    app_name: str = "TradingView Signal Server"
+    app_name: str = "QuantPilot AI"
     app_version: str = "4.1.0"
     debug: bool = False
     json_logs: bool = False
@@ -388,7 +388,7 @@ class Settings(BaseModel):
     def from_env(cls) -> "Settings":
         """Create Settings instance from environment variables."""
         instance = cls(
-            app_name=os.getenv("APP_NAME", "TradingView Signal Server"),
+            app_name=os.getenv("APP_NAME", "QuantPilot AI"),
             debug=os.getenv("DEBUG", "false").lower() == "true",
             json_logs=os.getenv("JSON_LOGS", "false").lower() == "true",
             jwt_secret=os.getenv("JWT_SECRET", ""),

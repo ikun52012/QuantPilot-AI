@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - Market Data Fetcher
+QuantPilot AI - Market Data Fetcher
 Fetches real-time market data from the exchange via ccxt.
 """
 import asyncio

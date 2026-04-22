@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - Database Layer
+QuantPilot AI - Database Layer
 SQLite database for users, subscriptions, and payments.
 
 ⚠️ DEPRECATED: This file is the legacy synchronous database module.

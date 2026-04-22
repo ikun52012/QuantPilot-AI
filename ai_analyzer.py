@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - AI Analyzer
+QuantPilot AI - AI Analyzer
 Uses LLM APIs (OpenAI / Anthropic / DeepSeek) to analyze trading signals.
 This is the brain of the system.
 """

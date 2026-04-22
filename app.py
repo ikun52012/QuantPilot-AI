@@ -1,5 +1,5 @@
 """
-TradingView Signal Server v4.1 - Main Application
+QuantPilot AI v4.1 - Main Application
 
 Complete pipeline:
   TradingView Webhook → Pre-Filter → AI Analysis → Trade Execution → Notification

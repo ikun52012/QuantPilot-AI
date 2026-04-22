@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - Trade Logger
+QuantPilot AI - Trade Logger
 Persists all trade decisions and results to JSON files.
 Enhanced with async database support.
 """
