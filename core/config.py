@@ -322,12 +322,61 @@ class Settings(BaseModel):
     def is_production(self) -> bool:
         return self.exchange.live_trading
 
-    def _validate_production_settings(self):
-        if self.exchange.live_trading:
+    def _validate_settings(self):
+        """Validate settings for all environments."""
+        warnings = []
+        errors = []
+        
+        WEAK_PASSWORDS = {"123456", "password", "admin", "changeme", "change-me", "change_this"}
+        WEAK_SECRETS = {
+            "change-this-to-a-long-random-secret-at-least-32-characters",
+            "your-jwt-secret", "your_jwt_secret", "changeme", "change-me",
+            "secret", "jwt-secret", "jwt_secret", "tvss-change-this-secret",
+        }
+        
+        if self.default_admin_password.lower() in WEAK_PASSWORDS:
+            warnings.append("DEFAULT_ADMIN_PASSWORD uses a weak default value. Change it before deployment!")
+        
+        if self.jwt_secret:
+            if len(self.jwt_secret) < 32:
+                warnings.append("JWT_SECRET should be at least 32 characters for security")
+            normalized_secret = self.jwt_secret.lower().replace("-", "").replace("_", "")
+            for weak in WEAK_SECRETS:
+                if weak.replace("-", "").replace("_", "") in normalized_secret:
+                    warnings.append("JWT_SECRET appears to use a placeholder value. Change it!")
+                    break
+        
+        if self.server.webhook_secret:
+            if len(self.server.webhook_secret) < 16:
+                warnings.append("WEBHOOK_SECRET should be at least 16 characters")
+        
+        if self.server.public_base_url and "your-domain" in self.server.public_base_url.lower():
+            warnings.append("PUBLIC_BASE_URL appears to use a placeholder value")
+        
+        if self.server.cors_origins == ["*"] and self.is_production:
+            warnings.append("CORS_ORIGINS=['*'] is too permissive for production")
+        
+        if self.server.trusted_hosts == ["*"] and self.is_production:
+            warnings.append("TRUSTED_HOSTS=['*'] is too permissive for production")
+        
+        if self.is_production:
             if not self.jwt_secret:
-                raise RuntimeError("JWT_SECRET must be set when LIVE_TRADING=true")
+                errors.append("JWT_SECRET must be set when LIVE_TRADING=true")
             if not self.exchange.api_key or not self.exchange.api_secret:
-                raise RuntimeError("Exchange API credentials required for live trading")
+                errors.append("Exchange API credentials required for live trading")
+            if self.default_admin_password.lower() in WEAK_PASSWORDS:
+                errors.append("DEFAULT_ADMIN_PASSWORD must be changed for live trading")
+        
+        for warning in warnings:
+            import warnings as warn_module
+            warn_module.warn(warning, UserWarning)
+        
+        if errors:
+            raise RuntimeError("\n".join(errors))
+
+    def _validate_production_settings(self):
+        """Legacy method - now calls _validate_settings."""
+        self._validate_settings()
 
     @classmethod
     def from_env(cls) -> "Settings":

@@ -4,16 +4,23 @@ import os
 from pathlib import Path
 
 try:
-    import loguru  # noqa: F401
-    import cryptography  # noqa: F401
+    import loguru
+    import cryptography
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest(f"runtime dependency not installed: {exc.name}")
 
 os.environ.setdefault("APP_ENCRYPTION_KEY", "test-only-fernet-key-do-not-use")
-import database
+
+import database  # deprecated: uses legacy synchronous module for test compatibility
 
 
 class PositionPnlTests(unittest.TestCase):
+    """
+    Position PnL calculation tests.
+    
+    Note: This test uses the legacy database.py module for synchronous testing.
+    For production code, prefer core/database.py with async SQLAlchemy.
+    """
     def setUp(self):
         self.tmp_path = Path.cwd() / ".test_tmp" / self._testMethodName
         if self.tmp_path.exists():

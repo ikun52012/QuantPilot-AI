@@ -2,7 +2,7 @@
 Signal Server - Authentication Router
 User registration, login, and session management.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Response, HTTPException, Depends
 from pydantic import BaseModel, Field
@@ -13,15 +13,11 @@ from sqlalchemy import select
 from core.database import get_db, create_user, get_user_by_username, get_user_by_email, update_user_login, InviteCodeModel
 from core.security import hash_password, verify_password, validate_password_strength
 from core.auth import create_token, set_auth_cookie, clear_auth_cookie, get_current_user
-from core.utils.datetime import utcnow
+from core.utils.datetime import utcnow, make_naive
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-
-# ─────────────────────────────────────────────
-# Request Models
-# ─────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
@@ -40,9 +36,12 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=256)
 
 
-def _as_utc(dt):
-    if dt and dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+def _to_naive_utc(dt):
+    """Convert datetime to naive UTC for PostgreSQL compatibility."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
 
 
@@ -97,7 +96,7 @@ async def register(
         if not invite:
             raise HTTPException(400, "Invalid or expired invite code")
 
-        if invite.expires_at and _as_utc(invite.expires_at) < utcnow():
+        if invite.expires_at and _to_naive_utc(invite.expires_at) < utcnow():
             raise HTTPException(400, "Invite code has expired")
 
         if invite.max_uses > 0 and invite.used_count >= invite.max_uses:

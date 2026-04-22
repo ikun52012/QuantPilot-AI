@@ -3,6 +3,7 @@ Signal Server - Database Layer (Enhanced)
 Async SQLAlchemy with PostgreSQL/SQLite support.
 """
 import json
+import re
 import uuid
 import os
 import secrets
@@ -298,14 +299,41 @@ class DatabaseManager:
         """Apply lightweight additive migrations for deployments without Alembic."""
         inspector = inspect(sync_conn)
         tables = set(inspector.get_table_names())
+        
+        VALID_TABLES = {
+            "users", "subscription_plans", "subscriptions", "payments",
+            "trades", "webhook_events", "invite_codes", "redeem_codes",
+            "admin_settings", "admin_audit_logs", "positions",
+        }
+        VALID_COLUMN_TYPES = {
+            "FLOAT", "BOOLEAN", "TIMESTAMP", "TEXT", "VARCHAR", "INTEGER",
+        }
+
+        def validate_identifier(name: str) -> bool:
+            return bool(re.match(r'^[a-z_][a-z0-9_]*$', name))
+
+        def validate_ddl(ddl: str) -> bool:
+            upper_ddl = ddl.upper()
+            return any(t in upper_ddl for t in VALID_COLUMN_TYPES)
 
         def add_missing_columns(table_name: str, columns: dict[str, str]) -> None:
-            if table_name not in tables:
+            if table_name not in tables or table_name not in VALID_TABLES:
+                return
+            if not validate_identifier(table_name):
+                logger.warning(f"[Database] Invalid table name: {table_name}")
                 return
             existing = {column["name"] for column in inspector.get_columns(table_name)}
             for name, ddl in columns.items():
                 if name not in existing:
-                    sync_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}"))
+                    if not validate_identifier(name):
+                        logger.warning(f"[Database] Invalid column name: {name}")
+                        continue
+                    if not validate_ddl(ddl):
+                        logger.warning(f"[Database] Invalid DDL for column {name}: {ddl}")
+                        continue
+                    quoted_table = sync_conn.dialect.identifier_preparer.quote(table_name)
+                    quoted_column = sync_conn.dialect.identifier_preparer.quote(name)
+                    sync_conn.execute(text(f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {ddl}"))
 
         add_missing_columns("users", {
             "balance_usdt": "FLOAT DEFAULT 0",

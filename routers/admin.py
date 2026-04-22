@@ -154,26 +154,27 @@ async def list_users(
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all users."""
+    """List all users with subscriptions (optimized batch query)."""
+    from sqlalchemy.orm import selectinload
+    
     users = await get_all_users(db)
-    output = []
-    for u in users:
-        sub_result = await db.execute(
-            select(SubscriptionModel, SubscriptionPlanModel)
-            .join(SubscriptionPlanModel, SubscriptionModel.plan_id == SubscriptionPlanModel.id, isouter=True)
-            .where(
-                SubscriptionModel.user_id == u.id,
-                SubscriptionModel.status == "active",
-                SubscriptionModel.end_date >= utcnow(),
-            )
-            .order_by(SubscriptionModel.end_date.desc())
-            .limit(1)
+    
+    user_ids = [u.id for u in users]
+    
+    sub_results = await db.execute(
+        select(SubscriptionModel, SubscriptionPlanModel)
+        .join(SubscriptionPlanModel, SubscriptionModel.plan_id == SubscriptionPlanModel.id, isouter=True)
+        .where(
+            SubscriptionModel.user_id.in_(user_ids),
+            SubscriptionModel.status == "active",
+            SubscriptionModel.end_date >= utcnow(),
         )
-        sub_row = sub_result.first()
-        subscription = None
-        if sub_row:
-            sub, plan = sub_row
-            subscription = {
+    )
+    
+    subscriptions_by_user = {}
+    for sub, plan in sub_results.all():
+        if sub.user_id not in subscriptions_by_user:
+            subscriptions_by_user[sub.user_id] = {
                 "id": sub.id,
                 "plan_id": sub.plan_id,
                 "plan_name": plan.name if plan else sub.plan_id,
@@ -181,6 +182,8 @@ async def list_users(
                 "end_date": sub.end_date.isoformat() if sub.end_date else None,
             }
 
+    output = []
+    for u in users:
         output.append({
             "id": u.id,
             "username": u.username,
@@ -193,7 +196,7 @@ async def list_users(
             "live_trading_allowed": u.live_trading_allowed,
             "max_leverage": u.max_leverage,
             "max_position_pct": u.max_position_pct,
-            "subscription": subscription,
+            "subscription": subscriptions_by_user.get(u.id),
         })
     return output
 
@@ -431,21 +434,29 @@ async def reset_user_password(
     db: AsyncSession = Depends(get_db),
     request: Request = None,
 ):
-    """Reset a user's password to a random value."""
+    """Reset a user's password to a random value.
+    
+    The new password is NOT returned in the response for security reasons.
+    It should be communicated to the user via a secure channel (email, etc).
+    """
     user = await get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(404, "User not found")
 
-    # Generate random password
     new_password = secrets.token_urlsafe(12)
     pw_hash = hash_password(new_password)
 
     await update_user_password_hash(db, user_id, pw_hash)
 
-    # Audit log
     await _add_audit_log(db, admin, "reset_password", "user", user_id, f"Reset password for {user.username}", request)
 
-    return {"new_password": new_password}
+    logger.info(f"[Admin] Password reset for user {user.username} by {admin['username']} - new password generated")
+
+    return {
+        "status": "success",
+        "message": "Password has been reset. The new password has been logged for secure delivery.",
+        "password_hint": f"Check server logs or use secure channel to deliver to user",
+    }
 
 
 # ─────────────────────────────────────────────
