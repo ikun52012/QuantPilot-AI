@@ -1,5 +1,5 @@
 """
-QuantPilot AI - Market Data Fetcher
+TradingView Signal Server - Market Data Fetcher
 Fetches real-time market data from the exchange via ccxt.
 """
 import asyncio
@@ -13,7 +13,7 @@ from core.config import settings
 from models import MarketContext
 from exchange import _build_exchange, _resolve_symbol
 
-# 鈹€鈹€鈹€ TTL cache for market context (per ticker) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── TTL cache for market context (per ticker) ───────────────────────────────
 _MARKET_CACHE_TTL = 30  # seconds
 _MARKET_CACHE_MAX_SIZE = 500
 _market_cache: OrderedDict[str, tuple[float, MarketContext]] = OrderedDict()

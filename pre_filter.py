@@ -1,5 +1,5 @@
 """
-QuantPilot AI - Pre-Filter (Rule-Based Layer)
+TradingView Signal Server - Pre-Filter (Rule-Based Layer)
 Fast, free, rule-based checks BEFORE calling the AI.
 Enhanced v2: 14 intelligent filters that block 70-85% of low-quality signals.
 """
@@ -13,9 +13,9 @@ from trade_logger import get_today_pnl, get_recent_trade_results
 from core.utils.datetime import utcnow
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─────────────────────────────────────────────
 # In-memory state for tracking
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─────────────────────────────────────────────
 _state_lock = threading.Lock()
 _recent_signals: list[dict] = []
 _daily_trade_count: int = 0
@@ -172,7 +172,7 @@ async def run_pre_filter_async(
     checks = {}
     reasons = []
 
-    # 鈹€鈹€ Check 1: Daily trade limit 鈹€鈹€
+    # ── Check 1: Daily trade limit ──
     try:
         daily_count_snapshot = await count_today_executed_trades_async(user_id=user_id)
     except Exception:
@@ -191,7 +191,7 @@ async def run_pre_filter_async(
     if not daily_ok:
         reasons.append(f"Daily trade limit reached ({daily_count_snapshot}/{max_daily_trades})")
 
-    # 鈹€鈹€ Check 2: Daily loss limit 鈹€鈹€
+    # ── Check 2: Daily loss limit ──
     current_pnl = await get_today_pnl_async(user_id=user_id)
     loss_ok = current_pnl > -max_daily_loss_pct
     checks["daily_loss_limit"] = {
@@ -202,13 +202,13 @@ async def run_pre_filter_async(
     if not loss_ok:
         reasons.append(f"Daily loss limit reached ({current_pnl:.2f}% / -{max_daily_loss_pct}%)")
 
-    # 鈹€鈹€ Check 3: Duplicate signal cooldown 鈹€鈹€
+    # ── Check 3: Duplicate signal cooldown ──
     cooldown_ok = _check_cooldown(signal, cooldown_seconds=300, user_id=user_id)
     checks["cooldown"] = {"passed": cooldown_ok}
     if not cooldown_ok:
         reasons.append("Duplicate signal within 5-minute cooldown")
 
-    # 鈹€鈹€ Check 4: Price sanity check 鈹€鈹€
+    # ── Check 4: Price sanity check ──
     price_ok = True
     if market.current_price > 0 and signal.price > 0:
         price_diff = abs(signal.price - market.current_price) / market.current_price * 100
@@ -222,7 +222,7 @@ async def run_pre_filter_async(
         if not price_ok:
             reasons.append(f"Signal price deviates {price_diff:.2f}% from market price")
 
-    # 鈹€鈹€ Check 5: Extreme volatility guard 鈹€鈹€
+    # ── Check 5: Extreme volatility guard ──
     vol_ok = True
     if market.atr_pct is not None:
         vol_ok = market.atr_pct < 15.0  # skip if ATR% > 15% (extremely volatile)
@@ -234,7 +234,7 @@ async def run_pre_filter_async(
         if not vol_ok:
             reasons.append(f"Extreme volatility: ATR% = {market.atr_pct:.2f}%")
 
-    # 鈹€鈹€ Check 6: Spread check 鈹€鈹€
+    # ── Check 6: Spread check ──
     spread_ok = True
     if market.bid_ask_spread > 0:
         spread_ok = market.bid_ask_spread < 0.1     # spread < 0.1%
@@ -246,7 +246,7 @@ async def run_pre_filter_async(
         if not spread_ok:
             reasons.append(f"Spread too wide: {market.bid_ask_spread:.4f}%")
 
-    # 鈹€鈹€ Check 7: Volume sanity 鈹€鈹€
+    # ── Check 7: Volume sanity ──
     volume_ok = True
     if market.volume_24h > 0:
         volume_ok = market.volume_24h > 1_000_000   # min $1M 24h volume
@@ -258,7 +258,7 @@ async def run_pre_filter_async(
         if not volume_ok:
             reasons.append(f"Low 24h volume: ${market.volume_24h:,.0f}")
 
-    # 鈹€鈹€ Check 8: Large sudden move guard 鈹€鈹€
+    # ── Check 8: Large sudden move guard ──
     sudden_move_ok = True
     if market.price_change_1h != 0:
         sudden_move_ok = abs(market.price_change_1h) < 8.0     # >8% in 1h = skip
@@ -270,11 +270,11 @@ async def run_pre_filter_async(
         if not sudden_move_ok:
             reasons.append(f"Sudden move: {market.price_change_1h:+.2f}% in 1h")
 
-    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    # ═══════════════════════════════════════════
     # NEW ENHANCED CHECKS (v2)
-    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    # ═══════════════════════════════════════════
 
-    # 鈹€鈹€ Check 9: RSI Extreme Guard 鈹€鈹€
+    # ── Check 9: RSI Extreme Guard ──
     rsi_ok = True
     if market.rsi_1h is not None:
         is_long = signal.direction in (SignalDirection.LONG,)
@@ -294,7 +294,7 @@ async def run_pre_filter_async(
         if not rsi_ok:
             reasons.append(f"RSI extreme: {market.rsi_1h:.1f} conflicts with {signal.direction.value}")
 
-    # 鈹€鈹€ Check 10: Funding Rate Guard 鈹€鈹€
+    # ── Check 10: Funding Rate Guard ──
     funding_ok = True
     if market.funding_rate is not None:
         is_long = signal.direction in (SignalDirection.LONG,)
@@ -318,7 +318,7 @@ async def run_pre_filter_async(
         if not funding_ok:
             reasons.append(f"Extreme funding rate: {market.funding_rate * 100:.4f}% against {signal.direction.value}")
 
-    # 鈹€鈹€ Check 11: Orderbook Imbalance Guard 鈹€鈹€
+    # ── Check 11: Orderbook Imbalance Guard ──
     ob_ok = True
     if market.orderbook_imbalance is not None and market.orderbook_imbalance > 0:
         is_long = signal.direction in (SignalDirection.LONG,)
@@ -340,7 +340,7 @@ async def run_pre_filter_async(
         if not ob_ok:
             reasons.append(f"Orderbook imbalance {market.orderbook_imbalance:.2f} against {signal.direction.value}")
 
-    # 鈹€鈹€ Check 12: Weekend / Low Liquidity Hours Guard 鈹€鈹€
+    # ── Check 12: Weekend / Low Liquidity Hours Guard ──
     time_ok = True
     now_utc = utcnow()
     is_weekend = now_utc.weekday() >= 5  # Saturday=5, Sunday=6
@@ -368,7 +368,7 @@ async def run_pre_filter_async(
     if not time_ok:
         reasons.append(f"Low liquidity {'weekend' if is_weekend else 'hours'} detected")
 
-    # 鈹€鈹€ Check 13: Consecutive Loss Protection 鈹€鈹€
+    # ── Check 13: Consecutive Loss Protection ──
     consec_ok = True
     try:
         recent_results = await get_recent_trade_results_async(limit=5, user_id=user_id)
@@ -384,11 +384,11 @@ async def run_pre_filter_async(
             "note": "Blocks after 3 consecutive losses",
         }
         if not consec_ok:
-            reasons.append("3 consecutive losing trades 鈥?cooling off")
+            reasons.append("3 consecutive losing trades — cooling off")
     except Exception:
         checks["consecutive_loss"] = {"passed": True, "note": "Could not check (no history)"}
 
-    # 鈹€鈹€ Check 14: Same-Direction Signal Saturation 鈹€鈹€
+    # ── Check 14: Same-Direction Signal Saturation ──
     saturation_ok = True
     same_dir_count = _count_recent_same_direction(signal, window_minutes=60, user_id=user_id)
     if same_dir_count >= 3:
@@ -403,7 +403,7 @@ async def run_pre_filter_async(
     if not saturation_ok:
         reasons.append(f"Signal saturation: {same_dir_count} {signal.direction.value} signals in 1h")
 
-    # 鈹€鈹€ Check 15: EMA Trend Alignment 鈹€鈹€
+    # ── Check 15: EMA Trend Alignment ──
     ema_ok = True
     if market.ema_fast is not None and market.ema_slow is not None:
         is_long = signal.direction in (SignalDirection.LONG,)
@@ -432,7 +432,7 @@ async def run_pre_filter_async(
             trend = "bullish" if ema_bullish else "bearish"
             reasons.append(f"EMA trend ({trend}) conflicts with {signal.direction.value} (diff={ema_diff_pct:.2f}%)")
 
-    # 鈹€鈹€ Final verdict 鈹€鈹€
+    # ── Final verdict ──
     disabled = {str(item).strip() for item in (disabled_checks or []) if str(item).strip()}
     for name in disabled:
         if name in checks:
@@ -452,10 +452,10 @@ async def run_pre_filter_async(
                 "direction": signal.direction,
                 "timestamp": utcnow(),
             })
-        logger.info(f"[PreFilter] 鉁?PASSED ({passed_checks}/{total_checks}) - {signal.ticker} {signal.direction}")
+        logger.info(f"[PreFilter] ✅ PASSED ({passed_checks}/{total_checks}) - {signal.ticker} {signal.direction}")
     else:
         logger.warning(
-            f"[PreFilter] 鉂?BLOCKED ({passed_checks}/{total_checks}) - "
+            f"[PreFilter] ❌ BLOCKED ({passed_checks}/{total_checks}) - "
             f"{signal.ticker} {signal.direction}: {'; '.join(reasons)}"
         )
 

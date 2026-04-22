@@ -1,5 +1,5 @@
 """
-QuantPilot AI - Trade Logger
+TradingView Signal Server - Trade Logger
 Persists all trade decisions and results to JSON files.
 Enhanced with async database support.
 """
@@ -113,7 +113,7 @@ async def log_trade_async(decision: TradeDecision, order_result: dict, user_id: 
     except Exception as e:
         logger.warning(f"[TradeLog] JSON mirror write skipped: {e}")
 
-    logger.info(f"[TradeLog] Saved trade {trade_id} 鈫?{log_path.name}")
+    logger.info(f"[TradeLog] Saved trade {trade_id} → {log_path.name}")
     return trade_id
 
 
