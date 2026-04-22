@@ -1,6 +1,6 @@
 # 📡 TradingView AI Signal Server (v4.1)
 
-![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
+![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
 
 **TradingView Signal Server** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT, Anthropic Claude, DeepSeek, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
 
@@ -109,7 +109,7 @@ docker-compose up -d --build
 # Monitor live terminal logs
 docker-compose logs -f
 ```
-_Note: Generated SQLite databases and critical logs will be persistently mapped to `./data` and `./logs`._
+_Note: Generated SQLite databases and critical logs will be persistently mapped to `./data` and `./logs`. If you encounter permission errors on Linux host machines, run `chmod -R 777 ./data ./logs` to allow the internal `appuser` container user to write._
 
 ---
 
@@ -185,6 +185,15 @@ The server records webhook events and reserves duplicate payload fingerprints at
 - Exchange TP/SL order parameters are tried through exchange-aware candidates. Always test each target exchange with a small paper/live pilot before trusting automation with real size.
 - Webhook Diagnostics shows recent invalid secrets, duplicate alerts, pre-filter blocks, AI rejects, and executed signals so TradingView issues can be traced from the dashboard.
 - For fully unattended payments, configure explorer API keys in `.env` and still keep manual review available for chain/API outages.
+
+---
+
+## 🛠️ Troubleshooting & FAQ
+
+- **Database Locks (SQLite WAL)**: High concurrency of webhooks might occasionally cause `database is locked` errors. Ensure `data/` is on a fast SSD and consider migrating to PostgreSQL for heavy SaaS loads.
+- **Port 8000 in Use**: If the server fails to start, check if another service is using port 8000 (`lsof -i :8000`). Change the port in `docker-compose.yml` or the `uvicorn` startup command.
+- **AI Timeout Errors**: If GPT-4 or Claude takes too long to respond, increase `AI_READ_TIMEOUT_SECS` (default 90) in your `.env` file.
+- **Supported Payment Chains**: The built-in scanner supports TRC20, ERC20, BEP20, and Arbitrum. Ensure you configure the respective block explorer API keys (e.g., TronGrid, Etherscan) in the `.env` file for automatic verification.
 
 ---
 
