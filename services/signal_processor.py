@@ -6,7 +6,7 @@ import json
 import hashlib
 import secrets
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 import asyncio
 
@@ -23,6 +23,7 @@ from core.database import (
     count_today_executed_trades,
 )
 from core.security import decrypt_settings_payload
+from core.utils.datetime import utcnow
 from core.metrics import (
     record_signal_received,
     record_prefilter_result,
@@ -121,7 +122,7 @@ class SignalProcessor:
         Process a webhook signal through the complete pipeline.
         Returns the result of the processing.
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = utcnow()
 
         # Compute fingerprint for deduplication
         fingerprint = compute_webhook_fingerprint(raw_body or signal.model_dump(), user_id)

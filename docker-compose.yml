@@ -1,4 +1,6 @@
-version: "3.8"
+# docker-compose.yml
+# Usage: docker compose up -d
+# Set POSTGRES_PASSWORD and REDIS_PASSWORD in .env before running in production.
 
 services:
   # ─────────────────────────────────────────────
@@ -15,9 +17,10 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://signal:signal@postgres:5432/signal_server
+      - DATABASE_URL=postgresql+asyncpg://signal:${POSTGRES_PASSWORD:-signal}@postgres:5432/signal_server
       - REDIS_URL=redis://redis:6379/0
       - REDIS_ENABLED=true
+      - PYTHONIOENCODING=utf-8
     volumes:
       - ./data:/app/data
       - ./trade_logs:/app/trade_logs
@@ -32,7 +35,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     logging:
       driver: "json-file"
       options:
@@ -50,7 +53,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: signal
-      POSTGRES_PASSWORD: signal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-signal}
       POSTGRES_DB: signal_server
     volumes:
       - postgres-data:/var/lib/postgresql/data

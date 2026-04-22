@@ -58,12 +58,21 @@ def _sanitize_log_record(record):
     return True
 
 
-# Console logging
+# Console logging — use UTF-8 wrapper to handle emoji on Windows GBK terminals
+import io as _io
+_stdout_utf8 = _io.TextIOWrapper(
+    sys.stdout.buffer,
+    encoding="utf-8",
+    errors="replace",
+    line_buffering=True,
+) if hasattr(sys.stdout, "buffer") else sys.stdout
+
 logger.add(
-    sys.stdout,
+    _stdout_utf8,
     level="DEBUG" if settings.debug else "INFO",
     format="{time:HH:mm:ss} | {level:<7} | {message}",
     filter=_sanitize_log_record,
+    colorize=False,
 )
 
 # File logging
@@ -75,6 +84,7 @@ logger.add(
     rotation="100 MB",
     retention="30 days",
     level="DEBUG",
+    encoding="utf-8",
     filter=_sanitize_log_record,
 )
 
@@ -86,6 +96,7 @@ if settings.json_logs:
         retention="30 days",
         level="INFO",
         serialize=True,
+        encoding="utf-8",
         filter=_sanitize_log_record,
     )
 
@@ -311,11 +322,11 @@ async def metrics():
 @app.get("/stats")
 async def get_stats():
     """Get today's trading statistics."""
-    from datetime import datetime, timezone
     from sqlalchemy import select
     from core.database import TradeModel, WebhookEventModel
+    from core.utils.datetime import utcnow
 
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     async with db_manager.async_session_factory() as session:
         events = await session.execute(
             select(WebhookEventModel).where(WebhookEventModel.created_at >= today_start)

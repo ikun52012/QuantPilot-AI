@@ -7,7 +7,7 @@ import uuid
 import os
 import secrets
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional, Any
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from sqlalchemy import select, update, delete, and_, or_, event
 from loguru import logger
 
 from core.config import settings
+from core.utils.datetime import utcnow
 
 
 class Base(DeclarativeBase):
@@ -43,7 +44,7 @@ class UserModel(Base):
     role = Column(String(20), default="user")
     balance_usdt = Column(Float, default=0.0)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: utcnow())
     last_login = Column(DateTime, nullable=True)
     settings_json = Column(Text, default="{}")
     webhook_secret = Column(String(128), default="")
@@ -72,7 +73,7 @@ class SubscriptionPlanModel(Base):
     features_json = Column(Text, default="[]")
     is_active = Column(Boolean, default=True)
     max_signals_per_day = Column(Integer, default=0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: utcnow())
 
     subscriptions = relationship("SubscriptionModel", back_populates="plan", lazy="dynamic")
 
@@ -87,7 +88,7 @@ class SubscriptionModel(Base):
     status = Column(String(20), default="pending", index=True)
     start_date = Column(DateTime, nullable=True)
     end_date = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: utcnow())
 
     user = relationship("UserModel", back_populates="subscriptions")
     plan = relationship("SubscriptionPlanModel", back_populates="subscriptions")
@@ -106,7 +107,7 @@ class PaymentModel(Base):
     tx_hash = Column(String(200), default="")
     wallet_address = Column(String(128), default="")
     status = Column(String(20), default="pending", index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: utcnow())
     confirmed_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=True)
 
@@ -144,7 +145,7 @@ class WebhookEventModel(Base):
     reason = Column(Text, default="")
     client_ip = Column(String(45), default="")
     payload_json = Column(Text, default="{}")
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(DateTime, default=lambda: utcnow(), index=True)
 
 
 class AdminSettingModel(Base):
@@ -153,7 +154,7 @@ class AdminSettingModel(Base):
 
     key = Column(String(100), primary_key=True)
     value = Column(Text, nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: utcnow())
 
 
 class AdminAuditLogModel(Base):
@@ -168,7 +169,7 @@ class AdminAuditLogModel(Base):
     target_id = Column(String(36), default="")
     summary = Column(Text, default="")
     client_ip = Column(String(45), default="")
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(DateTime, default=lambda: utcnow(), index=True)
 
 
 class InviteCodeModel(Base):
@@ -180,7 +181,7 @@ class InviteCodeModel(Base):
     max_uses = Column(Integer, default=1)
     used_count = Column(Integer, default=0)
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: utcnow())
     expires_at = Column(DateTime, nullable=True)
     created_by = Column(String(36), nullable=True)
     last_used_by = Column(String(36), nullable=True)
@@ -199,7 +200,7 @@ class RedeemCodeModel(Base):
     is_active = Column(Boolean, default=True, index=True)
     redeemed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
     redeemed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: utcnow())
     expires_at = Column(DateTime, nullable=True)
     created_by = Column(String(36), nullable=True)
 
@@ -231,7 +232,7 @@ class PositionModel(Base):
     current_pnl_pct = Column(Float, default=0.0)
     last_price = Column(Float, nullable=True)
     close_reason = Column(String(80), default="")
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: utcnow())
     exit_price = Column(Float, nullable=True)
     pnl_pct = Column(Float, default=0.0)
     closed_at = Column(DateTime, nullable=True)
@@ -511,7 +512,7 @@ async def get_all_users(session: AsyncSession) -> list[UserModel]:
 async def update_user_login(session: AsyncSession, user_id: str):
     """Update user's last login time."""
     await session.execute(
-        update(UserModel).where(UserModel.id == user_id).values(last_login=datetime.now(timezone.utc))
+        update(UserModel).where(UserModel.id == user_id).values(last_login=utcnow())
     )
 
 
@@ -529,7 +530,7 @@ async def update_user_password_hash(session: AsyncSession, user_id: str, passwor
     result = await session.execute(
         update(UserModel)
         .where(UserModel.id == user_id)
-        .values(password_hash=password_hash, password_changed_at=datetime.now(timezone.utc), token_version=UserModel.token_version + 1)
+        .values(password_hash=password_hash, password_changed_at=utcnow(), token_version=UserModel.token_version + 1)
     )
     return result.rowcount > 0
 
@@ -549,7 +550,7 @@ async def get_subscription_plans(session: AsyncSession, active_only: bool = True
 
 async def get_user_active_subscription(session: AsyncSession, user_id: str) -> Optional[SubscriptionModel]:
     """Get user's active subscription."""
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     result = await session.execute(
         select(SubscriptionModel)
         .where(
@@ -578,7 +579,7 @@ async def log_trade_db(
 ) -> TradeModel:
     """Log a trade to the database and keep the position ledger in sync."""
     trade_id = str(uuid.uuid4())
-    timestamp = datetime.now(timezone.utc)
+    timestamp = utcnow()
     payload = dict(payload or {})
     entry = {
         "id": trade_id,
@@ -621,7 +622,7 @@ async def log_trade_db(
 
 async def count_today_executed_trades(session: AsyncSession, user_id: Optional[str] = None) -> int:
     """Count today's executed trades."""
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     query = select(TradeModel).where(
         TradeModel.timestamp >= today_start,
         TradeModel.execute == True,
@@ -647,7 +648,7 @@ async def insert_trade_log_async(session: AsyncSession, entry: dict) -> dict:
     trade = TradeModel(
         id=entry.get("id") or str(uuid.uuid4()),
         user_id=entry.get("user_id"),
-        timestamp=datetime.fromisoformat(entry["timestamp"]) if isinstance(entry.get("timestamp"), str) else (entry.get("timestamp") or datetime.now(timezone.utc)),
+        timestamp=datetime.fromisoformat(entry["timestamp"]) if isinstance(entry.get("timestamp"), str) else (entry.get("timestamp") or utcnow()),
         ticker=entry.get("ticker", ""),
         direction=entry.get("direction", ""),
         execute=bool(entry.get("execute")),
@@ -782,7 +783,7 @@ async def close_position_async(
     ) * remaining_weight
     pnl_pct = round(_safe_float(position.realized_pnl_pct) + remaining_pnl, 6)
 
-    now = closed_at or datetime.now(timezone.utc)
+    now = closed_at or utcnow()
     position.status = "closed"
     position.exit_price = exit_price
     position.pnl_pct = pnl_pct
@@ -807,7 +808,7 @@ async def record_position_close_trade_async(
 ) -> TradeModel:
     """Create a synthetic close trade for TP/SL fills detected by the monitor."""
     trade_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     pnl_pct = await close_position_async(
         session=session,
         position=position,
@@ -870,7 +871,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
 
     entry_price = _safe_float(order_details.get("entry_price") or entry.get("entry_price"))
     quantity = _safe_float(order_details.get("quantity") or entry.get("quantity"))
-    timestamp = entry.get("timestamp") or datetime.now(timezone.utc).isoformat()
+    timestamp = entry.get("timestamp") or utcnow().isoformat()
     if isinstance(timestamp, str):
         opened_at = datetime.fromisoformat(timestamp)
     else:
@@ -975,7 +976,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
 
 async def get_trade_logs_async(session: AsyncSession, days: int = 30, user_id: Optional[str] = None) -> list[dict]:
     """Get trade logs for the last N days."""
-    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days), 365)))
+    since = utcnow() - timedelta(days=max(1, min(int(days), 365)))
 
     query = select(TradeModel).where(TradeModel.timestamp >= since)
     if user_id:
@@ -1042,7 +1043,7 @@ async def record_webhook_event(
 
 async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, window_secs: int = 300) -> bool:
     """Check if a webhook with this fingerprint was recently processed."""
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_secs)
+    cutoff = utcnow() - timedelta(seconds=window_secs)
     result = await session.execute(
         select(WebhookEventModel)
         .where(WebhookEventModel.fingerprint == fingerprint, WebhookEventModel.created_at >= cutoff)
@@ -1072,7 +1073,7 @@ async def set_admin_setting(session: AsyncSession, key: str, value: str):
     setting = result.scalar_one_or_none()
     if setting:
         setting.value = value
-        setting.updated_at = datetime.now(timezone.utc)
+        setting.updated_at = utcnow()
     else:
         setting = AdminSettingModel(key=key, value=value)
         session.add(setting)

@@ -5,7 +5,7 @@ Admin panel routes for user management, settings, and monitoring.
 import json
 import os
 import secrets
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +26,7 @@ from core.database import (
 from core.security import hash_password, validate_password_strength, generate_webhook_secret, webhook_secret_hash, is_placeholder_webhook_secret
 from core.auth import require_admin
 from core.config import settings
+from core.utils.datetime import utcnow
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -119,7 +120,7 @@ def _parse_expiry(expires_at: str = "", expires_days: int = 30) -> Optional[date
         except ValueError:
             raise HTTPException(400, "Invalid expires_at date")
     if expires_days:
-        return datetime.now(timezone.utc) + timedelta(days=expires_days)
+        return utcnow() + timedelta(days=expires_days)
     return None
 
 
@@ -163,7 +164,7 @@ async def list_users(
             .where(
                 SubscriptionModel.user_id == u.id,
                 SubscriptionModel.status == "active",
-                SubscriptionModel.end_date >= datetime.now(timezone.utc),
+                SubscriptionModel.end_date >= utcnow(),
             )
             .order_by(SubscriptionModel.end_date.desc())
             .limit(1)
@@ -408,7 +409,7 @@ async def grant_user_subscription(
         raise HTTPException(404, "Plan not found")
     status = _validate_subscription_status(req.status)
 
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     duration_days = req.duration_days or plan.duration_days
     sub = SubscriptionModel(
         user_id=user_id,
@@ -1061,7 +1062,7 @@ def os_access_writable(path: Path) -> bool:
 
 
 async def _activate_payment_subscription(db: AsyncSession, payment: PaymentModel) -> None:
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     payment.status = "confirmed"
     payment.confirmed_at = now
     if payment.subscription_id:

@@ -4,7 +4,7 @@ Tracks open positions, settles paper TP/SL, reconciles exchange closes,
 and keeps realised PnL in the database.
 """
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from loguru import logger
@@ -18,6 +18,7 @@ from core.database import (
     record_position_close_trade_async,
 )
 from core.security import decrypt_settings_payload
+from core.utils.datetime import utcnow, utcnow_iso
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -104,7 +105,7 @@ async def run_position_monitor_once(user_configs: Optional[dict] = None) -> dict
         "closed": 0,
         "adjusted": 0,
         "errors": 0,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": utcnow().isoformat(),
     }
 
     try:
@@ -230,12 +231,12 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
             position.realized_pnl_pct = round(_safe_float(position.realized_pnl_pct) + (level_pnl * weight), 6)
             remaining_qty = max(0.0, remaining_qty - qty)
             level["status"] = "hit"
-            level["hit_at"] = datetime.now(timezone.utc).isoformat()
+            level["hit_at"] = utcnow().isoformat()
             stats["partials"] += 1
 
         position.remaining_quantity = remaining_qty
         position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
-        position.updated_at = datetime.now(timezone.utc)
+        position.updated_at = utcnow()
         await session.flush()
 
         if remaining_qty <= max(0.00000001, opened_qty * 0.000001):
@@ -393,7 +394,7 @@ def _update_unrealized(position: PositionModel, mark_price: float) -> None:
     open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, position.leverage) * remaining_weight
     position.last_price = mark_price
     position.current_pnl_pct = round(_safe_float(position.realized_pnl_pct) + open_pnl, 6)
-    position.updated_at = datetime.now(timezone.utc)
+    position.updated_at = utcnow()
 
 
 async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: dict, exchange_position: dict, place_protective_stop) -> bool:
@@ -429,7 +430,7 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
     if result.get("status") in {"placed", "simulated"}:
         position.stop_loss = new_stop
         position.stop_loss_order_id = str(result.get("order_id") or position.stop_loss_order_id or "")
-        position.updated_at = datetime.now(timezone.utc)
+        position.updated_at = utcnow()
         logger.info(f"[PositionMonitor] Adjusted stop for {position.ticker}: new_stop={new_stop:.8f}")
         return True
     return False

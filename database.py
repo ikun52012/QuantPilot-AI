@@ -19,10 +19,11 @@ import uuid
 import os
 import secrets
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from loguru import logger
 from security import decrypt_settings_payload, decrypt_value, encrypt_settings_payload, encrypt_value
+from core.utils.datetime import utcnow
 
 DB_PATH = Path(__file__).parent / "data" / "server.db"
 ADMIN_SENSITIVE_SETTINGS = {"webhook_secret"}
@@ -490,7 +491,7 @@ def update_user_password_hash(user_id: str, password_hash: str) -> bool:
             SET password_hash=?, password_changed_at=?, token_version=COALESCE(token_version,0)+1
             WHERE id=?
             """,
-            (password_hash, datetime.now(timezone.utc).isoformat(), user_id),
+            (password_hash, utcnow().isoformat(), user_id),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -790,16 +791,21 @@ def create_subscription_plan(name: str, description: str, price: float, duration
         conn.close()
 
 
+ALLOWED_PLAN_FIELDS = {"name", "description", "price_usdt", "duration_days", "is_active", "max_signals_per_day", "features"}
+
+
 def update_subscription_plan(plan_id: str, **kwargs):
     conn = get_connection()
     try:
         sets = []
         vals = []
         for k, v in kwargs.items():
+            if k not in ALLOWED_PLAN_FIELDS:
+                continue
             if k == "features":
                 sets.append("features_json=?")
                 vals.append(json.dumps(v))
-            elif k in ("name", "description", "price_usdt", "duration_days", "is_active", "max_signals_per_day"):
+            else:
                 sets.append(f"{k}=?")
                 vals.append(v)
         if sets:

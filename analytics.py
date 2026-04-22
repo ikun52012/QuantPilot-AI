@@ -3,7 +3,7 @@ Signal Server - Analytics Module (Enhanced)
 Performance analytics and trade statistics.
 """
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 from collections import defaultdict
 
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from core.database import TradeModel
+from core.utils.datetime import utcnow
 
 
 async def calculate_performance(
@@ -22,7 +23,7 @@ async def calculate_performance(
     """
     Calculate comprehensive performance metrics.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = utcnow() - timedelta(days=days)
 
     # Build query
     query = select(TradeModel).where(TradeModel.timestamp >= cutoff)
@@ -129,7 +130,7 @@ async def get_daily_pnl(
     user_id: Optional[str] = None,
 ) -> list[dict]:
     """Get daily PnL breakdown."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = utcnow() - timedelta(days=days)
 
     query = select(TradeModel).where(TradeModel.timestamp >= cutoff)
     if user_id:
@@ -148,7 +149,7 @@ async def get_daily_pnl(
     # Fill missing days
     all_days = []
     for i in range(days):
-        day = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
+        day = (utcnow() - timedelta(days=i)).strftime("%Y-%m-%d")
         all_days.append(day)
 
     return [

@@ -2,7 +2,7 @@
 Signal Server - Authentication Router
 User registration, login, and session management.
 """
-from datetime import timezone
+from datetime import datetime
 
 from fastapi import APIRouter, Request, Response, HTTPException, Depends
 from pydantic import BaseModel, Field
@@ -10,9 +10,10 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from core.database import get_db, create_user, get_user_by_username, get_user_by_email, update_user_login
+from core.database import get_db, create_user, get_user_by_username, get_user_by_email, update_user_login, InviteCodeModel
 from core.security import hash_password, verify_password, validate_password_strength
 from core.auth import create_token, set_auth_cookie, clear_auth_cookie, get_current_user
+from core.utils.datetime import utcnow
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -96,7 +97,7 @@ async def register(
         if not invite:
             raise HTTPException(400, "Invalid or expired invite code")
 
-        if invite.expires_at and _as_utc(invite.expires_at) < datetime.now(timezone.utc):
+        if invite.expires_at and _as_utc(invite.expires_at) < utcnow():
             raise HTTPException(400, "Invite code has expired")
 
         if invite.max_uses > 0 and invite.used_count >= invite.max_uses:
@@ -116,7 +117,7 @@ async def register(
         if invite:
             invite.used_count += 1
             invite.last_used_by = user.id
-            invite.last_used_at = datetime.now(timezone.utc)
+            invite.last_used_at = utcnow()
             if invite.max_uses > 0 and invite.used_count >= invite.max_uses:
                 invite.is_active = False
 

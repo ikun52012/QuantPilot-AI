@@ -7,10 +7,11 @@ import json
 import threading
 import uuid
 import concurrent.futures
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from loguru import logger
 from models import TradeLog, TradeDecision
+from core.utils.datetime import utcnow, utcnow_iso
 
 LOGS_DIR = Path(__file__).parent / "trade_logs"
 LOGS_DIR.mkdir(exist_ok=True)
@@ -21,7 +22,7 @@ _file_lock = threading.Lock()
 
 def _get_log_file() -> Path:
     """Get today's log file path."""
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = utcnow().strftime("%Y-%m-%d")
     return LOGS_DIR / f"trades_{date_str}.json"
 
 
@@ -61,7 +62,7 @@ async def log_trade_async(decision: TradeDecision, order_result: dict, user_id: 
 
     entry = {
         "id": trade_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": utcnow().isoformat(),
         "user_id": user_id,
         "ticker": decision.ticker,
         "direction": decision.direction.value if decision.direction else "unknown",
@@ -176,7 +177,7 @@ def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
     all_trades = []
     days = max(1, min(int(days), 365))
     for i in range(days):
-        date = datetime.now(timezone.utc) - timedelta(days=i)
+        date = utcnow() - timedelta(days=i)
         date_str = date.strftime("%Y-%m-%d")
         path = LOGS_DIR / f"trades_{date_str}.json"
         trades = _load_logs(path)

@@ -67,15 +67,27 @@ def _load_or_create_key() -> bytes:
         return _derive_fernet_key(env_key)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    
     if KEY_FILE.exists():
-        return KEY_FILE.read_text(encoding="utf-8").strip().encode()
+        try:
+            return KEY_FILE.read_text(encoding="utf-8").strip().encode()
+        except PermissionError:
+            logger.error(f"[Security] Permission denied reading {KEY_FILE}. Check file permissions.")
+            raise RuntimeError(f"Cannot read encryption key file: {KEY_FILE}. Ensure proper permissions (chmod 600).")
 
     key = Fernet.generate_key()
-    KEY_FILE.write_text(key.decode(), encoding="utf-8")
+    
+    try:
+        KEY_FILE.write_text(key.decode(), encoding="utf-8")
+    except PermissionError:
+        logger.error(f"[Security] Permission denied writing to {KEY_FILE}. Check directory permissions.")
+        raise RuntimeError(f"Cannot write encryption key file: {KEY_FILE}. Ensure directory is writable.")
+    
     try:
         KEY_FILE.chmod(0o600)
-    except OSError:
+    except (OSError, PermissionError):
         pass
+    
     logger.warning("[Security] Generated persistent APP_ENCRYPTION_KEY in data/app_encryption.key")
     return key
 

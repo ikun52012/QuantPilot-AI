@@ -117,8 +117,9 @@ async def create_payment_request(
     subscription_id: Optional[str] = None,
 ) -> dict:
     """Create a payment request."""
-    from datetime import datetime, timezone, timedelta
+    from datetime import timedelta
     from core.database import PaymentModel
+    from core.utils.datetime import utcnow
     import uuid
 
     address = await get_payment_address(session, currency, network)
@@ -134,7 +135,7 @@ async def create_payment_request(
         network=network,
         wallet_address=address,
         status="pending",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        expires_at=utcnow() + timedelta(hours=24),
     )
 
     session.add(payment)

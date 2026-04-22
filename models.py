@@ -1,10 +1,11 @@
 """
 TradingView Signal Server - Data Models
 """
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
+from core.utils.datetime import utcnow
 
 
 class SignalDirection(str, Enum):
@@ -86,7 +87,7 @@ class TradingViewSignal(BaseModel):
     timeframe: str = Field(default="60", max_length=20)  # e.g. "60" for 1h
     strategy: str = Field(default="unknown", max_length=120)
     message: str = Field(default="", max_length=2000)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: utcnow())
 
     @field_validator("secret")
     @classmethod
@@ -191,7 +192,7 @@ class TradeDecision(BaseModel):
     reason: str = ""
     signal: Optional[TradingViewSignal] = None
     ai_analysis: Optional[AIAnalysis] = None
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: utcnow())
 
 
 # ─────────────────────────────────────────────
@@ -199,7 +200,7 @@ class TradeDecision(BaseModel):
 # ─────────────────────────────────────────────
 class TradeLog(BaseModel):
     id: str = ""
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: utcnow())
     ticker: str
     direction: str
     entry_price: float

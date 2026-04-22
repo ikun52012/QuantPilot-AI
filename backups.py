@@ -6,12 +6,13 @@ import os
 import json
 import shutil
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from loguru import logger
 
 from core.config import settings
+from core.utils.datetime import utcnow, utcnow_iso, utcnow_str
 
 
 # Backup directory
@@ -21,7 +22,7 @@ backup_path.mkdir(parents=True, exist_ok=True)
 
 async def create_backup(note: str = "") -> dict:
     """Create a database backup."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    timestamp = utcnow().strftime("%Y%m%d_%H%M%S")
     backup_name = f"backup_{timestamp}"
     backup_file = backup_path / f"{backup_name}.zip"
 
@@ -54,7 +55,7 @@ async def create_backup(note: str = "") -> dict:
 
         # Add metadata
         metadata = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": utcnow().isoformat(),
             "note": note,
             "files": [name for name, _ in files_to_backup],
         }

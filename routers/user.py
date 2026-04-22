@@ -4,7 +4,7 @@ User-facing routes for dashboard, settings, and trading.
 """
 import json
 import copy
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Request, Response, HTTPException, Depends, Query
@@ -21,6 +21,7 @@ from core.auth import get_current_user
 from core.config import settings
 from core.security import encrypt_settings_payload, decrypt_settings_payload
 from core import runtime_settings
+from core.utils.datetime import utcnow
 
 
 router = APIRouter(prefix="/api", tags=["user"])
@@ -250,7 +251,7 @@ async def get_trades(
     db: AsyncSession = Depends(get_db),
 ):
     """Get recent trades."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = utcnow() - timedelta(days=days)
     filters = [TradeModel.timestamp >= cutoff]
     if not _is_admin(user):
         filters.append(TradeModel.user_id == user.get("sub"))
@@ -284,7 +285,7 @@ async def get_history(
     db: AsyncSession = Depends(get_db),
 ):
     """Get trade history with details."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = utcnow() - timedelta(days=days)
     filters = [TradeModel.timestamp >= cutoff]
     if not _is_admin(user):
         filters.append(TradeModel.user_id == user.get("sub"))

@@ -4,7 +4,7 @@ Subscription and payment management.
 """
 import json
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Request, HTTPException, Depends, Query
@@ -19,6 +19,7 @@ from core.database import (
 )
 from core.auth import get_current_user
 from core.config import settings
+from core.utils.datetime import utcnow
 
 
 router = APIRouter(prefix="/api", tags=["subscription"])
@@ -172,7 +173,7 @@ async def create_subscription(
     if not db_user:
         raise HTTPException(404, "User not found")
 
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     activate_now = plan.price_usdt <= 0 or (db_user.balance_usdt or 0) >= plan.price_usdt
 
     if activate_now and plan.price_usdt > 0:
@@ -279,7 +280,7 @@ async def create_payment(
         network=req.network,
         wallet_address=address,
         status="pending",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        expires_at=utcnow() + timedelta(hours=24),
     )
     db.add(payment)
     await db.commit()
@@ -395,7 +396,7 @@ async def redeem_code(
     if code.redeemed_by:
         raise HTTPException(400, "Code has already been redeemed")
 
-    if code.expires_at and _as_utc(code.expires_at) < datetime.now(timezone.utc):
+    if code.expires_at and _as_utc(code.expires_at) < utcnow():
         raise HTTPException(400, "Code has expired")
 
     # Get user
@@ -420,8 +421,8 @@ async def redeem_code(
             user_id=user["sub"],
             plan_id=code.plan_id,
             status="active",
-            start_date=datetime.now(timezone.utc),
-            end_date=datetime.now(timezone.utc) + timedelta(days=duration_days),
+            start_date=utcnow(),
+            end_date=utcnow() + timedelta(days=duration_days),
         )
         db.add(subscription)
         subscription_payload = {
@@ -433,7 +434,7 @@ async def redeem_code(
 
     # Mark code as redeemed
     code.redeemed_by = user["sub"]
-    code.redeemed_at = datetime.now(timezone.utc)
+    code.redeemed_at = utcnow()
     code.is_active = False
 
     await db.commit()
