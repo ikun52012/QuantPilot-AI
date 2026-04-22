@@ -1,36 +1,36 @@
-# 📡 TradingView AI Signal Server (v4.1)
+# 馃摗 QuantPilot AI (v4.1)
 
 ![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
 
-**TradingView Signal Server** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT, Anthropic Claude, DeepSeek, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
+**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT, Anthropic Claude, DeepSeek, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
 
 This system is equipped with a stunning "Midnight Glassmorphism" interactive frontend dashboard. It features a complete multi-tenant/multi-user role-based access control system and a USDT subscription payment pipeline, making it ready to be deployed commercially as a complete SaaS quantitative advisory platform.
 
 ---
 
-## ✨ Core Features
+## 鉁?Core Features
 
-- **🤖 Invincible AI Trading Analysis Pipeline**
+- **馃 Invincible AI Trading Analysis Pipeline**
   - Built-in integration with OpenAI (GPT-4o), Anthropic (Claude 3.5 Sonnet), DeepSeek, and supports fully custom OpenAI-compatible endpoints.
   - The AI performs secondary risk assessment based on market depth and direction context, identifying false breakouts and choppy markets. It automatically recommends optimal take-profit tiers and adaptive stop-loss points.
-- **🛡️ 15-Layer Pre-Filter System**
+- **馃洝锔?15-Layer Pre-Filter System**
   - Features an extremely strict preliminary Webhook signal processor to prevent entries during malicious market conditions like whale manipulation or black swan high-volatility events.
   - Supports circuit breakers for maximum daily trades and maximum daily account drawdown.
-- **💸 Robust Multi-Tenant Architecture & Crypto Payment System**
+- **馃捀 Robust Multi-Tenant Architecture & Crypto Payment System**
   - Complete and secure JWT session control with independent user dashboards and a global Super Admin Dashboard.
   - Create and manage paid subscription plans. Features built-in multi-chain USDT transaction hash verification (TRC20, ERC20, BEP20, Solana, etc.), invite codes, and a free-trial ecosystem for a closed-loop business model.
-- **⚡ Multi-Exchange Live & Paper Trading Engine (Powered by ccxt)**
+- **鈿?Multi-Exchange Live & Paper Trading Engine (Powered by ccxt)**
   - Out-of-the-box support for Binance, OKX, Bybit, Bitget, Gate.io, and Coinbase.
   - Fully controlled via environment variables, the admin dashboard, or individual user settings for Local Paper Trading, Exchange Sandbox/Testnet Trading, and Live Trading.
-- **🎯 Smart Tiered Risk Management & Trailing Stops (Multi-TP)**
+- **馃幆 Smart Tiered Risk Management & Trailing Stops (Multi-TP)**
   - Customize up to 4 sequential stages (TP1 to TP4) of tiered position closing to secure bounce profits.
   - In-house developed smart trailing stop module that steps up the hard stop-loss based on percentage steps, letting your profits run.
-- **📱 Real-time Telegram Notifications**
+- **馃摫 Real-time Telegram Notifications**
   - From receiving a signal, triggering pre-filter blocks, AI smart analysis, to exchange order execution, all pipeline events are broadcasted in real-time to your Telegram Bot.
 
 ---
 
-## 🏗️ Architecture & Signal Lifecycle
+## 馃彈锔?Architecture & Signal Lifecycle
 
 ```mermaid
 graph LR
@@ -45,7 +45,7 @@ D --> G[Full-pipeline Telegram Broadcast]
 
 ---
 
-## 🎨 Cutting-edge Interactive Dashboard (Midnight Glassmorphism)
+## 馃帹 Cutting-edge Interactive Dashboard (Midnight Glassmorphism)
 
 We've completely overhauled the "boring financial backend" stereotype. The dashboard implements a **Midnight Glassmorphism** design aesthetic:
 - **Deep, dreamy cyberpunk abyss interface** paired with dynamic colorful micro-animation particles, showcasing your quant-geek taste.
@@ -54,7 +54,7 @@ We've completely overhauled the "boring financial backend" stereotype. The dashb
 
 ---
 
-## 🚀 Quick Start Guide
+## 馃殌 Quick Start Guide
 
 ### 1. Prerequisites
 Before starting your money-making machine, ensure your server terminal has the following:
@@ -78,7 +78,7 @@ pip install -r requirements.txt
 cp .env.example .env
 nano .env # Setup API keys for Exchanges, AI, Telegram Bot, etc.
 
-# 4. Ignite! 🔥
+# 4. Ignite! 馃敟
 uvicorn app:app --host 0.0.0.0 --port 8000
 # Set UVICORN_RELOAD=true only for local auto-reload development.
 ```
@@ -97,7 +97,7 @@ Username: admin
 Password: 123456
 ```
 
-**⚠️ SECURITY WARNING:** The default password `123456` is intentionally weak for initial setup only. You MUST change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` to strong, unique values before exposing the service to the internet. Failure to do so puts your trading accounts and funds at extreme risk.
+**鈿狅笍 SECURITY WARNING:** The default password `123456` is intentionally weak for initial setup only. You MUST change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` to strong, unique values before exposing the service to the internet. Failure to do so puts your trading accounts and funds at extreme risk.
 
 ### 3. One-Click Docker Deployment
 When you are ready to deploy it as a 24/7 cloud miner:
@@ -113,7 +113,7 @@ _Note: Generated SQLite databases and critical logs will be persistently mapped 
 
 ---
 
-## ⚙️ Core `.env` Configuration Guide
+## 鈿欙笍 Core `.env` Configuration Guide
 
 Here are the high-frequency variables you must pay attention to:
 *   **`AI_PROVIDER`**: Model integration base. Valid fields are `openai`, `anthropic`, `deepseek`, or `custom` for your own base (if `custom`, ensure you fill out the related custom fields below it).
@@ -128,7 +128,7 @@ Here are the high-frequency variables you must pay attention to:
 
 ---
 
-## 📬 TradingView Webhook Integration
+## 馃摤 TradingView Webhook Integration
 
 1. Craft your high-win-rate strategy chart in TradingView.
 2. Open the "Create Alert" dialog.
@@ -188,7 +188,7 @@ The server records webhook events and reserves duplicate payload fingerprints at
 
 ---
 
-## 🛠️ Troubleshooting & FAQ
+## 馃洜锔?Troubleshooting & FAQ
 
 - **Database Locks (SQLite WAL)**: High concurrency of webhooks might occasionally cause `database is locked` errors. Ensure `data/` is on a fast SSD and consider migrating to PostgreSQL for heavy SaaS loads.
 - **Port 8000 in Use**: If the server fails to start, check if another service is using port 8000 (`lsof -i :8000`). Change the port in `docker-compose.yml` or the `uvicorn` startup command.
@@ -197,9 +197,9 @@ The server records webhook events and reserves duplicate payload fingerprints at
 
 ---
 
-## 🛡️ Disclaimer & Risk Warning
+## 馃洝锔?Disclaimer & Risk Warning
 
 **Please review this declaration carefully before launching:**
 Deploying and running automated quantitative trading for futures or spot markets is an **extremely high-risk operation**. This project serves as an open structured routing hub and AI empowerment tool. All commands executed through this tool **do not constitute, nor are they equivalent to, any financial or investment advice**. The developers and contributors of this codebase **assume no liability whatsoever** for any asset liquidations, slippage blowouts, or total capital losses caused by exchange API outages, network jitter, or rare AI hallucinations. We strongly advise all users to maintain long-term paper trading using `LIVE_TRADING=false` before injecting real capital.
 
-> *All Trading Involves Absolute Risk. Code your own destiny.* ☕
+> *All Trading Involves Absolute Risk. Code your own destiny.* 鈽?

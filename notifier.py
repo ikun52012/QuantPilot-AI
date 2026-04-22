@@ -1,5 +1,5 @@
 """
-TradingView Signal Server - Telegram Notifications
+QuantPilot AI - Telegram Notifications
 Sends trading notifications to Telegram.
 """
 import httpx
@@ -34,8 +34,8 @@ async def send_telegram(text: str):
 async def notify_signal_received(ticker: str, direction: str, price: float):
     """Notify when a new signal is received."""
     text = (
-        f"📡 <b>Signal Received</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
+        f"馃摗 <b>Signal Received</b>\n"
+        f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
         f"Ticker: <code>{ticker}</code>\n"
         f"Direction: <b>{direction.upper()}</b>\n"
         f"Price: <code>{price}</code>\n"
@@ -47,8 +47,8 @@ async def notify_signal_received(ticker: str, direction: str, price: float):
 async def notify_pre_filter_blocked(ticker: str, direction: str, reason: str):
     """Notify when a signal is blocked by pre-filter."""
     text = (
-        f"🚫 <b>Signal Blocked (Pre-Filter)</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
+        f"馃毇 <b>Signal Blocked (Pre-Filter)</b>\n"
+        f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
         f"Ticker: <code>{ticker}</code>\n"
         f"Direction: {direction.upper()}\n"
         f"Reason: {reason}"
@@ -59,26 +59,26 @@ async def notify_pre_filter_blocked(ticker: str, direction: str, reason: str):
 async def notify_ai_analysis(ticker: str, analysis: AIAnalysis):
     """Notify AI analysis results."""
     emoji_map = {
-        "execute": "✅",
-        "modify": "🔄",
-        "reject": "❌",
-        "hold": "⏸️",
+        "execute": "鉁?,
+        "modify": "馃攧",
+        "reject": "鉂?,
+        "hold": "鈴革笍",
     }
-    emoji = emoji_map.get(analysis.recommendation, "❓")
+    emoji = emoji_map.get(analysis.recommendation, "鉂?)
 
     warnings_text = ""
     if analysis.warnings:
-        warnings_text = "\n⚠️ Warnings:\n" + "\n".join(f"  • {w}" for w in analysis.warnings)
+        warnings_text = "\n鈿狅笍 Warnings:\n" + "\n".join(f"  鈥?{w}" for w in analysis.warnings)
 
     text = (
         f"{emoji} <b>AI Analysis: {analysis.recommendation.upper()}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
+        f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
         f"Ticker: <code>{ticker}</code>\n"
         f"Confidence: <b>{analysis.confidence:.0%}</b>\n"
         f"Risk Score: {analysis.risk_score:.0%}\n"
         f"Market: {analysis.market_condition}\n"
         f"Position Size: {analysis.position_size_pct:.0%}\n"
-        f"\n💬 {analysis.reasoning}"
+        f"\n馃挰 {analysis.reasoning}"
         f"{warnings_text}"
     )
     await send_telegram(text)
@@ -88,10 +88,10 @@ async def notify_trade_executed(decision: TradeDecision, order_result: dict):
     """Notify when a trade is executed."""
     status = order_result.get("status", "unknown")
     if status in ("filled", "simulated"):
-        mode = "📝 PAPER" if status == "simulated" else "💰 LIVE"
+        mode = "馃摑 PAPER" if status == "simulated" else "馃挵 LIVE"
         text = (
-            f"🎯 <b>Trade Executed</b> ({mode})\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"馃幆 <b>Trade Executed</b> ({mode})\n"
+            f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
             f"Ticker: <code>{decision.ticker}</code>\n"
             f"Direction: <b>{decision.direction.value.upper() if decision.direction else 'N/A'}</b>\n"
             f"Entry: <code>{decision.entry_price}</code>\n"
@@ -100,32 +100,32 @@ async def notify_trade_executed(decision: TradeDecision, order_result: dict):
             f"Quantity: <code>{decision.quantity}</code>"
         )
         if decision.ai_analysis:
-            text += f"\n🤖 AI Confidence: {decision.ai_analysis.confidence:.0%}"
+            text += f"\n馃 AI Confidence: {decision.ai_analysis.confidence:.0%}"
     elif status == "error":
         text = (
-            f"💥 <b>Trade Failed</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"馃挜 <b>Trade Failed</b>\n"
+            f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
             f"Ticker: <code>{decision.ticker}</code>\n"
             f"Error: {order_result.get('reason', 'Unknown')}"
         )
     else:
-        text = f"ℹ️ Trade status: {status} - {order_result.get('reason', '')}"
+        text = f"鈩癸笍 Trade status: {status} - {order_result.get('reason', '')}"
 
     await send_telegram(text)
 
 
 async def notify_error(error: str):
     """Notify about system errors."""
-    text = f"🔴 <b>System Error</b>\n━━━━━━━━━━━━━━━━━━\n{error}"
+    text = f"馃敶 <b>System Error</b>\n鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n{error}"
     await send_telegram(text)
 
 
 async def notify_daily_summary(trades: int, win_rate: float, pnl: float):
     """Send daily trading summary."""
-    emoji = "📈" if pnl >= 0 else "📉"
+    emoji = "馃搱" if pnl >= 0 else "馃搲"
     text = (
         f"{emoji} <b>Daily Summary</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
+        f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
         f"Total Trades: {trades}\n"
         f"Win Rate: {win_rate:.1f}%\n"
         f"P&L: <b>{pnl:+.2f}%</b>"
