@@ -68,7 +68,7 @@ Use **Python 3.10+** for local installs. Docker uses Python 3.12 by default and 
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-organization/signal-server.git
+git clone https://github.com/ikun52012/QuantPilot-AI.git
 cd signal-server
 
 # 2. Install core Python dependencies (venv recommended)
