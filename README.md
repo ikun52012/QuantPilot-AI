@@ -1,32 +1,59 @@
-# 📡 QuantPilot AI (v4.1)
+# 📡 QuantPilot AI (v4.2)
 
 ![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
 
-**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT, Anthropic Claude, DeepSeek, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
+**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, **OpenRouter 100+ models**, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
 
-This system is equipped with a stunning "Midnight Glassmorphism" interactive frontend dashboard. It features a complete multi-tenant/multi-user role-based access control system and a USDT subscription payment pipeline, making it ready to be deployed commercially as a complete SaaS quantitative advisory platform.
+**NEW in v4.2**: Multi-model voting system, OpenRouter integration, realistic fee calculation, and 45 audit fixes.
 
 ---
 
 ## ✨ Core Features
 
 - **🤖 Invincible AI Trading Analysis Pipeline**
-  - Built-in integration with OpenAI (GPT-4o), Anthropic (Claude 3.5 Sonnet), DeepSeek, and supports fully custom OpenAI-compatible endpoints.
-  - The AI performs secondary risk assessment based on market depth and direction context, identifying false breakouts and choppy markets. It automatically recommends optimal take-profit tiers and adaptive stop-loss points.
+  - Built-in integration with OpenAI (GPT-4o), Anthropic (Claude 3.5 Sonnet), DeepSeek, and custom endpoints.
+  - **NEW: OpenRouter** - Access 100+ models via single API (GPT-4o, Claude, Gemini, Llama 3.1, Mistral, Qwen).
+  - **NEW: Multi-Model Voting** - Combine multiple AI providers for robust decisions. Strategies: weighted, consensus, best-confidence.
+  - AI performs secondary risk assessment, identifies false breakouts, recommends optimal TP/SL.
 - **🛡️ 15-Layer Pre-Filter System**
-  - Features an extremely strict preliminary Webhook signal processor to prevent entries during malicious market conditions like whale manipulation or black swan high-volatility events.
-  - Supports circuit breakers for maximum daily trades and maximum daily account drawdown.
+  - Strict Webhook signal processor preventing entries during whale manipulation/black swan events.
+  - Circuit breakers for max daily trades and drawdown.
 - **💸 Robust Multi-Tenant Architecture & Crypto Payment System**
-  - Complete and secure JWT session control with independent user dashboards and a global Super Admin Dashboard.
-  - Create and manage paid subscription plans. Features built-in multi-chain USDT transaction hash verification (TRC20, ERC20, BEP20, Solana, etc.), invite codes, and a free-trial ecosystem for a closed-loop business model.
-- **⚡ Multi-Exchange Live & Paper Trading Engine (Powered by ccxt)**
-  - Out-of-the-box support for Binance, OKX, Bybit, Bitget, Gate.io, and Coinbase.
-  - Fully controlled via environment variables, the admin dashboard, or individual user settings for Local Paper Trading, Exchange Sandbox/Testnet Trading, and Live Trading.
-- **🎯 Smart Tiered Risk Management & Trailing Stops (Multi-TP)**
-  - Customize up to 4 sequential stages (TP1 to TP4) of tiered position closing to secure bounce profits.
-  - In-house developed smart trailing stop module that steps up the hard stop-loss based on percentage steps, letting your profits run.
+  - JWT session control with user dashboards and admin panel.
+  - Multi-chain USDT verification (TRC20, ERC20, BEP20, Solana), invite codes, subscription plans.
+- **⚡ Multi-Exchange Live & Paper Trading Engine**
+  - Binance, OKX, Bybit, Bitget, Gate.io, Coinbase support.
+  - Paper trading, sandbox/testnet, live trading modes.
+  - **NEW: Realistic fees** - Maker 0.02%, Taker 0.05% for accurate PnL.
+- **🎯 Smart Tiered Risk Management & Trailing Stops**
+  - Up to 4 TP levels (TP1-TP4) with configurable distances and close percentages.
+  - 5 trailing stop modes: Moving, Breakeven-on-TP1, Step, Profit-%, Static.
 - **📱 Real-time Telegram Notifications**
-  - From receiving a signal, triggering pre-filter blocks, AI smart analysis, to exchange order execution, all pipeline events are broadcasted in real-time to your Telegram Bot.
+  - Pipeline events broadcast to Telegram Bot.
+
+---
+
+## 🆕 v4.2 New Features
+
+### Multi-Model Voting
+Combine analysis from multiple AI providers for more robust trading decisions:
+- **Weighted**: Recommended. Weighted average of confidence.
+- **Consensus**: Only proceed if majority agrees.
+- **Best Confidence**: Take highest confidence result.
+
+### OpenRouter Integration
+Access 100+ AI models through a single API key:
+- OpenAI: `openai/gpt-4o`, `openai/gpt-4o-mini`
+- Anthropic: `anthropic/claude-3.5-sonnet`
+- Google: `google/gemini-pro-1.5`
+- Meta: `meta-llama/llama-3.1-70b-instruct`
+- DeepSeek: `deepseek/deepseek-chat` (~$0.14/1M tokens - very cost-effective)
+
+### Paper Trading Fee Fix
+Realistic fee calculation for accurate PnL:
+- Maker fee: 0.02% (limit orders)
+- Taker fee: 0.05% (market orders)
+- Configurable order types affect fee tier
 
 ---
 

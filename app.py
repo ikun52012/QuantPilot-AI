@@ -41,6 +41,7 @@ from routers.auth import router as auth_router
 from routers.admin import router as admin_router
 from routers.user import router as user_router
 from routers.subscription import router as subscription_router
+from routers.ai_config import router as ai_config_router
 
 
 # ─────────────────────────────────────────────
@@ -208,6 +209,7 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(user_router)
 app.include_router(subscription_router)
+app.include_router(ai_config_router)
 
 
 # ─────────────────────────────────────────────
