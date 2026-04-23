@@ -3,35 +3,44 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QuantPilot AI — AI-Powered Crypto Trading</title>
-    <meta name="description" content="AI-powered cryptocurrency trading signal server with multi-exchange support, intelligent analysis, and advanced risk management.">
-    <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800,900|inter:300,400,500,600" rel="stylesheet">
+    <title>QuantPilot AI — AI-Powered Crypto Trading Platform</title>
+    <meta name="description" content="QuantPilot AI v4.2 — Multi-model AI voting, 100+ models via OpenRouter, 6+ exchanges, advanced risk management. The ultimate crypto quant trading platform.">
+    <meta name="keywords" content="crypto trading, AI trading, quantitative trading, GPT-4o, Claude, DeepSeek, OpenRouter, Binance, OKX, automated trading">
+    <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800,900|inter:300,400,500,600|jetbrains+mono:400,500" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <style>
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
         :root {
-            --bg-dark: #020617;
-            --bg-card: rgba(15, 23, 42, 0.65);
-            --border: rgba(255, 255, 255, 0.08);
-            --text-primary: #f8fafc;
+            --bg-dark: #030712;
+            --bg-card: rgba(15, 23, 42, 0.6);
+            --bg-card-hover: rgba(15, 23, 42, 0.85);
+            --border: rgba(255, 255, 255, 0.06);
+            --border-hover: rgba(99, 102, 241, 0.3);
+            --text-primary: #f1f5f9;
             --text-secondary: #94a3b8;
             --text-muted: #64748b;
+            --accent-indigo: #6366f1;
             --accent-blue: #3b82f6;
             --accent-purple: #a855f7;
             --accent-cyan: #06b6d4;
             --accent-green: #10b981;
             --accent-orange: #f59e0b;
-            --gradient-hero: linear-gradient(135deg, #3b82f6 0%, #a855f7 50%, #06b6d4 100%);
-            --gradient-card: linear-gradient(135deg, rgba(59,130,246,0.08), rgba(168,85,247,0.06));
-            --glow-blue: 0 0 80px rgba(59,130,246,0.2);
-            --glow-purple: 0 0 80px rgba(168,85,247,0.15);
-            --radius: 24px;
-            --radius-sm: 12px;
+            --accent-rose: #f43f5e;
+            --gradient-hero: linear-gradient(135deg, #6366f1 0%, #a855f7 40%, #06b6d4 100%);
+            --gradient-text: linear-gradient(135deg, #818cf8 0%, #c084fc 50%, #22d3ee 100%);
+            --gradient-border: linear-gradient(135deg, rgba(99,102,241,0.4), rgba(168,85,247,0.2), rgba(6,182,212,0.3));
+            --glow-indigo: 0 0 80px rgba(99,102,241,0.15);
+            --glow-purple: 0 0 80px rgba(168,85,247,0.1);
+            --radius-xl: 28px;
+            --radius-lg: 20px;
+            --radius-md: 14px;
+            --radius-sm: 10px;
         }
 
         html { scroll-behavior: smooth; }
-         body {
+
+        body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg-dark);
             color: var(--text-primary);
@@ -43,44 +52,54 @@
             font-family: 'Outfit', sans-serif;
         }
 
-        /* ── Animated background ── */
+        code, .mono { font-family: 'JetBrains Mono', monospace; }
+
+        /* ── Animated Background ── */
         .bg-grid {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             background-image:
-                linear-gradient(rgba(59,130,246,0.03) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(59,130,246,0.03) 1px, transparent 1px);
-            background-size: 60px 60px;
+                linear-gradient(rgba(99,102,241,0.025) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(99,102,241,0.025) 1px, transparent 1px);
+            background-size: 64px 64px;
+            mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 20%, transparent 70%);
+            -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 20%, transparent 70%);
+        }
+        .bg-noise {
+            position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.015;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+            background-size: 256px 256px;
         }
         .bg-glow {
             position: fixed; z-index: 0; pointer-events: none;
-            width: 600px; height: 600px; border-radius: 50%;
-            filter: blur(140px); opacity: 0.35;
-            animation: float 20s infinite ease-in-out alternate;
+            width: 700px; height: 700px; border-radius: 50%;
+            filter: blur(160px); opacity: 0.3;
+            animation: orb-float 25s infinite ease-in-out alternate;
         }
-        .bg-glow.g1 { top: -200px; left: -100px; background: rgba(59,130,246,0.18); animation-delay: 0s; }
-        .bg-glow.g2 { top: 40%; right: -200px; background: rgba(168,85,247,0.14); animation-delay: -5s; }
-        .bg-glow.g3 { bottom: -200px; left: 30%; background: rgba(6,182,212,0.12); animation-delay: -10s; }
+        .bg-glow.g1 { top: -300px; left: -200px; background: rgba(99,102,241,0.2); animation-delay: 0s; }
+        .bg-glow.g2 { top: 30%; right: -300px; background: rgba(168,85,247,0.15); animation-delay: -8s; }
+        .bg-glow.g3 { bottom: -300px; left: 20%; background: rgba(6,182,212,0.12); animation-delay: -16s; }
 
-        @keyframes float {
+        @keyframes orb-float {
             0% { transform: translate(0, 0) scale(1); }
-            33% { transform: translate(30px, -50px) scale(1.1); }
-            66% { transform: translate(-20px, 20px) scale(0.9); }
-            100% { transform: translate(0, 0) scale(1); }
+            25% { transform: translate(40px, -60px) scale(1.08); }
+            50% { transform: translate(-30px, 30px) scale(0.95); }
+            75% { transform: translate(20px, 50px) scale(1.05); }
+            100% { transform: translate(-10px, -20px) scale(1); }
         }
 
         /* ── Utility ── */
-        .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
-        .section { padding: 100px 0; }
+        .container { max-width: 1240px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
+        .section { padding: 120px 0; }
         .section-title {
-            font-size: clamp(28px, 4vw, 42px); font-weight: 800; text-align: center;
-            margin-bottom: 16px; letter-spacing: -0.02em;
+            font-size: clamp(30px, 4.5vw, 48px); font-weight: 800; text-align: center;
+            margin-bottom: 16px; letter-spacing: -0.03em;
         }
         .section-subtitle {
             text-align: center; color: var(--text-secondary); font-size: 17px;
-            max-width: 600px; margin: 0 auto 56px;
+            max-width: 640px; margin: 0 auto 64px; line-height: 1.7;
         }
         .gradient-text {
-            background: var(--gradient-hero);
+            background: var(--gradient-text);
             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
             background-clip: text;
         }
@@ -90,108 +109,158 @@
             100% { background-position: -200% center; }
         }
         .shimmer-text {
-            background: linear-gradient(90deg, #3b82f6 0%, #a855f7 25%, #06b6d4 50%, #a855f7 75%, #3b82f6 100%);
+            background: linear-gradient(90deg, #818cf8 0%, #c084fc 25%, #22d3ee 50%, #c084fc 75%, #818cf8 100%);
             background-size: 200% auto;
             color: transparent;
             -webkit-background-clip: text;
             background-clip: text;
-            animation: shimmer 4s linear infinite;
+            animation: shimmer 5s linear infinite;
         }
 
-        /* ── Header / Navbar ── */
+        @keyframes typing {
+            from { width: 0; }
+            to { width: 100%; }
+        }
+        @keyframes blink-caret {
+            0%, 100% { border-color: transparent; }
+            50% { border-color: var(--accent-indigo); }
+        }
+
+        /* ── Navbar ── */
         .navbar {
             position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-            padding: 16px 0;
-            background: rgba(5, 8, 16, 0.7);
-            backdrop-filter: blur(16px);
-            border-bottom: 1px solid var(--border);
-            transition: all 0.3s ease;
+            padding: 18px 0;
+            background: rgba(3, 7, 18, 0.6);
+            backdrop-filter: blur(20px) saturate(1.2);
+            -webkit-backdrop-filter: blur(20px) saturate(1.2);
+            border-bottom: 1px solid transparent;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .navbar.scrolled {
+            padding: 12px 0;
+            background: rgba(3, 7, 18, 0.92);
+            border-bottom-color: var(--border);
         }
         .navbar .container {
             display: flex; align-items: center; justify-content: space-between;
         }
         .nav-logo {
             display: flex; align-items: center; gap: 10px;
-            font-size: 20px; font-weight: 800; text-decoration: none; color: var(--text-primary);
+            font-size: 22px; font-weight: 900; text-decoration: none; color: var(--text-primary);
+            letter-spacing: -0.02em;
         }
-        .nav-logo i {
-            font-size: 26px;
+        .nav-logo-icon {
+            width: 36px; height: 36px; border-radius: 10px;
             background: var(--gradient-hero);
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; color: #fff;
+            box-shadow: 0 4px 16px rgba(99,102,241,0.3);
         }
-        .nav-links { display: flex; align-items: center; gap: 32px; }
+        .nav-links { display: flex; align-items: center; gap: 8px; }
         .nav-links a {
             color: var(--text-secondary); text-decoration: none; font-size: 14px;
-            font-weight: 500; transition: color 0.2s;
+            font-weight: 500; transition: all 0.2s; padding: 8px 16px;
+            border-radius: 8px;
         }
-        .nav-links a:hover { color: var(--text-primary); }
+        .nav-links a:hover { color: var(--text-primary); background: rgba(255,255,255,0.05); }
+        .nav-cta-group { display: flex; align-items: center; gap: 10px; }
         .nav-cta {
             display: inline-flex; align-items: center; gap: 8px;
-            padding: 10px 24px; border-radius: 10px;
+            padding: 10px 22px; border-radius: var(--radius-sm);
             background: var(--gradient-hero); color: #fff; font-weight: 600;
             font-size: 14px; text-decoration: none; transition: all 0.3s;
-            box-shadow: 0 4px 20px rgba(79,140,255,0.3);
+            box-shadow: 0 4px 20px rgba(99,102,241,0.3);
         }
-        .nav-cta:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(79,140,255,0.4); }
+        .nav-cta:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(99,102,241,0.45); }
+        .nav-cta-ghost {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 10px 22px; border-radius: var(--radius-sm);
+            background: rgba(255,255,255,0.04); color: var(--text-primary); font-weight: 600;
+            font-size: 14px; text-decoration: none; transition: all 0.3s;
+            border: 1px solid var(--border);
+        }
+        .nav-cta-ghost:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); }
 
         /* ── Hero ── */
         .hero {
             min-height: 100vh; display: flex; align-items: center;
-            text-align: center; padding-top: 80px;
+            text-align: center; padding-top: 80px; position: relative;
         }
         .hero-badge {
-            display: inline-flex; align-items: center; gap: 8px;
-            padding: 6px 16px; border-radius: 50px;
-            background: rgba(79,140,255,0.1); border: 1px solid rgba(79,140,255,0.2);
-            font-size: 13px; color: var(--accent-blue); margin-bottom: 28px;
-            font-weight: 600;
+            display: inline-flex; align-items: center; gap: 10px;
+            padding: 8px 20px 8px 12px; border-radius: 50px;
+            background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2);
+            font-size: 13px; color: var(--accent-indigo); margin-bottom: 32px;
+            font-weight: 600; letter-spacing: 0.02em;
+        }
+        .hero-badge .dot-container {
+            width: 22px; height: 22px; border-radius: 50%;
+            background: rgba(16,185,129,0.12);
+            display: flex; align-items: center; justify-content: center;
         }
         .hero-badge .dot {
-            width: 6px; height: 6px; border-radius: 50%; background: var(--accent-green);
+            width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green);
             animation: glow-pulse 2s infinite;
         }
         @keyframes glow-pulse {
             0%,100% { box-shadow: 0 0 4px var(--accent-green); opacity: 1; }
-            50% { box-shadow: 0 0 12px var(--accent-green); opacity: 0.6; }
+            50% { box-shadow: 0 0 16px var(--accent-green); opacity: 0.5; }
         }
         .hero h1 {
-            font-size: clamp(40px, 6vw, 72px); font-weight: 900;
-            letter-spacing: -0.03em; line-height: 1.1; margin-bottom: 24px;
+            font-size: clamp(42px, 7vw, 80px); font-weight: 900;
+            letter-spacing: -0.04em; line-height: 1.05; margin-bottom: 28px;
         }
         .hero p {
-            font-size: 18px; color: var(--text-secondary); max-width: 680px;
-            margin: 0 auto 40px; line-height: 1.7;
+            font-size: 18px; color: var(--text-secondary); max-width: 700px;
+            margin: 0 auto 44px; line-height: 1.75;
         }
         .hero-actions { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
         .btn-hero {
             display: inline-flex; align-items: center; gap: 10px;
-            padding: 14px 32px; border-radius: 12px;
+            padding: 16px 36px; border-radius: var(--radius-md);
             font-size: 15px; font-weight: 600; text-decoration: none;
-            transition: all 0.3s ease; cursor: pointer; border: none;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); cursor: pointer; border: none;
+            position: relative; overflow: hidden;
         }
+        .btn-hero::after {
+            content: ''; position: absolute; inset: 0;
+            background: linear-gradient(135deg, rgba(255,255,255,0.1), transparent);
+            opacity: 0; transition: opacity 0.3s;
+        }
+        .btn-hero:hover::after { opacity: 1; }
         .btn-hero.primary {
             background: var(--gradient-hero); color: #fff;
-            box-shadow: 0 4px 24px rgba(79,140,255,0.35);
+            box-shadow: 0 4px 28px rgba(99,102,241,0.35);
         }
-        .btn-hero.primary:hover { transform: translateY(-3px); box-shadow: 0 8px 40px rgba(79,140,255,0.5); }
+        .btn-hero.primary:hover { transform: translateY(-3px); box-shadow: 0 12px 40px rgba(99,102,241,0.5); }
         .btn-hero.secondary {
-            background: rgba(255,255,255,0.05); color: var(--text-primary);
+            background: rgba(255,255,255,0.04); color: var(--text-primary);
             border: 1px solid var(--border);
         }
-        .btn-hero.secondary:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.1); }
+        .btn-hero.secondary:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); transform: translateY(-2px); }
 
         /* ── Hero Stats ── */
         .hero-stats {
-            display: flex; justify-content: center; gap: 48px; margin-top: 64px;
-            flex-wrap: wrap;
+            display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px;
+            margin-top: 80px; border-radius: var(--radius-lg); overflow: hidden;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border);
         }
-        .hero-stat { text-align: center; }
+        .hero-stat {
+            text-align: center; padding: 28px 16px;
+            background: rgba(3, 7, 18, 0.8);
+            backdrop-filter: blur(12px);
+            transition: background 0.3s;
+        }
+        .hero-stat:hover { background: rgba(15, 23, 42, 0.9); }
         .hero-stat-value {
-            font-size: 32px; font-weight: 800;
-            background: var(--gradient-hero);
+            font-size: 36px; font-weight: 900;
+            font-family: 'Outfit', sans-serif;
+            background: var(--gradient-text);
             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            background-clip: text; line-height: 1.2;
         }
-        .hero-stat-label { font-size: 13px; color: var(--text-muted); margin-top: 4px; font-weight: 500; }
+        .hero-stat-label { font-size: 12px; color: var(--text-muted); margin-top: 6px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; }
 
         /* ── Feature Cards ── */
         .features-grid {
@@ -200,143 +269,279 @@
         .feature-card {
             background: var(--bg-card);
             border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 32px 28px;
-            transition: all 0.3s ease;
+            border-radius: var(--radius-xl);
+            padding: 36px 32px;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
             position: relative;
             overflow: hidden;
             backdrop-filter: blur(16px);
             -webkit-backdrop-filter: blur(16px);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
         }
         .feature-card::after {
             content: '';
             position: absolute;
             inset: 0;
             opacity: 0;
-            transition: opacity 0.3s;
-            background: radial-gradient(600px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(255,255,255,0.06), transparent 40%);
+            transition: opacity 0.4s;
+            background: radial-gradient(500px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(99,102,241,0.06), transparent 40%);
             pointer-events: none;
-            z-index: 1;
         }
         .feature-card:hover::after { opacity: 1; }
         .feature-card::before {
             content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent); opacity: 0;
-            transition: opacity 0.3s ease;
+            background: var(--gradient-border); opacity: 0;
+            transition: opacity 0.4s ease;
         }
         .feature-card:hover {
-            transform: translateY(-4px);
-            border-color: rgba(79,140,255,0.15);
-            box-shadow: var(--glow-blue);
+            transform: translateY(-6px);
+            border-color: var(--border-hover);
+            box-shadow: var(--glow-indigo);
         }
         .feature-card:hover::before { opacity: 1; }
         .feature-icon {
-            width: 48px; height: 48px; border-radius: var(--radius-sm);
+            width: 52px; height: 52px; border-radius: var(--radius-md);
             display: flex; align-items: center; justify-content: center;
-            font-size: 22px; margin-bottom: 20px;
+            font-size: 24px; margin-bottom: 24px;
         }
-        .feature-icon.blue { background: rgba(79,140,255,0.12); color: var(--accent-blue); }
-        .feature-icon.purple { background: rgba(168,85,247,0.12); color: var(--accent-purple); }
-        .feature-icon.cyan { background: rgba(34,211,238,0.12); color: var(--accent-cyan); }
-        .feature-icon.green { background: rgba(16,185,129,0.12); color: var(--accent-green); }
-        .feature-icon.orange { background: rgba(245,158,11,0.12); color: var(--accent-orange); }
-        .feature-card h3 { font-size: 17px; font-weight: 700; margin-bottom: 10px; }
-        .feature-card p { font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
+        .feature-icon.indigo { background: rgba(99,102,241,0.1); color: var(--accent-indigo); }
+        .feature-icon.blue { background: rgba(59,130,246,0.1); color: var(--accent-blue); }
+        .feature-icon.purple { background: rgba(168,85,247,0.1); color: var(--accent-purple); }
+        .feature-icon.cyan { background: rgba(6,182,212,0.1); color: var(--accent-cyan); }
+        .feature-icon.green { background: rgba(16,185,129,0.1); color: var(--accent-green); }
+        .feature-icon.orange { background: rgba(245,158,11,0.1); color: var(--accent-orange); }
+        .feature-icon.rose { background: rgba(244,63,94,0.1); color: var(--accent-rose); }
+        .feature-card .card-tag {
+            display: inline-block; padding: 3px 10px; border-radius: 6px;
+            font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+            text-transform: uppercase; margin-bottom: 12px;
+        }
+        .tag-new { background: rgba(16,185,129,0.12); color: var(--accent-green); }
+        .tag-upgraded { background: rgba(99,102,241,0.12); color: var(--accent-indigo); }
+        .feature-card h3 { font-size: 18px; font-weight: 700; margin-bottom: 10px; letter-spacing: -0.01em; }
+        .feature-card p { font-size: 14px; color: var(--text-secondary); line-height: 1.65; }
+
+        /* ── AI Models Showcase ── */
+        .ai-showcase {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+        }
+        .ai-main-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xl);
+            padding: 40px;
+            position: relative; overflow: hidden;
+        }
+        .ai-main-card::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+            background: var(--gradient-border);
+        }
+        .ai-main-card h3 {
+            font-size: 22px; font-weight: 800; margin-bottom: 20px;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .ai-main-card h3 i { font-size: 26px; }
+        .ai-models-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+        }
+        .ai-model-chip {
+            display: flex; align-items: center; gap: 10px;
+            padding: 14px 16px; border-radius: var(--radius-md);
+            background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+            transition: all 0.3s; cursor: default;
+        }
+        .ai-model-chip:hover {
+            border-color: var(--border-hover);
+            background: rgba(99,102,241,0.05);
+            transform: translateY(-2px);
+        }
+        .ai-model-chip .model-icon {
+            width: 36px; height: 36px; border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 16px; flex-shrink: 0;
+        }
+        .ai-model-chip .model-info { flex: 1; min-width: 0; }
+        .ai-model-chip .model-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .ai-model-chip .model-price { font-size: 11px; color: var(--text-muted); }
+
+        /* ── Voting Section ── */
+        .voting-section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xl);
+            padding: 40px;
+            position: relative; overflow: hidden;
+        }
+        .voting-section::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+            background: linear-gradient(90deg, var(--accent-green), var(--accent-indigo), var(--accent-cyan));
+        }
+        .voting-section h3 {
+            font-size: 22px; font-weight: 800; margin-bottom: 20px;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .voting-strategies {
+            display: flex; flex-direction: column; gap: 12px;
+        }
+        .strategy-item {
+            display: flex; align-items: center; gap: 14px;
+            padding: 16px 18px; border-radius: var(--radius-md);
+            background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+            transition: all 0.3s;
+        }
+        .strategy-item:hover {
+            border-color: var(--border-hover);
+            background: rgba(99,102,241,0.04);
+        }
+        .strategy-icon {
+            width: 42px; height: 42px; border-radius: var(--radius-sm);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px; flex-shrink: 0;
+        }
+        .strategy-info h4 { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
+        .strategy-info p { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
 
         /* ── Pipeline Section ── */
         .pipeline-flow {
             display: flex; align-items: center; justify-content: center;
-            gap: 4px; flex-wrap: wrap; margin-top: 40px;
+            gap: 6px; flex-wrap: wrap; margin-top: 48px;
         }
         .pipeline-step {
             display: flex; align-items: center; gap: 10px;
-            padding: 16px 24px; border-radius: var(--radius);
+            padding: 18px 28px; border-radius: var(--radius-lg);
             background: var(--bg-card); border: 1px solid var(--border);
-            transition: all 0.3s ease;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+        }
+        .pipeline-step::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+            background: var(--gradient-border); opacity: 0;
+            transition: opacity 0.3s;
         }
         .pipeline-step:hover {
-            border-color: rgba(79,140,255,0.2);
-            transform: translateY(-2px);
+            border-color: var(--border-hover);
+            transform: translateY(-3px);
+            box-shadow: var(--glow-indigo);
         }
+        .pipeline-step:hover::before { opacity: 1; }
         .pipeline-step i { font-size: 22px; }
         .pipeline-step span { font-size: 14px; font-weight: 600; }
-        .pipeline-arrow { 
-            color: var(--accent-blue); 
-            font-size: 24px; 
+        .pipeline-arrow {
+            color: var(--accent-indigo);
+            font-size: 22px;
             animation: pulse-arrow 1.5s infinite alternate ease-in-out;
         }
         @keyframes pulse-arrow {
-            0% { transform: translateX(-4px); opacity: 0.4; text-shadow: none; }
-            100% { transform: translateX(4px); opacity: 1; text-shadow: 0 0 16px var(--accent-blue); }
+            0% { transform: translateX(-4px); opacity: 0.3; }
+            100% { transform: translateX(4px); opacity: 1; text-shadow: 0 0 16px var(--accent-indigo); }
         }
 
         /* ── TP & Trailing Section ── */
         .tp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
         .tp-card {
             background: var(--bg-card); border: 1px solid var(--border);
-            border-radius: var(--radius); padding: 32px; position: relative; overflow: hidden;
+            border-radius: var(--radius-xl); padding: 36px; position: relative; overflow: hidden;
         }
+        .tp-card::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+        }
+        .tp-card.green-line::before { background: linear-gradient(90deg, var(--accent-green), var(--accent-cyan)); }
+        .tp-card.purple-line::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-indigo)); }
         .tp-card h3 {
-            font-size: 20px; font-weight: 700; margin-bottom: 16px;
-            display: flex; align-items: center; gap: 10px;
+            font-size: 20px; font-weight: 700; margin-bottom: 20px;
+            display: flex; align-items: center; gap: 12px;
         }
         .tp-card h3 i { font-size: 24px; }
         .tp-list { list-style: none; }
         .tp-list li {
-            display: flex; align-items: center; gap: 12px;
-            padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.04);
+            display: flex; align-items: center; gap: 14px;
+            padding: 14px 0; border-bottom: 1px solid rgba(255,255,255,0.04);
             font-size: 14px; color: var(--text-secondary);
         }
         .tp-list li:last-child { border-bottom: none; }
         .tp-list li i { font-size: 16px; color: var(--accent-green); flex-shrink: 0; }
         .tp-list li strong { color: var(--text-primary); }
 
-        /* ── Tech Stack / Exchanges ── */
-        .exchanges-row {
-            display: flex; justify-content: center; gap: 24px; flex-wrap: wrap;
-            margin-top: 40px;
+        /* ── Exchanges ── */
+        .exchanges-grid {
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+            margin-top: 48px;
         }
-        .exchange-chip {
-            display: flex; align-items: center; gap: 8px;
-            padding: 12px 24px; border-radius: 50px;
+        .exchange-card {
+            display: flex; align-items: center; gap: 16px;
+            padding: 20px 24px; border-radius: var(--radius-lg);
             background: var(--bg-card); border: 1px solid var(--border);
-            font-size: 14px; font-weight: 600; color: var(--text-primary);
-            transition: all 0.3s ease;
+            font-size: 15px; font-weight: 600; color: var(--text-primary);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative; overflow: hidden;
         }
-        .exchange-chip:hover { border-color: rgba(79,140,255,0.3); transform: translateY(-2px); }
-        .exchange-chip i { font-size: 18px; }
+        .exchange-card::after {
+            content: '';
+            position: absolute; inset: 0;
+            opacity: 0;
+            transition: opacity 0.3s;
+            background: radial-gradient(400px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(99,102,241,0.04), transparent 40%);
+            pointer-events: none;
+        }
+        .exchange-card:hover::after { opacity: 1; }
+        .exchange-card:hover {
+            border-color: var(--border-hover);
+            transform: translateY(-3px);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .exchange-card .ex-icon {
+            width: 44px; height: 44px; border-radius: var(--radius-sm);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px; flex-shrink: 0;
+        }
+        .exchange-card .ex-info { flex: 1; }
+        .exchange-card .ex-name { font-weight: 700; }
+        .exchange-card .ex-desc { font-size: 12px; color: var(--text-muted); font-weight: 400; }
 
         /* ── CTA Section ── */
-        .cta-section {
-            text-align: center; padding: 80px 0 120px;
-        }
+        .cta-section { text-align: center; padding: 80px 0 120px; }
         .cta-box {
-            background: rgba(15, 23, 42, 0.4);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 24px;
-            padding: 64px 48px;
+            background: rgba(15, 23, 42, 0.35);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: var(--radius-xl);
+            padding: 72px 56px;
             position: relative; overflow: hidden;
             backdrop-filter: blur(24px);
-            box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 20px 60px rgba(0,0,0,0.5);
-            animation: pulse-glow 4s infinite alternate;
+            -webkit-backdrop-filter: blur(24px);
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5);
+            animation: cta-pulse 5s infinite alternate;
         }
-        @keyframes pulse-glow {
-            0% { box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 20px 60px rgba(0,0,0,0.5), 0 0 30px rgba(168,85,247,0.1); }
-            100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 20px 60px rgba(0,0,0,0.5), 0 0 50px rgba(59,130,246,0.2); }
+        @keyframes cta-pulse {
+            0% { box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5), 0 0 40px rgba(99,102,241,0.08); }
+            100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5), 0 0 60px rgba(168,85,247,0.12); }
         }
         .cta-box::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+            background: var(--gradient-border);
         }
-        .cta-box h2 { font-size: 32px; font-weight: 800; margin-bottom: 16px; }
-        .cta-box p { color: var(--text-secondary); font-size: 16px; margin-bottom: 32px; max-width: 500px; margin-left: auto; margin-right: auto; }
+        .cta-box::after {
+            content: ''; position: absolute; bottom: -200px; left: 50%; transform: translateX(-50%);
+            width: 600px; height: 400px; border-radius: 50%;
+            background: radial-gradient(circle, rgba(99,102,241,0.08), transparent 70%);
+            pointer-events: none;
+        }
+        .cta-box h2 { font-size: 36px; font-weight: 800; margin-bottom: 16px; letter-spacing: -0.02em; }
+        .cta-box p { color: var(--text-secondary); font-size: 16px; margin-bottom: 36px; max-width: 520px; margin-left: auto; margin-right: auto; line-height: 1.7; }
 
         /* ── Footer ── */
         .footer {
-            padding: 40px 0; border-top: 1px solid var(--border);
-            text-align: center; color: var(--text-muted); font-size: 13px;
+            padding: 48px 0; border-top: 1px solid var(--border);
+            text-align: center;
         }
+        .footer-links {
+            display: flex; justify-content: center; gap: 24px;
+            margin-bottom: 20px;
+        }
+        .footer-links a {
+            color: var(--text-muted); text-decoration: none; font-size: 13px;
+            transition: color 0.2s;
+        }
+        .footer-links a:hover { color: var(--text-primary); }
+        .footer-copy { color: var(--text-muted); font-size: 13px; }
 
         /* ── Animated counter ── */
         .counter { display: inline-block; }
@@ -345,21 +550,31 @@
         @media (max-width: 1024px) {
             .features-grid { grid-template-columns: repeat(2, 1fr); }
             .tp-grid { grid-template-columns: 1fr; }
+            .ai-showcase { grid-template-columns: 1fr; }
+            .exchanges-grid { grid-template-columns: repeat(2, 1fr); }
+            .hero-stats { grid-template-columns: repeat(3, 1fr); }
         }
         @media (max-width: 768px) {
             .features-grid { grid-template-columns: 1fr; }
-            .nav-links { display: none; }
+            .nav-links, .nav-cta-ghost { display: none; }
             .hero h1 { font-size: 36px; }
-            .hero-stats { gap: 24px; }
+            .hero-stats { grid-template-columns: repeat(3, 1fr); }
             .pipeline-flow { flex-direction: column; }
             .pipeline-arrow { transform: rotate(90deg); }
             .cta-box { padding: 40px 24px; }
+            .exchanges-grid { grid-template-columns: 1fr; }
+            .ai-models-grid { grid-template-columns: 1fr; }
+            .hero-stat-value { font-size: 28px; }
+        }
+        @media (max-width: 480px) {
+            .hero-stats { grid-template-columns: repeat(2, 1fr); }
+            .hero-stats .hero-stat:last-child { grid-column: span 2; }
         }
 
-        /* ── Animations on scroll ── */
+        /* ── Reveal animations ── */
         .reveal {
-            opacity: 0; transform: translateY(30px);
-            transition: opacity 0.6s ease, transform 0.6s ease;
+            opacity: 0; transform: translateY(32px);
+            transition: opacity 0.7s cubic-bezier(0.4, 0, 0.2, 1), transform 0.7s cubic-bezier(0.4, 0, 0.2, 1);
         }
         .reveal.visible { opacity: 1; transform: translateY(0); }
         .reveal.delay-1 { transition-delay: 0.1s; }
@@ -367,11 +582,13 @@
         .reveal.delay-3 { transition-delay: 0.3s; }
         .reveal.delay-4 { transition-delay: 0.4s; }
         .reveal.delay-5 { transition-delay: 0.5s; }
+        .reveal.delay-6 { transition-delay: 0.6s; }
 
-        /* Floating particles */
-        .particle {
-            position: absolute; width: 4px; height: 4px;
-            border-radius: 50%; pointer-events: none; z-index: 0;
+        /* ── Divider ── */
+        .section-divider {
+            width: 60px; height: 3px; border-radius: 2px;
+            background: var(--gradient-hero);
+            margin: 0 auto 0;
         }
     </style>
 </head>
@@ -379,6 +596,7 @@
 
 <!-- Background effects -->
 <div class="bg-grid"></div>
+<div class="bg-noise"></div>
 <div class="bg-glow g1"></div>
 <div class="bg-glow g2"></div>
 <div class="bg-glow g3"></div>
@@ -387,62 +605,67 @@
 <nav class="navbar" id="navbar">
     <div class="container">
         <a href="/" class="nav-logo">
-            <i class="ri-signal-tower-fill"></i>
-            <span>TVSS</span>
+            <div class="nav-logo-icon"><i class="ri-signal-tower-fill"></i></div>
+            <span>QPAI</span>
         </a>
         <div class="nav-links">
             <a href="#features">Features</a>
+            <a href="#ai-models">AI Models</a>
             <a href="#pipeline">Pipeline</a>
-            <a href="#tp-trailing">Take Profit</a>
             <a href="#exchanges">Exchanges</a>
         </div>
-        <a href="/register" class="nav-cta">
-            <i class="ri-user-add-line"></i> Sign Up
-        </a>
+        <div class="nav-cta-group">
+            <a href="/login" class="nav-cta-ghost"><i class="ri-login-box-line"></i> Sign In</a>
+            <a href="/register" class="nav-cta"><i class="ri-user-add-line"></i> Get Started</a>
+        </div>
     </div>
 </nav>
 
 <!-- ── Hero ── -->
 <section class="hero">
     <div class="container">
-        <div class="hero-badge">
-            <span class="dot"></span>
-            <span>v4.0 — Auth · Subscriptions · Crypto Payments</span>
+        <div class="hero-badge reveal">
+            <span class="dot-container"><span class="dot"></span></span>
+            <span>v4.2 — Multi-Model Voting &middot; OpenRouter &middot; 100+ AI Models</span>
         </div>
-        <h1>
+        <h1 class="reveal delay-1">
             AI-Powered<br>
             <span class="shimmer-text">Crypto Trading</span><br>
-            Signal Server
+            QuantPilot AI
         </h1>
-        <p>
-            Receive signals from TradingView, filter with intelligent rules,
-            analyze with AI (GPT-4o / Claude / DeepSeek), and execute trades
-            across 6+ exchanges — all with advanced multi-TP and trailing stop management.
+        <p class="reveal delay-2">
+            Combine multiple AI models for robust trading decisions. Receive signals from TradingView,
+            filter with 15 intelligent checks, analyze with GPT-4o / Claude / DeepSeek via
+            <strong style="color:var(--text-primary)">OpenRouter</strong>, and execute across 6+ exchanges.
         </p>
-        <div class="hero-actions">
-            <a href="/dashboard" class="btn-hero primary">
-                <i class="ri-rocket-2-line"></i> Open Dashboard
+        <div class="hero-actions reveal delay-3">
+            <a href="/register" class="btn-hero primary">
+                <i class="ri-rocket-2-line"></i> Start Trading Free
             </a>
             <a href="#features" class="btn-hero secondary">
                 <i class="ri-book-read-line"></i> Explore Features
             </a>
         </div>
-        <div class="hero-stats">
+        <div class="hero-stats reveal delay-4">
+            <div class="hero-stat">
+                <div class="hero-stat-value counter" data-target="100">0</div>
+                <div class="hero-stat-label">AI Models</div>
+            </div>
             <div class="hero-stat">
                 <div class="hero-stat-value counter" data-target="6">0</div>
-                <div class="hero-stat-label">Exchanges Supported</div>
+                <div class="hero-stat-label">Exchanges</div>
             </div>
             <div class="hero-stat">
                 <div class="hero-stat-value counter" data-target="15">0</div>
-                <div class="hero-stat-label">Pre-Filter Checks</div>
+                <div class="hero-stat-label">Filter Checks</div>
             </div>
             <div class="hero-stat">
                 <div class="hero-stat-value counter" data-target="4">0</div>
-                <div class="hero-stat-label">Take-Profit Levels</div>
+                <div class="hero-stat-label">TP Levels</div>
             </div>
             <div class="hero-stat">
                 <div class="hero-stat-value counter" data-target="5">0</div>
-                <div class="hero-stat-label">Trailing Stop Modes</div>
+                <div class="hero-stat-label">Trailing Modes</div>
             </div>
         </div>
     </div>
@@ -455,38 +678,169 @@
             Everything You Need for<br><span class="gradient-text">Smart Trading</span>
         </h2>
         <p class="section-subtitle reveal delay-1">
-            A complete trading pipeline from signal to execution, enhanced by AI intelligence and advanced risk management.
+            A complete trading pipeline from signal to execution, enhanced by multi-model AI intelligence and advanced risk management.
         </p>
         <div class="features-grid">
             <div class="feature-card reveal delay-1">
-                <div class="feature-icon blue"><i class="ri-robot-2-line"></i></div>
-                <h3>Custom AI Analysis</h3>
-                <p>Choose from OpenAI GPT-4o, Anthropic Claude, or DeepSeek. Customize temperature, max tokens, and add your own system prompt for tailored trade decisions.</p>
+                <span class="card-tag tag-new">NEW</span>
+                <div class="feature-icon indigo"><i class="ri-vote-line"></i></div>
+                <h3>Multi-Model Voting</h3>
+                <p>Combine analysis from multiple AI providers for robust decisions. Weighted, consensus, or best-confidence strategies. Reduces bias and increases reliability.</p>
             </div>
             <div class="feature-card reveal delay-2">
-                <div class="feature-icon green"><i class="ri-money-dollar-circle-line"></i></div>
-                <h3>Multi Take-Profit (TP1-TP4)</h3>
-                <p>Set up to 4 progressive take-profit levels with independent position-close percentages. Scale out of winning trades systematically.</p>
+                <span class="card-tag tag-new">NEW</span>
+                <div class="feature-icon purple"><i class="ri-router-line"></i></div>
+                <h3>OpenRouter 100+ Models</h3>
+                <p>Access GPT-4o, Claude, Gemini, Llama 3.1, Mistral, Qwen, and more through a single API key. The most cost-effective way to enable multi-model analysis.</p>
             </div>
             <div class="feature-card reveal delay-3">
-                <div class="feature-icon purple"><i class="ri-route-line"></i></div>
-                <h3>Advanced Trailing Stop</h3>
-                <p>5 trailing stop modes: Moving, Breakeven on TP1, Step-Down trailing, Profit-% activated trailing, or static stop-loss.</p>
+                <div class="feature-icon blue"><i class="ri-robot-2-line"></i></div>
+                <h3>Custom AI Analysis</h3>
+                <p>Choose from OpenAI GPT-4o, Anthropic Claude, DeepSeek, or your own custom endpoint. Customize temperature, tokens, and system prompt.</p>
             </div>
             <div class="feature-card reveal delay-1">
-                <div class="feature-icon cyan"><i class="ri-exchange-cny-line"></i></div>
-                <h3>6+ Exchange Support</h3>
-                <p>Trade on Binance, OKX, Bybit, Bitget, Gate.io, and Coinbase. Seamless multi-exchange execution via CCXT.</p>
+                <span class="card-tag tag-upgraded">UPGRADED</span>
+                <div class="feature-icon green"><i class="ri-money-dollar-circle-line"></i></div>
+                <h3>Realistic Paper Trading</h3>
+                <p>Accurate fee simulation with maker 0.02% / taker 0.05%. Configure order types (limit/market) that affect fee tiers. Correct PnL with fee deductions.</p>
             </div>
             <div class="feature-card reveal delay-2">
                 <div class="feature-icon orange"><i class="ri-shield-check-line"></i></div>
-                <h3>15-Check Pre-Filter</h3>
-                <p>Enhanced pre-filter with RSI extremes, funding rate guard, orderbook imbalance, market hours, consecutive loss protection, EMA alignment, and more.</p>
+                <h3>15-Layer Pre-Filter</h3>
+                <p>RSI extremes, funding rate guard, orderbook imbalance, market hours, consecutive loss protection, EMA alignment, and adaptive thresholds.</p>
             </div>
             <div class="feature-card reveal delay-3">
-                <div class="feature-icon blue"><i class="ri-pie-chart-2-line"></i></div>
+                <div class="feature-icon cyan"><i class="ri-route-line"></i></div>
+                <h3>5 Trailing Stop Modes</h3>
+                <p>Moving trailing, breakeven on TP1, step-down trailing, profit-% activated, or static stop-loss. Advanced exit management for any strategy.</p>
+            </div>
+            <div class="feature-card reveal delay-1">
+                <span class="card-tag tag-new">NEW</span>
+                <div class="feature-icon rose"><i class="ri-brain-line"></i></div>
+                <h3>AI Batch Queue</h3>
+                <p>Merges same-ticker signals within 5-second window to reduce API costs by 50-70%. Smart signal deduplication without sacrificing quality.</p>
+            </div>
+            <div class="feature-card reveal delay-2">
+                <span class="card-tag tag-new">NEW</span>
+                <div class="feature-icon indigo"><i class="ri-user-heart-line"></i></div>
+                <h3>User Learning System</h3>
+                <p>Tracks model accuracy and adjusts confidence weights based on historical performance. The system learns from your trading data over time.</p>
+            </div>
+            <div class="feature-card reveal delay-3">
+                <div class="feature-icon green"><i class="ri-pie-chart-2-line"></i></div>
                 <h3>Live Analytics</h3>
-                <p>Real-time equity curves, win/loss distribution, Sharpe ratio, Sortino, profit factor and detailed AI performance metrics.</p>
+                <p>Real-time equity curves, win/loss distribution, Sharpe ratio, Sortino, profit factor, and detailed AI performance metrics per model.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ── AI Models & Voting ── -->
+<section class="section" id="ai-models" style="padding-top: 60px;">
+    <div class="container">
+        <h2 class="section-title reveal">
+            <span class="gradient-text">AI Model Ecosystem</span>
+        </h2>
+        <p class="section-subtitle reveal delay-1">
+            Access 100+ AI models through OpenRouter, or use direct provider APIs. Multi-model voting combines their strengths.
+        </p>
+        <div class="ai-showcase">
+            <div class="ai-main-card reveal delay-1">
+                <h3><i class="ri-robot-2-line" style="color:var(--accent-indigo)"></i> Supported Models</h3>
+                <div class="ai-models-grid">
+                    <div class="ai-model-chip">
+                        <div class="model-icon" style="background:rgba(16,185,129,0.1);color:var(--accent-green)"><i class="ri-flashlight-line"></i></div>
+                        <div class="model-info">
+                            <div class="model-name">GPT-4o</div>
+                            <div class="model-price">$5/1M tokens</div>
+                        </div>
+                    </div>
+                    <div class="ai-model-chip">
+                        <div class="model-icon" style="background:rgba(168,85,247,0.1);color:var(--accent-purple)"><i class="ri-sparkling-line"></i></div>
+                        <div class="model-info">
+                            <div class="model-name">Claude 3.5 Sonnet</div>
+                            <div class="model-price">$3/1M tokens</div>
+                        </div>
+                    </div>
+                    <div class="ai-model-chip">
+                        <div class="model-icon" style="background:rgba(59,130,246,0.1);color:var(--accent-blue)"><i class="ri-mental-health-line"></i></div>
+                        <div class="model-info">
+                            <div class="model-name">Gemini Pro 1.5</div>
+                            <div class="model-price">$1.25/1M tokens</div>
+                        </div>
+                    </div>
+                    <div class="ai-model-chip">
+                        <div class="model-icon" style="background:rgba(6,182,212,0.1);color:var(--accent-cyan)"><i class="ri-code-s-slash-line"></i></div>
+                        <div class="model-info">
+                            <div class="model-name">DeepSeek Chat</div>
+                            <div class="model-price">$0.14/1M tokens</div>
+                        </div>
+                    </div>
+                    <div class="ai-model-chip">
+                        <div class="model-icon" style="background:rgba(244,63,94,0.1);color:var(--accent-rose)"><i class="ri-fire-line"></i></div>
+                        <div class="model-info">
+                            <div class="model-name">Llama 3.1 70B</div>
+                            <div class="model-price">$0.9/1M tokens</div>
+                        </div>
+                    </div>
+                    <div class="ai-model-chip">
+                        <div class="model-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-orange)"><i class="ri-typhoon-line"></i></div>
+                        <div class="model-info">
+                            <div class="model-name">Mistral Large</div>
+                            <div class="model-price">$2/1M tokens</div>
+                        </div>
+                    </div>
+                    <div class="ai-model-chip">
+                        <div class="model-icon" style="background:rgba(99,102,241,0.1);color:var(--accent-indigo)"><i class="ri-global-line"></i></div>
+                        <div class="model-info">
+                            <div class="model-name">Qwen 2.5 72B</div>
+                            <div class="model-price">$0.35/1M tokens</div>
+                        </div>
+                    </div>
+                    <div class="ai-model-chip">
+                        <div class="model-icon" style="background:rgba(148,163,184,0.1);color:var(--text-secondary)"><i class="ri-tools-line"></i></div>
+                        <div class="model-info">
+                            <div class="model-name">Local Rules</div>
+                            <div class="model-price">Free (fallback)</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="voting-section reveal delay-2">
+                <h3><i class="ri-vote-line" style="color:var(--accent-green)"></i> Multi-Model Voting</h3>
+                <p style="color:var(--text-secondary);font-size:14px;margin-bottom:20px;line-height:1.6">
+                    Combine analysis from multiple AI providers to produce more robust trading decisions. Each model votes with its confidence, and results are aggregated.
+                </p>
+                <div class="voting-strategies">
+                    <div class="strategy-item">
+                        <div class="strategy-icon" style="background:rgba(16,185,129,0.1);color:var(--accent-green)"><i class="ri-scales-3-line"></i></div>
+                        <div class="strategy-info">
+                            <h4>Weighted <span style="color:var(--accent-green);font-size:11px;font-weight:500">&#9733; Recommended</span></h4>
+                            <p>Weighted average of confidence, vote on recommendation</p>
+                        </div>
+                    </div>
+                    <div class="strategy-item">
+                        <div class="strategy-icon" style="background:rgba(99,102,241,0.1);color:var(--accent-indigo)"><i class="ri-team-line"></i></div>
+                        <div class="strategy-info">
+                            <h4>Consensus</h4>
+                            <p>Only proceed if majority of models agrees</p>
+                        </div>
+                    </div>
+                    <div class="strategy-item">
+                        <div class="strategy-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-orange)"><i class="ri-star-line"></i></div>
+                        <div class="strategy-info">
+                            <h4>Best Confidence</h4>
+                            <p>Take result from the highest confidence model</p>
+                        </div>
+                    </div>
+                </div>
+                <div style="margin-top:20px;padding:16px;border-radius:var(--radius-md);background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.12)">
+                    <p style="font-size:12px;color:var(--text-secondary);line-height:1.6">
+                        <i class="ri-lightbulb-line" style="color:var(--accent-indigo)"></i>
+                        <strong style="color:var(--text-primary)">Recommended:</strong>
+                        1 high-quality model (40-50% weight) + 1 cost-effective model (30-40%) + local fallback (10-20%). Balances quality, cost, and reliability.
+                    </p>
+                </div>
             </div>
         </div>
     </div>
@@ -496,26 +850,26 @@
 <section class="section" id="pipeline" style="padding-top: 60px;">
     <div class="container">
         <h2 class="section-title reveal">Signal <span class="gradient-text">Processing Pipeline</span></h2>
-        <p class="section-subtitle reveal delay-1">Every signal flows through a battle-tested 6-step pipeline.</p>
+        <p class="section-subtitle reveal delay-1">Every signal flows through a battle-tested pipeline with multi-model AI validation.</p>
         <div class="pipeline-flow reveal delay-2">
-            <div class="pipeline-step reveal delay-1" style="color: var(--accent-blue);">
+            <div class="pipeline-step reveal delay-1" style="color: var(--accent-indigo);">
                 <i class="ri-tv-2-line"></i>
                 <span>TradingView</span>
             </div>
             <span class="pipeline-arrow reveal delay-1"><i class="ri-arrow-right-line"></i></span>
             <div class="pipeline-step reveal delay-2" style="color: var(--accent-orange);">
                 <i class="ri-filter-3-line"></i>
-                <span>Pre-Filter</span>
+                <span>15-Layer Filter</span>
             </div>
             <span class="pipeline-arrow reveal delay-2"><i class="ri-arrow-right-line"></i></span>
             <div class="pipeline-step reveal delay-3" style="color: var(--accent-purple);">
                 <i class="ri-robot-2-line"></i>
-                <span>AI Analysis</span>
+                <span>Multi-Model AI</span>
             </div>
             <span class="pipeline-arrow reveal delay-3"><i class="ri-arrow-right-line"></i></span>
             <div class="pipeline-step reveal delay-4" style="color: var(--accent-green);">
-                <i class="ri-checkbox-circle-line"></i>
-                <span>Decision</span>
+                <i class="ri-vote-line"></i>
+                <span>Vote &amp; Decide</span>
             </div>
             <span class="pipeline-arrow reveal delay-4"><i class="ri-arrow-right-line"></i></span>
             <div class="pipeline-step reveal delay-5" style="color: var(--accent-cyan);">
@@ -523,7 +877,7 @@
                 <span>Execute</span>
             </div>
             <span class="pipeline-arrow reveal delay-5"><i class="ri-arrow-right-line"></i></span>
-            <div class="pipeline-step reveal delay-5" style="color: var(--accent-blue);">
+            <div class="pipeline-step reveal delay-6" style="color: var(--accent-indigo);">
                 <i class="ri-telegram-line"></i>
                 <span>Notify</span>
             </div>
@@ -537,7 +891,7 @@
         <h2 class="section-title reveal">Multi Take-Profit &<br><span class="gradient-text">Trailing Stop Strategies</span></h2>
         <p class="section-subtitle reveal delay-1">Maximize profits and protect gains with sophisticated exit management.</p>
         <div class="tp-grid">
-            <div class="tp-card reveal delay-1">
+            <div class="tp-card green-line reveal delay-1">
                 <h3><i class="ri-target-line" style="color:var(--accent-green)"></i> Take-Profit Levels</h3>
                 <ul class="tp-list">
                     <li>
@@ -557,12 +911,12 @@
                         <span><strong>TP4</strong> — Final target, close remaining position</span>
                     </li>
                     <li>
-                        <i class="ri-settings-3-line" style="color:var(--accent-blue)"></i>
+                        <i class="ri-settings-3-line" style="color:var(--accent-indigo)"></i>
                         <span>Configurable distance % and close % per level</span>
                     </li>
                 </ul>
             </div>
-            <div class="tp-card reveal delay-2">
+            <div class="tp-card purple-line reveal delay-2">
                 <h3><i class="ri-route-line" style="color:var(--accent-purple)"></i> Trailing Stop Modes</h3>
                 <ul class="tp-list">
                     <li>
@@ -579,7 +933,7 @@
                     </li>
                     <li>
                         <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>Profit % Trailing</strong> — Activate trailing after X% profit is reached</span>
+                        <span><strong>Profit % Trailing</strong> — Activate trailing after X% profit</span>
                     </li>
                     <li>
                         <i class="ri-close-circle-line" style="color:var(--accent-orange)"></i>
@@ -595,14 +949,50 @@
 <section class="section" id="exchanges" style="padding-top: 60px;">
     <div class="container">
         <h2 class="section-title reveal"><span class="gradient-text">Supported Exchanges</span></h2>
-        <p class="section-subtitle reveal delay-1">Seamlessly connect to the world's leading cryptocurrency exchanges.</p>
-        <div class="exchanges-row reveal delay-2">
-            <div class="exchange-chip"><i class="ri-coins-line" style="color:var(--accent-orange)"></i> Binance</div>
-            <div class="exchange-chip"><i class="ri-coins-line" style="color:var(--accent-blue)"></i> OKX</div>
-            <div class="exchange-chip"><i class="ri-coins-line" style="color:var(--accent-cyan)"></i> Bybit</div>
-            <div class="exchange-chip"><i class="ri-coins-line" style="color:var(--accent-purple)"></i> Bitget</div>
-            <div class="exchange-chip"><i class="ri-coins-line" style="color:var(--accent-green)"></i> Gate.io</div>
-            <div class="exchange-chip"><i class="ri-coins-line" style="color:var(--accent-blue)"></i> Coinbase</div>
+        <p class="section-subtitle reveal delay-1">Seamlessly connect to the world's leading cryptocurrency exchanges via CCXT.</p>
+        <div class="exchanges-grid">
+            <div class="exchange-card reveal delay-1">
+                <div class="ex-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-orange)"><i class="ri-coins-line"></i></div>
+                <div class="ex-info">
+                    <div class="ex-name">Binance</div>
+                    <div class="ex-desc">World's largest crypto exchange</div>
+                </div>
+            </div>
+            <div class="exchange-card reveal delay-2">
+                <div class="ex-icon" style="background:rgba(59,130,246,0.1);color:var(--accent-blue)"><i class="ri-coins-line"></i></div>
+                <div class="ex-info">
+                    <div class="ex-name">OKX</div>
+                    <div class="ex-desc">Advanced derivatives trading</div>
+                </div>
+            </div>
+            <div class="exchange-card reveal delay-3">
+                <div class="ex-icon" style="background:rgba(6,182,212,0.1);color:var(--accent-cyan)"><i class="ri-coins-line"></i></div>
+                <div class="ex-info">
+                    <div class="ex-name">Bybit</div>
+                    <div class="ex-desc">Popular futures platform</div>
+                </div>
+            </div>
+            <div class="exchange-card reveal delay-4">
+                <div class="ex-icon" style="background:rgba(168,85,247,0.1);color:var(--accent-purple)"><i class="ri-coins-line"></i></div>
+                <div class="ex-info">
+                    <div class="ex-name">Bitget</div>
+                    <div class="ex-desc">Copy trading &amp; futures</div>
+                </div>
+            </div>
+            <div class="exchange-card reveal delay-5">
+                <div class="ex-icon" style="background:rgba(16,185,129,0.1);color:var(--accent-green)"><i class="ri-coins-line"></i></div>
+                <div class="ex-info">
+                    <div class="ex-name">Gate.io</div>
+                    <div class="ex-desc">Wide altcoin selection</div>
+                </div>
+            </div>
+            <div class="exchange-card reveal delay-6">
+                <div class="ex-icon" style="background:rgba(99,102,241,0.1);color:var(--accent-indigo)"><i class="ri-coins-line"></i></div>
+                <div class="ex-info">
+                    <div class="ex-name">Coinbase</div>
+                    <div class="ex-desc">US-regulated exchange</div>
+                </div>
+            </div>
         </div>
     </div>
 </section>
@@ -612,12 +1002,12 @@
     <div class="container">
         <div class="cta-box reveal">
             <h2>Ready to Start <span class="gradient-text">Trading Smarter</span>?</h2>
-            <p>Create an account, subscribe to a plan, and start receiving AI-powered trading signals on your exchange.</p>
+            <p>Create an account, subscribe to a plan, and start receiving AI-powered multi-model trading signals on your exchange.</p>
             <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
-                <a href="/register" class="btn-hero primary" style="font-size:16px;padding:16px 40px;">
+                <a href="/register" class="btn-hero primary" style="font-size:16px;padding:18px 44px;">
                     <i class="ri-user-add-line"></i> Create Account
                 </a>
-                <a href="/login" class="btn-hero secondary" style="font-size:16px;padding:16px 40px;">
+                <a href="/login" class="btn-hero secondary" style="font-size:16px;padding:18px 44px;">
                     <i class="ri-login-box-line"></i> Sign In
                 </a>
             </div>
@@ -628,21 +1018,27 @@
 <!-- ── Footer ── -->
 <footer class="footer">
     <div class="container">
-        <p>© 2026 QuantPilot AI · Built by @ikun52012 · v4.0.0</p>
+        <div class="footer-links">
+            <a href="/">Home</a>
+            <a href="/dashboard">Dashboard</a>
+            <a href="/register">Register</a>
+            <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank">GitHub</a>
+        </div>
+        <p class="footer-copy">&copy; 2026 QuantPilot AI &middot; Built by @ikun52012 &middot; v4.2.0</p>
     </div>
 </footer>
 
 <script>
     // ── Scroll reveal ──
-    const observer = new IntersectionObserver((entries) => {
+    const revealObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {
                 entry.target.classList.add('visible');
             }
         });
-    }, { threshold: 0.1 });
+    }, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
 
-    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+    document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
 
     // ── Counter animation ──
     const counters = document.querySelectorAll('.counter');
@@ -651,16 +1047,16 @@
             if (entry.isIntersecting) {
                 const el = entry.target;
                 const target = parseInt(el.dataset.target);
-                let current = 0;
-                const inc = Math.ceil(target / 30);
-                const timer = setInterval(() => {
-                    current += inc;
-                    if (current >= target) {
-                        current = target;
-                        clearInterval(timer);
-                    }
-                    el.textContent = current;
-                }, 40);
+                const duration = 1800;
+                const startTime = performance.now();
+                const animate = (now) => {
+                    const elapsed = now - startTime;
+                    const progress = Math.min(elapsed / duration, 1);
+                    const eased = 1 - Math.pow(1 - progress, 3);
+                    el.textContent = Math.round(eased * target) + (target >= 100 ? '+' : '');
+                    if (progress < 1) requestAnimationFrame(animate);
+                };
+                requestAnimationFrame(animate);
                 counterObserver.unobserve(el);
             }
         });
@@ -669,43 +1065,52 @@
     counters.forEach(c => counterObserver.observe(c));
 
     // ── Navbar scroll effect ──
+    const navbar = document.getElementById('navbar');
+    let lastScroll = 0;
     window.addEventListener('scroll', () => {
-        const navbar = document.getElementById('navbar');
-        if (window.scrollY > 50) {
-            navbar.style.padding = '10px 0';
-            navbar.style.background = 'rgba(5, 8, 16, 0.92)';
+        const scrollY = window.scrollY;
+        if (scrollY > 50) {
+            navbar.classList.add('scrolled');
         } else {
-            navbar.style.padding = '16px 0';
-            navbar.style.background = 'rgba(5, 8, 16, 0.7)';
+            navbar.classList.remove('scrolled');
         }
-    });
+        lastScroll = scrollY;
+    }, { passive: true });
 
-    // ── Spotlight Hover Effect for Cards ──
-    const cards = document.querySelectorAll('.feature-card, .tp-card, .exchange-chip');
-    cards.forEach(card => {
+    // ── Spotlight Hover Effect ──
+    const spotlightCards = document.querySelectorAll('.feature-card, .tp-card, .exchange-card, .ai-model-chip');
+    spotlightCards.forEach(card => {
         card.addEventListener('mousemove', (e) => {
             const rect = card.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            card.style.setProperty('--mouse-x', `${x}px`);
-            card.style.setProperty('--mouse-y', `${y}px`);
+            card.style.setProperty('--mouse-x', `${e.clientX - rect.left}px`);
+            card.style.setProperty('--mouse-y', `${e.clientY - rect.top}px`);
         });
     });
 
-    // ── Smooth scroll for anchor links ──
+    // ── Smooth scroll ──
     document.querySelectorAll('a[href^="#"]').forEach(link => {
         link.addEventListener('click', (e) => {
             e.preventDefault();
             const target = document.querySelector(link.getAttribute('href'));
             if (target) {
-                const navHeight = document.getElementById('navbar').offsetHeight;
+                const navHeight = navbar.offsetHeight;
                 window.scrollTo({
-                    top: target.offsetTop - navHeight,
+                    top: target.offsetTop - navHeight - 16,
                     behavior: 'smooth'
                 });
             }
         });
     });
+
+    // ── Parallax subtle effect on hero stats ──
+    window.addEventListener('mousemove', (e) => {
+        const x = (e.clientX / window.innerWidth - 0.5) * 8;
+        const y = (e.clientY / window.innerHeight - 0.5) * 8;
+        document.querySelectorAll('.bg-glow').forEach((glow, i) => {
+            const factor = (i + 1) * 0.5;
+            glow.style.transform = `translate(${x * factor}px, ${y * factor}px)`;
+        });
+    }, { passive: true });
 </script>
 
 </body>
