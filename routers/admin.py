@@ -27,7 +27,7 @@ from core.security import hash_password, validate_password_strength, generate_we
 from core.auth import require_admin
 from core.config import settings
 from core.utils.datetime import utcnow, to_utc
-from core.request_utils import public_base_url
+from core.request_utils import client_ip as get_client_ip, public_base_url
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -1094,13 +1094,9 @@ async def _add_audit_log(
     request: Optional[Request],
 ):
     """Add an audit log entry."""
-    client_ip = ""
+    admin_client_ip = ""
     if request:
-        client_ip = (
-            request.headers.get("cf-connecting-ip") or
-            request.headers.get("x-forwarded-for", "").split(",")[0].strip() or
-            (request.client.host if request.client else "")
-        )
+        admin_client_ip = get_client_ip(request, default="")
 
     log = AdminAuditLogModel(
         admin_id=admin.get("sub"),
@@ -1109,6 +1105,6 @@ async def _add_audit_log(
         target_type=target_type,
         target_id=target_id,
         summary=summary,
-        client_ip=client_ip,
+        client_ip=admin_client_ip,
     )
     db.add(log)

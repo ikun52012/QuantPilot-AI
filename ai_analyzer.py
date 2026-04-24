@@ -1,6 +1,6 @@
 """
 QuantPilot AI - AI Analyzer
-Uses LLM APIs (OpenAI / Anthropic / DeepSeek) to analyze trading signals.
+Uses LLM APIs (OpenAI / Anthropic / DeepSeek / OpenRouter) to analyze trading signals.
 This is the brain of the system.
 """
 import asyncio
@@ -307,6 +307,42 @@ async def _call_deepseek(system: str, user: str) -> str:
     return await _with_retry(_do, "deepseek")
 
 
+async def _call_openrouter(system: str, user: str) -> str:
+    """Call OpenRouter's OpenAI-compatible chat completions API."""
+    async def _do():
+        if not settings.ai.openrouter_api_key:
+            raise ValueError("OpenRouter API key is not configured")
+
+        headers = {
+            "Authorization": f"Bearer {settings.ai.openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+        if settings.ai.openrouter_site_url:
+            headers["HTTP-Referer"] = settings.ai.openrouter_site_url
+        if settings.ai.openrouter_app_name:
+            headers["X-Title"] = settings.ai.openrouter_app_name
+
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": settings.ai.openrouter_model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": settings.ai.temperature,
+                    "max_tokens": settings.ai.max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+
+    return await _with_retry(_do, "openrouter")
+
+
 async def _call_custom(system: str, user: str) -> str:
     """Call custom AI provider API with automatic retry."""
     async def _do():
@@ -385,6 +421,8 @@ async def analyze_signal(
             raw = await _call_anthropic(system_prompt, user_prompt)
         elif provider == "deepseek":
             raw = await _call_deepseek(system_prompt, user_prompt)
+        elif provider == "openrouter":
+            raw = await _call_openrouter(system_prompt, user_prompt)
         elif (
             settings.ai.custom_provider_enabled
             and provider in {"custom", settings.ai.custom_provider_name.lower()}

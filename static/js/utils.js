@@ -1,5 +1,5 @@
 /**
- * Signal Server - Utility Functions
+ * QuantPilot AI - Utility Functions
  * Common helper functions for the frontend.
  */
 

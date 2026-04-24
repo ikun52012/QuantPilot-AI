@@ -47,6 +47,10 @@ class AISettingsRequest(BaseModel):
     temperature: float = Field(default=0.3, ge=0, le=2)
     max_tokens: int = Field(default=1000, ge=100, le=4000)
     custom_system_prompt: str = Field(default="", max_length=12000)
+    openrouter_enabled: bool = False
+    openrouter_model: str = Field(default="", max_length=160)
+    openrouter_site_url: str = Field(default="", max_length=500)
+    openrouter_app_name: str = Field(default="QuantPilot AI", max_length=120)
     custom_provider_enabled: bool = False
     custom_provider_name: str = Field(default="custom", max_length=80)
     custom_provider_model: str = Field(default="", max_length=160)

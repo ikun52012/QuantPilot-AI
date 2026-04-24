@@ -9,19 +9,19 @@
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
         :root{
-            --bg:#020617;--card:rgba(15,23,42,.65);--border:rgba(255,255,255,.08);
-            --text:#f8fafc;--muted:#94a3b8;--blue:#3b82f6;--purple:#a855f7;--cyan:#06b6d4;
-            --green:#10b981;--red:#f43f5e;--gradient:linear-gradient(135deg,#3b82f6,#a855f7,#06b6d4);
+            --bg:#04060e;--card:rgba(12,17,30,.7);--border:rgba(148,163,184,.08);
+            --text:#f1f5f9;--muted:#94a3b8;--blue:#3b82f6;--purple:#a78bfa;--cyan:#06b6d4;
+            --green:#22c55e;--red:#ef4444;--gradient:linear-gradient(135deg,#3b82f6,#06b6d4,#a78bfa);
         }
         html{height:100%}
         body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden}
         h1,h2,h3{font-family:'Outfit',sans-serif;}
-        .bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:linear-gradient(rgba(59,130,246,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,.03) 1px,transparent 1px);background-size:60px 60px}
-        .bg-glow{position:fixed;z-index:0;pointer-events:none;width:500px;height:500px;border-radius:50%;filter:blur(120px);opacity:.35}
-        .g1{top:-200px;left:-100px;background:rgba(59,130,246,.18)}.g2{bottom:-200px;right:-100px;background:rgba(168,85,247,.14)}
+        .bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:linear-gradient(rgba(59,130,246,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(167,139,250,.02) 1px,transparent 1px);background-size:60px 60px}
+        .bg-glow{display:none}
+        .g1,.g2{display:none}
         .auth-container{position:relative;z-index:1;width:100%;max-width:420px;padding:20px}
-        .auth-card{background:var(--card);border:1px solid var(--border);border-radius:24px;padding:40px 36px;backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);box-shadow:0 12px 40px rgba(0,0,0,.5);position:relative;overflow:hidden;}
-        .auth-card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.15),transparent)}
+        .auth-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:40px 36px;backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);box-shadow:0 12px 48px rgba(0,0,0,.6);position:relative;overflow:hidden;}
+        .auth-card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(59,130,246,.25),transparent)}
         .auth-logo{text-align:center;margin-bottom:28px}
         .auth-logo i{font-size:36px;background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
         .auth-logo h1{font-size:24px;font-weight:700;margin-top:8px}
@@ -30,8 +30,8 @@
         .form-group label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin-bottom:6px}
         .input-wrap{position:relative}
         .input-wrap i.icon-left{position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:18px;color:var(--muted)}
-        .input-wrap input{width:100%;padding:12px 42px 12px 42px;border-radius:10px;border:1px solid var(--border);background:rgba(10,14,23,.6);color:var(--text);font-size:14px;font-family:inherit;transition:border-color .2s}
-        .input-wrap input:focus{outline:none;border-color:var(--blue)}
+        .input-wrap input{width:100%;padding:12px 42px 12px 42px;border-radius:10px;border:1px solid var(--border);background:rgba(6,9,18,.7);color:var(--text);font-size:14px;font-family:inherit;transition:border-color .2s}
+        .input-wrap input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(59,130,246,.15)}
         .input-wrap input::placeholder{color:rgba(136,146,168,.5)}
         .input-wrap .eye-btn{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:4px;line-height:1;transition:color .2s}
         .input-wrap .eye-btn:hover{color:var(--text)}
@@ -56,7 +56,7 @@
     <a href="/" class="back-link"><i class="ri-arrow-left-line"></i> Back to Home</a>
     <div class="auth-card">
         <div class="auth-logo">
-            <i class="ri-signal-tower-fill"></i>
+            <i class="ri-radar-line"></i>
             <h1>Create Account</h1>
             <p>Join QuantPilot AI</p>
         </div>

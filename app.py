@@ -138,8 +138,9 @@ async def lifespan(app: FastAPI):
 
     async def _daily_reset_job():
         """Daily reset at midnight UTC."""
-        from pre_filter import reset_daily_counters
-        reset_daily_counters()
+        from pre_filter import _state_lock, reset_daily_counters
+        with _state_lock:
+            reset_daily_counters()
         logger.info("[Scheduler] Daily trade counters reset")
 
     async def _position_monitor_job():
@@ -168,7 +169,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     scheduler.shutdown(wait=True)
     await db_manager.close()
-    logger.info("Signal Server shutting down...")
+    logger.info("QuantPilot AI shutting down...")
 
 
 # ─────────────────────────────────────────────

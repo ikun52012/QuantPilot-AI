@@ -1,5 +1,5 @@
 """
-Signal Server - Middleware
+QuantPilot AI - Middleware
 Request processing middleware including rate limiting, logging, and security.
 """
 import time
@@ -18,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from loguru import logger
 
 from core.config import settings
+from core.request_utils import client_ip
 
 
 # ─────────────────────────────────────────────
@@ -76,10 +77,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
     def _get_client_ip(self, request: Request) -> str:
         """Extract client IP from request."""
-        forwarded = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
+        return client_ip(request)
 
 
 # ─────────────────────────────────────────────
@@ -177,10 +175,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     def _get_client_ip(self, request: Request) -> str:
         """Extract client IP from request."""
-        forwarded = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
+        return client_ip(request)
 
 
 # ─────────────────────────────────────────────
@@ -253,8 +248,21 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
                             status_code=413,
                             content={"detail": "Request body too large"}
                         )
+                    return await call_next(request)
                 except ValueError:
                     pass
+
+            body = await request.body()
+            if len(body) > self.MAX_SIZE:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": "Request body too large"}
+                )
+
+            async def receive():
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            request._receive = receive  # type: ignore[attr-defined]
 
         return await call_next(request)
 

@@ -1,5 +1,5 @@
 /**
- * Signal Server - Charts Module
+ * QuantPilot AI - Charts Module
  * Chart.js configuration and rendering.
  */
 

@@ -1,5 +1,5 @@
 /**
- * Signal Server - Auth Module
+ * QuantPilot AI - Auth Module
  * Authentication state management.
  */
 
@@ -56,14 +56,21 @@ async function requireAuth() {
  */
 async function logout() {
     try {
+        const csrf = getCookie('tvss_csrf');
         await fetch('/api/auth/logout', {
             method: 'POST',
             credentials: 'include',
+            headers: csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf) } : {},
         });
     } catch {}
 
     _cachedUser = null;
     window.location.replace('/login');
+}
+
+function getCookie(name) {
+    const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return match ? match[2] : null;
 }
 
 /**

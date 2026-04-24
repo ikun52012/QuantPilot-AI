@@ -69,7 +69,15 @@ def _current_ai_key(provider: str) -> str:
         return settings.ai.anthropic_api_key
     if provider == "deepseek":
         return settings.ai.deepseek_api_key
+    if provider == "openrouter":
+        return settings.ai.openrouter_api_key
     return settings.ai.custom_provider_api_key
+
+
+def _normalize_ai_provider(provider: Any, default: str | None = None) -> str:
+    value = str(provider or default or settings.ai.provider).lower().strip()
+    allowed = {"openai", "anthropic", "deepseek", "openrouter", "custom"}
+    return value if value in allowed else settings.ai.provider
 
 
 async def _load_encrypted_dict(session: AsyncSession, key: str) -> dict[str, Any]:
@@ -115,7 +123,7 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
 
     ai = runtime.get("ai") or {}
     if ai:
-        settings.ai.provider = str(ai.get("provider") or settings.ai.provider).lower().strip()
+        settings.ai.provider = _normalize_ai_provider(ai.get("provider"))
         api_key = str(ai.get("api_key") or "")
         if settings.ai.provider == "openai":
             settings.ai.openai_api_key = api_key
@@ -123,6 +131,8 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
             settings.ai.anthropic_api_key = api_key
         elif settings.ai.provider == "deepseek":
             settings.ai.deepseek_api_key = api_key
+        elif settings.ai.provider == "openrouter":
+            settings.ai.openrouter_api_key = api_key
         else:
             settings.ai.custom_provider_api_key = api_key
         settings.ai.temperature = _to_float(ai.get("temperature"), settings.ai.temperature, 0, 2)
@@ -132,6 +142,10 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.ai.custom_provider_name = str(ai.get("custom_provider_name") or settings.ai.custom_provider_name)
         settings.ai.custom_provider_model = str(ai.get("custom_provider_model") or "")
         settings.ai.custom_provider_api_url = str(ai.get("custom_provider_api_url") or "")
+        settings.ai.openrouter_enabled = _to_bool(ai.get("openrouter_enabled"), settings.ai.openrouter_enabled)
+        settings.ai.openrouter_model = str(ai.get("openrouter_model") or settings.ai.openrouter_model)
+        settings.ai.openrouter_site_url = str(ai.get("openrouter_site_url") or settings.ai.openrouter_site_url)
+        settings.ai.openrouter_app_name = str(ai.get("openrouter_app_name") or settings.ai.openrouter_app_name)
 
     telegram = runtime.get("telegram") or {}
     if telegram:
@@ -193,7 +207,7 @@ async def save_exchange_settings(session: AsyncSession, data: dict[str, Any]) ->
 
 async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
     current = await _load_encrypted_dict(session, AI_KEY)
-    provider = str(data.get("provider") or current.get("provider") or settings.ai.provider).lower().strip()
+    provider = _normalize_ai_provider(data.get("provider") or current.get("provider"))
     updated = {
         "provider": provider,
         "api_key": str(data.get("api_key") or current.get("api_key") or _current_ai_key(provider) or ""),
@@ -204,6 +218,10 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
         "custom_provider_name": str(data.get("custom_provider_name") or current.get("custom_provider_name") or settings.ai.custom_provider_name),
         "custom_provider_model": str(data.get("custom_provider_model") or current.get("custom_provider_model") or ""),
         "custom_provider_api_url": str(data.get("custom_provider_api_url") or current.get("custom_provider_api_url") or ""),
+        "openrouter_enabled": _to_bool(data.get("openrouter_enabled"), _to_bool(current.get("openrouter_enabled"), settings.ai.openrouter_enabled)),
+        "openrouter_model": str(data.get("openrouter_model") or current.get("openrouter_model") or settings.ai.openrouter_model),
+        "openrouter_site_url": str(data.get("openrouter_site_url") or current.get("openrouter_site_url") or settings.ai.openrouter_site_url),
+        "openrouter_app_name": str(data.get("openrouter_app_name") or current.get("openrouter_app_name") or settings.ai.openrouter_app_name),
     }
     await _save_encrypted_dict(session, AI_KEY, updated)
     apply_runtime_settings({"ai": updated})
@@ -278,6 +296,7 @@ def runtime_status() -> dict[str, Any]:
             settings.ai.openai_api_key
             or settings.ai.anthropic_api_key
             or settings.ai.deepseek_api_key
+            or settings.ai.openrouter_api_key
             or settings.ai.custom_provider_api_key
         ),
         "ai_temperature": settings.ai.temperature,
@@ -287,6 +306,9 @@ def runtime_status() -> dict[str, Any]:
         "custom_provider_name": settings.ai.custom_provider_name,
         "custom_provider_model": settings.ai.custom_provider_model,
         "custom_provider_url": settings.ai.custom_provider_api_url,
+        "openrouter_enabled": settings.ai.openrouter_enabled,
+        "openrouter_model": settings.ai.openrouter_model,
+        "openrouter_api_configured": _public_secret_configured(settings.ai.openrouter_api_key),
         "telegram": {
             "configured": bool(settings.telegram.bot_token and settings.telegram.chat_id),
             "bot_configured": _public_secret_configured(settings.telegram.bot_token),

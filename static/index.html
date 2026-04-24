@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QuantPilot AI — Dashboard</title>
-    <meta name="description" content="AI-powered crypto trading signal dashboard">
+    <meta name="description" content="QuantPilot AI trading operations dashboard">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
@@ -22,8 +22,8 @@
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar" role="complementary" aria-label="Sidebar">
         <div class="sidebar-logo">
-            <i class="ri-signal-tower-fill"></i>
-            <span>TVSS</span>
+            <i class="ri-radar-line"></i>
+            <span>QuantPilot AI</span>
         </div>
         <nav class="sidebar-nav" role="navigation" aria-label="Main navigation">
             <a href="/" class="nav-item" id="nav-home">
@@ -381,6 +381,7 @@
                             <option value="deepseek">DeepSeek (Cheapest)</option>
                             <option value="openai">OpenAI (GPT-4o)</option>
                             <option value="anthropic">Anthropic (Claude)</option>
+                            <option value="openrouter">OpenRouter</option>
                             <option value="custom">Custom Provider</option>
                         </select>
                     </div>
@@ -388,7 +389,15 @@
                         <label for="set-ai-key">API Key</label>
                         <input type="password" id="set-ai-key" class="text-input" placeholder="Enter AI API Key">
                     </div>
-                    
+
+                    <div id="openrouter-ai-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="set-openrouter-model">OpenRouter Model</label>
+                            <input type="text" id="set-openrouter-model" class="text-input" placeholder="openai/gpt-4o-mini">
+                            <p class="hint">Use OpenRouter model IDs such as openai/gpt-4o-mini or deepseek/deepseek-chat</p>
+                        </div>
+                    </div>
+
                     <!-- Custom AI Provider Fields (hidden by default) -->
                     <div id="custom-ai-fields" style="display: none;">
                         <div class="form-group">

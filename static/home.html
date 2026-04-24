@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QuantPilot AI — AI-Powered Crypto Trading Platform</title>
-    <meta name="description" content="QuantPilot AI v4.2 — Multi-model AI voting, 100+ models via OpenRouter, 6+ exchanges, advanced risk management. The ultimate crypto quant trading platform.">
+    <meta name="description" content="QuantPilot AI v4.1 — AI-assisted crypto trade automation with TradingView webhooks, pre-filtering, multi-TP exits, and multi-exchange execution.">
     <meta name="keywords" content="crypto trading, AI trading, quantitative trading, GPT-4o, Claude, DeepSeek, OpenRouter, Binance, OKX, automated trading">
     <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800,900|inter:300,400,500,600|jetbrains+mono:400,500" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
@@ -12,30 +12,30 @@
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
         :root {
-            --bg-dark: #030712;
-            --bg-card: rgba(15, 23, 42, 0.6);
-            --bg-card-hover: rgba(15, 23, 42, 0.85);
-            --border: rgba(255, 255, 255, 0.06);
-            --border-hover: rgba(99, 102, 241, 0.3);
+            --bg-dark: #04060e;
+            --bg-card: rgba(12, 17, 30, 0.65);
+            --bg-card-hover: rgba(18, 24, 42, 0.85);
+            --border: rgba(148, 163, 184, 0.06);
+            --border-hover: rgba(59, 130, 246, 0.3);
             --text-primary: #f1f5f9;
             --text-secondary: #94a3b8;
             --text-muted: #64748b;
-            --accent-indigo: #6366f1;
+            --accent-indigo: #3b82f6;
             --accent-blue: #3b82f6;
-            --accent-purple: #a855f7;
+            --accent-purple: #a78bfa;
             --accent-cyan: #06b6d4;
-            --accent-green: #10b981;
+            --accent-green: #22c55e;
             --accent-orange: #f59e0b;
-            --accent-rose: #f43f5e;
-            --gradient-hero: linear-gradient(135deg, #6366f1 0%, #a855f7 40%, #06b6d4 100%);
-            --gradient-text: linear-gradient(135deg, #818cf8 0%, #c084fc 50%, #22d3ee 100%);
-            --gradient-border: linear-gradient(135deg, rgba(99,102,241,0.4), rgba(168,85,247,0.2), rgba(6,182,212,0.3));
-            --glow-indigo: 0 0 80px rgba(99,102,241,0.15);
-            --glow-purple: 0 0 80px rgba(168,85,247,0.1);
-            --radius-xl: 28px;
-            --radius-lg: 20px;
-            --radius-md: 14px;
-            --radius-sm: 10px;
+            --accent-rose: #ef4444;
+            --gradient-hero: linear-gradient(135deg, #3b82f6 0%, #06b6d4 52%, #a78bfa 100%);
+            --gradient-text: linear-gradient(135deg, #3b82f6 0%, #06b6d4 55%, #a78bfa 100%);
+            --gradient-border: linear-gradient(135deg, rgba(59,130,246,0.36), rgba(6,182,212,0.22), rgba(167,139,250,0.25));
+            --glow-indigo: 0 0 80px rgba(59,130,246,0.12);
+            --glow-purple: 0 0 80px rgba(167,139,250,0.08);
+            --radius-xl: 10px;
+            --radius-lg: 10px;
+            --radius-md: 10px;
+            --radius-sm: 8px;
         }
 
         html { scroll-behavior: smooth; }
@@ -58,8 +58,8 @@
         .bg-grid {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             background-image:
-                linear-gradient(rgba(99,102,241,0.025) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(99,102,241,0.025) 1px, transparent 1px);
+                linear-gradient(rgba(59,130,246,0.026) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(167,139,250,0.022) 1px, transparent 1px);
             background-size: 64px 64px;
             mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 20%, transparent 70%);
             -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 20%, transparent 70%);
@@ -69,24 +69,7 @@
             background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
             background-size: 256px 256px;
         }
-        .bg-glow {
-            position: fixed; z-index: 0; pointer-events: none;
-            width: 700px; height: 700px; border-radius: 50%;
-            filter: blur(160px); opacity: 0.3;
-            animation: orb-float 25s infinite ease-in-out alternate;
-        }
-        .bg-glow.g1 { top: -300px; left: -200px; background: rgba(99,102,241,0.2); animation-delay: 0s; }
-        .bg-glow.g2 { top: 30%; right: -300px; background: rgba(168,85,247,0.15); animation-delay: -8s; }
-        .bg-glow.g3 { bottom: -300px; left: 20%; background: rgba(6,182,212,0.12); animation-delay: -16s; }
-
-        @keyframes orb-float {
-            0% { transform: translate(0, 0) scale(1); }
-            25% { transform: translate(40px, -60px) scale(1.08); }
-            50% { transform: translate(-30px, 30px) scale(0.95); }
-            75% { transform: translate(20px, 50px) scale(1.05); }
-            100% { transform: translate(-10px, -20px) scale(1); }
-        }
-
+        .bg-glow { display: none; }
         /* ── Utility ── */
         .container { max-width: 1240px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
         .section { padding: 120px 0; }
@@ -109,7 +92,7 @@
             100% { background-position: -200% center; }
         }
         .shimmer-text {
-            background: linear-gradient(90deg, #818cf8 0%, #c084fc 25%, #22d3ee 50%, #c084fc 75%, #818cf8 100%);
+            background: linear-gradient(90deg, #3b82f6 0%, #06b6d4 35%, #a78bfa 50%, #06b6d4 75%, #3b82f6 100%);
             background-size: 200% auto;
             color: transparent;
             -webkit-background-clip: text;
@@ -130,7 +113,7 @@
         .navbar {
             position: fixed; top: 0; left: 0; right: 0; z-index: 100;
             padding: 18px 0;
-            background: rgba(3, 7, 18, 0.6);
+            background: rgba(4, 6, 14, 0.6);
             backdrop-filter: blur(20px) saturate(1.2);
             -webkit-backdrop-filter: blur(20px) saturate(1.2);
             border-bottom: 1px solid transparent;
@@ -138,7 +121,7 @@
         }
         .navbar.scrolled {
             padding: 12px 0;
-            background: rgba(3, 7, 18, 0.92);
+            background: rgba(4, 6, 14, 0.92);
             border-bottom-color: var(--border);
         }
         .navbar .container {
@@ -150,11 +133,11 @@
             letter-spacing: -0.02em;
         }
         .nav-logo-icon {
-            width: 36px; height: 36px; border-radius: 10px;
+            width: 36px; height: 36px; border-radius: var(--radius);
             background: var(--gradient-hero);
             display: flex; align-items: center; justify-content: center;
             font-size: 18px; color: #fff;
-            box-shadow: 0 4px 16px rgba(99,102,241,0.3);
+            box-shadow: 0 4px 16px rgba(59,130,246,0.26);
         }
         .nav-links { display: flex; align-items: center; gap: 8px; }
         .nav-links a {
@@ -169,9 +152,9 @@
             padding: 10px 22px; border-radius: var(--radius-sm);
             background: var(--gradient-hero); color: #fff; font-weight: 600;
             font-size: 14px; text-decoration: none; transition: all 0.3s;
-            box-shadow: 0 4px 20px rgba(99,102,241,0.3);
+            box-shadow: 0 4px 20px rgba(59,130,246,0.26);
         }
-        .nav-cta:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(99,102,241,0.45); }
+        .nav-cta:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(59,130,246,0.38); }
         .nav-cta-ghost {
             display: inline-flex; align-items: center; gap: 8px;
             padding: 10px 22px; border-radius: var(--radius-sm);
@@ -189,13 +172,13 @@
         .hero-badge {
             display: inline-flex; align-items: center; gap: 10px;
             padding: 8px 20px 8px 12px; border-radius: 50px;
-            background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2);
+            background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.22);
             font-size: 13px; color: var(--accent-indigo); margin-bottom: 32px;
             font-weight: 600; letter-spacing: 0.02em;
         }
         .hero-badge .dot-container {
             width: 22px; height: 22px; border-radius: 50%;
-            background: rgba(16,185,129,0.12);
+            background: rgba(34,197,94,0.12);
             display: flex; align-items: center; justify-content: center;
         }
         .hero-badge .dot {
@@ -230,9 +213,9 @@
         .btn-hero:hover::after { opacity: 1; }
         .btn-hero.primary {
             background: var(--gradient-hero); color: #fff;
-            box-shadow: 0 4px 28px rgba(99,102,241,0.35);
+            box-shadow: 0 4px 28px rgba(59,130,246,0.3);
         }
-        .btn-hero.primary:hover { transform: translateY(-3px); box-shadow: 0 12px 40px rgba(99,102,241,0.5); }
+        .btn-hero.primary:hover { transform: translateY(-3px); box-shadow: 0 12px 40px rgba(59,130,246,0.42); }
         .btn-hero.secondary {
             background: rgba(255,255,255,0.04); color: var(--text-primary);
             border: 1px solid var(--border);
@@ -248,11 +231,11 @@
         }
         .hero-stat {
             text-align: center; padding: 28px 16px;
-            background: rgba(3, 7, 18, 0.8);
+            background: rgba(4, 6, 14, 0.8);
             backdrop-filter: blur(12px);
             transition: background 0.3s;
         }
-        .hero-stat:hover { background: rgba(15, 23, 42, 0.9); }
+        .hero-stat:hover { background: rgba(12, 17, 30, 0.9); }
         .hero-stat-value {
             font-size: 36px; font-weight: 900;
             font-family: 'Outfit', sans-serif;
@@ -283,7 +266,7 @@
             inset: 0;
             opacity: 0;
             transition: opacity 0.4s;
-            background: radial-gradient(500px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(99,102,241,0.06), transparent 40%);
+            background: radial-gradient(500px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(59,130,246,0.06), transparent 40%);
             pointer-events: none;
         }
         .feature-card:hover::after { opacity: 1; }
@@ -303,20 +286,20 @@
             display: flex; align-items: center; justify-content: center;
             font-size: 24px; margin-bottom: 24px;
         }
-        .feature-icon.indigo { background: rgba(99,102,241,0.1); color: var(--accent-indigo); }
+        .feature-icon.indigo { background: rgba(59,130,246,0.1); color: var(--accent-indigo); }
         .feature-icon.blue { background: rgba(59,130,246,0.1); color: var(--accent-blue); }
-        .feature-icon.purple { background: rgba(168,85,247,0.1); color: var(--accent-purple); }
+        .feature-icon.purple { background: rgba(167,139,250,0.1); color: var(--accent-purple); }
         .feature-icon.cyan { background: rgba(6,182,212,0.1); color: var(--accent-cyan); }
-        .feature-icon.green { background: rgba(16,185,129,0.1); color: var(--accent-green); }
+        .feature-icon.green { background: rgba(34,197,94,0.1); color: var(--accent-green); }
         .feature-icon.orange { background: rgba(245,158,11,0.1); color: var(--accent-orange); }
-        .feature-icon.rose { background: rgba(244,63,94,0.1); color: var(--accent-rose); }
+        .feature-icon.rose { background: rgba(239,68,68,0.1); color: var(--accent-rose); }
         .feature-card .card-tag {
             display: inline-block; padding: 3px 10px; border-radius: 6px;
             font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
             text-transform: uppercase; margin-bottom: 12px;
         }
-        .tag-new { background: rgba(16,185,129,0.12); color: var(--accent-green); }
-        .tag-upgraded { background: rgba(99,102,241,0.12); color: var(--accent-indigo); }
+        .tag-new { background: rgba(34,197,94,0.12); color: var(--accent-green); }
+        .tag-upgraded { background: rgba(59,130,246,0.12); color: var(--accent-indigo); }
         .feature-card h3 { font-size: 18px; font-weight: 700; margin-bottom: 10px; letter-spacing: -0.01em; }
         .feature-card p { font-size: 14px; color: var(--text-secondary); line-height: 1.65; }
 
@@ -351,11 +334,11 @@
         }
         .ai-model-chip:hover {
             border-color: var(--border-hover);
-            background: rgba(99,102,241,0.05);
+            background: rgba(59,130,246,0.05);
             transform: translateY(-2px);
         }
         .ai-model-chip .model-icon {
-            width: 36px; height: 36px; border-radius: 10px;
+            width: 36px; height: 36px; border-radius: var(--radius);
             display: flex; align-items: center; justify-content: center;
             font-size: 16px; flex-shrink: 0;
         }
@@ -363,7 +346,7 @@
         .ai-model-chip .model-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .ai-model-chip .model-price { font-size: 11px; color: var(--text-muted); }
 
-        /* ── Voting Section ── */
+        /* ── Decision Section ── */
         .voting-section {
             background: var(--bg-card);
             border: 1px solid var(--border);
@@ -373,7 +356,7 @@
         }
         .voting-section::before {
             content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-            background: linear-gradient(90deg, var(--accent-green), var(--accent-indigo), var(--accent-cyan));
+            background: linear-gradient(90deg, var(--accent-green), var(--accent-blue), var(--accent-cyan));
         }
         .voting-section h3 {
             font-size: 22px; font-weight: 800; margin-bottom: 20px;
@@ -390,7 +373,7 @@
         }
         .strategy-item:hover {
             border-color: var(--border-hover);
-            background: rgba(99,102,241,0.04);
+            background: rgba(59,130,246,0.04);
         }
         .strategy-icon {
             width: 42px; height: 42px; border-radius: var(--radius-sm);
@@ -432,7 +415,7 @@
         }
         @keyframes pulse-arrow {
             0% { transform: translateX(-4px); opacity: 0.3; }
-            100% { transform: translateX(4px); opacity: 1; text-shadow: 0 0 16px var(--accent-indigo); }
+            100% { transform: translateX(4px); opacity: 1; text-shadow: 0 0 16px var(--accent-blue); }
         }
 
         /* ── TP & Trailing Section ── */
@@ -479,7 +462,7 @@
             position: absolute; inset: 0;
             opacity: 0;
             transition: opacity 0.3s;
-            background: radial-gradient(400px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(99,102,241,0.04), transparent 40%);
+            background: radial-gradient(400px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(59,130,246,0.04), transparent 40%);
             pointer-events: none;
         }
         .exchange-card:hover::after { opacity: 1; }
@@ -511,8 +494,8 @@
             animation: cta-pulse 5s infinite alternate;
         }
         @keyframes cta-pulse {
-            0% { box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5), 0 0 40px rgba(99,102,241,0.08); }
-            100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5), 0 0 60px rgba(168,85,247,0.12); }
+            0% { box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5), 0 0 40px rgba(59,130,246,0.08); }
+            100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5), 0 0 60px rgba(167,139,250,0.1); }
         }
         .cta-box::before {
             content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
@@ -521,7 +504,7 @@
         .cta-box::after {
             content: ''; position: absolute; bottom: -200px; left: 50%; transform: translateX(-50%);
             width: 600px; height: 400px; border-radius: 50%;
-            background: radial-gradient(circle, rgba(99,102,241,0.08), transparent 70%);
+            background: radial-gradient(circle, rgba(59,130,246,0.08), transparent 70%);
             pointer-events: none;
         }
         .cta-box h2 { font-size: 36px; font-weight: 800; margin-bottom: 16px; letter-spacing: -0.02em; }
@@ -597,16 +580,12 @@
 <!-- Background effects -->
 <div class="bg-grid"></div>
 <div class="bg-noise"></div>
-<div class="bg-glow g1"></div>
-<div class="bg-glow g2"></div>
-<div class="bg-glow g3"></div>
-
 <!-- ── Navbar ── -->
 <nav class="navbar" id="navbar">
     <div class="container">
         <a href="/" class="nav-logo">
-            <div class="nav-logo-icon"><i class="ri-signal-tower-fill"></i></div>
-            <span>QPAI</span>
+            <div class="nav-logo-icon"><i class="ri-radar-line"></i></div>
+            <span>QuantPilot AI</span>
         </a>
         <div class="nav-links">
             <a href="#features">Features</a>
@@ -626,7 +605,7 @@
     <div class="container">
         <div class="hero-badge reveal">
             <span class="dot-container"><span class="dot"></span></span>
-            <span>v4.2 — Multi-Model Voting &middot; OpenRouter &middot; 100+ AI Models</span>
+            <span>v4.1 — AI Risk Review &middot; Multi-TP &middot; Exchange Automation</span>
         </div>
         <h1 class="reveal delay-1">
             AI-Powered<br>
@@ -634,9 +613,8 @@
             QuantPilot AI
         </h1>
         <p class="reveal delay-2">
-            Combine multiple AI models for robust trading decisions. Receive signals from TradingView,
-            filter with 15 intelligent checks, analyze with GPT-4o / Claude / DeepSeek via
-            <strong style="color:var(--text-primary)">OpenRouter</strong>, and execute across 6+ exchanges.
+            Receive TradingView signals, filter weak setups with 15 fast checks, review them with
+            OpenAI, Claude, DeepSeek, OpenRouter, or a custom provider, then execute across 6+ exchanges.
         </p>
         <div class="hero-actions reveal delay-3">
             <a href="/register" class="btn-hero primary">
@@ -648,8 +626,8 @@
         </div>
         <div class="hero-stats reveal delay-4">
             <div class="hero-stat">
-                <div class="hero-stat-value counter" data-target="100">0</div>
-                <div class="hero-stat-label">AI Models</div>
+                <div class="hero-stat-value counter" data-target="4">0</div>
+                <div class="hero-stat-label">AI Providers</div>
             </div>
             <div class="hero-stat">
                 <div class="hero-stat-value counter" data-target="6">0</div>
@@ -678,20 +656,20 @@
             Everything You Need for<br><span class="gradient-text">Smart Trading</span>
         </h2>
         <p class="section-subtitle reveal delay-1">
-            A complete trading pipeline from signal to execution, enhanced by multi-model AI intelligence and advanced risk management.
+            A complete trading pipeline from signal to execution, with strict risk controls and practical operations tooling.
         </p>
         <div class="features-grid">
             <div class="feature-card reveal delay-1">
-                <span class="card-tag tag-new">NEW</span>
-                <div class="feature-icon indigo"><i class="ri-vote-line"></i></div>
-                <h3>Multi-Model Voting</h3>
-                <p>Combine analysis from multiple AI providers for robust decisions. Weighted, consensus, or best-confidence strategies. Reduces bias and increases reliability.</p>
+                <span class="card-tag tag-upgraded">CORE</span>
+                <div class="feature-icon indigo"><i class="ri-robot-2-line"></i></div>
+                <h3>Provider-Aware AI Review</h3>
+                <p>Route analysis through OpenAI, Anthropic, DeepSeek, OpenRouter, or an OpenAI-compatible custom endpoint with configurable prompts and token limits.</p>
             </div>
             <div class="feature-card reveal delay-2">
-                <span class="card-tag tag-new">NEW</span>
+                <span class="card-tag tag-upgraded">COMPATIBLE</span>
                 <div class="feature-icon purple"><i class="ri-router-line"></i></div>
-                <h3>OpenRouter 100+ Models</h3>
-                <p>Access GPT-4o, Claude, Gemini, Llama 3.1, Mistral, Qwen, and more through a single API key. The most cost-effective way to enable multi-model analysis.</p>
+                <h3>OpenRouter Support</h3>
+                <p>Use OpenRouter's OpenAI-compatible endpoint from the same AI settings surface while keeping direct provider integrations available.</p>
             </div>
             <div class="feature-card reveal delay-3">
                 <div class="feature-icon blue"><i class="ri-robot-2-line"></i></div>
@@ -699,10 +677,10 @@
                 <p>Choose from OpenAI GPT-4o, Anthropic Claude, DeepSeek, or your own custom endpoint. Customize temperature, tokens, and system prompt.</p>
             </div>
             <div class="feature-card reveal delay-1">
-                <span class="card-tag tag-upgraded">UPGRADED</span>
+                <span class="card-tag tag-upgraded">SAFE</span>
                 <div class="feature-icon green"><i class="ri-money-dollar-circle-line"></i></div>
                 <h3>Realistic Paper Trading</h3>
-                <p>Accurate fee simulation with maker 0.02% / taker 0.05%. Configure order types (limit/market) that affect fee tiers. Correct PnL with fee deductions.</p>
+                <p>Paper mode records simulated orders locally first, so strategies can be tested without sending live exchange orders.</p>
             </div>
             <div class="feature-card reveal delay-2">
                 <div class="feature-icon orange"><i class="ri-shield-check-line"></i></div>
@@ -715,34 +693,34 @@
                 <p>Moving trailing, breakeven on TP1, step-down trailing, profit-% activated, or static stop-loss. Advanced exit management for any strategy.</p>
             </div>
             <div class="feature-card reveal delay-1">
-                <span class="card-tag tag-new">NEW</span>
-                <div class="feature-icon rose"><i class="ri-brain-line"></i></div>
-                <h3>AI Batch Queue</h3>
-                <p>Merges same-ticker signals within 5-second window to reduce API costs by 50-70%. Smart signal deduplication without sacrificing quality.</p>
+                <span class="card-tag tag-upgraded">SECURE</span>
+                <div class="feature-icon rose"><i class="ri-key-2-line"></i></div>
+                <h3>Per-User Webhooks</h3>
+                <p>Each user can receive an isolated webhook secret, encrypted exchange settings, and subscription-aware live trading permissions.</p>
             </div>
             <div class="feature-card reveal delay-2">
-                <span class="card-tag tag-new">NEW</span>
-                <div class="feature-icon indigo"><i class="ri-user-heart-line"></i></div>
-                <h3>User Learning System</h3>
-                <p>Tracks model accuracy and adjusts confidence weights based on historical performance. The system learns from your trading data over time.</p>
+                <span class="card-tag tag-upgraded">OPS</span>
+                <div class="feature-icon indigo"><i class="ri-pulse-line"></i></div>
+                <h3>Operational Controls</h3>
+                <p>Admin diagnostics cover payment review, webhook events, position monitor state, backups, storage health, and audit history.</p>
             </div>
             <div class="feature-card reveal delay-3">
                 <div class="feature-icon green"><i class="ri-pie-chart-2-line"></i></div>
                 <h3>Live Analytics</h3>
-                <p>Real-time equity curves, win/loss distribution, Sharpe ratio, Sortino, profit factor, and detailed AI performance metrics per model.</p>
+                <p>Equity curves, win/loss distribution, Sharpe ratio, Sortino, profit factor, and AI confidence performance are available in the dashboard.</p>
             </div>
         </div>
     </div>
 </section>
 
-<!-- ── AI Models & Voting ── -->
+<!-- ── AI Providers ── -->
 <section class="section" id="ai-models" style="padding-top: 60px;">
     <div class="container">
         <h2 class="section-title reveal">
-            <span class="gradient-text">AI Model Ecosystem</span>
+            <span class="gradient-text">AI Provider Layer</span>
         </h2>
         <p class="section-subtitle reveal delay-1">
-            Access 100+ AI models through OpenRouter, or use direct provider APIs. Multi-model voting combines their strengths.
+            Choose a direct provider or an OpenAI-compatible route, then keep risk behavior consistent through one execution pipeline.
         </p>
         <div class="ai-showcase">
             <div class="ai-main-card reveal delay-1">
@@ -752,49 +730,49 @@
                         <div class="model-icon" style="background:rgba(16,185,129,0.1);color:var(--accent-green)"><i class="ri-flashlight-line"></i></div>
                         <div class="model-info">
                             <div class="model-name">GPT-4o</div>
-                            <div class="model-price">$5/1M tokens</div>
+                            <div class="model-price">OpenAI route</div>
                         </div>
                     </div>
                     <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(168,85,247,0.1);color:var(--accent-purple)"><i class="ri-sparkling-line"></i></div>
+                        <div class="model-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-purple)"><i class="ri-sparkling-line"></i></div>
                         <div class="model-info">
                             <div class="model-name">Claude 3.5 Sonnet</div>
-                            <div class="model-price">$3/1M tokens</div>
+                            <div class="model-price">Anthropic route</div>
                         </div>
                     </div>
                     <div class="ai-model-chip">
                         <div class="model-icon" style="background:rgba(59,130,246,0.1);color:var(--accent-blue)"><i class="ri-mental-health-line"></i></div>
                         <div class="model-info">
                             <div class="model-name">Gemini Pro 1.5</div>
-                            <div class="model-price">$1.25/1M tokens</div>
+                            <div class="model-price">OpenRouter route</div>
                         </div>
                     </div>
                     <div class="ai-model-chip">
                         <div class="model-icon" style="background:rgba(6,182,212,0.1);color:var(--accent-cyan)"><i class="ri-code-s-slash-line"></i></div>
                         <div class="model-info">
                             <div class="model-name">DeepSeek Chat</div>
-                            <div class="model-price">$0.14/1M tokens</div>
+                            <div class="model-price">DeepSeek route</div>
                         </div>
                     </div>
                     <div class="ai-model-chip">
                         <div class="model-icon" style="background:rgba(244,63,94,0.1);color:var(--accent-rose)"><i class="ri-fire-line"></i></div>
                         <div class="model-info">
                             <div class="model-name">Llama 3.1 70B</div>
-                            <div class="model-price">$0.9/1M tokens</div>
+                            <div class="model-price">OpenRouter route</div>
                         </div>
                     </div>
                     <div class="ai-model-chip">
                         <div class="model-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-orange)"><i class="ri-typhoon-line"></i></div>
                         <div class="model-info">
                             <div class="model-name">Mistral Large</div>
-                            <div class="model-price">$2/1M tokens</div>
+                            <div class="model-price">OpenRouter route</div>
                         </div>
                     </div>
                     <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(99,102,241,0.1);color:var(--accent-indigo)"><i class="ri-global-line"></i></div>
+                        <div class="model-icon" style="background:rgba(20,184,166,0.1);color:var(--accent-indigo)"><i class="ri-global-line"></i></div>
                         <div class="model-info">
                             <div class="model-name">Qwen 2.5 72B</div>
-                            <div class="model-price">$0.35/1M tokens</div>
+                            <div class="model-price">OpenRouter route</div>
                         </div>
                     </div>
                     <div class="ai-model-chip">
@@ -807,38 +785,38 @@
                 </div>
             </div>
             <div class="voting-section reveal delay-2">
-                <h3><i class="ri-vote-line" style="color:var(--accent-green)"></i> Multi-Model Voting</h3>
+                <h3><i class="ri-shield-check-line" style="color:var(--accent-green)"></i> Risk Decision Layer</h3>
                 <p style="color:var(--text-secondary);font-size:14px;margin-bottom:20px;line-height:1.6">
-                    Combine analysis from multiple AI providers to produce more robust trading decisions. Each model votes with its confidence, and results are aggregated.
+                    Every executable trade has to pass fast rule checks, AI confidence thresholds, and validated exit planning before an order is created.
                 </p>
                 <div class="voting-strategies">
                     <div class="strategy-item">
                         <div class="strategy-icon" style="background:rgba(16,185,129,0.1);color:var(--accent-green)"><i class="ri-scales-3-line"></i></div>
                         <div class="strategy-info">
-                            <h4>Weighted <span style="color:var(--accent-green);font-size:11px;font-weight:500">&#9733; Recommended</span></h4>
-                            <p>Weighted average of confidence, vote on recommendation</p>
+                            <h4>Pre-Filter Gate</h4>
+                            <p>Daily limits, volatility, spread, volume, RSI, funding, and trend checks run before AI spend.</p>
                         </div>
                     </div>
                     <div class="strategy-item">
-                        <div class="strategy-icon" style="background:rgba(99,102,241,0.1);color:var(--accent-indigo)"><i class="ri-team-line"></i></div>
+                        <div class="strategy-icon" style="background:rgba(20,184,166,0.1);color:var(--accent-indigo)"><i class="ri-team-line"></i></div>
                         <div class="strategy-info">
-                            <h4>Consensus</h4>
-                            <p>Only proceed if majority of models agrees</p>
+                            <h4>AI Confidence</h4>
+                            <p>Low-confidence or direction-conflicting analysis is rejected before execution.</p>
                         </div>
                     </div>
                     <div class="strategy-item">
                         <div class="strategy-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-orange)"><i class="ri-star-line"></i></div>
                         <div class="strategy-info">
-                            <h4>Best Confidence</h4>
-                            <p>Take result from the highest confidence model</p>
+                            <h4>Protective Exits</h4>
+                            <p>Opening trades require a valid stop loss and at least one take-profit target.</p>
                         </div>
                     </div>
                 </div>
-                <div style="margin-top:20px;padding:16px;border-radius:var(--radius-md);background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.12)">
+                <div style="margin-top:20px;padding:16px;border-radius:var(--radius-md);background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.14)">
                     <p style="font-size:12px;color:var(--text-secondary);line-height:1.6">
                         <i class="ri-lightbulb-line" style="color:var(--accent-indigo)"></i>
-                        <strong style="color:var(--text-primary)">Recommended:</strong>
-                        1 high-quality model (40-50% weight) + 1 cost-effective model (30-40%) + local fallback (10-20%). Balances quality, cost, and reliability.
+                        <strong style="color:var(--text-primary)">Default posture:</strong>
+                        Paper trading first, explicit live-trading permission, and user-scoped webhook secrets.
                     </p>
                 </div>
             </div>
@@ -850,7 +828,7 @@
 <section class="section" id="pipeline" style="padding-top: 60px;">
     <div class="container">
         <h2 class="section-title reveal">Signal <span class="gradient-text">Processing Pipeline</span></h2>
-        <p class="section-subtitle reveal delay-1">Every signal flows through a battle-tested pipeline with multi-model AI validation.</p>
+        <p class="section-subtitle reveal delay-1">Every signal flows through a practical pipeline with fast checks, AI review, and protective exit validation.</p>
         <div class="pipeline-flow reveal delay-2">
             <div class="pipeline-step reveal delay-1" style="color: var(--accent-indigo);">
                 <i class="ri-tv-2-line"></i>
@@ -864,12 +842,12 @@
             <span class="pipeline-arrow reveal delay-2"><i class="ri-arrow-right-line"></i></span>
             <div class="pipeline-step reveal delay-3" style="color: var(--accent-purple);">
                 <i class="ri-robot-2-line"></i>
-                <span>Multi-Model AI</span>
+                <span>AI Review</span>
             </div>
             <span class="pipeline-arrow reveal delay-3"><i class="ri-arrow-right-line"></i></span>
             <div class="pipeline-step reveal delay-4" style="color: var(--accent-green);">
-                <i class="ri-vote-line"></i>
-                <span>Vote &amp; Decide</span>
+                <i class="ri-shield-check-line"></i>
+                <span>Risk Decision</span>
             </div>
             <span class="pipeline-arrow reveal delay-4"><i class="ri-arrow-right-line"></i></span>
             <div class="pipeline-step reveal delay-5" style="color: var(--accent-cyan);">
@@ -973,7 +951,7 @@
                 </div>
             </div>
             <div class="exchange-card reveal delay-4">
-                <div class="ex-icon" style="background:rgba(168,85,247,0.1);color:var(--accent-purple)"><i class="ri-coins-line"></i></div>
+                <div class="ex-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-purple)"><i class="ri-coins-line"></i></div>
                 <div class="ex-info">
                     <div class="ex-name">Bitget</div>
                     <div class="ex-desc">Copy trading &amp; futures</div>
@@ -987,7 +965,7 @@
                 </div>
             </div>
             <div class="exchange-card reveal delay-6">
-                <div class="ex-icon" style="background:rgba(99,102,241,0.1);color:var(--accent-indigo)"><i class="ri-coins-line"></i></div>
+                <div class="ex-icon" style="background:rgba(20,184,166,0.1);color:var(--accent-indigo)"><i class="ri-coins-line"></i></div>
                 <div class="ex-info">
                     <div class="ex-name">Coinbase</div>
                     <div class="ex-desc">US-regulated exchange</div>
@@ -1002,7 +980,7 @@
     <div class="container">
         <div class="cta-box reveal">
             <h2>Ready to Start <span class="gradient-text">Trading Smarter</span>?</h2>
-            <p>Create an account, subscribe to a plan, and start receiving AI-powered multi-model trading signals on your exchange.</p>
+            <p>Create an account, subscribe to a plan, and start routing AI-reviewed trading signals to your exchange.</p>
             <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
                 <a href="/register" class="btn-hero primary" style="font-size:16px;padding:18px 44px;">
                     <i class="ri-user-add-line"></i> Create Account
@@ -1024,7 +1002,7 @@
             <a href="/register">Register</a>
             <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank">GitHub</a>
         </div>
-        <p class="footer-copy">&copy; 2026 QuantPilot AI &middot; Built by @ikun52012 &middot; v4.2.0</p>
+        <p class="footer-copy">&copy; 2026 QuantPilot AI &middot; Built by @ikun52012 &middot; v4.1.0</p>
     </div>
 </footer>
 
@@ -1102,15 +1080,6 @@
         });
     });
 
-    // ── Parallax subtle effect on hero stats ──
-    window.addEventListener('mousemove', (e) => {
-        const x = (e.clientX / window.innerWidth - 0.5) * 8;
-        const y = (e.clientY / window.innerHeight - 0.5) * 8;
-        document.querySelectorAll('.bg-glow').forEach((glow, i) => {
-            const factor = (i + 1) * 0.5;
-            glow.style.transform = `translate(${x * factor}px, ${y * factor}px)`;
-        });
-    }, { passive: true });
 </script>
 
 </body>

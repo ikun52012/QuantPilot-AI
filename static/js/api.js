@@ -1,5 +1,5 @@
 /**
- * Signal Server - API Client
+ * QuantPilot AI - API Client
  * Centralized API communication with error handling.
  */
 

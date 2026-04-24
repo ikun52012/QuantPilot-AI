@@ -1,6 +1,6 @@
 """
 QuantPilot AI - AI Configuration Router
-Admin endpoints for AI provider and multi-model voting configuration.
+Admin endpoints for AI provider catalog and experimental voting settings.
 """
 import json
 from fastapi import APIRouter, HTTPException, Depends, Request
@@ -21,8 +21,8 @@ router = APIRouter(prefix="/api/admin/ai", tags=["ai-config"])
 
 class VotingConfigRequest(BaseModel):
     """Request to update voting configuration."""
-    enabled: bool = Field(description="Enable/disable multi-model voting")
-    models: List[str] = Field(default_factory=list, description="List of models to participate in voting")
+    enabled: bool = Field(description="Enable/disable stored voting configuration")
+    models: List[str] = Field(default_factory=list, description="List of models configured for voting")
     weights: Dict[str, float] = Field(default_factory=dict, description="Weight for each model")
     strategy: str = Field(default="weighted", description="Voting strategy: weighted/consensus/best_confidence")
 
@@ -67,11 +67,11 @@ async def get_voting_config(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Get current multi-model voting configuration.
+    Get current stored voting configuration.
     
     Returns:
-        - enabled: Whether voting is enabled
-        - models: List of participating models
+        - enabled: Whether voting configuration is enabled
+        - models: List of configured models
         - weights: Model weights
         - strategy: Voting strategy
         - available_providers: Available models per provider
@@ -80,8 +80,8 @@ async def get_voting_config(
         - openrouter_model: Current OpenRouter model
         - custom_provider_enabled: Whether custom provider is enabled
     
-    Multi-model voting allows combining analysis from multiple AI providers
-    to get more robust trading decisions.
+    Note: the active analyzer currently executes the primary provider path.
+    These settings are persisted for voting-capable deployments or future use.
     """
     return VotingConfigResponse(
         enabled=settings.ai.voting_enabled,
@@ -104,13 +104,13 @@ async def update_voting_config(
     request: Request = None,
 ):
     """
-    Update multi-model voting configuration.
+    Update stored voting configuration.
     
     Model ID format:
     - 'openai:gpt-4o' - OpenAI with specific model
     - 'anthropic:claude-3.5-sonnet' - Anthropic with specific model
     - 'deepseek:deepseek-chat' - DeepSeek
-    - 'openrouter:openai/gpt-4o' - OpenRouter (100+ models via single API)
+    - 'openrouter:openai/gpt-4o' - OpenRouter model ID
     - 'openrouter:anthropic/claude-3.5-sonnet' - Claude via OpenRouter
     - 'openrouter:google/gemini-pro-1.5' - Gemini via OpenRouter
     - 'local' - Local rule-based fallback
@@ -233,7 +233,7 @@ async def update_provider_config(
     """
     Update AI provider configuration.
     
-    OpenRouter provider allows access to 100+ models through a single API:
+    OpenRouter provider uses OpenAI-compatible model IDs through a single API:
     - OpenAI: openai/gpt-4o, openai/gpt-4o-mini
     - Anthropic: anthropic/claude-3.5-sonnet
     - Google: google/gemini-pro-1.5
@@ -242,7 +242,7 @@ async def update_provider_config(
     - DeepSeek: deepseek/deepseek-chat
     - Qwen: qwen/qwen-2.5-72b-instruct
     
-    Cost-effective way to enable multi-model voting with single API key.
+    This endpoint configures provider routing; execution still follows the selected primary provider.
     """
     # Update settings
     if req.provider:
@@ -332,28 +332,27 @@ async def get_available_models(
     return {
         "providers": settings.ai.available_models,
         "openrouter_popular": [
-            {"id": "openai/gpt-4o", "name": "GPT-4o", "provider": "OpenAI", "pricing": "$5/1M input"},
-            {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "Anthropic", "pricing": "$3/1M input"},
-            {"id": "google/gemini-pro-1.5", "name": "Gemini Pro 1.5", "provider": "Google", "pricing": "$1.25/1M input"},
-            {"id": "meta-llama/llama-3.1-70b-instruct", "name": "Llama 3.1 70B", "provider": "Meta", "pricing": "$0.9/1M input"},
-            {"id": "mistralai/mistral-large", "name": "Mistral Large", "provider": "Mistral", "pricing": "$2/1M input"},
-            {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat", "provider": "DeepSeek", "pricing": "$0.14/1M input"},
-            {"id": "qwen/qwen-2.5-72b-instruct", "name": "Qwen 2.5 72B", "provider": "Alibaba", "pricing": "$0.35/1M input"},
+            {"id": "openai/gpt-4o", "name": "GPT-4o", "provider": "OpenAI", "pricing": "OpenRouter route"},
+            {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "Anthropic", "pricing": "OpenRouter route"},
+            {"id": "google/gemini-pro-1.5", "name": "Gemini Pro 1.5", "provider": "Google", "pricing": "OpenRouter route"},
+            {"id": "meta-llama/llama-3.1-70b-instruct", "name": "Llama 3.1 70B", "provider": "Meta", "pricing": "OpenRouter route"},
+            {"id": "mistralai/mistral-large", "name": "Mistral Large", "provider": "Mistral", "pricing": "OpenRouter route"},
+            {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat", "provider": "DeepSeek", "pricing": "OpenRouter route"},
+            {"id": "qwen/qwen-2.5-72b-instruct", "name": "Qwen 2.5 72B", "provider": "Alibaba", "pricing": "OpenRouter route"},
         ],
         "description": """
-## Multi-Model Voting Configuration Guide
+## Voting Configuration Guide
 
-### What is Multi-Model Voting?
-Multi-model voting combines analysis from multiple AI providers to produce more robust trading decisions.
+### Current Status
+Voting settings are stored for compatible deployments. The built-in analyzer currently executes the selected primary provider.
 
-### Benefits
-- Reduced bias: Different models have different strengths
-- Increased reliability: Fallback if one model fails
-- Better accuracy: Weighted combination often outperforms single models
-- Cost optimization: Use cheaper models for most queries
+### Use Cases
+- Keep a model catalog ready for future voting execution
+- Store operator-preferred model groups
+- Document the intended fallback mix
 
 ### Voting Strategies
-1. Weighted (Recommended): Weighted average of confidence
+1. Weighted: Weighted average of confidence
 2. Consensus: Only proceed if majority agrees
 3. Best Confidence: Take highest confidence result
 

@@ -1,5 +1,5 @@
 /**
- * Signal Server - Toast Notifications
+ * QuantPilot AI - Toast Notifications
  * Toast notification system.
  */
 

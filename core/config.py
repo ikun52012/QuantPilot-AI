@@ -1,16 +1,29 @@
 """
-Signal Server - Configuration (Enhanced)
+QuantPilot AI - Configuration
 Pydantic Settings with validation and type safety.
 """
+import json
 import os
 import secrets
 from pathlib import Path
 from typing import Optional, Any
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from dotenv import load_dotenv
 
 ENV_PATH = Path(__file__).parent.parent / ".env"
 load_dotenv(ENV_PATH, override=False)
+
+
+def _json_env(name: str, default: Any) -> Any:
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        if isinstance(default, list):
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return default
 
 
 class AIConfig(BaseModel):
@@ -27,6 +40,11 @@ class AIConfig(BaseModel):
     custom_provider_api_key: str = ""
     custom_provider_model: str = ""
     custom_provider_api_url: str = ""
+    openrouter_enabled: bool = False
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_site_url: str = ""
+    openrouter_app_name: str = "QuantPilot AI"
     temperature: float = 0.3
     max_tokens: int = 1000
     custom_system_prompt: str = ""
@@ -35,14 +53,43 @@ class AIConfig(BaseModel):
     write_timeout_secs: float = 30.0
     pool_timeout_secs: float = 10.0
     max_retries: int = 3
+    voting_enabled: bool = False
+    voting_models: list[str] = Field(default_factory=list)
+    voting_weights: dict[str, float] = Field(default_factory=dict)
+    voting_strategy: str = "weighted"
+    available_models: dict[str, list[str]] = Field(default_factory=lambda: {
+        "openai": ["gpt-4o", "gpt-4o-mini"],
+        "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
+        "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+        "openrouter": [
+            "openai/gpt-4o",
+            "openai/gpt-4o-mini",
+            "anthropic/claude-3.5-sonnet",
+            "deepseek/deepseek-chat",
+            "google/gemini-pro-1.5",
+            "meta-llama/llama-3.1-70b-instruct",
+            "mistralai/mistral-large",
+            "qwen/qwen-2.5-72b-instruct",
+        ],
+        "custom": [],
+    })
 
     @field_validator('provider')
     @classmethod
     def validate_provider(cls, v: str) -> str:
-        allowed = {'openai', 'anthropic', 'deepseek', 'custom'}
+        allowed = {'openai', 'anthropic', 'deepseek', 'openrouter', 'custom'}
         normalized = v.lower().strip()
         if normalized not in allowed:
             raise ValueError(f"AI provider must be one of: {allowed}")
+        return normalized
+
+    @field_validator('voting_strategy')
+    @classmethod
+    def validate_voting_strategy(cls, v: str) -> str:
+        normalized = v.lower().strip()
+        allowed = {'weighted', 'consensus', 'best_confidence'}
+        if normalized not in allowed:
+            raise ValueError(f"voting_strategy must be one of: {allowed}")
         return normalized
 
     @classmethod
@@ -60,6 +107,11 @@ class AIConfig(BaseModel):
             custom_provider_api_key=os.getenv("CUSTOM_AI_API_KEY", ""),
             custom_provider_model=os.getenv("CUSTOM_AI_MODEL", ""),
             custom_provider_api_url=os.getenv("CUSTOM_AI_API_URL", ""),
+            openrouter_enabled=os.getenv("OPENROUTER_ENABLED", "false").lower() == "true",
+            openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
+            openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
+            openrouter_site_url=os.getenv("OPENROUTER_SITE_URL", ""),
+            openrouter_app_name=os.getenv("OPENROUTER_APP_NAME", "QuantPilot AI"),
             temperature=float(os.getenv("AI_TEMPERATURE", "0.3")),
             max_tokens=int(os.getenv("AI_MAX_TOKENS", "1000")),
             custom_system_prompt=os.getenv("AI_CUSTOM_PROMPT", ""),
@@ -68,6 +120,10 @@ class AIConfig(BaseModel):
             write_timeout_secs=float(os.getenv("AI_WRITE_TIMEOUT_SECS", "30")),
             pool_timeout_secs=float(os.getenv("AI_POOL_TIMEOUT_SECS", "10")),
             max_retries=int(os.getenv("AI_MAX_RETRIES", "3")),
+            voting_enabled=os.getenv("AI_VOTING_ENABLED", "false").lower() == "true",
+            voting_models=_json_env("AI_VOTING_MODELS", []),
+            voting_weights=_json_env("AI_VOTING_WEIGHTS", {}),
+            voting_strategy=os.getenv("AI_VOTING_STRATEGY", "weighted"),
         )
 
 
@@ -220,6 +276,7 @@ class ServerConfig(BaseModel):
     port: int = 8000
     cors_origins: list[str] = ["*"]
     trusted_hosts: list[str] = ["*"]
+    trust_proxy_headers: bool = False
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
@@ -234,6 +291,7 @@ class ServerConfig(BaseModel):
             port=int(os.getenv("PORT", "8000")),
             cors_origins=cors_origins,
             trusted_hosts=trusted_hosts,
+            trust_proxy_headers=os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true",
         )
 
 

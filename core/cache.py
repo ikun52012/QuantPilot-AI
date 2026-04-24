@@ -22,28 +22,27 @@ class InMemoryCache:
     """Thread-safe in-memory LRU cache with TTL."""
 
     def __init__(self, max_size: int = 1000, default_ttl: int = 300):
-        self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[float, int, Any]] = OrderedDict()
         self._lock = threading.Lock()
         self._max_size = max_size
         self._default_ttl = default_ttl
 
     def get(self, key: str) -> Optional[Any]:
-        """Get a value from cache."""
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
                 return None
-            timestamp, value = entry
-            if time.monotonic() - timestamp > self._default_ttl:
+            timestamp, ttl, value = entry
+            if time.monotonic() - timestamp > ttl:
                 del self._cache[key]
                 return None
             self._cache.move_to_end(key)
             return value
 
     def set(self, key: str, value: Any, ttl: Optional[int] = None):
-        """Set a value in cache."""
         with self._lock:
-            self._cache[key] = (time.monotonic(), value)
+            effective_ttl = ttl if ttl is not None else self._default_ttl
+            self._cache[key] = (time.monotonic(), effective_ttl, value)
             self._cache.move_to_end(key)
             while len(self._cache) > self._max_size:
                 self._cache.popitem(last=False)

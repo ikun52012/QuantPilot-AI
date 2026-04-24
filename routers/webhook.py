@@ -2,6 +2,7 @@
 Signal Server - Webhook Router
 Handles TradingView webhook signals.
 """
+import hmac
 import json
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -10,10 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_admin_setting, get_db
 from core.config import settings
-from core.auth import get_optional_user
 from models import TradingViewSignal
 from services.signal_processor import SignalProcessor, verify_webhook_signature
 from core.security import is_placeholder_webhook_secret
+from core.request_utils import client_ip as get_client_ip
 
 
 router = APIRouter(prefix="", tags=["webhook"])
@@ -53,11 +54,7 @@ async def webhook(
         raise HTTPException(401, "Missing webhook secret")
 
     # Get client IP
-    client_ip = (
-        request.headers.get("cf-connecting-ip") or
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip() or
-        (request.client.host if request.client else "unknown")
-    )
+    client_ip = get_client_ip(request)
 
     # Validate signal
     try:
@@ -74,7 +71,7 @@ async def webhook(
     if not user_id:
         # Check admin secret
         admin_secret = await get_admin_setting(db, "webhook_secret", settings.server.webhook_secret)
-        if is_placeholder_webhook_secret(admin_secret) or secret != admin_secret:
+        if is_placeholder_webhook_secret(admin_secret) or not hmac.compare_digest(secret, admin_secret):
             logger.warning(f"[Webhook] Invalid secret from {client_ip}")
             raise HTTPException(401, "Invalid webhook secret")
 

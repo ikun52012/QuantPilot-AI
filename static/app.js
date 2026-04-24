@@ -1,5 +1,5 @@
 /**
- * TradingView Signal Server - Dashboard Frontend Logic
+ * QuantPilot AI - Dashboard Frontend Logic
  * v4.0 — Auth, Subscriptions, Crypto Payments, Admin Panel
  */
 
@@ -356,8 +356,10 @@ function toggleExchangePasswordField() {
 
 function toggleCustomAIFields() {
     const provider = document.getElementById('set-ai-provider')?.value;
-    const fields = document.getElementById('custom-ai-fields');
-    if (fields) fields.style.display = provider === 'custom' ? 'block' : 'none';
+    const customFields = document.getElementById('custom-ai-fields');
+    const openrouterFields = document.getElementById('openrouter-ai-fields');
+    if (customFields) customFields.style.display = provider === 'custom' ? 'block' : 'none';
+    if (openrouterFields) openrouterFields.style.display = provider === 'openrouter' ? 'block' : 'none';
 }
 
 function toggleExitModeFields() {
@@ -390,11 +392,15 @@ async function loadSettings() {
         setSecretPlaceholder('set-api-secret', status.exchange_api_configured, 'Enter API Secret');
         setSecretPlaceholder('set-password', status.exchange_password_configured, 'Enter Passphrase');
         if (document.getElementById('set-ai-provider') && status.ai_provider) document.getElementById('set-ai-provider').value = status.ai_provider;
-        setSecretPlaceholder('set-ai-key', status.ai_api_configured, 'Enter AI API Key');
+        const aiKeyConfigured = status.ai_provider === 'openrouter'
+            ? Boolean(status.openrouter_api_configured)
+            : Boolean(status.ai_api_configured);
+        setSecretPlaceholder('set-ai-key', aiKeyConfigured, 'Enter AI API Key');
         if (document.getElementById('set-custom-provider-enabled')) document.getElementById('set-custom-provider-enabled').checked = Boolean(status.custom_provider_enabled);
         if (document.getElementById('set-custom-provider-name')) document.getElementById('set-custom-provider-name').value = status.custom_provider_name || 'custom';
         if (document.getElementById('set-custom-provider-model')) document.getElementById('set-custom-provider-model').value = status.custom_provider_model || '';
         if (document.getElementById('set-custom-provider-url')) document.getElementById('set-custom-provider-url').value = status.custom_provider_url || '';
+        if (document.getElementById('set-openrouter-model')) document.getElementById('set-openrouter-model').value = status.openrouter_model || 'openai/gpt-4o-mini';
         setFieldValue('set-ai-temp', status.ai_temperature ?? 0.3);
         setFieldValue('set-ai-tokens', status.ai_max_tokens ?? 1000);
         setFieldValue('set-ai-prompt', status.ai_custom_system_prompt || '');
@@ -479,7 +485,7 @@ async function saveExchangeSettings() { await saveSettings('/api/settings/exchan
     live_trading: document.getElementById('set-live-trading')?.value === 'true',
     sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false
 }, 'btn-save-exchange'); }
-async function saveAISettings() { await saveSettings('/api/settings/ai', { provider:document.getElementById('set-ai-provider').value, api_key:document.getElementById('set-ai-key').value, temperature:parseFloat(document.getElementById('set-ai-temp').value)||0.3, max_tokens:parseInt(document.getElementById('set-ai-tokens').value)||1000, custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'' }, 'btn-save-ai'); }
+async function saveAISettings() { const provider = document.getElementById('set-ai-provider').value; await saveSettings('/api/settings/ai', { provider, api_key:document.getElementById('set-ai-key').value, temperature:parseFloat(document.getElementById('set-ai-temp').value)||0.3, max_tokens:parseInt(document.getElementById('set-ai-tokens').value)||1000, custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'', openrouter_enabled: provider === 'openrouter', openrouter_model: document.getElementById('set-openrouter-model')?.value || 'openai/gpt-4o-mini' }, 'btn-save-ai'); }
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
 async function saveRiskSettings() {
     const mode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';
