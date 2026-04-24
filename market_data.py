@@ -17,12 +17,20 @@ from exchange import _build_exchange, _resolve_symbol
 _MARKET_CACHE_TTL = 30  # seconds
 _MARKET_CACHE_MAX_SIZE = 500
 _market_cache: OrderedDict[str, tuple[float, MarketContext]] = OrderedDict()
-_market_cache_lock = threading.Lock()
+_market_cache_lock = asyncio.Lock()
 
 
 def _get_exchange() -> ccxt.Exchange:
-    """Create a ccxt exchange instance."""
-    return _build_exchange()
+    """Create a ccxt exchange instance (uses connection pool when available)."""
+    from exchange import _get_or_create_exchange
+    return _get_or_create_exchange(
+        exchange_id=settings.exchange.name,
+        api_key=settings.exchange.api_key,
+        api_secret=settings.exchange.api_secret,
+        password=settings.exchange.password,
+        live=False,
+        sandbox=False,
+    )
 
 
 async def fetch_market_context(ticker: str) -> MarketContext:
@@ -32,7 +40,7 @@ async def fetch_market_context(ticker: str) -> MarketContext:
     on rapid consecutive signals for the same symbol.
     """
     now = time.monotonic()
-    with _market_cache_lock:
+    async with _market_cache_lock:
         entry = _market_cache.get(ticker)
         if entry and (now - entry[0]) < _MARKET_CACHE_TTL:
             _market_cache.move_to_end(ticker)
@@ -41,7 +49,7 @@ async def fetch_market_context(ticker: str) -> MarketContext:
 
     context = await _fetch_market_context_live(ticker)
 
-    with _market_cache_lock:
+    async with _market_cache_lock:
         _market_cache[ticker] = (time.monotonic(), context)
         _market_cache.move_to_end(ticker)
         while len(_market_cache) > _MARKET_CACHE_MAX_SIZE:
@@ -132,6 +140,16 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             ema_slow=round(ema_slow, 2) if ema_slow else None,
             orderbook_imbalance=round(ob_imbalance, 4),
         )
+
+        # ── Multi-timeframe OHLCV for SMC/FVG analysis ──
+        try:
+            ohlcv_15m = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, "15m", None, 50)
+        except Exception:
+            ohlcv_15m = []
+
+        context._ohlcv_15m = ohlcv_15m
+        context._ohlcv_1h = ohlcv_1h
+        context._ohlcv_4h = ohlcv_4h
 
         logger.info(f"[MarketData] Fetched context for {ticker}: price={current_price}, RSI={rsi}, ATR%={atr_pct}")
         return context

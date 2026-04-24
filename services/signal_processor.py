@@ -367,6 +367,27 @@ class SignalProcessor:
         # Set execute flag
         decision.execute = analysis.recommendation in ("execute", "modify")
 
+        # ── SMC/FVG entry optimization ──
+        # When AI recommends "modify" and provides a suggested_entry, use it
+        # as the optimal entry price instead of the raw signal price.
+        if decision.execute and analysis.recommendation == "modify" and analysis.suggested_entry:
+            suggested = float(analysis.suggested_entry)
+            if suggested > 0:
+                price_diff_pct = abs(suggested - signal.price) / signal.price * 100 if signal.price > 0 else 0
+                # Only accept modified entry if it's within 5% of signal price
+                # (prevents AI from suggesting wildly different prices)
+                if price_diff_pct <= 5.0:
+                    logger.info(
+                        f"[Signal] AI modified entry: {signal.price} → {suggested} "
+                        f"({price_diff_pct:+.2f}% adjustment via SMC/FVG)"
+                    )
+                    decision.entry_price = suggested
+                else:
+                    logger.warning(
+                        f"[Signal] AI suggested entry {suggested} is {price_diff_pct:.2f}% "
+                        f"from signal price {signal.price}; using original price"
+                    )
+
         if decision.execute:
             self._apply_exit_plan(decision, signal, analysis, user_settings or {})
             if signal.direction in {SignalDirection.LONG, SignalDirection.SHORT}:

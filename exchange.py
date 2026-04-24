@@ -21,6 +21,48 @@ async def _close_exchange(exchange):
 
 
 # ─────────────────────────────────────────────
+# Exchange instance cache (#19)
+# Reuse CCXT instances for the same exchange+sandbox+credentials config
+# to avoid repeated connection setup overhead.
+# ─────────────────────────────────────────────
+import threading as _threading
+import hashlib as _hashlib
+
+_exchange_pool: dict[str, ccxt.Exchange] = {}
+_exchange_pool_lock = _threading.Lock()
+
+
+def _get_or_create_exchange(
+    exchange_id: str = None,
+    api_key: str = None,
+    api_secret: str = None,
+    password: str = "",
+    live: bool = False,
+    sandbox: bool | None = None,
+) -> ccxt.Exchange:
+    """Return a cached CCXT instance or create a new one."""
+    eid = (exchange_id or settings.exchange.name).lower().strip()
+    cred_hash = _hashlib.md5(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:8]
+    sb = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
+    cache_key = f"{eid}:{sb}:{cred_hash}"
+
+    with _exchange_pool_lock:
+        existing = _exchange_pool.get(cache_key)
+        if existing is not None:
+            return existing
+
+    instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox)
+
+    with _exchange_pool_lock:
+        if len(_exchange_pool) >= 50:
+            oldest_key = next(iter(_exchange_pool))
+            _exchange_pool.pop(oldest_key, None)
+        _exchange_pool[cache_key] = instance
+
+    return instance
+
+
+# ─────────────────────────────────────────────
 # Supported exchanges
 # ─────────────────────────────────────────────
 SUPPORTED_EXCHANGES = {

@@ -22,6 +22,38 @@ _AI_TIMEOUT = httpx.Timeout(
     pool=float(os.getenv("AI_POOL_TIMEOUT_SECS", "10")),
 )
 
+# ─────────────────────────────────────────────
+# AI analysis result cache (#18)
+# ─────────────────────────────────────────────
+import time as _time
+
+_AI_CACHE_TTL = 30  # seconds
+_AI_CACHE: dict[str, tuple[float, "AIAnalysis"]] = {}
+_AI_CACHE_LOCK = asyncio.Lock()
+
+
+def _ai_cache_key(ticker: str, direction: str) -> str:
+    return f"{ticker}:{direction}"
+
+
+async def _get_cached_analysis(ticker: str, direction: str):
+    key = _ai_cache_key(ticker, direction)
+    async with _AI_CACHE_LOCK:
+        entry = _AI_CACHE.get(key)
+        if entry and (_time.monotonic() - entry[0]) < _AI_CACHE_TTL:
+            return entry[1]
+    return None
+
+
+async def _set_cached_analysis(ticker: str, direction: str, analysis):
+    key = _ai_cache_key(ticker, direction)
+    async with _AI_CACHE_LOCK:
+        _AI_CACHE[key] = (_time.monotonic(), analysis)
+        now = _time.monotonic()
+        stale = [k for k, (ts, _) in _AI_CACHE.items() if now - ts > _AI_CACHE_TTL * 3]
+        for k in stale:
+            del _AI_CACHE[k]
+
 
 # ─────────────────────────────────────────────
 # System prompt - the "trading analyst" persona
@@ -83,6 +115,32 @@ Key rules:
 Respond ONLY with the JSON object, no other text."""
 
 
+# ─────────────────────────────────────────────
+# SMC / FVG entry optimization instructions
+# ─────────────────────────────────────────────
+SMC_FVG_PROMPT = """
+## Smart Money Concepts (SMC) & Fair Value Gap (FVG) Entry Optimization
+
+You will receive multi-timeframe SMC analysis data including:
+- **Market Structure**: BOS (Break of Structure), CHoCH (Change of Character), trend direction per timeframe
+- **Fair Value Gaps (FVG)**: Imbalance zones where price moved too fast — these are high-probability retracement targets
+- **Order Blocks (OB)**: Last opposing candle before a strong impulse — institutional entry footprints
+- **Premium/Discount Zones**: Fibonacci-based value areas from recent swing range
+- **Confluence Zones**: Areas where multiple timeframe levels overlap (highest probability)
+
+### Entry Optimization Rules:
+1. **If the signal price is in a PREMIUM zone for a LONG trade**: recommend "modify" and suggest entry at the nearest unfilled bullish FVG or bullish OB in the discount zone. This gives a better risk/reward.
+2. **If the signal price is in a DISCOUNT zone for a SHORT trade**: recommend "modify" and suggest entry at the nearest unfilled bearish FVG or bearish OB in the premium zone.
+3. **If a confluence zone exists near the signal price (within 1-2 ATR)**: prefer that zone as the entry point.
+4. **HTF (4H) structure takes priority**: If HTF trend conflicts with the signal direction AND there's no CHoCH, be very skeptical.
+5. **Use FVG midpoints as entry targets**: The midpoint of an unfilled FVG is the optimal entry within that zone.
+6. **Order Block entries**: Enter at the OB midpoint; place stop loss beyond the OB boundary.
+7. **When modifying entry**: Set `suggested_entry` to the optimal price. The system will use limit orders or wait for price to reach this level.
+8. **Stop loss placement**: Place SL beyond the nearest structural invalidation point (below swing low for longs, above swing high for shorts), not at a random fixed distance.
+9. **If no SMC data is available**: Fall back to standard technical analysis (RSI, EMA, ATR).
+"""
+
+
 RISK_PROFILE_PROMPTS = {
     "conservative": """AI risk profile: CONSERVATIVE.
 - Filter aggressively; reject marginal, late, overextended, or noisy trades.
@@ -108,6 +166,10 @@ RISK_PROFILE_PROMPTS = {
 def _get_effective_system_prompt() -> str:
     """Return system prompt with optional custom additions."""
     base = SYSTEM_PROMPT
+
+    # Always include SMC/FVG optimization instructions
+    base += "\n" + SMC_FVG_PROMPT
+
     profile = settings.risk.ai_risk_profile.lower().strip()
     base += "\n\n" + RISK_PROFILE_PROMPTS.get(profile, RISK_PROFILE_PROMPTS["balanced"])
     if settings.risk.exit_management_mode == "ai":
@@ -129,8 +191,8 @@ def _get_effective_system_prompt() -> str:
     return base
 
 
-def _build_user_prompt(signal: TradingViewSignal, market: MarketContext) -> str:
-    """Build the user prompt with signal and market data."""
+def _build_user_prompt(signal: TradingViewSignal, market: MarketContext, smc_text: str = "") -> str:
+    """Build the user prompt with signal, market data, and SMC analysis."""
     tp_config = settings.take_profit
     ts_config = settings.trailing_stop
 
@@ -179,7 +241,8 @@ def _build_user_prompt(signal: TradingViewSignal, market: MarketContext) -> str:
 {ts_section}
 
 Based on the configuration, suggest up to {tp_config.num_levels} take-profit targets and appropriate parameter adjustments.
-Should this signal be executed, modified, or rejected? Provide your analysis as JSON."""
+{smc_text}
+Should this signal be executed, modified, or rejected? If the entry price is suboptimal based on SMC analysis, recommend "modify" and provide a better suggested_entry price. Provide your analysis as JSON."""
 
 
 # ─────────────────────────────────────────────
@@ -405,10 +468,48 @@ async def analyze_signal(
 ) -> AIAnalysis:
     """
     Send signal + market context to LLM and parse the response.
-    Returns structured AIAnalysis.
+    Includes multi-timeframe SMC/FVG analysis for optimal entry detection.
+    Results are cached for 30s per ticker+direction.
     """
+    # Check cache first (#18)
+    cached = await _get_cached_analysis(signal.ticker, signal.direction.value)
+    if cached is not None:
+        logger.info(f"[AI] Using cached analysis for {signal.ticker} {signal.direction.value}")
+        return cached
+
+    # ── SMC / FVG multi-timeframe analysis ──
+    smc_text = ""
+    try:
+        from smc_analyzer import (
+            analyze_smc_single_tf, find_confluence_zones,
+            format_smc_for_ai, MultiTimeframeSMC,
+        )
+
+        ohlcv_4h = getattr(market, "_ohlcv_4h", None) or []
+        ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
+        ohlcv_15m = getattr(market, "_ohlcv_15m", None) or []
+
+        htf_ctx = analyze_smc_single_tf(ohlcv_4h, "4h", market.current_price) if len(ohlcv_4h) >= 5 else None
+        mtf_ctx = analyze_smc_single_tf(ohlcv_1h, "1h", market.current_price) if len(ohlcv_1h) >= 5 else None
+        ltf_ctx = analyze_smc_single_tf(ohlcv_15m, "15m", market.current_price) if len(ohlcv_15m) >= 5 else None
+
+        direction = signal.direction.value if signal.direction else "long"
+        confluence = find_confluence_zones(htf_ctx, mtf_ctx, ltf_ctx, direction, market.current_price)
+
+        mtf_smc = MultiTimeframeSMC(htf=htf_ctx, mtf=mtf_ctx, ltf=ltf_ctx, confluence_zones=confluence)
+        smc_text = format_smc_for_ai(mtf_smc, direction, market.current_price)
+
+        logger.info(
+            f"[AI/SMC] {signal.ticker}: "
+            f"FVGs={sum(len(c.fvgs) for c in [htf_ctx, mtf_ctx, ltf_ctx] if c)}, "
+            f"OBs={sum(len(c.order_blocks) for c in [htf_ctx, mtf_ctx, ltf_ctx] if c)}, "
+            f"Confluences={len(confluence)}"
+        )
+    except Exception as e:
+        logger.warning(f"[AI/SMC] SMC analysis failed, proceeding without: {e}")
+
     system_prompt = _get_effective_system_prompt()
-    user_prompt = _build_user_prompt(signal, market)
+    user_prompt = _build_user_prompt(signal, market, smc_text)
     provider = settings.ai.provider.lower()
 
     logger.info(f"[AI] Analyzing {signal.ticker} {signal.direction.value} via {provider}...")
@@ -437,6 +538,8 @@ async def analyze_signal(
             f"[AI] Result: {analysis.recommendation} "
             f"(confidence={analysis.confidence:.2f}, risk={analysis.risk_score:.2f})"
         )
+        # Cache the result (#18)
+        await _set_cached_analysis(signal.ticker, signal.direction.value, analysis)
         return analysis
 
     except httpx.HTTPStatusError as e:

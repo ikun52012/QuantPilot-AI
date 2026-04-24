@@ -432,6 +432,46 @@ async def run_pre_filter_async(
             trend = "bullish" if ema_bullish else "bearish"
             reasons.append(f"EMA trend ({trend}) conflicts with {signal.direction.value} (diff={ema_diff_pct:.2f}%)")
 
+    # ── Check 16: Market Structure (SMC) Validation ──
+    structure_ok = True
+    try:
+        ohlcv_4h = getattr(market, "_ohlcv_4h", None) or []
+        ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
+
+        if len(ohlcv_4h) >= 10 or len(ohlcv_1h) >= 10:
+            from smc_analyzer import detect_market_structure
+
+            # Use 4H structure as primary, 1H as fallback
+            htf_ohlcv = ohlcv_4h if len(ohlcv_4h) >= 10 else ohlcv_1h
+            htf_label = "4h" if len(ohlcv_4h) >= 10 else "1h"
+            structure = detect_market_structure(htf_ohlcv, htf_label)
+
+            is_long = signal.direction in (SignalDirection.LONG,)
+            is_short = signal.direction in (SignalDirection.SHORT,)
+
+            # Block if HTF structure strongly opposes signal AND there's no CHoCH
+            if is_long and structure.trend == "bearish" and not structure.last_choch:
+                structure_ok = False
+            elif is_short and structure.trend == "bullish" and not structure.last_choch:
+                structure_ok = False
+
+            checks["market_structure"] = {
+                "passed": structure_ok,
+                "htf_trend": structure.trend,
+                "timeframe": htf_label,
+                "last_bos": structure.last_bos,
+                "last_choch": structure.last_choch,
+                "direction": signal.direction.value,
+                "note": "Blocks when HTF structure opposes signal without CHoCH reversal",
+            }
+            if not structure_ok:
+                reasons.append(
+                    f"HTF ({htf_label}) market structure is {structure.trend}, "
+                    f"conflicts with {signal.direction.value} (no CHoCH detected)"
+                )
+    except Exception as e:
+        checks["market_structure"] = {"passed": True, "note": f"Could not check: {e}"}
+
     # ── Final verdict ──
     disabled = {str(item).strip() for item in (disabled_checks or []) if str(item).strip()}
     for name in disabled:
