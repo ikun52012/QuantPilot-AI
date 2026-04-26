@@ -11,6 +11,7 @@ from collections import defaultdict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from loguru import logger
+import inspect
 
 from core.auth import verify_token
 from core.config import settings
@@ -54,7 +55,9 @@ class ConnectionManager:
 
         # Check connection limit
         if len(user_connections) >= _WS_CONNECTION_LIMIT_PER_USER:
-            await websocket.close(code=4029, reason="Too many connections. Please wait.")
+            close_result = websocket.close(code=4029, reason="Too many connections. Please wait.")
+            if inspect.isawaitable(close_result):
+                await close_result
             logger.warning(f"[WebSocket] Rate limit exceeded for user {user_id}")
             return False
 

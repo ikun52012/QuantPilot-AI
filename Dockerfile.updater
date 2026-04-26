@@ -1,0 +1,9 @@
+FROM python:3.12-alpine
+
+WORKDIR /workspace
+
+RUN apk add --no-cache docker-cli docker-cli-compose
+
+COPY scripts/docker-updater.py /workspace/scripts/docker-updater.py
+
+CMD ["python", "/workspace/scripts/docker-updater.py"]

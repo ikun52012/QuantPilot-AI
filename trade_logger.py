@@ -9,6 +9,7 @@ import uuid
 import concurrent.futures
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 from loguru import logger
 from models import TradeLog, TradeDecision
 from core.utils.datetime import utcnow, utcnow_iso
@@ -45,13 +46,13 @@ def _save_logs(path: Path, logs: list[dict]):
     tmp_path.replace(path)
 
 
-def _filter_user(trades: list[dict], user_id: str | None = None) -> list[dict]:
+def _filter_user(trades: list[dict], user_id: Optional[str] = None) -> list[dict]:
     if user_id is None:
         return trades
     return [t for t in trades if t.get("user_id") == user_id]
 
 
-async def log_trade_async(decision: TradeDecision, order_result: dict, user_id: str | None = None) -> str:
+async def log_trade_async(decision: TradeDecision, order_result: dict, user_id: Optional[str] = None) -> str:
     """
     Log a trade decision and its execution result (async version).
     Returns the trade ID.
@@ -117,7 +118,7 @@ async def log_trade_async(decision: TradeDecision, order_result: dict, user_id: 
     return trade_id
 
 
-def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None = None) -> str:
+def log_trade(decision: TradeDecision, order_result: dict, user_id: Optional[str] = None) -> str:
     """
     DEPRECATED: Use log_trade_async() instead.
     Kept as a thin shim for any remaining sync callers.
@@ -143,18 +144,18 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
         return future.result(timeout=30)
 
 
-def get_today_trades(user_id: str | None = None) -> list[dict]:
+def get_today_trades(user_id: Optional[str] = None) -> list[dict]:
     """Get all trades from today."""
     return get_trade_history(1, user_id=user_id)
 
 
-def get_today_pnl(user_id: str | None = None) -> float:
+def get_today_pnl(user_id: Optional[str] = None) -> float:
     """Return today's cumulative realised PnL percentage from the trade log."""
     trades = get_today_trades(user_id)
     return sum(t.get("pnl_pct", 0.0) or 0.0 for t in trades if t.get("execute"))
 
 
-def get_today_stats(user_id: str | None = None) -> dict:
+def get_today_stats(user_id: Optional[str] = None) -> dict:
     """Get today's trading statistics."""
     trades = get_today_trades(user_id)
     executed = [t for t in trades if t.get("execute")]
@@ -168,7 +169,7 @@ def get_today_stats(user_id: str | None = None) -> dict:
     }
 
 
-def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
+def get_trade_history(days: int = 7, user_id: Optional[str] = None) -> list[dict]:
     """Get trade history for the last N days from JSON files."""
     all_trades = []
     days = max(1, min(int(days), 365))
@@ -184,7 +185,7 @@ def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict]:
     return all_trades
 
 
-async def get_trade_history_async(days: int = 7, user_id: str | None = None) -> list[dict]:
+async def get_trade_history_async(days: int = 7, user_id: Optional[str] = None) -> list[dict]:
     """Get trade history for the last N days from database (async)."""
     from core.database import db_manager, get_trade_logs_async
 
@@ -210,7 +211,7 @@ async def get_trade_history_async(days: int = 7, user_id: str | None = None) -> 
     return merged
 
 
-def get_recent_trade_results(limit: int = 5, user_id: str | None = None) -> list[dict]:
+def get_recent_trade_results(limit: int = 5, user_id: Optional[str] = None) -> list[dict]:
     """Get the most recent executed trade results (for consecutive loss check)."""
     all_trades = get_trade_history(days=3, user_id=user_id)
     executed = [t for t in all_trades if t.get("execute")]
@@ -218,7 +219,7 @@ def get_recent_trade_results(limit: int = 5, user_id: str | None = None) -> list
     return executed[:limit]
 
 
-async def get_today_pnl_async(user_id: str | None = None) -> float:
+async def get_today_pnl_async(user_id: Optional[str] = None) -> float:
     """Return today's cumulative realised PnL percentage (async version)."""
     try:
         trades = await get_trade_history_async(1, user_id=user_id)
@@ -228,7 +229,7 @@ async def get_today_pnl_async(user_id: str | None = None) -> float:
         return get_today_pnl(user_id)
 
 
-async def get_recent_trade_results_async(limit: int = 5, user_id: str | None = None) -> list[dict]:
+async def get_recent_trade_results_async(limit: int = 5, user_id: Optional[str] = None) -> list[dict]:
     """Get the most recent executed trade results (async version)."""
     try:
         all_trades = await get_trade_history_async(days=3, user_id=user_id)
@@ -240,7 +241,7 @@ async def get_recent_trade_results_async(limit: int = 5, user_id: str | None = N
         return get_recent_trade_results(limit, user_id)
 
 
-async def get_today_stats_async(user_id: str | None = None) -> dict:
+async def get_today_stats_async(user_id: Optional[str] = None) -> dict:
     """Get today's trading statistics (async version)."""
     try:
         trades = await get_trade_history_async(1, user_id=user_id)

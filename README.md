@@ -222,6 +222,21 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 ### 3. Docker Deployment
 
+Production compose defaults to the published GHCR image:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+The admin panel one-click update feature requires:
+- `signal-server` running from `ghcr.io/ikun52012/quantpilot-ai`
+- the bundled `updater` service running
+- `/var/run/docker.sock` mounted into the updater sidecar
+
+For local development from source, keep using `docker build` or `uvicorn` directly. In that mode,
+the admin page still supports update checking, but rollout stays manual.
+
 ```bash
 docker-compose up -d --build
 docker-compose logs -f

@@ -123,11 +123,21 @@ echo "JWT_SECRET=$(openssl rand -hex 32)" >> .env
 echo "WEBHOOK_SECRET=$(openssl rand -hex 16)" >> .env
 ```
 
-### 3.2 Build and Start
+### 3.2 Pull and Start
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+The production compose file uses the published GHCR image by default:
+
+```bash
+SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:latest
+```
+
+If you want the admin panel one-click update button to work, keep the bundled `updater`
+service enabled and make sure the host allows mounting `/var/run/docker.sock`.
 
 ### 3.3 View Startup Logs
 
@@ -150,8 +160,9 @@ docker compose down
 # Restart application (without rebuilding database)
 docker compose restart signal-server
 
-# Rebuild after code update
-docker compose up -d --build signal-server
+# Pull latest published image and roll the app service
+docker compose pull signal-server
+docker compose up -d --no-deps signal-server
 
 # View all container status
 docker compose ps

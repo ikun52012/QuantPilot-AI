@@ -1477,6 +1477,8 @@ h1, h2, h3, h4, h5, h6 {
 .badge-simulated { background: var(--accent-orange-bg); color: var(--accent-orange); }
 .badge-blocked_by_prefilter { background: var(--accent-orange-bg); color: var(--accent-orange); }
 .badge-error { background: var(--accent-red-bg); color: var(--accent-red); }
+.badge-success { background: var(--accent-green-bg); color: var(--accent-green); }
+.badge-warning { background: var(--accent-orange-bg); color: var(--accent-orange); }
 .badge-open { background: var(--accent-blue-bg); color: var(--accent-blue); }
 .badge-closed { background: rgba(107, 114, 128, 0.15); color: var(--text-muted); }
 .badge-not_executed { background: rgba(107, 114, 128, 0.15); color: var(--text-muted); }

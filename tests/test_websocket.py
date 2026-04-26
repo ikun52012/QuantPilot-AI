@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch, AsyncMock
 class TestConnectionManager:
     @pytest.fixture
     def manager(self):
-        from routers.websocket import ConnectionManager
+        from routers.websocket import ConnectionManager, _ws_connection_times
+        _ws_connection_times.clear()
         return ConnectionManager()
 
     @pytest.fixture
@@ -131,7 +132,8 @@ class TestWebSocketSystem:
 class TestBroadcastFunctions:
     @pytest.fixture
     def manager(self):
-        from routers.websocket import ConnectionManager
+        from routers.websocket import ConnectionManager, _ws_connection_times
+        _ws_connection_times.clear()
         return ConnectionManager()
 
     async def test_broadcast_position_update(self, manager):
@@ -148,7 +150,8 @@ class TestBroadcastFunctions:
             "pnl_pct": 3.5,
         }
 
-        await broadcast_position_update("user123", position)
+        with patch('routers.websocket.manager', manager):
+            await broadcast_position_update("user123", position)
 
         ws.send_json.assert_called()
 
@@ -166,7 +169,8 @@ class TestBroadcastFunctions:
             "direction": "buy",
         }
 
-        await broadcast_trade_executed("user123", trade)
+        with patch('routers.websocket.manager', manager):
+            await broadcast_trade_executed("user123", trade)
 
         ws.send_json.assert_called()
 

@@ -4,7 +4,9 @@ Admin panel routes for user management, settings, and monitoring.
 """
 import json
 import os
+import re
 import secrets
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -1628,3 +1630,327 @@ async def update_enhanced_filters_settings(
     await _add_audit_log(db, admin, "update_enhanced_filters", "settings", "", "Updated enhanced filter settings", request)
 
     return {"status": "success", "message": "Enhanced filters updated", "settings": settings_data}
+
+
+# ─────────────────────────────────────────────
+# Update Management
+# ─────────────────────────────────────────────
+
+GITHUB_REPO = "ikun52012/QuantPilot-AI"
+GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+UPDATE_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "updater"
+UPDATE_REQUEST_DIR = UPDATE_DATA_DIR / "requests"
+UPDATE_STATUS_DIR = UPDATE_DATA_DIR / "status"
+UPDATE_HEALTH_FILE = UPDATE_STATUS_DIR / "updater-health.json"
+UPDATE_HEARTBEAT_TTL_SECS = 30
+
+
+class UpdateRequest(BaseModel):
+    confirm: bool = Field(default=False, description="Must be true to execute update")
+    backup_before_update: bool = Field(default=True, description="Create backup before update")
+
+
+def _ensure_update_dirs() -> None:
+    UPDATE_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+    UPDATE_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _update_control_enabled() -> bool:
+    return os.getenv("AUTO_UPDATE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_iso_timestamp(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return to_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _now_iso() -> str:
+    return utcnow().isoformat().replace("+00:00", "Z")
+
+
+def _read_update_payload(path: Path) -> Optional[dict]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_update_payload(path: Path, payload: dict) -> None:
+    _ensure_update_dirs()
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _status_file(task_id: str) -> Path:
+    return UPDATE_STATUS_DIR / f"{task_id}.json"
+
+
+def _request_file(task_id: str) -> Path:
+    return UPDATE_REQUEST_DIR / f"{task_id}.json"
+
+
+def _version_tuple(value: str) -> tuple[int, int, int]:
+    parts = [int(part) for part in re.findall(r"\d+", value or "")[:3]]
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def _next_update_task_id() -> str:
+    return f"upd_{utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+
+def _updater_health() -> dict:
+    health = _read_update_payload(UPDATE_HEALTH_FILE) or {}
+    last_seen = _parse_iso_timestamp(str(health.get("updated_at", "")))
+    healthy = False
+    if last_seen is not None:
+        healthy = (utcnow() - last_seen).total_seconds() <= UPDATE_HEARTBEAT_TTL_SECS
+    return {
+        **health,
+        "healthy": healthy,
+    }
+
+
+def _update_supported() -> bool:
+    health = _updater_health()
+    return _update_control_enabled() and bool(health.get("healthy"))
+
+
+def _latest_update_task() -> Optional[dict]:
+    _ensure_update_dirs()
+    status_files = sorted(UPDATE_STATUS_DIR.glob("upd_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for path in status_files:
+        payload = _read_update_payload(path)
+        if payload:
+            return payload
+    return None
+
+
+def _active_update_task() -> Optional[dict]:
+    _ensure_update_dirs()
+    status_files = sorted(UPDATE_STATUS_DIR.glob("upd_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for path in status_files:
+        payload = _read_update_payload(path)
+        if payload and payload.get("status") in {"queued", "running"}:
+            return payload
+    return None
+
+
+async def _fetch_latest_release_data() -> dict:
+    import httpx
+
+    current_version = settings.app_version
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                GITHUB_RELEASES_API,
+                headers={"Accept": "application/vnd.github.v3+json"},
+            )
+
+        if response.status_code == 404:
+            return {
+                "status": "error",
+                "message": "No published GitHub release found",
+                "current_version": current_version,
+                "latest_version": current_version,
+                "has_update": False,
+            }
+
+        if response.status_code != 200:
+            return {
+                "status": "error",
+                "message": f"GitHub API returned {response.status_code}",
+                "current_version": current_version,
+                "latest_version": current_version,
+                "has_update": False,
+            }
+
+        latest_release = response.json()
+        if not isinstance(latest_release, dict):
+            return {
+                "status": "error",
+                "message": "Unexpected GitHub response",
+                "current_version": current_version,
+                "latest_version": current_version,
+                "has_update": False,
+            }
+
+        latest_version = str(latest_release.get("tag_name") or "").strip().lstrip("v")
+        if not latest_version:
+            return {
+                "status": "error",
+                "message": "Latest release tag is missing",
+                "current_version": current_version,
+                "latest_version": current_version,
+                "has_update": False,
+            }
+
+        has_update = _version_tuple(latest_version) > _version_tuple(current_version)
+
+        return {
+            "status": "success",
+            "current_version": current_version,
+            "latest_version": latest_version,
+            "has_update": has_update,
+            "release_url": latest_release.get("html_url", ""),
+            "release_name": latest_release.get("name", latest_version),
+            "release_body": latest_release.get("body", ""),
+            "published_at": latest_release.get("published_at", ""),
+            "download_url": f"https://github.com/{GITHUB_REPO}/releases/tag/v{latest_version}",
+            "docker_image": f"ghcr.io/{GITHUB_REPO.lower()}:latest",
+        }
+    except httpx.TimeoutException:
+        return {
+            "status": "error",
+            "message": "GitHub API timeout",
+            "current_version": current_version,
+            "latest_version": current_version,
+            "has_update": False,
+        }
+    except Exception as e:
+        logger.error(f"[Admin] Check update failed: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "current_version": current_version,
+            "latest_version": current_version,
+            "has_update": False,
+        }
+
+
+@router.get("/check-update")
+async def check_for_update(
+    admin: dict = Depends(require_admin),
+):
+    """Check GitHub Releases for latest version."""
+    release = await _fetch_latest_release_data()
+    return {
+        **release,
+        "one_click_supported": _update_supported(),
+        "one_click_enabled": _update_control_enabled(),
+        "updater_healthy": _updater_health().get("healthy", False),
+    }
+
+
+@router.post("/perform-update")
+async def perform_update(
+    req: UpdateRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Queue a one-click Docker update handled by the updater sidecar."""
+
+    if not req.confirm:
+        raise HTTPException(400, "Update must be confirmed")
+
+    if not _update_supported():
+        raise HTTPException(400, "One-click update is not available for this deployment")
+
+    active_task = _active_update_task()
+    if active_task:
+        raise HTTPException(409, f"Update task {active_task.get('task_id', 'unknown')} is already {active_task.get('status', 'running')}")
+
+    release = await _fetch_latest_release_data()
+    if release.get("status") != "success":
+        raise HTTPException(502, release.get("message", "Unable to check latest release"))
+    if not release.get("has_update"):
+        raise HTTPException(400, "No newer release is available")
+
+    current_version = str(release.get("current_version") or settings.app_version)
+    latest_version = str(release.get("latest_version") or current_version)
+
+    backup_result = None
+    if req.backup_before_update:
+        from backups import create_backup
+
+        backup_result = await create_backup(note=f"Pre-update backup before v{latest_version}")
+        if backup_result.get("status") != "ok":
+            raise HTTPException(500, backup_result.get("reason", "Backup failed before update"))
+
+    task_id = _next_update_task_id()
+    queued_at = _now_iso()
+    task_payload = {
+        "task_id": task_id,
+        "status": "queued",
+        "created_at": queued_at,
+        "updated_at": queued_at,
+        "current_version": current_version,
+        "target_version": latest_version,
+        "release_name": release.get("release_name", latest_version),
+        "release_url": release.get("release_url", ""),
+        "message": f"Update to v{latest_version} has been queued.",
+        "backup": backup_result,
+        "log": [f"Queued update request for v{latest_version}."],
+    }
+
+    if backup_result:
+        task_payload["log"].append(f"Created backup {backup_result.get('backup_name', '')}.")
+
+    try:
+        _write_update_payload(_status_file(task_id), task_payload)
+        _write_update_payload(_request_file(task_id), task_payload)
+    except OSError as e:
+        raise HTTPException(500, f"Failed to queue update task: {e}")
+
+    await _add_audit_log(
+        db,
+        admin,
+        "queue_update",
+        "system",
+        task_id,
+        f"Queued update from v{current_version} to v{latest_version}",
+        request,
+    )
+    await db.commit()
+
+    return {
+        "status": "queued",
+        "message": "Update queued. The service will restart when rollout begins.",
+        "task_id": task_id,
+        "previous_version": current_version,
+        "latest_version": latest_version,
+        "backup": backup_result,
+        "poll_url": f"/api/admin/update-task/{task_id}",
+    }
+
+
+@router.get("/update-status")
+async def get_update_status(
+    admin: dict = Depends(require_admin),
+):
+    """Get current update environment status."""
+    health = _updater_health()
+    latest_task = _latest_update_task()
+    return {
+        "deployment_mode": "docker-compose" if _update_control_enabled() else "manual",
+        "current_version": settings.app_version,
+        "github_repo": GITHUB_REPO,
+        "one_click_enabled": _update_control_enabled(),
+        "update_supported": _update_supported(),
+        "updater_healthy": health.get("healthy", False),
+        "updater_message": health.get("message", "Updater unavailable"),
+        "updater_last_seen": health.get("updated_at"),
+        "latest_task": latest_task,
+    }
+
+
+@router.get("/update-task/{task_id}")
+async def get_update_task(
+    task_id: str,
+    admin: dict = Depends(require_admin),
+):
+    """Read the persisted state of an update task."""
+    payload = _read_update_payload(_status_file(task_id))
+    if payload is None:
+        payload = _read_update_payload(_request_file(task_id))
+    if payload is None:
+        raise HTTPException(404, "Update task not found")
+    return payload

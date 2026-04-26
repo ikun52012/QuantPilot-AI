@@ -49,26 +49,31 @@ async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
 @pytest_asyncio.fixture(scope="function")
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     from app import app
-    from core.database import get_db
+    from core.database import get_db, db_manager
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
     async def override_get_db():
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
+    db_manager.async_session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    db_manager.engine = db_session.bind
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
     app.dependency_overrides.clear()
+    db_manager.async_session_factory = None
+    db_manager.engine = None
 
 
 @pytest.fixture
 def test_user_data():
     return {
         "username": "testuser",
-        "email": "test@example.com",
-        "password": "TestPass123!",
+        "email": "member@example.com",
+        "password": "Str0ng!Pass123",
     }
 
 

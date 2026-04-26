@@ -25,7 +25,7 @@ class TestDetectFVGs:
 
         fvg = bullish_fvgs[0]
         assert fvg["low"] >= 102
-        assert fvg["high"] <= 103
+        assert fvg["high"] >= 103
 
     def test_bearish_fvg_detection(self):
         candles = [

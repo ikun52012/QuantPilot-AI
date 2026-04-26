@@ -1034,7 +1034,7 @@ async function adminVerifyPayment(paymentId) {
 async function loadAdmin() {
     if (!isAdmin()) { showToast('Admin access required','error'); return; }
     try {
-        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs, webhookEvents, backups, monitorState, filterThresholds, filterStats, externalKeys, enhancedFilters] = await Promise.all([
+        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs, webhookEvents, backups, monitorState, filterThresholds, filterStats, externalKeys, enhancedFilters, updateStatus] = await Promise.all([
             fetchAPI('/api/admin/users'),
             fetchAPI('/api/admin/payments'),
             fetchAPI('/api/admin/plans'),
@@ -1051,6 +1051,7 @@ async function loadAdmin() {
             fetchAPI('/api/admin/filter-stats'),
             fetchAPI('/api/admin/external-api-keys'),
             fetchAPI('/api/admin/enhanced-filters'),
+            fetchAPI('/api/admin/update-status'),
         ]);
 
         renderAdminUsers(users, plans);
@@ -1058,6 +1059,7 @@ async function loadAdmin() {
         renderAdminRegistration(registration || {}, invites || []);
         renderAdminRedeemCodes(redeemCodes || [], plans || []);
         renderAdminPendingPayments(payments || []);
+        renderAdminUpdate(updateStatus || {});
         renderAdminSystem(system || {}, auditLogs || []);
         renderAdminWebhookEvents(webhookEvents || []);
         renderAdminBackups(backups || []);
@@ -1259,6 +1261,359 @@ function renderAdminPendingPayments(payments) {
     } else {
         payEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No pending payments</p>';
     }
+}
+
+let currentUpdateInfo = null;
+let currentUpdateTaskId = null;
+let updatePollTimer = null;
+
+function renderAdminUpdate(status) {
+    const el = document.getElementById('admin-update');
+    const badge = document.getElementById('admin-update-badge');
+    if (!el) return;
+
+    const currentVersion = status.current_version || '--';
+    const deploymentMode = status.deployment_mode || 'manual';
+    const updateSupported = status.update_supported || false;
+    const updaterHealthy = status.updater_healthy || false;
+    const latestTask = status.latest_task || null;
+    const updaterMessage = status.updater_message || 'Updater unavailable';
+
+    if (latestTask && ['queued', 'running'].includes(latestTask.status)) {
+        currentUpdateTaskId = latestTask.task_id || currentUpdateTaskId;
+        startUpdatePolling(currentUpdateTaskId);
+    }
+
+    if (badge) {
+        if (latestTask && ['queued', 'running'].includes(latestTask.status)) {
+            badge.textContent = latestTask.status === 'running' ? 'Updating' : 'Queued';
+            badge.className = 'badge badge-pending';
+        } else if (updateSupported) {
+            badge.textContent = 'Ready';
+            badge.className = 'badge badge-active';
+        } else {
+            badge.textContent = 'Manual';
+            badge.className = 'badge badge-warning';
+        }
+    }
+
+    const latestTaskHtml = latestTask
+        ? `<div style="margin-top:16px;padding:12px;background:rgba(148,163,184,0.06);border-radius:8px;border:1px solid rgba(148,163,184,0.12)">
+            <p style="margin:0 0 6px"><strong>Latest Task:</strong> ${escapeHtml(latestTask.task_id || '--')}</p>
+            <p style="margin:0;font-size:12px;color:var(--text-secondary)">Status: <span class="badge badge-${safeClassToken(latestTask.status || 'unknown')}">${escapeHtml(latestTask.status || 'unknown')}</span> ${latestTask.target_version ? `→ v${escapeHtml(latestTask.target_version)}` : ''}</p>
+        </div>`
+        : '';
+
+    el.innerHTML = `
+        <div class="settings-form">
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label>Current Version</label>
+                    <div class="metric-value" style="font-size:18px;color:var(--accent-cyan)">v${escapeHtml(currentVersion)}</div>
+                </div>
+                <div class="form-group">
+                    <label>Environment</label>
+                    <div class="metric-value">${deploymentMode === 'docker-compose' ? '<i class="ri-box-3-line"></i> Docker Compose' : '<i class="ri-code-line"></i> Manual / Source'}</div>
+                </div>
+                <div class="form-group">
+                    <label>Updater</label>
+                    <div class="metric-value">${updaterHealthy ? '<span class="badge badge-active">Online</span>' : `<span class="badge badge-warning">${escapeHtml(updaterMessage)}</span>`}</div>
+                </div>
+            </div>
+            <div class="form-row">
+                <button class="btn btn-primary" onclick="checkForUpdate()" id="btn-check-update">
+                    <i class="ri-refresh-line"></i> Check for Updates
+                </button>
+                <button class="btn btn-success" onclick="showUpdateModal()" id="btn-one-click-update" ${updateSupported ? 'style="display:none"' : 'disabled'}>
+                    <i class="ri-download-cloud-2-line"></i> One-Click Update
+                </button>
+                <a href="https://github.com/${escapeHtml(status.github_repo || 'ikun52012/QuantPilot-AI')}/releases" target="_blank" class="btn btn-secondary">
+                    <i class="ri-external-link-line"></i> View Releases
+                </a>
+            </div>
+            <p class="hint">One-click update requires the updater sidecar and GHCR image deployment. It queues a rollout task instead of restarting the current HTTP request.</p>
+            ${latestTaskHtml}
+            <div id="update-result" style="margin-top:16px"></div>
+        </div>
+    `;
+
+    if (latestTask) {
+        renderUpdateTaskResult(latestTask);
+    }
+}
+
+async function checkForUpdate() {
+    const btn = document.getElementById('btn-check-update');
+    const resultEl = document.getElementById('update-result');
+    const badge = document.getElementById('admin-update-badge');
+
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Checking...';
+    }
+
+    try {
+        const info = await fetchAPI('/api/admin/check-update');
+        currentUpdateInfo = info;
+
+        const hasUpdate = info.has_update;
+        const latestVersion = info.latest_version || info.current_version;
+        const releaseUrl = info.release_url || '';
+        const releaseBody = info.release_body || '';
+        const oneClickSupported = info.one_click_supported || false;
+
+        if (badge) {
+            if (hasUpdate) {
+                badge.textContent = 'Update Available';
+                badge.className = 'badge badge-active';
+            } else if (info.status === 'error') {
+                badge.textContent = 'Error';
+                badge.className = 'badge badge-error';
+            } else {
+                badge.textContent = 'Latest';
+                badge.className = 'badge badge-active';
+            }
+        }
+
+        const oneClickBtn = document.getElementById('btn-one-click-update');
+        if (oneClickBtn && hasUpdate && oneClickSupported) {
+            oneClickBtn.style.display = '';
+        } else if (oneClickBtn) {
+            oneClickBtn.style.display = 'none';
+        }
+
+        if (resultEl) {
+            if (info.status === 'error') {
+                resultEl.innerHTML = `
+                    <div style="padding:12px;background:rgba(239,68,68,0.06);border-radius:8px;border:1px solid rgba(239,68,68,0.14)">
+                        <p style="color:var(--accent-red);margin:0"><i class="ri-error-warning-line"></i> ${escapeHtml(info.message || 'Check failed')}</p>
+                    </div>
+                `;
+            } else if (hasUpdate) {
+                const notesHtml = releaseBody
+                    ? `<div style="margin-top:12px;padding:12px;background:rgba(16,185,129,0.06);border-radius:8px;border:1px solid rgba(16,185,129,0.14);max-height:200px;overflow-y:auto">
+                        <h4 style="margin:0 0 8px;color:var(--accent-green)">Release Notes</h4>
+                        <pre style="white-space:pre-wrap;font-size:12px;color:var(--text-secondary);margin:0">${escapeHtml(releaseBody.slice(0, 1000))}${releaseBody.length > 1000 ? '...' : ''}</pre>
+                    </div>`
+                    : '';
+                resultEl.innerHTML = `
+                    <div style="padding:16px;background:rgba(16,185,129,0.06);border-radius:8px;border:1px solid rgba(16,185,129,0.14)">
+                        <p style="font-size:14px;color:var(--accent-green);margin:0 0 8px"><i class="ri-arrow-up-circle-line"></i> New version available: <strong>v${escapeHtml(latestVersion)}</strong></p>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0">Current: v${escapeHtml(info.current_version)} → Latest: v${escapeHtml(latestVersion)}</p>
+                        ${oneClickSupported ? '<p style="font-size:12px;color:var(--accent-cyan);margin:8px 0 0"><i class="ri-information-line"></i> Click "One-Click Update" to queue a rollout task</p>' : '<p style="font-size:12px;color:var(--accent-orange);margin:8px 0 0"><i class="ri-information-line"></i> Automatic rollout is not available for this deployment</p>'}
+                    </div>
+                    ${notesHtml}
+                    <div style="margin-top:12px">
+                        <a href="${escapeHtml(releaseUrl)}" target="_blank" class="btn btn-sm btn-secondary">
+                            <i class="ri-external-link-line"></i> Full Release Notes
+                        </a>
+                    </div>
+                `;
+            } else {
+                resultEl.innerHTML = `
+                    <div style="padding:12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.14)">
+                        <p style="color:var(--accent-indigo);margin:0"><i class="ri-checkbox-circle-line"></i> You are running the latest version v${escapeHtml(latestVersion)}</p>
+                    </div>
+                `;
+            }
+        }
+
+    } catch (err) {
+        if (resultEl) {
+            resultEl.innerHTML = `
+                <div style="padding:12px;background:rgba(239,68,68,0.06);border-radius:8px;border:1px solid rgba(239,68,68,0.14)">
+                    <p style="color:var(--accent-red);margin:0"><i class="ri-error-warning-line"></i> ${escapeHtml(err.message)}</p>
+                </div>
+            `;
+        }
+        showToast(err.message, 'error', 'Check Update Failed');
+    }
+
+    if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-refresh-line"></i> Check for Updates';
+    }
+}
+
+function showUpdateModal() {
+    if (!currentUpdateInfo || !currentUpdateInfo.has_update) {
+        showToast('No update available', 'warning');
+        return;
+    }
+    if (!currentUpdateInfo.one_click_supported) {
+        showToast('One-click update is not available for this deployment', 'warning');
+        return;
+    }
+
+    const latestVersion = currentUpdateInfo.latest_version;
+    const currentVersion = currentUpdateInfo.current_version;
+
+    const modalHtml = `
+        <div style="text-align:center">
+            <div style="font-size:48px;color:var(--accent-orange);margin-bottom:16px"><i class="ri-download-cloud-2-line"></i></div>
+            <h3 style="margin:0 0 8px">Update Confirmation</h3>
+            <p style="color:var(--text-secondary);margin:0 0 16px">This will update from <strong>v${escapeHtml(currentVersion)}</strong> to <strong>v${escapeHtml(latestVersion)}</strong></p>
+        </div>
+        <div style="padding:16px;background:rgba(245,158,11,0.06);border-radius:8px;border:1px solid rgba(245,158,11,0.14);margin-bottom:16px">
+            <p style="font-size:13px;color:var(--accent-orange);margin:0"><i class="ri-alert-line"></i> <strong>Warning:</strong></p>
+            <ul style="font-size:12px;color:var(--text-secondary);margin:8px 0 0;padding-left:20px">
+                <li>The update will be queued and applied by the updater sidecar</li>
+                <li>signal-server will restart when the rollout begins</li>
+                <li>Active positions may be affected</li>
+                <li>Recommend pausing trading before update</li>
+                <li>Database backup will be created automatically</li>
+            </ul>
+        </div>
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="update-backup-checkbox" checked>
+                <span>Create backup before update</span>
+            </label>
+        </div>
+        <div class="form-row" style="justify-content:center">
+            <button class="btn btn-danger" onclick="performUpdate()" id="btn-confirm-update">
+                <i class="ri-download-cloud-2-line"></i> Confirm Update
+            </button>
+            <button class="btn btn-secondary" onclick="closeUpdateModal()">
+                <i class="ri-close-line"></i> Cancel
+            </button>
+        </div>
+    `;
+
+    const modal = document.getElementById('payment-modal');
+    const body = document.getElementById('payment-modal-body');
+    if (modal && body) {
+        body.innerHTML = modalHtml;
+        modal.style.display = 'flex';
+    }
+}
+
+function closeUpdateModal() {
+    const modal = document.getElementById('payment-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function performUpdate() {
+    const backupCheckbox = document.getElementById('update-backup-checkbox');
+    const resultEl = document.getElementById('update-result');
+
+    closeUpdateModal();
+
+    if (resultEl) {
+        resultEl.innerHTML = `
+            <div style="padding:16px;background:rgba(245,158,11,0.06);border-radius:8px;border:1px solid rgba(245,158,11,0.14)">
+                <p style="color:var(--accent-orange);margin:0"><i class="ri-loader-4-line ri-spin"></i> Queueing update...</p>
+                <p style="font-size:12px;color:var(--text-secondary);margin:8px 0 0">The updater sidecar will pull the new image and restart the application.</p>
+            </div>
+        `;
+    }
+
+    try {
+        const result = await fetchAPI('/api/admin/perform-update', {
+            method: 'POST',
+            body: JSON.stringify({
+                confirm: true,
+                backup_before_update: backupCheckbox ? backupCheckbox.checked : true,
+            }),
+        });
+        currentUpdateTaskId = result.task_id || null;
+        if (resultEl) {
+            resultEl.innerHTML = `
+                <div style="padding:16px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.14)">
+                    <p style="color:var(--accent-blue);margin:0 0 8px"><i class="ri-time-line"></i> Update queued</p>
+                    <p style="font-size:12px;color:var(--text-secondary);margin:0">Task ID: ${escapeHtml(result.task_id || '--')}. Polling updater status now.</p>
+                </div>
+            `;
+        }
+        startUpdatePolling(currentUpdateTaskId);
+        showToast('Update queued successfully', 'success');
+
+    } catch (err) {
+        if (resultEl) {
+            resultEl.innerHTML = `
+                <div style="padding:16px;background:rgba(239,68,68,0.06);border-radius:8px;border:1px solid rgba(239,68,68,0.14)">
+                    <p style="color:var(--accent-red);margin:0"><i class="ri-error-warning-line"></i> Update failed: ${escapeHtml(err.message)}</p>
+                </div>
+            `;
+        }
+        showToast(err.message, 'error', 'Update Failed');
+    }
+}
+
+async function pollUpdateTask(taskId) {
+    if (!taskId) return;
+    try {
+        const task = await fetchAPI(`/api/admin/update-task/${encodeURIComponent(taskId)}`);
+        renderUpdateTaskResult(task);
+        const status = String(task.status || '').toLowerCase();
+        if (['completed', 'failed'].includes(status)) {
+            stopUpdatePolling();
+            await refreshAdminUpdatePanel();
+        }
+    } catch (err) {
+        const resultEl = document.getElementById('update-result');
+        if (resultEl) {
+            resultEl.innerHTML = `<div style="padding:12px;background:rgba(239,68,68,0.06);border-radius:8px;border:1px solid rgba(239,68,68,0.14)"><p style="color:var(--accent-red);margin:0"><i class="ri-error-warning-line"></i> Failed to poll update task: ${escapeHtml(err.message)}</p></div>`;
+        }
+        stopUpdatePolling();
+    }
+}
+
+function startUpdatePolling(taskId) {
+    if (!taskId) return;
+    currentUpdateTaskId = taskId;
+    stopUpdatePolling();
+    pollUpdateTask(taskId);
+    updatePollTimer = window.setInterval(() => pollUpdateTask(taskId), 5000);
+}
+
+function stopUpdatePolling() {
+    if (updatePollTimer) {
+        window.clearInterval(updatePollTimer);
+        updatePollTimer = null;
+    }
+}
+
+async function refreshAdminUpdatePanel() {
+    try {
+        const status = await fetchAPI('/api/admin/update-status');
+        renderAdminUpdate(status || {});
+    } catch (err) {
+        console.error('Failed to refresh update panel', err);
+    }
+}
+
+function renderUpdateTaskResult(task) {
+    const resultEl = document.getElementById('update-result');
+    if (!resultEl || !task) return;
+
+    const logs = Array.isArray(task.log) ? task.log : [];
+    const status = String(task.status || 'unknown').toLowerCase();
+    const statusClass = status === 'completed' ? 'active' : status === 'failed' ? 'error' : 'pending';
+    const title = status === 'completed'
+        ? 'Update completed'
+        : status === 'failed'
+            ? 'Update failed'
+            : status === 'running'
+                ? 'Update running'
+                : 'Update queued';
+    const summary = task.message || '';
+    const logHtml = logs.length
+        ? logs.map(log => `<div style="font-size:12px;padding:4px 0">${escapeHtml(log)}</div>`).join('')
+        : '<div style="font-size:12px;color:var(--text-secondary)">No logs yet.</div>';
+
+    resultEl.innerHTML = `
+        <div style="padding:16px;background:rgba(148,163,184,0.06);border-radius:8px;border:1px solid rgba(148,163,184,0.12)">
+            <p style="margin:0 0 8px"><span class="badge badge-${statusClass}">${escapeHtml(status)}</span> <strong>${escapeHtml(title)}</strong></p>
+            <p style="font-size:12px;color:var(--text-secondary);margin:0">${escapeHtml(summary)}</p>
+            <p style="font-size:11px;color:var(--text-muted);margin:8px 0 0">Task: ${escapeHtml(task.task_id || '--')} ${task.target_version ? `· target v${escapeHtml(task.target_version)}` : ''}</p>
+        </div>
+        <div style="margin-top:12px;padding:12px;background:var(--card-bg);border-radius:8px;border:1px solid rgba(255,255,255,0.08)">
+            <h4 style="margin:0 0 8px;font-size:13px">Update Log</h4>
+            ${logHtml}
+        </div>
+        ${status === 'completed' ? '<div style="margin-top:12px"><button class="btn btn-primary" onclick="location.reload()"><i class="ri-refresh-line"></i> Refresh Page</button></div>' : ''}
+    `;
 }
 
 function renderAdminSystem(system, auditLogs) {

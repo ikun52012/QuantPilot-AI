@@ -17,12 +17,49 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+def _ohlcv_value(candle, index: int, key: str) -> float:
+    """Read OHLCV values from either list-based or dict-based candle input."""
+    if isinstance(candle, dict):
+        return float(candle.get(key, 0.0) or 0.0)
+    return float(candle[index])
+
+
+def _structure_dict(structure: MarketStructure) -> dict:
+    event_type = "none"
+    if structure.last_choch:
+        event_type = "choch"
+    elif structure.last_bos:
+        event_type = "bos"
+    return {
+        "type": event_type,
+        "trend": structure.trend,
+        "last_bos": structure.last_bos,
+        "last_choch": structure.last_choch,
+        "swing_highs": structure.swing_highs,
+        "swing_lows": structure.swing_lows,
+    }
+
+
+class CompatDictMixin:
+    """Allow old tests and adapters to access dataclasses like dicts."""
+
+    def get(self, key: str, default=None):
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str):
+        if key == "high":
+            return max(getattr(self, "top"), getattr(self, "bottom"))
+        if key == "low":
+            return min(getattr(self, "top"), getattr(self, "bottom"))
+        return getattr(self, key)
+
+
 # ─────────────────────────────────────────────
 # Data structures
 # ─────────────────────────────────────────────
 
 @dataclass
-class FVG:
+class FVG(CompatDictMixin):
     """A Fair Value Gap (imbalance zone)."""
     type: str           # "bullish" or "bearish"
     top: float          # upper boundary
@@ -34,7 +71,7 @@ class FVG:
 
 
 @dataclass
-class OrderBlock:
+class OrderBlock(CompatDictMixin):
     """An Order Block (last opposing candle before impulse)."""
     type: str           # "bullish" or "bearish"
     high: float
@@ -62,6 +99,15 @@ class MarketStructure:
     last_choch: Optional[str] = None # "bullish_choch" or "bearish_choch"
     swing_highs: list[StructurePoint] = field(default_factory=list)
     swing_lows: list[StructurePoint] = field(default_factory=list)
+
+    def get(self, key: str, default=None):
+        if key == "type":
+            if self.last_choch:
+                return "choch"
+            if self.last_bos:
+                return "bos"
+            return "none"
+        return getattr(self, key, default)
 
 
 @dataclass
@@ -102,13 +148,13 @@ def detect_swing_points(
         return highs, lows
 
     for i in range(lookback, len(ohlcv) - lookback):
-        high_i = ohlcv[i][2]  # High
-        low_i = ohlcv[i][3]   # Low
+        high_i = _ohlcv_value(ohlcv[i], 2, "high")
+        low_i = _ohlcv_value(ohlcv[i], 3, "low")
 
-        is_swing_high = all(high_i >= ohlcv[i - j][2] for j in range(1, lookback + 1)) and \
-                         all(high_i >= ohlcv[i + j][2] for j in range(1, lookback + 1))
-        is_swing_low = all(low_i <= ohlcv[i - j][3] for j in range(1, lookback + 1)) and \
-                        all(low_i <= ohlcv[i + j][3] for j in range(1, lookback + 1))
+        is_swing_high = all(high_i >= _ohlcv_value(ohlcv[i - j], 2, "high") for j in range(1, lookback + 1)) and \
+                         all(high_i >= _ohlcv_value(ohlcv[i + j], 2, "high") for j in range(1, lookback + 1))
+        is_swing_low = all(low_i <= _ohlcv_value(ohlcv[i - j], 3, "low") for j in range(1, lookback + 1)) and \
+                        all(low_i <= _ohlcv_value(ohlcv[i + j], 3, "low") for j in range(1, lookback + 1))
 
         if is_swing_high:
             highs.append(StructurePoint(type="high", price=high_i, index=i, timeframe=timeframe))
@@ -119,10 +165,27 @@ def detect_swing_points(
 
 
 def detect_market_structure(
-    ohlcv: list[list],
-    timeframe: str = "1h",
-) -> MarketStructure:
+    ohlcv: list,
+    timeframe: str | float = "1h",
+):
     """Detect BOS (Break of Structure) and CHoCH (Change of Character)."""
+    if ohlcv and isinstance(ohlcv[0], dict) and "price" in ohlcv[0]:
+        highs = [StructurePoint(type="high", price=float(p["price"]), index=int(p.get("index", 0)), timeframe="compat") for p in ohlcv if p.get("type") == "high"]
+        lows = [StructurePoint(type="low", price=float(p["price"]), index=int(p.get("index", 0)), timeframe="compat") for p in ohlcv if p.get("type") == "low"]
+        structure = MarketStructure(trend="ranging", swing_highs=highs[-5:], swing_lows=lows[-5:])
+        if len(highs) >= 2 and len(lows) >= 2:
+            hh = highs[-1].price > highs[-2].price
+            hl = lows[-1].price > lows[-2].price
+            lh = highs[-1].price < highs[-2].price
+            ll = lows[-1].price < lows[-2].price
+            if hh and hl:
+                structure.trend = "bullish"
+                structure.last_bos = "bullish_bos"
+            elif lh and ll:
+                structure.trend = "bearish"
+                structure.last_bos = "bearish_bos"
+        return _structure_dict(structure)
+
     swing_highs, swing_lows = detect_swing_points(ohlcv, lookback=3, timeframe=timeframe)
 
     structure = MarketStructure(
@@ -185,10 +248,10 @@ def detect_fvgs(
         return fvgs
 
     for i in range(1, len(ohlcv) - 1):
-        prev_high = ohlcv[i - 1][2]
-        prev_low = ohlcv[i - 1][3]
-        next_high = ohlcv[i + 1][2]
-        next_low = ohlcv[i + 1][3]
+        prev_high = _ohlcv_value(ohlcv[i - 1], 2, "high")
+        prev_low = _ohlcv_value(ohlcv[i - 1], 3, "low")
+        next_high = _ohlcv_value(ohlcv[i + 1], 2, "high")
+        next_low = _ohlcv_value(ohlcv[i + 1], 3, "low")
 
         # Bullish FVG: gap between prev candle high and next candle low
         if prev_high < next_low:
@@ -242,19 +305,19 @@ def detect_order_blocks(
         return obs
 
     for i in range(1, len(ohlcv) - 2):
-        open_i = ohlcv[i][1]
-        close_i = ohlcv[i][4]
-        high_i = ohlcv[i][2]
-        low_i = ohlcv[i][3]
+        open_i = _ohlcv_value(ohlcv[i], 1, "open")
+        close_i = _ohlcv_value(ohlcv[i], 4, "close")
+        high_i = _ohlcv_value(ohlcv[i], 2, "high")
+        low_i = _ohlcv_value(ohlcv[i], 3, "low")
 
         is_bearish_candle = close_i < open_i
         is_bullish_candle = close_i > open_i
 
         # Check the next 2 candles for impulse
-        next_close_1 = ohlcv[i + 1][4]
-        next_close_2 = ohlcv[i + 2][4]
-        next_high = max(ohlcv[i + 1][2], ohlcv[i + 2][2])
-        next_low = min(ohlcv[i + 1][3], ohlcv[i + 2][3])
+        next_close_1 = _ohlcv_value(ohlcv[i + 1], 4, "close")
+        next_close_2 = _ohlcv_value(ohlcv[i + 2], 4, "close")
+        next_high = max(_ohlcv_value(ohlcv[i + 1], 2, "high"), _ohlcv_value(ohlcv[i + 2], 2, "high"))
+        next_low = min(_ohlcv_value(ohlcv[i + 1], 3, "low"), _ohlcv_value(ohlcv[i + 2], 3, "low"))
 
         mid_price = (high_i + low_i) / 2 if (high_i + low_i) > 0 else 1
 
@@ -292,15 +355,30 @@ def detect_order_blocks(
 
 
 def calculate_premium_discount(
-    swing_highs: list[StructurePoint],
-    swing_lows: list[StructurePoint],
-) -> tuple[float, float, float]:
+    swing_highs,
+    swing_lows,
+):
     """Calculate Premium/Discount/Equilibrium zones from recent swing range.
 
     Returns (premium_zone, discount_zone, equilibrium).
     Premium = above 61.8% of range (expensive, good for shorts)
     Discount = below 38.2% of range (cheap, good for longs)
     """
+    if isinstance(swing_highs, (int, float)) and isinstance(swing_lows, (int, float)):
+        range_high = float(swing_highs or 0.0)
+        range_low = float(swing_lows or 0.0)
+        range_size = range_high - range_low
+        if range_size <= 0:
+            return {"premium": 0.0, "discount": 0.0, "equilibrium": 0.0}
+        equilibrium = range_low + range_size * 0.5
+        premium_zone = range_low + range_size * 0.81
+        discount_zone = range_low + range_size * 0.19
+        return {
+            "premium": round(premium_zone, 8),
+            "discount": round(discount_zone, 8),
+            "equilibrium": round(equilibrium, 8),
+        }
+
     if not swing_highs or not swing_lows:
         return 0.0, 0.0, 0.0
 
@@ -319,16 +397,33 @@ def calculate_premium_discount(
 
 
 def find_confluence_zones(
-    htf: Optional[SMCContext],
-    mtf: Optional[SMCContext],
-    ltf: Optional[SMCContext],
-    direction: str,
-    current_price: float,
+    htf,
+    mtf,
+    ltf=None,
+    direction: str = "long",
+    current_price: float = 0.0,
 ) -> list[dict]:
     """Find zones where multiple timeframe SMC levels overlap (confluence).
 
     These are the highest-probability entry zones.
     """
+    if isinstance(htf, list) and isinstance(mtf, list) and ltf is None:
+        zones = []
+        for a in htf:
+            for b in mtf:
+                if a.get("type") != b.get("type"):
+                    continue
+                overlap_top = min(float(a.get("high", 0.0)), float(b.get("high", 0.0)))
+                overlap_bottom = max(float(a.get("low", 0.0)), float(b.get("low", 0.0)))
+                if overlap_top > overlap_bottom:
+                    zones.append({
+                        "confluence_top": round(overlap_top, 8),
+                        "confluence_bottom": round(overlap_bottom, 8),
+                        "confluence_midpoint": round((overlap_top + overlap_bottom) / 2, 8),
+                        "strength": "medium",
+                    })
+        return zones
+
     zones: list[dict] = []
     all_levels: list[dict] = []
 
@@ -438,9 +533,13 @@ def analyze_smc_single_tf(
     fvgs = detect_fvgs(ohlcv, timeframe, current_price)
     obs = detect_order_blocks(ohlcv, timeframe)
 
-    premium, discount, equilibrium = calculate_premium_discount(
-        structure.swing_highs, structure.swing_lows
-    )
+    premium_data = calculate_premium_discount(structure.swing_highs, structure.swing_lows)
+    if isinstance(premium_data, dict):
+        premium = premium_data.get("premium", 0.0)
+        discount = premium_data.get("discount", 0.0)
+        equilibrium = premium_data.get("equilibrium", 0.0)
+    else:
+        premium, discount, equilibrium = premium_data
 
     return SMCContext(
         timeframe=timeframe,

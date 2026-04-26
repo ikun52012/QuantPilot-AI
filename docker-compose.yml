@@ -8,9 +8,7 @@ services:
   # Signal Server
   # ─────────────────────────────────────────────
   signal-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${SIGNAL_SERVER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai:latest}
     container_name: signal-server
     restart: unless-stopped
     ports:
@@ -22,6 +20,7 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme-in-production}@redis:6379/0
       - REDIS_ENABLED=true
       - PYTHONIOENCODING=utf-8
+      - AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED:-true}
     volumes:
       - ./data:/app/data
       - ./trade_logs:/app/trade_logs
@@ -42,6 +41,25 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - signal-network
+
+  updater:
+    image: ${SIGNAL_UPDATER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai-updater:latest}
+    container_name: signal-updater
+    restart: unless-stopped
+    working_dir: /workspace
+    environment:
+      - UPDATER_BASE_DIR=/workspace
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-quantpilot-ai}
+      - UPDATE_TARGET_SERVICE=signal-server
+      - UPDATE_TARGET_IMAGE=${SIGNAL_SERVER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai:latest}
+      - UPDATER_HEARTBEAT_SECS=10
+    volumes:
+      - ./:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - signal-server
     networks:
       - signal-network
 
@@ -82,7 +100,7 @@ services:
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-changeme-in-production} ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 5

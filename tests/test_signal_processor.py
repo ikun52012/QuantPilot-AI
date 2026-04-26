@@ -66,6 +66,7 @@ class TestWebhookSignature:
     def test_verify_signature_no_secret(self, mock_settings):
         """Should allow when no HMAC secret configured (dev mode)."""
         mock_settings.exchange.live_trading = False
+        mock_settings.webhook_hmac_secret = ""
         with patch("os.getenv", return_value=""):
             assert verify_webhook_signature(b"test", "") is True
 
@@ -73,6 +74,7 @@ class TestWebhookSignature:
     def test_verify_signature_live_trading_no_secret(self, mock_settings):
         """Should reject when live trading but no secret."""
         mock_settings.exchange.live_trading = True
+        mock_settings.webhook_hmac_secret = ""
         with patch("os.getenv", return_value=""):
             assert verify_webhook_signature(b"test", "") is False
 
@@ -236,22 +238,25 @@ class TestPositionSizeCalculation:
         with patch("services.signal_processor.settings") as mock_settings:
             mock_settings.risk.account_equity_usdt = 10000
             mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.position_sizing_mode = "percentage"
             qty = processor._calculate_position_size(price=100, size_pct=1.0, leverage=1)
-            assert qty == 100.0  # 10000 * 10% * 1.0 / 100 = 100
+            assert qty == 10.0  # 10000 * 10% * 1.0 / 100 / 10 = 10 units at $100
 
     def test_position_size_with_leverage(self, processor):
         """Position size should scale with leverage."""
         with patch("services.signal_processor.settings") as mock_settings:
             mock_settings.risk.account_equity_usdt = 10000
             mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.position_sizing_mode = "percentage"
             qty = processor._calculate_position_size(price=100, size_pct=1.0, leverage=10)
-            assert qty == 1000.0  # 10000 * 10% * 1.0 * 10 / 100 = 1000
+            assert qty == 100.0  # 10000 * 10% * 1.0 * 10 / 100 = 100 units
 
     def test_position_size_zero_price(self, processor):
         """Should return 0 when price is zero."""
         with patch("services.signal_processor.settings") as mock_settings:
             mock_settings.risk.account_equity_usdt = 10000
             mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.position_sizing_mode = "percentage"
             qty = processor._calculate_position_size(price=0, size_pct=1.0, leverage=1)
             assert qty == 0.0
 

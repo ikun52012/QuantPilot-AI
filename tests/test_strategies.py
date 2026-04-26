@@ -60,7 +60,8 @@ class TestDCAEngine:
 
         assert position.total_quantity > 0
 
-    def test_position_sizing_martingale(self, engine):
+    @pytest.mark.asyncio
+    async def test_position_sizing_martingale(self, engine):
         config = DCAConfig(
             ticker="BTCUSDT",
             initial_capital_usdt=1000.0,
@@ -71,17 +72,18 @@ class TestDCAEngine:
 
         base_qty = position.entries[0].quantity
 
-        engine._add_entry(position.config_id, config, 49000.0)
+        await engine._add_entry(position.config_id, config, 49000.0)
 
         new_qty = position.entries[-1].quantity
         assert new_qty >= base_qty
 
-    def test_average_entry_calculation(self, engine, config):
+    @pytest.mark.asyncio
+    async def test_average_entry_calculation(self, engine, config):
         position = engine.create_position(config, 50000.0)
 
         initial_avg = position.average_entry_price
 
-        engine._add_entry(position.config_id, config, 49000.0)
+        await engine._add_entry(position.config_id, config, 49000.0)
 
         new_avg = position.average_entry_price
 
@@ -107,7 +109,8 @@ class TestDCAEngine:
         loss_pct = (50000.0 - 49400.0) / 50000.0 * 100
         assert loss_pct >= config.activation_loss_pct
 
-    def test_max_entries_limit(self, engine):
+    @pytest.mark.asyncio
+    async def test_max_entries_limit(self, engine):
         config = DCAConfig(
             ticker="BTCUSDT",
             max_entries=3,
@@ -115,16 +118,17 @@ class TestDCAEngine:
         )
         position = engine.create_position(config, 50000.0)
 
-        engine._add_entry(position.config_id, config, 49750.0)
-        engine._add_entry(position.config_id, config, 49500.0)
+        await engine._add_entry(position.config_id, config, 49750.0)
+        await engine._add_entry(position.config_id, config, 49500.0)
 
         assert len(position.entries) == 3
         assert position.entries_remaining == 0
 
-    def test_close_position(self, engine, config):
+    @pytest.mark.asyncio
+    async def test_close_position(self, engine, config):
         position = engine.create_position(config, 50000.0)
 
-        engine._close_position(position.config_id, 52000.0, "take_profit")
+        await engine._close_position(position.config_id, 52000.0, "take_profit")
 
         assert position.status == "closed"
         assert position.close_reason == "take_profit"
@@ -217,13 +221,14 @@ class TestGridEngine:
         buy_triggered = [l for l in triggered if l.side == "buy"]
         assert len(buy_triggered) > 0
 
-    def test_execute_grid_level(self, engine, config):
+    @pytest.mark.asyncio
+    async def test_execute_grid_level(self, engine, config):
         grid = engine.create_grid(config, 50000.0)
 
         for level in grid.grid_levels[:3]:
             level.status = "pending"
 
-        result = engine._execute_grid_level(grid.config_id, grid.grid_levels[0], 49000.0, config)
+        result = await engine._execute_grid_level(grid.config_id, grid.grid_levels[0], 49000.0, config)
 
         assert result["success"] == True
 
@@ -234,10 +239,11 @@ class TestGridEngine:
 
         assert isinstance(grid.unrealized_pnl_usdt, float)
 
-    def test_close_grid(self, engine, config):
+    @pytest.mark.asyncio
+    async def test_close_grid(self, engine, config):
         grid = engine.create_grid(config, 50000.0)
 
-        engine._close_grid(grid.config_id, 53000.0, "out_of_range")
+        await engine._close_grid(grid.config_id, 53000.0, "out_of_range")
 
         assert grid.status == "closed"
 
