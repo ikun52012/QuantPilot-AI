@@ -12,7 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir -r requirements.txt
 
 
 # ─────────────────────────────────────────────
@@ -27,27 +29,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
-COPY . .
+# Create appuser with fixed uid 1000 to match typical host user
+# This avoids permission issues when mounting host volumes (./data, ./logs, etc.)
+RUN groupadd -g 1000 appgroup && \
+    useradd -u 1000 -g appgroup -m -d /home/appuser -s /bin/bash appuser
 
-RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
-    && mkdir -p data/backups logs trade_logs \
-    && chown -R appuser:appgroup /app/data /app/logs /app/trade_logs \
-    && chmod -R 775 /app/data /app/logs /app/trade_logs \
+COPY --chown=appuser:appgroup . .
+
+RUN mkdir -p data/backups logs trade_logs \
+    && chmod -R 775 data logs trade_logs \
     && chmod +x scripts/docker-entrypoint.sh
 
-RUN cp -r /root/.local /home/appuser/.local 2>/dev/null || true \
-    && chown -R appuser:appgroup /home/appuser/.local 2>/dev/null || true
-
 USER appuser
-
-ENV PATH=/home/appuser/.local/bin:/root/.local/bin:$PATH
 
 EXPOSE 8000
 
