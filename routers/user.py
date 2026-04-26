@@ -105,7 +105,8 @@ def _load_user_settings(db_user) -> dict:
         raw = json.loads(db_user.settings_json or "{}")
         settings_data = decrypt_settings_payload(raw)
         return settings_data if isinstance(settings_data, dict) else {}
-    except Exception:
+    except Exception as e:
+        logger.debug(f"[User] Failed to load user settings: {e}")
         return {}
 
 
@@ -115,7 +116,8 @@ def _loads_list(value) -> list:
     try:
         parsed = json.loads(value or "[]")
         return parsed if isinstance(parsed, list) else []
-    except Exception:
+    except Exception as e:
+        logger.debug(f"[User] Failed to parse list value: {e}")
         return []
 
 
@@ -184,6 +186,17 @@ async def get_status(
         **status,
         "version": settings.app_version,
     }
+
+
+@router.get("/trading-controls")
+async def get_trading_controls(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Expose current trading control state to the dashboard."""
+    from core.trading_control import get_trading_control_state
+
+    return await get_trading_control_state(db)
 
 
 # ─────────────────────────────────────────────

@@ -1,6 +1,6 @@
 /**
  * QuantPilot AI - Dashboard Frontend Logic
- * v4.0 — Auth, Subscriptions, Crypto Payments, Admin Panel
+ * v4.5 — AI command center redesign, trading controls, strategies, PWA
  */
 
 const API = '';
@@ -73,8 +73,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     detectWebhookUrl();
     updateUserUI();
     setupSpotlight();
-    if (isAdmin()) loadDashboard();
-    else switchPage('user');
+    const hashPage = window.location.hash ? window.location.hash.slice(1) : '';
+    const initialPage = document.getElementById(`page-${hashPage}`)
+        ? hashPage
+        : (isAdmin() ? 'dashboard' : 'user');
+    switchPage(initialPage);
 });
 
 function setupSpotlight() {
@@ -179,8 +182,12 @@ function switchPage(page) {
     navEl?.classList.add('active');
     navEl?.setAttribute('aria-current','page');
     document.getElementById(`page-${page}`)?.classList.add('active');
-    const titles = { dashboard:'Dashboard', user:'My Trading', positions:'Positions', history:'Trade History', analytics:'Analytics', settings:'Settings', subscription:'Subscription', admin:'Admin Panel' };
+    const titles = { dashboard:'Dashboard', user:'My Trading', positions:'Positions', history:'Trade History', analytics:'Analytics', settings:'Settings', subscription:'Subscription', admin:'Admin Panel', backtest:'Backtest', strategies:'Strategies' };
     document.getElementById('page-title').textContent = titles[page] || page;
+    if (window.location.hash !== `#${page}`) {
+        history.replaceState(null, '', `${window.location.pathname}#${page}`);
+    }
+    if (page === 'dashboard') loadDashboard();
     if (page === 'positions') loadPositions();
     if (page === 'history') loadHistory();
     if (page === 'analytics') loadAnalytics();
@@ -188,15 +195,21 @@ function switchPage(page) {
     if (page === 'user') loadUserPortal();
     if (page === 'subscription') loadSubscription();
     if (page === 'admin') loadAdmin();
+    if (page === 'strategies') {
+        loadStrategiesOverview();
+        loadDCAList();
+        loadGridList();
+    }
 }
 
 // ─── Dashboard ───
 async function loadDashboard() {
     try {
-        const [status, stats, perf] = await Promise.all([
+        const [status, stats, perf, strategyOverview] = await Promise.all([
             fetchAPI('/api/status'),
             fetchAPI('/stats'),
-            fetchAPI('/api/performance?days=30')
+            fetchAPI('/api/performance?days=30'),
+            fetchAPI('/api/strategies/overview').catch(() => null),
         ]);
         if (status.live_trading) {
             const el = document.getElementById('trading-mode');
@@ -204,6 +217,9 @@ async function loadDashboard() {
             el.style.background = 'var(--accent-red-bg)';
             el.style.color = 'var(--accent-red)';
         }
+        setText('dash-api-health', 'API Online');
+        setText('dash-risk-mode', status.live_trading ? 'Live Risk Guard' : 'Paper Risk Guard');
+        setText('dash-webhook-state', status.webhook_configured === false ? 'Webhook Needs Setup' : 'Webhook Ready');
         const pnl = perf.total_pnl_pct || 0;
         const pnlEl = document.getElementById('kpi-pnl');
         pnlEl.textContent = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
@@ -211,6 +227,7 @@ async function loadDashboard() {
         document.getElementById('kpi-trades').textContent = perf.total_trades || 0;
         document.getElementById('kpi-winrate').textContent = `${(perf.win_rate || 0).toFixed(1)}%`;
         document.getElementById('kpi-sharpe').textContent = (perf.sharpe_ratio || 0).toFixed(2);
+        renderDashboardBrief(perf, strategyOverview, status);
         renderMetrics(perf);
         renderEquityChart(perf.equity_curve || []);
         await loadRecentSignals();
@@ -219,6 +236,45 @@ async function loadDashboard() {
         if (err.message.includes('401') || err.message.includes('Session expired')) redirectToLogin('expired');
         else showToast(err.message, 'error', 'Dashboard Load Failed');
     }
+}
+
+function renderDashboardBrief(perf = {}, overview = {}, status = {}) {
+    const pnl = Number(perf.total_pnl_pct || 0);
+    const win = Number(perf.win_rate || 0);
+    const confidence = Math.max(0, Math.min(99, Math.round((win * 0.55) + (pnl > 0 ? 25 : 12) + Math.min(Number(perf.sharpe_ratio || 0) * 8, 16))));
+    setText('ai-confidence', confidence ? `${confidence}%` : '--');
+    setText('ai-brief-title', pnl >= 0 ? 'Constructive Market Posture' : 'Defensive Market Posture');
+    setText(
+        'ai-brief-text',
+        pnl >= 0
+            ? `Portfolio trend is positive over the selected window. Keep execution gated by risk controls and review any low-confidence signal before automation.`
+            : `Performance is under pressure. Prefer paper mode, smaller sizing, and manual review until drawdown and win-rate stabilize.`
+    );
+    setText('dash-dca-active', overview?.dca?.active_count ?? '--');
+    setText('dash-grid-active', overview?.grid?.active_count ?? '--');
+    const botPnl = Number((overview?.dca?.total_pnl || 0) + (overview?.grid?.total_pnl || 0));
+    setText('dash-bot-pnl', Number.isFinite(botPnl) ? `$${formatNum(botPnl)}` : '--');
+
+    const queue = document.getElementById('dashboard-action-queue');
+    if (!queue) return;
+    const items = [
+        {
+            icon: status.live_trading ? 'ri-alarm-warning-line' : 'ri-shield-check-line',
+            title: status.live_trading ? 'Live trading enabled' : 'Paper trading active',
+            text: status.live_trading ? 'Confirm exchange keys, leverage, and emergency stop readiness.' : 'Execution is isolated from real funds.',
+        },
+        {
+            icon: 'ri-robot-2-line',
+            title: `${overview?.dca?.active_count || 0} DCA / ${overview?.grid?.active_count || 0} Grid bots`,
+            text: 'Automation health is tracked from persisted strategy state.',
+        },
+        {
+            icon: pnl >= 0 ? 'ri-line-chart-line' : 'ri-arrow-down-circle-line',
+            title: pnl >= 0 ? 'Performance stable' : 'Performance needs review',
+            text: `Win rate ${win.toFixed(1)}%, Sharpe ${(Number(perf.sharpe_ratio || 0)).toFixed(2)}.`,
+        },
+    ];
+    queue.innerHTML = items.map(item => `<div class="queue-item"><i class="${item.icon}"></i><div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.text)}</span></div></div>`).join('');
 }
 
 function renderMetrics(perf) {
@@ -438,7 +494,12 @@ async function loadSettings() {
         if (profileEl) profileEl.checked = true;
         toggleExitModeFields();
         toggleRiskProfileHint();
-        if (isAdmin()) loadAdminWebhookConfig();
+        if (isAdmin()) {
+            loadAdminWebhookConfig();
+            loadVotingConfig();
+        }
+        // Load 2FA status
+        load2FAStatus();
     } catch (e) { console.error('Settings load error:', e); }
 }
 
@@ -527,6 +588,141 @@ async function saveTSSettings() {
     showToast(`Trailing stop: ${data.mode}`,'success','Trailing Stop Updated');
 }
 
+// ─── Two-Factor Authentication (2FA) ───
+let _2faSecret = '';
+let _2faRecoveryCodes = [];
+
+async function load2FAStatus() {
+    try {
+        const data = await fetchAPI('/api/auth/2fa/status');
+        const badge = document.getElementById('twofa-status-badge');
+        const disabledView = document.getElementById('twofa-disabled-view');
+        const enabledView = document.getElementById('twofa-enabled-view');
+        const setupView = document.getElementById('twofa-setup-view');
+        const recoveryView = document.getElementById('twofa-recovery-view');
+
+        if (!badge) return;
+
+        setupView.style.display = 'none';
+        recoveryView.style.display = 'none';
+
+        if (data.enabled) {
+            badge.style.display = 'inline-block';
+            badge.textContent = 'Enabled';
+            badge.style.background = 'rgba(34,197,94,0.15)';
+            badge.style.color = '#22c55e';
+            disabledView.style.display = 'none';
+            enabledView.style.display = 'block';
+            document.getElementById('twofa-recovery-remaining').textContent =
+                `Recovery codes remaining: ${data.recovery_codes_remaining}`;
+        } else {
+            badge.style.display = 'none';
+            disabledView.style.display = 'block';
+            enabledView.style.display = 'none';
+        }
+    } catch (e) { console.error('2FA status error:', e); }
+}
+
+async function setup2FA() {
+    const btn = document.getElementById('btn-setup-2fa');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ri-loader-4-line"></i> Setting up...';
+    try {
+        const data = await fetchAPI('/api/auth/2fa/setup', { method: 'POST' });
+        _2faSecret = data.secret;
+
+        // Show QR code
+        const container = document.getElementById('twofa-qr-container');
+        container.innerHTML = `<img src="data:image/png;base64,${data.qr_code}" alt="2FA QR Code" style="width:180px;height:180px;image-rendering:pixelated">`;
+        document.getElementById('twofa-manual-key').textContent = data.secret;
+
+        document.getElementById('twofa-disabled-view').style.display = 'none';
+        document.getElementById('twofa-setup-view').style.display = 'block';
+        document.getElementById('twofa-confirm-code').value = '';
+        document.getElementById('twofa-confirm-code').focus();
+    } catch (e) {
+        showToast(e.message || 'Failed to set up 2FA', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-shield-keyhole-line"></i> Set Up 2FA';
+    }
+}
+
+function cancel2FASetup() {
+    document.getElementById('twofa-setup-view').style.display = 'none';
+    document.getElementById('twofa-disabled-view').style.display = 'block';
+    _2faSecret = '';
+}
+
+async function confirm2FA() {
+    const code = document.getElementById('twofa-confirm-code').value.trim();
+    if (!code || code.length !== 6) {
+        showToast('Enter a valid 6-digit code', 'error');
+        return;
+    }
+    const btn = document.getElementById('btn-confirm-2fa');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ri-loader-4-line"></i> Verifying...';
+    try {
+        const data = await fetchAPI('/api/auth/2fa/enable', {
+            method: 'POST',
+            body: JSON.stringify({ code }),
+        });
+        _2faRecoveryCodes = data.recovery_codes || [];
+
+        // Show recovery codes
+        const codesEl = document.getElementById('twofa-recovery-codes');
+        codesEl.innerHTML = _2faRecoveryCodes.map(c =>
+            `<div style="padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;font-family:monospace;font-size:14px;text-align:center;letter-spacing:1px;user-select:all">${escapeHtml(c)}</div>`
+        ).join('');
+
+        document.getElementById('twofa-setup-view').style.display = 'none';
+        document.getElementById('twofa-recovery-view').style.display = 'block';
+        showToast('2FA enabled successfully!', 'success');
+    } catch (e) {
+        showToast(e.message || 'Invalid code', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-check-line"></i> Enable 2FA';
+    }
+}
+
+function copyRecoveryCodes() {
+    const text = _2faRecoveryCodes.join('\n');
+    copyText(text, 'Recovery codes copied');
+}
+
+function finish2FASetup() {
+    _2faRecoveryCodes = [];
+    _2faSecret = '';
+    load2FAStatus();
+}
+
+async function disable2FA() {
+    const pw = document.getElementById('twofa-disable-pw').value;
+    if (!pw) {
+        showToast('Enter your password to disable 2FA', 'error');
+        return;
+    }
+    const btn = document.getElementById('btn-disable-2fa');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ri-loader-4-line"></i> Disabling...';
+    try {
+        await fetchAPI('/api/auth/2fa/disable', {
+            method: 'POST',
+            body: JSON.stringify({ password: pw }),
+        });
+        document.getElementById('twofa-disable-pw').value = '';
+        showToast('2FA has been disabled', 'success');
+        load2FAStatus();
+    } catch (e) {
+        showToast(e.message || 'Failed to disable 2FA', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-shield-cross-line"></i> Disable 2FA';
+    }
+}
+
 // ─── Subscription Page ───
 async function loadUserPortal() {
     try {
@@ -558,6 +754,7 @@ function renderUserSettings(data) {
         const id = `user-${key.replace('_','-')}`;
         if (document.getElementById(id)) setFieldValue(id, tp[key] ?? '');
     });
+    toggleUserTPLevels();
     setText('user-webhook-url', wh.url || `${window.location.origin}/webhook`);
     setText('user-webhook-secret', wh.secret || '');
     setText('user-webhook-template', wh.template || '');
@@ -837,7 +1034,7 @@ async function adminVerifyPayment(paymentId) {
 async function loadAdmin() {
     if (!isAdmin()) { showToast('Admin access required','error'); return; }
     try {
-        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs, webhookEvents, backups, monitorState] = await Promise.all([
+        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs, webhookEvents, backups, monitorState, filterThresholds, filterStats, externalKeys, enhancedFilters] = await Promise.all([
             fetchAPI('/api/admin/users'),
             fetchAPI('/api/admin/payments'),
             fetchAPI('/api/admin/plans'),
@@ -850,6 +1047,10 @@ async function loadAdmin() {
             fetchAPI('/api/admin/webhook-events?limit=30'),
             fetchAPI('/api/admin/backups'),
             fetchAPI('/api/admin/position-monitor'),
+            fetchAPI('/api/admin/filter-thresholds'),
+            fetchAPI('/api/admin/filter-stats'),
+            fetchAPI('/api/admin/external-api-keys'),
+            fetchAPI('/api/admin/enhanced-filters'),
         ]);
 
         renderAdminUsers(users, plans);
@@ -861,7 +1062,91 @@ async function loadAdmin() {
         renderAdminWebhookEvents(webhookEvents || []);
         renderAdminBackups(backups || []);
         renderAdminPositionMonitor(monitorState || {});
+        renderAdminFilterThresholds(filterThresholds || {});
+        renderAdminFilterStats(filterStats || {});
+        renderAdminExternalAPIKeys(externalKeys || {});
+        renderAdminEnhancedFilters(enhancedFilters || {});
+        loadAdminRiskConsole();
     } catch (err) { showToast(err.message, 'error', 'Admin Load Failed'); }
+}
+
+async function loadAdminRiskConsole() {
+    if (!isAdmin()) return;
+    try {
+        const [controls, orderData] = await Promise.all([
+            fetchAPI('/api/admin/trading-controls'),
+            fetchAPI('/api/admin/order-events?limit=8').catch(() => ({ events: [] })),
+        ]);
+        renderTradingControls(controls || {});
+        renderOrderEvents(orderData.events || []);
+    } catch (err) {
+        setText('admin-control-mode', 'Unavailable');
+        setText('admin-control-reason', err.message);
+        const el = document.getElementById('admin-order-events');
+        if (el) el.innerHTML = `<div class="empty-state">Risk console unavailable: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function renderTradingControls(state = {}) {
+    const mode = state.mode || 'enabled';
+    const allowed = state.allowed !== false;
+    setText('admin-control-mode', mode.replace(/_/g, ' ').toUpperCase());
+    setText('admin-control-reason', state.reason || (allowed ? 'New trade execution is allowed.' : 'New trade execution is blocked.'));
+    const badge = document.getElementById('admin-control-badge');
+    if (badge) {
+        badge.textContent = allowed ? 'Enabled' : mode.replace(/_/g, ' ');
+        badge.className = `badge badge-${allowed ? 'active' : 'error'}`;
+    }
+}
+
+function renderOrderEvents(events = []) {
+    const el = document.getElementById('admin-order-events');
+    if (!el) return;
+    if (!events.length) {
+        el.innerHTML = '<div class="empty-state">No recent order events</div>';
+        return;
+    }
+    el.innerHTML = events.map(event => {
+        const status = event.status || 'unknown';
+        const title = `${event.ticker || '--'} · ${(event.direction || '--').toUpperCase()}`;
+        const meta = `${status} · attempts ${event.attempt_count || 0} · ${formatDateTime(event.updated_at || event.created_at)}`;
+        return `<div class="order-event"><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(meta)}</span>${event.last_error ? `<span>${escapeHtml(event.last_error)}</span>` : ''}</div><span class="badge badge-${safeClassToken(status)}">${escapeHtml(status)}</span></div>`;
+    }).join('');
+}
+
+async function setTradingControlMode(mode) {
+    const reason = mode === 'enabled' ? 'Trading enabled from admin console' : `Trading set to ${mode.replace(/_/g, ' ')} from admin console`;
+    try {
+        const state = await fetchAPI('/api/admin/trading-controls', {
+            method: 'POST',
+            body: JSON.stringify({ mode, reason }),
+        });
+        renderTradingControls(state);
+        showToast(`Trading mode: ${state.mode}`, 'success', 'Risk Control Updated');
+    } catch (err) {
+        showToast(err.message, 'error', 'Risk Control Failed');
+    }
+}
+
+async function emergencyStopTrading() {
+    if (!confirm('Activate emergency stop and block all new trade execution?')) return;
+    try {
+        const state = await fetchAPI('/api/admin/trading-controls/emergency-stop', { method: 'POST' });
+        renderTradingControls(state);
+        showToast('All new trade execution is blocked.', 'warning', 'Emergency Stop Active');
+    } catch (err) {
+        showToast(err.message, 'error', 'Emergency Stop Failed');
+    }
+}
+
+async function runOrderReconciliation() {
+    try {
+        const result = await fetchAPI('/api/admin/order-events/reconcile', { method: 'POST' });
+        await loadAdminRiskConsole();
+        showToast(`Checked ${result.checked || 0}, manual review ${result.marked_manual_review || 0}.`, 'success', 'Reconciliation Complete');
+    } catch (err) {
+        showToast(err.message, 'error', 'Reconciliation Failed');
+    }
 }
 
 function renderAdminUsers(users, plans) {
@@ -894,7 +1179,7 @@ function renderAdminUsers(users, plans) {
         const active = Boolean(u.is_active);
         const sub = u.subscription ? `<strong>${escapeHtml(u.subscription.plan_name || u.subscription.plan_id)}</strong><br><span class="hint">Until ${escapeHtml(formatDateTime(u.subscription.end_date))}</span>` : '<span style="color:var(--text-muted)">None</span>';
         return `<tr>
-            <td><div class="admin-stack"><input id="admin-username-${id}" class="text-input table-input" value="${escapeHtml(u.username)}" autocomplete="off"><input id="admin-email-${id}" class="text-input table-input" value="${escapeHtml(u.email)}" autocomplete="off"></div></td>
+            <td><div class="admin-stack"><input id="admin-username-${id}" class="text-input table-input" value="${escapeHtml(u.username)}" autocomplete="off"><input id="admin-email-${id}" class="text-input table-input" value="${escapeHtml(u.email)}" autocomplete="off">${u.totp_enabled ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#22c55e;margin-top:2px"><i class="ri-shield-check-line"></i>2FA</span>' : ''}</div></td>
             <td><select id="admin-role-${id}" class="select-input table-input"><option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
             <td><select id="admin-active-${id}" class="select-input table-input"><option value="true" ${active ? 'selected' : ''}>Active</option><option value="false" ${!active ? 'selected' : ''}>Disabled</option></select></td>
             <td><input id="admin-balance-${id}" type="number" class="text-input table-input" value="${Number(u.balance_usdt || 0).toFixed(2)}" min="0" step="0.01"></td>
@@ -1015,6 +1300,376 @@ function renderAdminPositionMonitor(state) {
         return `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(item.stop_price || '--')}</td><td>${escapeHtml(item.paper ? 'paper' : 'live')}</td><td>${escapeHtml(formatDateTime(item.updated_at))}</td></tr>`;
     }).join('') : '<tr><td colspan="4" class="empty-state">No trailing-stop adjustments yet</td></tr>';
     el.innerHTML = `<div class="settings-form"><div class="form-row"><button class="btn btn-primary" onclick="runPositionMonitor()"><i class="ri-play-line"></i> Run Monitor Now</button><span class="hint">Last run: ${escapeHtml(formatDateTime(state.last_run_at))}</span></div><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Trade Rule</th><th>Stop</th><th>Mode</th><th>Updated</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
+function renderAdminFilterThresholds(thresholds) {
+    const el = document.getElementById('admin-filter-thresholds');
+    if (!el) return;
+
+    const current = thresholds.thresholds || thresholds.current || {};
+    const defaults = thresholds.weights || thresholds.defaults || {};
+
+    const thresholdFields = [
+        ['atr_pct_max', 'ATR% Max', 'Extreme volatility threshold'],
+        ['spread_pct_max', 'Spread% Max', 'Maximum acceptable spread'],
+        ['volume_24h_min', 'Min Volume (USD)', 'Minimum 24h volume'],
+        ['price_change_1h_max', '1h Price Change Max', 'Large sudden move threshold'],
+        ['rsi_long_max', 'RSI Long Max', 'Block longs above this RSI'],
+        ['rsi_short_min', 'RSI Short Min', 'Block shorts below this RSI'],
+        ['funding_rate_threshold', 'Funding Rate Threshold', 'Extreme funding rate'],
+        ['consecutive_loss_max', 'Max Consecutive Losses', 'Cool-off after N losses'],
+        ['cooldown_seconds', 'Cooldown Seconds', 'Duplicate signal cooldown'],
+        ['min_pass_score', 'Min Pass Score', 'Minimum score for scoring mode'],
+    ];
+
+    const inputs = thresholdFields.map(([key, label, hint]) => {
+        const value = current[key] ?? defaults[key] ?? '';
+        return `<div class="form-group">
+            <label for="threshold-${key}">${escapeHtml(label)}</label>
+            <input type="number" id="threshold-${key}" class="text-input" value="${value}" step="0.1">
+            <p class="hint">${escapeHtml(hint)}</p>
+        </div>`;
+    }).join('');
+
+    el.innerHTML = `
+        <div class="settings-form">
+            <div class="form-row three-col">${inputs}</div>
+            <div class="form-row">
+                <button class="btn btn-primary" onclick="saveFilterThresholds()"><i class="ri-save-line"></i> Save Thresholds</button>
+                <button class="btn btn-secondary" onclick="loadFilterThresholds()"><i class="ri-refresh-line"></i> Refresh</button>
+                <button class="btn btn-warning" onclick="resetFilterThresholds()"><i class="ri-restart-line"></i> Reset to Defaults</button>
+            </div>
+            <div style="margin-top:16px;padding:12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.14)">
+                <p style="font-size:12px;color:var(--text-secondary);margin:0">
+                    <i class="ri-information-line" style="color:var(--accent-indigo)"></i>
+                    <strong>Dynamic thresholds:</strong> BTC/ETH have stricter thresholds. High-volatility assets use relaxed thresholds.
+                </p>
+            </div>
+        </div>`;
+}
+
+function renderAdminFilterStats(stats) {
+    const el = document.getElementById('admin-filter-stats');
+    if (!el) return;
+
+    const summary = stats.summary || {};
+    const detailed = stats.statistics || {};
+
+    const summaryRows = Object.entries(summary).map(([check, data]) => {
+        const topTickers = (data.top_tickers || []).map(([t, c]) => `${escapeHtml(t)}:${escapeHtml(c)}`).join(', ');
+        return `<tr>
+            <td><strong>${escapeHtml(check)}</strong></td>
+            <td>${escapeHtml(data.total_blocks || 0)}</td>
+            <td style="font-size:11px;color:var(--text-muted)">${escapeHtml(topTickers || '--')}</td>
+        </tr>`;
+    }).join('');
+
+    el.innerHTML = `
+        <div class="settings-form">
+            <div class="form-row">
+                <button class="btn btn-warning" onclick="resetFilterStats()"><i class="ri-delete-bin-line"></i> Reset Statistics</button>
+                <button class="btn btn-secondary" onclick="loadFilterStats()"><i class="ri-refresh-line"></i> Refresh</button>
+            </div>
+            <div class="table-wrapper mt-4">
+                <table class="data-table">
+                    <thead><tr><th>Filter Check</th><th>Total Blocks</th><th>Top Tickers</th></tr></thead>
+                    <tbody>${summaryRows || '<tr><td colspan="3" class="empty-state">No blocking statistics yet</td></tr>'}</tbody>
+                </table>
+            </div>
+        </div>`;
+}
+
+async function loadFilterThresholds() {
+    try {
+        const thresholds = await fetchAPI('/api/admin/filter-thresholds');
+        renderAdminFilterThresholds(thresholds);
+    } catch (err) {
+        showToast(err.message, 'error', 'Load Failed');
+    }
+}
+
+async function saveFilterThresholds() {
+    const thresholdFields = [
+        'atr_pct_max', 'spread_pct_max', 'volume_24h_min', 'price_change_1h_max',
+        'rsi_long_max', 'rsi_short_min', 'funding_rate_threshold', 'consecutive_loss_max',
+        'cooldown_seconds', 'min_pass_score'
+    ];
+
+    const data = {};
+    thresholdFields.forEach(key => {
+        const el = document.getElementById(`threshold-${key}`);
+        if (el) data[key] = parseFloat(el.value) || null;
+    });
+
+    try {
+        await fetchAPI('/api/admin/filter-thresholds', { method: 'POST', body: JSON.stringify(data) });
+        showToast('Filter thresholds saved.', 'success', 'Saved');
+    } catch (err) {
+        showToast(err.message, 'error', 'Save Failed');
+    }
+}
+
+async function resetFilterThresholds() {
+    if (!confirm('Reset all thresholds to default values?')) return;
+
+    const thresholdFields = [
+        'atr_pct_max', 'spread_pct_max', 'volume_24h_min', 'price_change_1h_max',
+        'rsi_long_max', 'rsi_short_min', 'funding_rate_threshold', 'consecutive_loss_max',
+        'cooldown_seconds', 'min_pass_score'
+    ];
+
+    const defaults = {
+        atr_pct_max: 15.0, spread_pct_max: 0.1, volume_24h_min: 1000000, price_change_1h_max: 8.0,
+        rsi_long_max: 80, rsi_short_min: 20, funding_rate_threshold: 0.0005, consecutive_loss_max: 3,
+        cooldown_seconds: 300, min_pass_score: 0.0
+    };
+
+    thresholdFields.forEach(key => {
+        const el = document.getElementById(`threshold-${key}`);
+        if (el) el.value = defaults[key] ?? '';
+    });
+
+    showToast('Thresholds reset to defaults. Click Save to apply.', 'info', 'Reset');
+}
+
+async function loadFilterStats() {
+    try {
+        const stats = await fetchAPI('/api/admin/filter-stats');
+        renderAdminFilterStats(stats);
+    } catch (err) {
+        showToast(err.message, 'error', 'Load Failed');
+    }
+}
+
+async function resetFilterStats() {
+    if (!confirm('Clear all filter blocking statistics?')) return;
+    try {
+        await fetchAPI('/api/admin/filter-stats/reset', { method: 'POST' });
+        showToast('Filter statistics reset.', 'success', 'Reset');
+        loadFilterStats();
+    } catch (err) {
+        showToast(err.message, 'error', 'Reset Failed');
+    }
+}
+
+function renderAdminExternalAPIKeys(keys) {
+    const el = document.getElementById('admin-external-api-keys');
+    if (!el) return;
+
+    const descriptions = keys.description || {};
+
+    const keyConfigs = [
+        {
+            name: 'whale_alert_api_key',
+            label: 'Whale Alert API Key',
+            configured: keys.whale_alert_configured,
+            masked: keys.whale_alert_api_key,
+            desc: descriptions.whale_alert,
+            free: true,
+        },
+        {
+            name: 'etherscan_api_key',
+            label: 'Etherscan API Key',
+            configured: keys.etherscan_configured,
+            masked: keys.etherscan_api_key,
+            desc: descriptions.etherscan,
+            free: true,
+        },
+        {
+            name: 'glassnode_api_key',
+            label: 'Glassnode API Key',
+            configured: keys.glassnode_configured,
+            masked: keys.glassnode_api_key,
+            desc: descriptions.glassnode,
+            free: false,
+        },
+        {
+            name: 'cryptoquant_api_key',
+            label: 'CryptoQuant API Key',
+            configured: keys.cryptoquant_configured,
+            masked: keys.cryptoquant_api_key,
+            desc: descriptions.cryptoquant,
+            free: false,
+        },
+    ];
+
+    const rows = keyConfigs.map(cfg => {
+        const statusBadge = cfg.configured
+            ? `<span class="badge badge-active">Configured</span>`
+            : `<span class="badge badge-inactive">Not Set</span>`;
+
+        const freeBadge = cfg.free
+            ? `<span class="badge badge-success" style="font-size:10px">FREE</span>`
+            : `<span class="badge badge-warning" style="font-size:10px">Paid</span>`;
+
+        const deleteBtn = cfg.configured
+            ? `<button class="btn btn-sm btn-danger" onclick="deleteExternalAPIKey('${cfg.name}')"><i class="ri-delete-bin-line"></i></button>`
+            : '';
+
+        return `<tr>
+            <td>
+                <strong>${escapeHtml(cfg.label)}</strong>
+                ${freeBadge}
+            </td>
+            <td>${statusBadge}</td>
+            <td style="font-family:monospace;font-size:11px">${escapeHtml(cfg.masked || '--')}</td>
+            <td style="font-size:11px;color:var(--text-muted)">${escapeHtml(cfg.desc || '')}</td>
+            <td>
+                <input type="password" id="api-key-${cfg.name}" class="text-input" placeholder="Enter new key" style="width:150px">
+                <button class="btn btn-sm btn-primary" onclick="saveExternalAPIKey('${cfg.name}')"><i class="ri-save-line"></i></button>
+                ${deleteBtn}
+            </td>
+        </tr>`;
+    }).join('');
+
+    el.innerHTML = `
+        <div class="settings-form">
+            <div class="table-wrapper">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>API Service</th>
+                            <th>Status</th>
+                            <th>Key Preview</th>
+                            <th>Description</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <div style="margin-top:16px;padding:12px;background:rgba(16,185,129,0.06);border-radius:8px;border:1px solid rgba(16,185,129,0.14)">
+                <h4 style="margin:0 0 8px;font-size:13px;color:var(--accent-green)"><i class="ri-information-line"></i> Free API Keys Guide</h4>
+                <ul style="margin:0;padding-left:20px;font-size:12px;color:var(--text-secondary)">
+                    <li><strong>Whale Alert:</strong> <a href="https://whale-alert.io" target="_blank">whale-alert.io</a> → Free tier 500 requests/day</li>
+                    <li><strong>Etherscan:</strong> <a href="https://etherscan.io/apis" target="_blank">etherscan.io/apis</a> → Free tier 5 calls/sec</li>
+                    <li>Keys are encrypted and stored securely in database</li>
+                    <li>Glassnode/CryptoQuant require paid subscriptions for full data</li>
+                </ul>
+            </div>
+        </div>`;
+}
+
+function renderAdminEnhancedFilters(settings) {
+    const el = document.getElementById('admin-enhanced-filters');
+    if (!el) return;
+
+    const desc = settings.description || {};
+
+    el.innerHTML = `
+        <div class="settings-form">
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="enhanced-filters-enabled" ${settings.enhanced_filters_enabled ? 'checked' : ''}>
+                    <span>Enable Enhanced Whale & On-chain Filters</span>
+                </label>
+                <p class="hint">${escapeHtml(desc.enhanced_filters_enabled || 'Activates whale activity, correlated assets, and OI change checks')}</p>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="whale-threshold">Whale Threshold (USD)</label>
+                    <input type="number" id="whale-threshold" class="text-input" value="${settings.whale_threshold_usd || 1000000}" min="100000" step="100000">
+                    <p class="hint">${escapeHtml(desc.whale_threshold_usd || 'Min USD for whale transfer')}</p>
+                </div>
+                <div class="form-group">
+                    <label for="correlated-threshold">Correlated Change %</label>
+                    <input type="number" id="correlated-threshold" class="text-input" value="${settings.correlated_threshold_pct || 5}" min="1" max="20" step="0.5">
+                    <p class="hint">${escapeHtml(desc.correlated_threshold_pct || 'BTC/ETH change threshold')}</p>
+                </div>
+                <div class="form-group">
+                    <label for="oi-threshold">OI Change %</label>
+                    <input type="number" id="oi-threshold" class="text-input" value="${settings.oi_change_threshold_pct || 15}" min="5" max="50" step="1">
+                    <p class="hint">${escapeHtml(desc.oi_change_threshold_pct || 'Open Interest change threshold')}</p>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <button class="btn btn-primary" onclick="saveEnhancedFilters()"><i class="ri-save-line"></i> Save Enhanced Filters</button>
+                <button class="btn btn-secondary" onclick="loadEnhancedFilters()"><i class="ri-refresh-line"></i> Refresh</button>
+            </div>
+
+            <div style="margin-top:16px;padding:12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.14)">
+                <p style="font-size:12px;color:var(--text-secondary);margin:0">
+                    <i class="ri-information-line" style="color:var(--accent-indigo)"></i>
+                    <strong>Enhanced filters require external API keys:</strong>
+                    Configure Whale Alert (free) or Etherscan (free) keys above to enable whale tracking.
+                    OI and correlated asset checks use exchange public data (no API key required).
+                </p>
+            </div>
+        </div>`;
+}
+
+async function loadExternalAPIKeys() {
+    try {
+        const keys = await fetchAPI('/api/admin/external-api-keys');
+        renderAdminExternalAPIKeys(keys);
+    } catch (err) {
+        showToast(err.message, 'error', 'Load Failed');
+    }
+}
+
+async function saveExternalAPIKey(keyName) {
+    const input = document.getElementById(`api-key-${keyName}`);
+    const value = input?.value?.trim() || '';
+
+    if (!value) {
+        showToast('Please enter an API key.', 'warning', 'Missing Key');
+        return;
+    }
+
+    const data = { [keyName]: value };
+
+    try {
+        await fetchAPI('/api/admin/external-api-keys', { method: 'POST', body: JSON.stringify(data) });
+        showToast(`${keyName.replace('_api_key', '')} key saved.`, 'success', 'Saved');
+        input.value = '';
+        loadExternalAPIKeys();
+    } catch (err) {
+        showToast(err.message, 'error', 'Save Failed');
+    }
+}
+
+async function deleteExternalAPIKey(keyName) {
+    if (!confirm(`Delete ${keyName}? This will disable related features.`)) return;
+
+    try {
+        await fetchAPI(`/api/admin/external-api-keys/${keyName}`, { method: 'DELETE' });
+        showToast(`${keyName.replace('_api_key', '')} key deleted.`, 'warning', 'Deleted');
+        loadExternalAPIKeys();
+    } catch (err) {
+        showToast(err.message, 'error', 'Delete Failed');
+    }
+}
+
+async function loadEnhancedFilters() {
+    try {
+        const settings = await fetchAPI('/api/admin/enhanced-filters');
+        renderAdminEnhancedFilters(settings);
+    } catch (err) {
+        showToast(err.message, 'error', 'Load Failed');
+    }
+}
+
+async function saveEnhancedFilters() {
+    const enabled = document.getElementById('enhanced-filters-enabled')?.checked || false;
+    const whaleThreshold = parseFloat(document.getElementById('whale-threshold')?.value) || 1000000;
+    const correlatedThreshold = parseFloat(document.getElementById('correlated-threshold')?.value) || 5;
+    const oiThreshold = parseFloat(document.getElementById('oi-threshold')?.value) || 15;
+
+    const data = {
+        enhanced_filters_enabled: enabled,
+        whale_threshold_usd: whaleThreshold,
+        correlated_threshold_pct: correlatedThreshold,
+        oi_change_threshold_pct: oiThreshold,
+    };
+
+    try {
+        await fetchAPI('/api/admin/enhanced-filters', { method: 'POST', body: JSON.stringify(data) });
+        showToast('Enhanced filter settings saved.', 'success', 'Saved');
+    } catch (err) {
+        showToast(err.message, 'error', 'Save Failed');
+    }
 }
 
 function renderAdminBackups(backups) {
@@ -1297,4 +1952,516 @@ async function refreshAll() {
     if (p==='dashboard') await loadDashboard(); else if (p==='positions') await loadPositions();
     else if (p==='user') await loadUserPortal(); else if (p==='history') await loadHistory(); else if (p==='analytics') await loadAnalytics();
     else if (p==='subscription') await loadSubscription(); else if (p==='admin') await loadAdmin();
+    else if (p==='strategies') { await loadStrategiesOverview(); await loadDCAList(); await loadGridList(); }
+}
+
+function toggleVotingFields() {
+    const enabled = document.getElementById('voting-enabled')?.checked || false;
+    const fields = document.getElementById('voting-config-fields');
+    if (fields) fields.style.display = enabled ? 'block' : 'none';
+}
+
+async function loadVotingConfig() {
+    try {
+        const config = await fetchAPI('/api/admin/ai/voting-config');
+        const enabledEl = document.getElementById('voting-enabled');
+        if (enabledEl) enabledEl.checked = Boolean(config.enabled);
+
+        const modelsEl = document.getElementById('voting-models');
+        if (modelsEl && config.models) {
+            modelsEl.value = config.models.join('\n');
+        }
+
+        const strategyEl = document.getElementById('voting-strategy');
+        if (strategyEl && config.strategy) {
+            strategyEl.value = config.strategy;
+        }
+
+        const weightsEl = document.getElementById('voting-weight-models');
+        if (weightsEl && config.weights) {
+            const weightLines = Object.entries(config.weights).map(([k, v]) => `${k}: ${v}`);
+            weightsEl.value = weightLines.join('\n');
+        }
+
+        toggleVotingFields();
+    } catch (err) {
+        console.warn('Could not load voting config:', err);
+    }
+}
+
+async function saveVotingConfig() {
+    const enabled = document.getElementById('voting-enabled')?.checked || false;
+
+    const modelsText = document.getElementById('voting-models')?.value || '';
+    const models = modelsText.split('\n').map(m => m.trim()).filter(m => m);
+
+    const strategy = document.getElementById('voting-strategy')?.value || 'weighted';
+
+    const weightsText = document.getElementById('voting-weight-models')?.value || '';
+    const weights = {};
+    weightsText.split('\n').forEach(line => {
+        const parts = line.split(':').map(p => p.trim());
+        if (parts.length >= 2 && parts[0]) {
+            weights[parts[0]] = parseFloat(parts[1]) || 1.0;
+        }
+    });
+
+    if (!models.length && enabled) {
+        showToast('Please add at least one voting model.', 'warning', 'No Models');
+        return;
+    }
+
+    const btn = document.getElementById('btn-save-voting');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line"></i> Saving...'; }
+
+    try {
+        await fetchAPI('/api/admin/ai/voting-config', {
+            method: 'POST',
+            body: JSON.stringify({
+                enabled,
+                models,
+                weights,
+                strategy,
+            })
+        });
+        showToast(`Voting ${enabled ? 'enabled' : 'disabled'} with ${models.length} models.`, 'success', 'Voting Config Saved');
+        if (btn) { btn.innerHTML = '<i class="ri-check-line"></i> Saved!'; }
+        setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-save-line"></i> Save Voting Config'; } }, 2000);
+    } catch (err) {
+        showToast(err.message, 'error', 'Save Failed');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-save-line"></i> Save Voting Config'; }
+    }
+}
+
+function toggleUserTPLevels() {
+    const num = parseInt(document.getElementById('user-tp-levels')?.value) || 1;
+    for (let i = 1; i <= 4; i++) {
+        const row = document.getElementById(`user-tp-row-${i}`);
+        if (row) row.style.display = i <= num ? 'flex' : 'none';
+    }
+}
+
+let btEquityChart = null;
+
+async function runBacktest() {
+    const btn = document.getElementById('btn-run-backtest');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line"></i> Running...'; }
+
+    const request = {
+        ticker: document.getElementById('bt-ticker')?.value || 'BTCUSDT',
+        timeframe: document.getElementById('bt-timeframe')?.value || '1h',
+        days: parseInt(document.getElementById('bt-days')?.value) || 30,
+        strategy: document.getElementById('bt-strategy')?.value || 'simple_trend',
+        initial_capital: parseFloat(document.getElementById('bt-capital')?.value) || 10000,
+        position_size_pct: parseFloat(document.getElementById('bt-position-size')?.value) || 10,
+        leverage: parseFloat(document.getElementById('bt-leverage')?.value) || 1,
+        stop_loss_pct: parseFloat(document.getElementById('bt-stop-loss')?.value) || 2,
+        trailing_mode: document.getElementById('bt-trailing-mode')?.value || 'none',
+        fee_pct: parseFloat(document.getElementById('bt-fee')?.value) || 0.04,
+        slippage_pct: parseFloat(document.getElementById('bt-slippage')?.value) || 0.01,
+    };
+
+    try {
+        const result = await fetchAPI('/api/backtest/run', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        });
+
+        displayBacktestResults(result, request);
+
+        if (btn) { btn.innerHTML = '<i class="ri-check-line"></i> Completed!'; }
+        setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-play-line"></i> Run Backtest'; } }, 2000);
+    } catch (err) {
+        showToast(err.message, 'error', 'Backtest Failed');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-play-line"></i> Run Backtest'; }
+    }
+}
+
+function displayBacktestResults(result, config) {
+    const resultsCard = document.getElementById('bt-results-card');
+    if (resultsCard) resultsCard.style.display = 'block';
+
+    const metrics = result.metrics || {};
+
+    document.getElementById('bt-total-return').textContent = formatPercent(metrics.total_return_pct || 0);
+    document.getElementById('bt-win-rate').textContent = formatPercent(metrics.win_rate || 0);
+    document.getElementById('bt-max-dd').textContent = formatPercent(metrics.max_drawdown_pct || 0);
+    document.getElementById('bt-sharpe').textContent = metrics.sharpe_ratio?.toFixed(2) || '--';
+    document.getElementById('bt-pf').textContent = metrics.profit_factor === 'inf' ? '∞' : (metrics.profit_factor?.toFixed(2) || '--');
+    document.getElementById('bt-total-trades').textContent = metrics.total_trades || 0;
+
+    document.getElementById('bt-avg-win').textContent = formatPercent(metrics.avg_win_pct || 0);
+    document.getElementById('bt-avg-loss').textContent = formatPercent(metrics.avg_loss_pct || 0);
+    document.getElementById('bt-largest-win').textContent = formatPercent(metrics.largest_win_pct || 0);
+    document.getElementById('bt-largest-loss').textContent = formatPercent(metrics.largest_loss_pct || 0);
+    document.getElementById('bt-expectancy').textContent = metrics.expectancy?.toFixed(4) || '--';
+    document.getElementById('bt-rr').textContent = metrics.risk_reward_ratio?.toFixed(2) || '--';
+    document.getElementById('bt-max-wins').textContent = metrics.max_consecutive_wins || 0;
+    document.getElementById('bt-max-losses').textContent = metrics.max_consecutive_losses || 0;
+    document.getElementById('bt-cagr').textContent = formatPercent(metrics.cagr_pct || 0);
+    document.getElementById('bt-kelly').textContent = metrics.kelly_fraction?.toFixed(4) || '--';
+
+    document.getElementById('bt-execution-time').textContent = `${result.execution_time_ms?.toFixed(0) || 0}ms`;
+
+    renderEquityCurve(result.equity_curve || [], config.initial_capital);
+    renderTradeTable(result.trades || []);
+
+    const signals = result.signals || {};
+    showToast(`Backtest completed: ${metrics.total_trades} trades, ${formatPercent(metrics.total_return_pct)} return`,
+        metrics.total_return_pct >= 0 ? 'success' : 'warning', 'Backtest Results');
+}
+
+function renderEquityCurve(equityCurve, initialCapital) {
+    const canvas = document.getElementById('bt-equity-chart');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+
+    if (btEquityChart) {
+        btEquityChart.destroy();
+    }
+
+    const labels = equityCurve.map(e => {
+        const ts = new Date(e.timestamp);
+        return ts.toLocaleDateString();
+    }).filter((_, i) => i % Math.max(1, Math.floor(equityCurve.length / 20)) === 0);
+
+    const data = equityCurve.map(e => e.equity).filter((_, i) => i % Math.max(1, Math.floor(equityCurve.length / 20)) === 0);
+
+    btEquityChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Equity (USDT)',
+                data: data,
+                borderColor: data[data.length - 1] >= initialCapital ? '#10b981' : '#ef4444',
+                backgroundColor: 'transparent',
+                borderWidth: 2,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                tension: 0.1,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true, position: 'top' },
+            },
+            scales: {
+                x: { display: true, grid: { display: false } },
+                y: { display: true, grid: { color: '#1f2937' }, ticks: { callback: v => `$${v.toFixed(0)}` } }
+            }
+        }
+    });
+}
+
+function renderTradeTable(trades) {
+    const tbody = document.getElementById('bt-trade-list');
+    if (!tbody) return;
+
+    tbody.innerHTML = '';
+
+    if (!trades.length) {
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#6b7280">No trades executed</td></tr>';
+        return;
+    }
+
+    trades.slice(0, 50).forEach((trade, i) => {
+        const pnlClass = trade.pnl_pct >= 0 ? 'text-success' : 'text-danger';
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>${i + 1}</td>
+            <td><span class="badge ${trade.direction === 'buy' ? 'badge-green' : 'badge-red'}">${trade.direction.toUpperCase()}</span></td>
+            <td>${trade.entry_price.toFixed(4)}</td>
+            <td>${trade.exit_price.toFixed(4)}</td>
+            <td class="${pnlClass}">${formatPercent(trade.pnl_pct)}</td>
+            <td class="${pnlClass}">$${trade.pnl_usdt.toFixed(2)}</td>
+            <td>$${trade.fees_usdt.toFixed(4)}</td>
+            <td>${trade.holding_bars}</td>
+            <td>${trade.exit_reason}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+async function compareStrategies() {
+    const ticker = document.getElementById('bt-ticker')?.value || 'BTCUSDT';
+    const timeframe = document.getElementById('bt-timeframe')?.value || '1h';
+    const days = parseInt(document.getElementById('bt-days')?.value) || 30;
+
+    try {
+        const result = await fetchAPI(`/api/backtest/compare?ticker=${ticker}&timeframe=${timeframe}&days=${days}`);
+
+        const comparisonCard = document.getElementById('bt-comparison-card');
+        if (comparisonCard) comparisonCard.style.display = 'block';
+
+        const table = document.getElementById('bt-comparison-table');
+        if (!table) return;
+
+        let html = '<table class="table"><thead><tr><th>Strategy</th><th>Return</th><th>Win Rate</th><th>Max DD</th><th>Sharpe</th><th>Trades</th></tr></thead><tbody>';
+
+        result.comparison.forEach(c => {
+            const m = c.metrics || {};
+            const returnClass = (m.total_return_pct || 0) >= 0 ? 'text-success' : 'text-danger';
+            html += `<tr>
+                <td><strong>${c.strategy}</strong></td>
+                <td class="${returnClass}">${formatPercent(m.total_return_pct || 0)}</td>
+                <td>${formatPercent(m.win_rate || 0)}</td>
+                <td>${formatPercent(m.max_drawdown_pct || 0)}</td>
+                <td>${m.sharpe_ratio?.toFixed(2) || '--'}</td>
+                <td>${c.trades_count || 0}</td>
+            </tr>`;
+        });
+
+        html += '</tbody></table>';
+        table.innerHTML = html;
+
+        showToast('Strategy comparison completed', 'success', 'Comparison');
+    } catch (err) {
+        showToast(err.message, 'error', 'Comparison Failed');
+    }
+}
+
+function formatPercent(value) {
+    if (typeof value !== 'number') return '--';
+    const sign = value >= 0 ? '+' : '';
+    return `${sign}${value.toFixed(2)}%`;
+}
+
+async function loadStrategiesOverview() {
+    try {
+        const overview = await fetchAPI('/api/strategies/overview');
+
+        document.getElementById('st-dca-active').textContent = overview.dca?.active_count || 0;
+        document.getElementById('st-grid-active').textContent = overview.grid?.active_count || 0;
+
+        const totalPnl = (overview.dca?.total_pnl_usdt || 0) + (overview.grid?.total_pnl_usdt || 0);
+        document.getElementById('st-total-pnl').textContent = `$${totalPnl.toFixed(2)}`;
+    } catch (err) {
+        console.warn('Failed to load strategies overview:', err);
+    }
+}
+
+async function createDCA() {
+    const btn = document.querySelector('button[onclick="createDCA()"]');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line"></i> Creating...'; }
+
+    const request = {
+        ticker: document.getElementById('dca-ticker')?.value || 'BTCUSDT',
+        direction: document.getElementById('dca-direction')?.value || 'long',
+        initial_capital_usdt: parseFloat(document.getElementById('dca-initial-capital')?.value) || 1000,
+        max_entries: parseInt(document.getElementById('dca-max-entries')?.value) || 5,
+        entry_spacing_pct: parseFloat(document.getElementById('dca-spacing')?.value) || 2,
+        sizing_method: document.getElementById('dca-sizing')?.value || 'fixed',
+        stop_loss_pct: parseFloat(document.getElementById('dca-sl')?.value) || 10,
+        take_profit_pct: parseFloat(document.getElementById('dca-tp')?.value) || 5,
+        activation_loss_pct: parseFloat(document.getElementById('dca-activation')?.value) || 1,
+        max_total_capital_usdt: parseFloat(document.getElementById('dca-max-capital')?.value) || 5000,
+        mode: document.getElementById('dca-mode')?.value || 'average_down',
+    };
+
+    try {
+        const result = await fetchAPI('/api/strategies/dca/create', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        });
+
+        showToast(`DCA created for ${result.ticker}, entry=${result.initial_entry_price}`, 'success', 'DCA Created');
+        loadDCAList();
+        loadStrategiesOverview();
+
+        if (btn) { btn.innerHTML = '<i class="ri-check-line"></i> Created!'; }
+        setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-add-line"></i> Create DCA'; } }, 2000);
+    } catch (err) {
+        showToast(err.message, 'error', 'DCA Failed');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-add-line"></i> Create DCA'; }
+    }
+}
+
+async function loadDCAList() {
+    try {
+        const result = await fetchAPI('/api/strategies/dca/list');
+        const container = document.getElementById('dca-list');
+
+        if (!result.strategies?.length) {
+            container.innerHTML = '<div style="color:#6b7280;text-align:center;padding:20px">No active DCA strategies</div>';
+            return;
+        }
+
+        let html = '<table class="table"><thead><tr><th>ID</th><th>Ticker</th><th>Direction</th><th>Entries</th><th>Avg Entry</th><th>PnL</th><th>Actions</th></tr></thead><tbody>';
+
+        result.strategies.forEach(s => {
+            const pnlClass = s.unrealized_pnl_pct >= 0 ? 'text-success' : 'text-danger';
+            html += `<tr>
+                <td style="font-size:11px">${s.config_id?.slice(-12) || '--'}</td>
+                <td>${s.ticker}</td>
+                <td><span class="badge ${s.direction === 'long' ? 'badge-green' : 'badge-red'}">${s.direction}</span></td>
+                <td>${s.entries_count}/${s.entries_count + s.entries_remaining}</td>
+                <td>${s.average_entry_price?.toFixed(4) || '--'}</td>
+                <td class="${pnlClass}">${formatPercent(s.unrealized_pnl_pct)}</td>
+                <td>
+                    <button class="btn btn-sm btn-secondary" onclick="checkDCA('${s.config_id}')"><i class="ri-refresh-line"></i></button>
+                    <button class="btn btn-sm btn-danger" onclick="closeDCA('${s.config_id}')"><i class="ri-close-line"></i></button>
+                </td>
+            </tr>`;
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+
+        document.getElementById('st-dca-active').textContent = result.active_count || 0;
+    } catch (err) {
+        console.warn('Failed to load DCA list:', err);
+    }
+}
+
+async function checkDCA(strategyId) {
+    try {
+        const result = await fetchAPI(`/api/strategies/dca/check/${strategyId}`, { method: 'POST' });
+
+        if (result.action === 'dca_entry') {
+            showToast(`DCA entry #${result.entry_idx} executed`, 'info', 'DCA Update');
+        } else if (result.action === 'close') {
+            showToast(`DCA closed: ${result.reason}, pnl=${formatPercent(result.pnl_pct)}`,
+                result.pnl_pct >= 0 ? 'success' : 'warning', 'DCA Closed');
+        }
+
+        loadDCAList();
+    } catch (err) {
+        showToast(err.message, 'error', 'Check Failed');
+    }
+}
+
+async function closeDCA(strategyId) {
+    if (!confirm('Close this DCA strategy?')) return;
+
+    try {
+        const result = await fetchAPI(`/api/strategies/dca/close/${strategyId}`, { method: 'DELETE' });
+        showToast(`DCA closed at ${result.close_price}, pnl=$${result.final_pnl_usdt?.toFixed(2)}`, 'success', 'DCA Closed');
+        loadDCAList();
+        loadStrategiesOverview();
+    } catch (err) {
+        showToast(err.message, 'error', 'Close Failed');
+    }
+}
+
+async function createGrid() {
+    const btn = document.querySelector('button[onclick="createGrid()"]');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line"></i> Creating...'; }
+
+    const request = {
+        ticker: document.getElementById('grid-ticker')?.value || 'BTCUSDT',
+        grid_count: parseInt(document.getElementById('grid-count')?.value) || 10,
+        total_capital_usdt: parseFloat(document.getElementById('grid-capital')?.value) || 1000,
+        grid_spacing_pct: parseFloat(document.getElementById('grid-spacing')?.value) || 1,
+        spacing_mode: document.getElementById('grid-spacing-mode')?.value || 'arithmetic',
+        mode: document.getElementById('grid-mode')?.value || 'neutral',
+        upper_price: parseFloat(document.getElementById('grid-upper')?.value) || 0,
+        lower_price: parseFloat(document.getElementById('grid-lower')?.value) || 0,
+    };
+
+    try {
+        const result = await fetchAPI('/api/strategies/grid/create', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        });
+
+        showToast(`Grid created for ${result.ticker}, ${result.grid_levels} levels`, 'success', 'Grid Created');
+        loadGridList();
+        loadStrategiesOverview();
+
+        if (btn) { btn.innerHTML = '<i class="ri-check-line"></i> Created!'; }
+        setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-add-line"></i> Create Grid'; } }, 2000);
+    } catch (err) {
+        showToast(err.message, 'error', 'Grid Failed');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-add-line"></i> Create Grid'; }
+    }
+}
+
+async function loadGridList() {
+    try {
+        const result = await fetchAPI('/api/strategies/grid/list');
+        const container = document.getElementById('grid-list');
+
+        if (!result.strategies?.length) {
+            container.innerHTML = '<div style="color:#6b7280;text-align:center;padding:20px">No active grid strategies</div>';
+            return;
+        }
+
+        let html = '<table class="table"><thead><tr><th>ID</th><th>Ticker</th><th>Range</th><th>Trades</th><th>PnL</th><th>Pending</th><th>Actions</th></tr></thead><tbody>';
+
+        result.strategies.forEach(s => {
+            const pnlClass = (s.realized_pnl_usdt || 0) >= 0 ? 'text-success' : 'text-danger';
+            html += `<tr>
+                <td style="font-size:11px">${s.config_id?.slice(-12) || '--'}</td>
+                <td>${s.ticker}</td>
+                <td>${s.lower_price?.toFixed(2)} - ${s.upper_price?.toFixed(2)}</td>
+                <td>${s.total_trades || 0}</td>
+                <td class="${pnlClass}">$${(s.realized_pnl_usdt || 0).toFixed(2)}</td>
+                <td>${s.pending_orders || 0}</td>
+                <td>
+                    <button class="btn btn-sm btn-secondary" onclick="checkGrid('${s.config_id}')"><i class="ri-refresh-line"></i></button>
+                    <button class="btn btn-sm btn-danger" onclick="closeGrid('${s.config_id}')"><i class="ri-close-line"></i></button>
+                </td>
+            </tr>`;
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+
+        document.getElementById('st-grid-active').textContent = result.active_count || 0;
+    } catch (err) {
+        console.warn('Failed to load grid list:', err);
+    }
+}
+
+async function checkGrid(strategyId) {
+    try {
+        const result = await fetchAPI(`/api/strategies/grid/check/${strategyId}`, { method: 'POST' });
+
+        if (result.trades?.length) {
+            showToast(`Grid executed ${result.trades.length} trades`, 'info', 'Grid Update');
+        }
+
+        loadGridList();
+    } catch (err) {
+        showToast(err.message, 'error', 'Check Failed');
+    }
+}
+
+async function closeGrid(strategyId) {
+    if (!confirm('Close this grid strategy?')) return;
+
+    try {
+        const result = await fetchAPI(`/api/strategies/grid/close/${strategyId}`, { method: 'DELETE' });
+        showToast(`Grid closed, ${result.total_trades} trades, pnl=$${result.final_pnl_usdt?.toFixed(2)}`, 'success', 'Grid Closed');
+        loadGridList();
+        loadStrategiesOverview();
+    } catch (err) {
+        showToast(err.message, 'error', 'Close Failed');
+    }
+}
+
+async function startStrategyMonitor() {
+    const interval = parseInt(document.getElementById('monitor-interval')?.value) || 60;
+
+    try {
+        const result = await fetchAPI(`/api/strategies/monitor/start?interval_seconds=${interval}`, { method: 'POST' });
+        showToast(`Monitor started, checking every ${interval}s`, 'success', 'Monitor');
+        document.getElementById('st-monitor-status').textContent = 'Running';
+    } catch (err) {
+        showToast(err.message, 'error', 'Monitor Failed');
+    }
+}
+
+async function stopStrategyMonitor() {
+    try {
+        const result = await fetchAPI('/api/strategies/monitor/stop', { method: 'POST' });
+        showToast('Monitor stopped', 'info', 'Monitor');
+        document.getElementById('st-monitor-status').textContent = 'Stopped';
+    } catch (err) {
+        showToast(err.message, 'error', 'Monitor Failed');
+    }
 }

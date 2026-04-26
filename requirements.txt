@@ -5,21 +5,20 @@ python-dotenv>=1.0.0
 pydantic>=2.9.0
 pydantic-settings>=2.5.0
 ccxt>=4.4.0
-python-telegram-bot>=21.0
 apscheduler>=3.10.0
 aiofiles>=23.2.0
 loguru>=0.7.0
 cryptography>=42.0.0
+PyJWT>=2.9.0
+pyotp>=2.9.0
+qrcode[pil]>=7.4.0
 
 asyncpg>=0.29.0
 aiosqlite>=0.20.0
 sqlalchemy[asyncio]>=2.0.0
+greenlet>=3.0.0
 
 redis>=5.0.0
 hiredis>=2.3.0; sys_platform != "win32"
 
 prometheus-client>=0.20.0
-
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-pytest-cov>=5.0.0

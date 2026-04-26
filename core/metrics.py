@@ -197,6 +197,90 @@ DB_LATENCY = Histogram(
     registry=registry,
 )
 
+DB_POOL_SIZE = Gauge(
+    "db_pool_size",
+    "Database connection pool size",
+    ["pool_type"],
+    registry=registry,
+)
+
+DB_POOL_OVERFLOW = Gauge(
+    "db_pool_overflow",
+    "Database connection pool overflow count",
+    ["pool_type"],
+    registry=registry,
+)
+
+DB_POOL_CHECKOUT_TIME = Histogram(
+    "db_pool_checkout_seconds",
+    "Time to checkout a connection from the pool",
+    ["pool_type"],
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+    registry=registry,
+)
+
+
+# ─────────────────────────────────────────────
+# Business Alert Metrics
+# ─────────────────────────────────────────────
+
+DAILY_LOSS_PCT = Gauge(
+    "daily_loss_percent",
+    "Current daily loss percentage",
+    ["user_id"],
+    registry=registry,
+)
+
+DAILY_TRADE_COUNT = Gauge(
+    "daily_trade_count",
+    "Current daily trade count",
+    ["user_id"],
+    registry=registry,
+)
+
+OPEN_POSITIONS_COUNT = Gauge(
+    "open_positions_count",
+    "Number of open positions",
+    ["user_id", "direction"],
+    registry=registry,
+)
+
+UNREALIZED_PNL = Gauge(
+    "unrealized_pnl_usdt",
+    "Total unrealized PnL in USDT",
+    ["user_id"],
+    registry=registry,
+)
+
+AI_COST_USD = Counter(
+    "ai_cost_usd_total",
+    "Estimated AI API cost in USD",
+    ["provider"],
+    registry=registry,
+)
+
+EXCHANGE_POOL_SIZE = Gauge(
+    "exchange_pool_size",
+    "Number of cached exchange instances",
+    ["exchange"],
+    registry=registry,
+)
+
+TRADING_CONTROL_MODE = Gauge(
+    "trading_control_mode",
+    "Current trading control mode (0=enabled, 1=read_only, 2=paused, 3=emergency)",
+    ["mode"],
+    registry=registry,
+)
+
+FILTER_PERFORMANCE = Histogram(
+    "prefilter_check_latency_seconds",
+    "Pre-filter check execution latency",
+    ["check_name"],
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
+    registry=registry,
+)
+
 
 # ─────────────────────────────────────────────
 # Cache Metrics
@@ -311,10 +395,57 @@ def record_exchange_request(exchange: str, endpoint: str, status: str, latency: 
 
 def record_http_request(method: str, path: str, status: int, latency: float):
     """Record an HTTP request."""
-    # Normalize path to avoid high cardinality
     normalized_path = _normalize_path(path)
     HTTP_REQUESTS.labels(method=method, path=normalized_path, status=str(status)).inc()
     HTTP_LATENCY.labels(method=method, path=normalized_path).observe(latency)
+
+
+def update_db_pool_metrics(pool_type: str = "async"):
+    """Update database connection pool metrics from engine."""
+    from core.database import db_manager
+    if db_manager.engine and hasattr(db_manager.engine, 'pool'):
+        pool = db_manager.engine.pool
+        try:
+            pool_size = pool.size() if hasattr(pool, 'size') else 0
+            checked_out = pool.checkedout() if hasattr(pool, 'checkedout') else 0
+            overflow = pool.overflow() if hasattr(pool, 'overflow') else 0
+            DB_POOL_SIZE.labels(pool_type=pool_type).set(pool_size)
+            DB_POOL_OVERFLOW.labels(pool_type=pool_type).set(overflow)
+            DB_CONNECTIONS.labels(status="active").set(checked_out)
+            DB_CONNECTIONS.labels(status="idle").set(max(0, pool_size - checked_out))
+        except Exception:
+            pass
+
+
+def record_ai_cost(provider: str, cost_usd: float):
+    """Record AI API cost."""
+    AI_COST_USD.labels(provider=provider).inc(cost_usd)
+
+
+def update_trading_control_mode(mode: str):
+    """Update trading control mode metric."""
+    mode_values = {"enabled": 0, "read_only": 1, "paused": 2, "emergency_stop": 3}
+    for m, v in mode_values.items():
+        TRADING_CONTROL_MODE.labels(mode=m).set(1 if m == mode else 0)
+
+
+def record_filter_performance(check_name: str, latency: float):
+    """Record pre-filter check execution time."""
+    FILTER_PERFORMANCE.labels(check_name=check_name).observe(latency)
+
+
+def update_exchange_pool_metrics():
+    """Update exchange connection pool size metrics."""
+    try:
+        from exchange import _exchange_pool, SUPPORTED_EXCHANGES
+        exchange_counts = {}
+        for key in _exchange_pool:
+            exchange_id = key.split(":")[0]
+            exchange_counts[exchange_id] = exchange_counts.get(exchange_id, 0) + 1
+        for exchange_id, count in exchange_counts.items():
+            EXCHANGE_POOL_SIZE.labels(exchange=exchange_id).set(count)
+    except Exception:
+        pass
 
 
 def _normalize_path(path: str) -> str:

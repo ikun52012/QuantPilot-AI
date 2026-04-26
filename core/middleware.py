@@ -7,6 +7,7 @@ import json
 import re
 import hmac
 import hashlib
+import uuid
 from typing import Callable, Optional
 from datetime import datetime
 
@@ -19,6 +20,22 @@ from loguru import logger
 
 from core.config import settings
 from core.request_utils import client_ip
+
+
+# ─────────────────────────────────────────────
+# Request ID Middleware
+# ─────────────────────────────────────────────
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Inject a unique X-Request-ID into every request/response for tracing."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        request_id = request.headers.get("x-request-id", "") or str(uuid.uuid4())[:12]
+        request.state.request_id = request_id
+
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
 
 # ─────────────────────────────────────────────
@@ -44,13 +61,13 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         start_time = time.time()
-        request_id = request.headers.get("x-request-id", "")
+        request_id = getattr(request.state, "request_id", "")
 
         # Log request
-        client_ip = self._get_client_ip(request)
+        ip = self._get_client_ip(request)
         logger.info(
             f"[Request] {request.method} {request.url.path} "
-            f"from {client_ip} {request_id}"
+            f"from {ip} rid={request_id}"
         )
 
         try:
@@ -60,7 +77,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             # Log response
             logger.info(
                 f"[Response] {request.method} {request.url.path} "
-                f"{response.status_code} in {duration:.3f}s"
+                f"{response.status_code} in {duration:.3f}s rid={request_id}"
             )
 
             # Add timing header
@@ -71,7 +88,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             duration = time.time() - start_time
             logger.error(
                 f"[Request] {request.method} {request.url.path} "
-                f"failed after {duration:.3f}s: {e}"
+                f"failed after {duration:.3f}s rid={request_id}: {e}"
             )
             raise
 
@@ -92,6 +109,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.enabled = enabled
         self._login_attempts: dict[str, list[float]] = {}
         self._register_attempts: dict[str, list[float]] = {}
+        self._webhook_attempts: dict[str, list[float]] = {}
         self._api_requests: dict[str, list[float]] = {}
         self._lock = __import__("threading").Lock()
 
@@ -99,18 +117,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not self.enabled:
             return await call_next(request)
 
-        client_ip = self._get_client_ip(request)
+        ip = self._get_client_ip(request)
         path = request.url.path
 
         # Login rate limiting
         if path == "/api/auth/login" and request.method == "POST":
             if not self._check_rate(
                 self._login_attempts,
-                client_ip,
+                ip,
                 settings.rate_limit.login_max_attempts,
                 settings.rate_limit.login_window_secs,
             ):
-                logger.warning(f"[RateLimit] Login rate limit hit for {client_ip}")
+                logger.warning(f"[RateLimit] Login rate limit hit for {ip}")
                 return JSONResponse(
                     status_code=429,
                     content={"detail": "Too many login attempts. Please wait 5 minutes."}
@@ -120,25 +138,39 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         elif path == "/api/auth/register" and request.method == "POST":
             if not self._check_rate(
                 self._register_attempts,
-                client_ip,
+                ip,
                 settings.rate_limit.register_max_attempts,
                 settings.rate_limit.register_window_secs,
             ):
-                logger.warning(f"[RateLimit] Register rate limit hit for {client_ip}")
+                logger.warning(f"[RateLimit] Register rate limit hit for {ip}")
                 return JSONResponse(
                     status_code=429,
                     content={"detail": "Too many registration attempts. Please wait 10 minutes."}
+                )
+
+        # Webhook rate limiting — 30 requests per 60 seconds per IP
+        elif path == "/webhook" and request.method == "POST":
+            if not self._check_rate(
+                self._webhook_attempts,
+                ip,
+                settings.rate_limit.webhook_max_attempts,
+                settings.rate_limit.webhook_window_secs,
+            ):
+                logger.warning(f"[RateLimit] Webhook rate limit hit for {ip}")
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many webhook requests. Please slow down."}
                 )
 
         # General API rate limiting
         elif path.startswith("/api/"):
             if not self._check_rate(
                 self._api_requests,
-                client_ip,
+                ip,
                 120,  # 120 requests per minute
                 60,
             ):
-                logger.warning(f"[RateLimit] API rate limit hit for {client_ip}")
+                logger.warning(f"[RateLimit] API rate limit hit for {ip}")
                 return JSONResponse(
                     status_code=429,
                     content={"detail": "Too many requests. Please slow down."}
@@ -149,7 +181,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Clear rate limit on successful login
         if path == "/api/auth/login" and response.status_code == 200:
             with self._lock:
-                self._login_attempts.pop(client_ip, None)
+                self._login_attempts.pop(ip, None)
 
         return response
 
@@ -193,6 +225,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         "/api/auth/login",
         "/api/auth/register",
         "/api/auth/logout",
+        "/api/auth/2fa/verify",
     }
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
@@ -277,11 +310,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         response = await call_next(request)
 
-        # Add security headers
+        # Core security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+
+        # HSTS — only when served over HTTPS or behind a proxy
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if request.url.scheme == "https" or forwarded_proto == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
         # Content Security Policy for HTML responses
         if "text/html" in response.headers.get("content-type", ""):
@@ -291,7 +330,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.bunny.net https://cdn.jsdelivr.net; "
                 "font-src 'self' https://fonts.gstatic.com https://fonts.bunny.net https://cdn.jsdelivr.net; "
                 "img-src 'self' data: https:; "
-                "connect-src 'self' https:;"
+                "connect-src 'self' https: wss:;"
             )
 
         return response
@@ -321,9 +360,10 @@ def setup_middleware(app):
             allowed_hosts=settings.server.trusted_hosts,
         )
 
-    # Custom middleware
+    # Custom middleware (order matters — outermost first)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestSizeLimitMiddleware)
     app.add_middleware(CSRFMiddleware)
     app.add_middleware(RateLimitMiddleware, enabled=settings.rate_limit.enabled)
     app.add_middleware(LoggingMiddleware)
+    app.add_middleware(RequestIDMiddleware)

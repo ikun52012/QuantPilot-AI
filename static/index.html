@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QuantPilot AI — Dashboard</title>
     <meta name="description" content="QuantPilot AI trading operations dashboard">
+    <meta name="theme-color" content="#0f151f">
+    <link rel="manifest" href="/static/manifest.json">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
@@ -43,6 +45,12 @@
             </a>
             <a href="#" class="nav-item" data-page="analytics" id="nav-analytics">
                 <i class="ri-pie-chart-2-line" aria-hidden="true"></i><span>Analytics</span>
+            </a>
+            <a href="#" class="nav-item admin-only" data-page="backtest" id="nav-backtest">
+                <i class="ri-test-tube-line" aria-hidden="true"></i><span>Backtest</span>
+            </a>
+            <a href="#" class="nav-item user-only" data-page="strategies" id="nav-strategies">
+                <i class="ri-node-tree" aria-hidden="true"></i><span>Strategies</span>
             </a>
             <a href="#" class="nav-item" data-page="subscription" id="nav-subscription">
                 <i class="ri-vip-crown-line" aria-hidden="true"></i><span>Subscription</span>
@@ -85,75 +93,166 @@
         </header>
 
         <!-- Page: Dashboard -->
-        <div class="page active" id="page-dashboard">
-            <!-- KPI Cards -->
-            <div class="kpi-grid">
-                <div class="kpi-card">
-                    <div class="kpi-icon green"><i class="ri-funds-line"></i></div>
-                    <div class="kpi-content">
-                        <span class="kpi-label">Total P&L</span>
-                        <span class="kpi-value" id="kpi-pnl">--</span>
+        <div class="page active command-page" id="page-dashboard">
+            <section class="command-hero">
+                <div class="hero-copy">
+                    <span class="eyebrow"><i class="ri-sparkling-2-line"></i> AI Trading Command Center</span>
+                    <h2>QuantPilot AI</h2>
+                    <p>Signal intelligence, risk control, automated strategies, and order health in one operating view.</p>
+                </div>
+                <div class="hero-status-grid">
+                    <div class="status-chip">
+                        <span class="status-dot"></span>
+                        <span id="dash-api-health">API Online</span>
+                    </div>
+                    <div class="status-chip warning">
+                        <i class="ri-shield-check-line"></i>
+                        <span id="dash-risk-mode">Risk Guard Active</span>
+                    </div>
+                    <div class="status-chip">
+                        <i class="ri-webhook-line"></i>
+                        <span id="dash-webhook-state">Webhook Ready</span>
                     </div>
                 </div>
-                <div class="kpi-card">
-                    <div class="kpi-icon blue"><i class="ri-bar-chart-grouped-line"></i></div>
-                    <div class="kpi-content">
-                        <span class="kpi-label">Total Trades</span>
-                        <span class="kpi-value" id="kpi-trades">--</span>
-                    </div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-icon purple"><i class="ri-trophy-line"></i></div>
-                    <div class="kpi-content">
-                        <span class="kpi-label">Win Rate</span>
-                        <span class="kpi-value" id="kpi-winrate">--</span>
-                    </div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-icon orange"><i class="ri-flashlight-line"></i></div>
-                    <div class="kpi-content">
-                        <span class="kpi-label">Sharpe Ratio</span>
-                        <span class="kpi-value" id="kpi-sharpe">--</span>
-                    </div>
-                </div>
-            </div>
+            </section>
 
-            <!-- Charts Row -->
-            <div class="charts-row">
-                <div class="chart-card wide">
-                    <div class="card-header">
-                        <h3>Equity Curve</h3>
-                        <div class="card-actions">
-                            <button class="btn btn-sm active" onclick="setChartPeriod(event, 7)">7D</button>
-                            <button class="btn btn-sm" onclick="setChartPeriod(event, 30)">30D</button>
-                            <button class="btn btn-sm" onclick="setChartPeriod(event, 90)">90D</button>
+            <div class="command-grid">
+                <section class="command-main">
+                    <div class="kpi-grid command-kpis">
+                        <div class="kpi-card">
+                            <div class="kpi-icon green"><i class="ri-funds-line"></i></div>
+                            <div class="kpi-content">
+                                <span class="kpi-label">Total P&L</span>
+                                <span class="kpi-value" id="kpi-pnl">--</span>
+                            </div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon blue"><i class="ri-bar-chart-grouped-line"></i></div>
+                            <div class="kpi-content">
+                                <span class="kpi-label">Total Trades</span>
+                                <span class="kpi-value" id="kpi-trades">--</span>
+                            </div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon purple"><i class="ri-trophy-line"></i></div>
+                            <div class="kpi-content">
+                                <span class="kpi-label">Win Rate</span>
+                                <span class="kpi-value" id="kpi-winrate">--</span>
+                            </div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-icon orange"><i class="ri-flashlight-line"></i></div>
+                            <div class="kpi-content">
+                                <span class="kpi-label">Sharpe Ratio</span>
+                                <span class="kpi-value" id="kpi-sharpe">--</span>
+                            </div>
                         </div>
                     </div>
-                    <div class="chart-container">
-                        <canvas id="equity-chart"></canvas>
-                    </div>
-                </div>
-            </div>
 
-            <!-- Bottom Row -->
-            <div class="charts-row two-col">
-                <div class="chart-card">
-                    <div class="card-header"><h3>Performance Metrics</h3></div>
-                    <div class="metrics-grid" id="metrics-grid">
-                        <!-- Filled by JS -->
+                    <div class="chart-card command-chart">
+                        <div class="card-header">
+                            <div>
+                                <span class="section-kicker">Portfolio Intelligence</span>
+                                <h3>Equity Curve</h3>
+                            </div>
+                            <div class="card-actions segmented">
+                                <button class="btn btn-sm active" onclick="setChartPeriod(event, 7)">7D</button>
+                                <button class="btn btn-sm" onclick="setChartPeriod(event, 30)">30D</button>
+                                <button class="btn btn-sm" onclick="setChartPeriod(event, 90)">90D</button>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="equity-chart"></canvas>
+                        </div>
                     </div>
-                </div>
-                <div class="chart-card">
-                    <div class="card-header"><h3>Recent Signals</h3></div>
-                    <div class="signals-list" id="recent-signals">
-                        <!-- Filled by JS -->
+
+                    <div class="terminal-grid">
+                        <div class="chart-card">
+                            <div class="card-header">
+                                <div>
+                                    <span class="section-kicker">Execution Metrics</span>
+                                    <h3>Performance Matrix</h3>
+                                </div>
+                            </div>
+                            <div class="metrics-grid" id="metrics-grid"></div>
+                        </div>
+                        <div class="chart-card">
+                            <div class="card-header">
+                                <div>
+                                    <span class="section-kicker">Signal Tape</span>
+                                    <h3>Recent Signals</h3>
+                                </div>
+                            </div>
+                            <div class="signals-list terminal-feed" id="recent-signals"></div>
+                        </div>
                     </div>
-                </div>
+                </section>
+
+                <aside class="command-rail">
+                    <div class="ai-panel">
+                        <div class="ai-panel-head">
+                            <div class="ai-orb"><i class="ri-brain-line"></i></div>
+                            <div>
+                                <span class="section-kicker">AI Copilot</span>
+                                <h3 id="ai-brief-title">System Brief</h3>
+                            </div>
+                        </div>
+                        <div class="confidence-ring">
+                            <div>
+                                <strong id="ai-confidence">--</strong>
+                                <span>Confidence</span>
+                            </div>
+                        </div>
+                        <p id="ai-brief-text">Waiting for live signal context. QuantPilot will summarize confidence, risk, and suggested action here.</p>
+                    </div>
+
+                    <div class="card action-queue">
+                        <div class="card-header">
+                            <div>
+                                <span class="section-kicker">Risk Engine</span>
+                                <h3>Action Queue</h3>
+                            </div>
+                            <button class="btn btn-icon" onclick="refreshAll()" title="Refresh"><i class="ri-refresh-line"></i></button>
+                        </div>
+                        <div class="queue-list" id="dashboard-action-queue">
+                            <div class="queue-item">
+                                <i class="ri-shield-check-line"></i>
+                                <div><strong>Risk guard online</strong><span>No blocking condition detected.</span></div>
+                            </div>
+                            <div class="queue-item">
+                                <i class="ri-robot-2-line"></i>
+                                <div><strong>Automation standby</strong><span>DCA/Grid status loads from strategies.</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card bot-strip">
+                        <div class="card-header">
+                            <div>
+                                <span class="section-kicker">Automation</span>
+                                <h3>Bot Status</h3>
+                            </div>
+                        </div>
+                        <div class="bot-metrics">
+                            <div><span>DCA</span><strong id="dash-dca-active">--</strong></div>
+                            <div><span>Grid</span><strong id="dash-grid-active">--</strong></div>
+                            <div><span>Bot P&L</span><strong id="dash-bot-pnl">--</strong></div>
+                        </div>
+                    </div>
+                </aside>
             </div>
         </div>
 
         <!-- Page: Positions -->
         <div class="page" id="page-positions">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Institutional Terminal</span>
+                    <h2>Positions</h2>
+                    <p>Scan exposure, margin usage, liquidation distance, and unrealized performance with minimal friction.</p>
+                </div>
+                <button class="btn btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
+            </section>
             <div class="card">
                 <div class="card-header">
                     <h3><i class="ri-stock-line"></i> Open Positions</h3>
@@ -203,6 +302,13 @@
 
         <!-- Page: History -->
         <div class="page" id="page-history">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Execution Ledger</span>
+                    <h2>Trade History</h2>
+                    <p>Audit fills, rejected signals, paper simulations, and realized performance over selectable windows.</p>
+                </div>
+            </section>
             <div class="card">
                 <div class="card-header">
                     <h3><i class="ri-history-line"></i> Trade History</h3>
@@ -239,6 +345,13 @@
 
         <!-- Page: Analytics -->
         <div class="page" id="page-analytics">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Performance Lab</span>
+                    <h2>Analytics</h2>
+                    <p>Review drawdown, expectancy, daily PnL, signal quality, and risk-adjusted strategy behavior.</p>
+                </div>
+            </section>
             <!-- Summary Cards -->
             <div class="kpi-grid analytics-kpis">
                 <div class="kpi-card">
@@ -420,7 +533,7 @@
                             </label>
                         </div>
                     </div>
-                    
+
                     <div class="form-row three-col" style="margin-top:0">
                         <div class="form-group">
                             <label for="set-ai-temp">Temperature</label>
@@ -443,6 +556,85 @@
                         <button class="btn btn-success" onclick="saveAISettings()" id="btn-save-ai">
                             <i class="ri-save-line"></i> Save AI Settings
                         </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Voting Configuration -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-team-line"></i> Multi-Model Voting <span class="badge badge-experimental">Experimental</span></h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="voting-enabled" onchange="toggleVotingFields()">
+                            <span>Enable Multi-Model Voting</span>
+                        </label>
+                        <p class="hint">When enabled, multiple AI models analyze each signal concurrently and results are aggregated by voting strategy.</p>
+                    </div>
+
+                    <div id="voting-config-fields" style="display:none;">
+                        <div class="form-group">
+                            <label for="voting-models">Voting Models <span class="hint">(format: provider/model_name)</span></label>
+                            <textarea id="voting-models" class="text-input" rows="3" placeholder="openai/gpt-4o&#10;deepseek/deepseek-chat&#10;local"></textarea>
+                            <p class="hint">Enter one model per line. Use 'local' for rule-based fallback without API call.</p>
+                        </div>
+
+                        <div class="form-row three-col">
+                            <div class="form-group">
+                                <label for="voting-strategy">Voting Strategy</label>
+                                <select id="voting-strategy" class="select-input">
+                                    <option value="weighted">Weighted (Recommended)</option>
+                                    <option value="consensus">Consensus (>50% agree)</option>
+                                    <option value="best_confidence">Best Confidence</option>
+                                </select>
+                                <p class="hint">Weighted: avg confidence with recommendation vote. Consensus: majority must agree. Best: highest confidence wins.</p>
+                            </div>
+                            <div class="form-group">
+                                <label for="voting-weight-models">Model Weights <span class="hint">(for weighted strategy)</span></label>
+                                <textarea id="voting-weight-models" class="text-input" rows="2" placeholder="openai/gpt-4o: 0.5&#10;deepseek/deepseek-chat: 0.3&#10;local: 0.2"></textarea>
+                                <p class="hint">Format: model_id: weight. Should sum to ~1.0</p>
+                            </div>
+                            <div class="form-group">
+                                <div style="padding:12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.14)">
+                                    <p style="font-size:12px;color:var(--text-secondary);margin:0">
+                                        <i class="ri-information-line" style="color:var(--accent-indigo)"></i>
+                                        <strong>Cost Warning:</strong> Voting calls multiple APIs per signal, increasing costs. Use local fallback to reduce API calls.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <button class="btn btn-primary" onclick="saveVotingConfig()" id="btn-save-voting">
+                                <i class="ri-save-line"></i> Save Voting Config
+                            </button>
+                            <button class="btn btn-secondary" onclick="loadVotingConfig()" id="btn-load-voting">
+                                <i class="ri-refresh-line"></i> Refresh
+                            </button>
+                        </div>
+
+                        <div id="voting-models-help" style="margin-top:16px;padding:16px;background:rgba(16,185,129,0.06);border-radius:8px;border:1px solid rgba(16,185,129,0.14)">
+                            <h4 style="margin:0 0 12px;font-size:14px;color:var(--accent-green)"><i class="ri-book-open-line"></i> Available Model IDs</h4>
+                            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:11px">
+                                <div><code>openai/gpt-4o</code></div>
+                                <div><code>openai/gpt-4o-mini</code></div>
+                                <div><code>anthropic/claude-3-5-sonnet-latest</code></div>
+                                <div><code>anthropic/claude-3-5-haiku-latest</code></div>
+                                <div><code>deepseek/deepseek-chat</code></div>
+                                <div><code>deepseek/deepseek-reasoner</code></div>
+                                <div><code>openrouter/openai/gpt-4o</code></div>
+                                <div><code>openrouter/anthropic/claude-3.5-sonnet</code></div>
+                                <div><code>openrouter/google/gemini-pro-1.5</code></div>
+                                <div><code>openrouter/meta-llama/llama-3.1-70b-instruct</code></div>
+                                <div><code>openrouter/mistralai/mistral-large</code></div>
+                                <div><code>openrouter/qwen/qwen-2.5-72b-instruct</code></div>
+                                <div><code>custom/&lt;model_name&gt;</code></div>
+                                <div><code>local</code> (free fallback)</div>
+                                <div></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -726,6 +918,80 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Two-Factor Authentication -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-shield-keyhole-line"></i> Two-Factor Authentication (2FA)</h3>
+                    <span class="badge" id="twofa-status-badge" style="display:none">Enabled</span>
+                </div>
+                <div class="settings-form" id="twofa-section">
+                    <div id="twofa-disabled-view">
+                        <div style="padding:16px;background:rgba(245,158,11,0.06);border-radius:8px;border:1px solid rgba(245,158,11,0.14);margin-bottom:16px">
+                            <p style="font-size:13px;color:var(--text-secondary);margin:0">
+                                <i class="ri-information-line" style="color:var(--accent-orange)"></i>
+                                2FA adds an extra layer of security to your account. When enabled, you'll need to enter a code from your authenticator app each time you log in.
+                            </p>
+                        </div>
+                        <button class="btn btn-primary" onclick="setup2FA()" id="btn-setup-2fa">
+                            <i class="ri-shield-keyhole-line"></i> Set Up 2FA
+                        </button>
+                    </div>
+
+                    <!-- Setup step: QR code -->
+                    <div id="twofa-setup-view" style="display:none">
+                        <div style="text-align:center;margin-bottom:20px">
+                            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Scan this QR code with your authenticator app (Google Authenticator, Authy, etc.)</p>
+                            <div id="twofa-qr-container" style="display:inline-block;padding:16px;background:#fff;border-radius:12px;margin-bottom:12px"></div>
+                            <div style="margin-top:8px">
+                                <p style="font-size:11px;color:var(--text-muted)">Or enter this key manually:</p>
+                                <code id="twofa-manual-key" style="font-size:13px;letter-spacing:2px;color:var(--accent-cyan);user-select:all">--</code>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="twofa-confirm-code">Enter the 6-digit code to confirm</label>
+                            <input type="text" id="twofa-confirm-code" class="text-input" placeholder="000000" maxlength="6" inputmode="numeric" style="text-align:center;letter-spacing:4px;font-size:18px;font-weight:600;max-width:240px">
+                        </div>
+                        <div class="form-row">
+                            <button class="btn btn-success" onclick="confirm2FA()" id="btn-confirm-2fa">
+                                <i class="ri-check-line"></i> Enable 2FA
+                            </button>
+                            <button class="btn btn-secondary" onclick="cancel2FASetup()">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Recovery codes display -->
+                    <div id="twofa-recovery-view" style="display:none">
+                        <div style="padding:16px;background:rgba(34,197,94,0.06);border-radius:8px;border:1px solid rgba(34,197,94,0.14);margin-bottom:16px">
+                            <p style="font-size:13px;color:var(--accent-green);margin:0;font-weight:600"><i class="ri-check-double-line"></i> 2FA has been enabled!</p>
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:6px">Save these recovery codes in a safe place. Each code can only be used once.</p>
+                        </div>
+                        <div id="twofa-recovery-codes" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:16px;max-width:360px"></div>
+                        <button class="btn btn-secondary" onclick="copyRecoveryCodes()"><i class="ri-file-copy-line"></i> Copy All Codes</button>
+                        <button class="btn btn-primary" onclick="finish2FASetup()" style="margin-left:8px"><i class="ri-check-line"></i> Done</button>
+                    </div>
+
+                    <!-- Enabled state -->
+                    <div id="twofa-enabled-view" style="display:none">
+                        <div style="display:flex;align-items:center;gap:12px;padding:16px;background:rgba(34,197,94,0.06);border-radius:8px;border:1px solid rgba(34,197,94,0.14);margin-bottom:16px">
+                            <i class="ri-shield-check-line" style="font-size:24px;color:var(--accent-green)"></i>
+                            <div>
+                                <p style="font-size:14px;font-weight:600;color:var(--accent-green);margin:0">2FA is active</p>
+                                <p style="font-size:12px;color:var(--text-secondary);margin:2px 0 0" id="twofa-recovery-remaining">Recovery codes remaining: --</p>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="twofa-disable-pw">Enter your password to disable 2FA</label>
+                            <input type="password" id="twofa-disable-pw" class="text-input" placeholder="Current password" style="max-width:320px">
+                        </div>
+                        <button class="btn btn-danger" onclick="disable2FA()" id="btn-disable-2fa">
+                            <i class="ri-shield-cross-line"></i> Disable 2FA
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Page: User Portal -->
@@ -785,20 +1051,76 @@
             <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-target-line"></i> My TP Configuration</h3></div>
                 <div class="settings-form">
-                    <div class="form-row three-col">
-                        <div class="form-group"><label for="user-tp-levels">TP Levels</label><select id="user-tp-levels" class="select-input"><option value="1">1 Level</option><option value="2">2 Levels</option><option value="3">3 Levels</option><option value="4">4 Levels</option></select></div>
-                        <div class="form-group"><label for="user-tp1-pct">TP1 %</label><input type="number" id="user-tp1-pct" class="text-input" value="2" step="0.1"></div>
-                        <div class="form-group"><label for="user-tp1-qty">TP1 Close %</label><input type="number" id="user-tp1-qty" class="text-input" value="25" step="1"></div>
+                    <div class="form-group">
+                        <label for="user-tp-levels">TP Levels</label>
+                        <select id="user-tp-levels" class="select-input" onchange="toggleUserTPLevels()">
+                            <option value="1">1 Level</option>
+                            <option value="2">2 Levels</option>
+                            <option value="3">3 Levels</option>
+                            <option value="4">4 Levels</option>
+                        </select>
                     </div>
-                    <div class="form-row three-col">
-                        <div class="form-group"><label for="user-tp2-pct">TP2 %</label><input type="number" id="user-tp2-pct" class="text-input" value="4" step="0.1"></div>
-                        <div class="form-group"><label for="user-tp3-pct">TP3 %</label><input type="number" id="user-tp3-pct" class="text-input" value="6" step="0.1"></div>
-                        <div class="form-group"><label for="user-tp4-pct">TP4 %</label><input type="number" id="user-tp4-pct" class="text-input" value="10" step="0.1"></div>
-                    </div>
-                    <div class="form-row three-col">
-                        <div class="form-group"><label for="user-tp2-qty">TP2 Close %</label><input type="number" id="user-tp2-qty" class="text-input" value="25" step="1"></div>
-                        <div class="form-group"><label for="user-tp3-qty">TP3 Close %</label><input type="number" id="user-tp3-qty" class="text-input" value="25" step="1"></div>
-                        <div class="form-group"><label for="user-tp4-qty">TP4 Close %</label><input type="number" id="user-tp4-qty" class="text-input" value="25" step="1"></div>
+                    <div class="tp-levels-grid" id="user-tp-levels-grid">
+                        <div class="tp-level-row" id="user-tp-row-1">
+                            <div class="tp-level-header">
+                                <span class="tp-badge tp1">TP1</span>
+                            </div>
+                            <div class="form-row two-col" style="margin-top:0">
+                                <div class="form-group">
+                                    <label for="user-tp1-pct">Distance %</label>
+                                    <input type="number" id="user-tp1-pct" class="text-input" value="2" step="0.5" min="0.1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="user-tp1-qty">Close %</label>
+                                    <input type="number" id="user-tp1-qty" class="text-input" value="25" step="5" min="1" max="100">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tp-level-row" id="user-tp-row-2" style="display:none">
+                            <div class="tp-level-header">
+                                <span class="tp-badge tp2">TP2</span>
+                            </div>
+                            <div class="form-row two-col" style="margin-top:0">
+                                <div class="form-group">
+                                    <label for="user-tp2-pct">Distance %</label>
+                                    <input type="number" id="user-tp2-pct" class="text-input" value="4" step="0.5" min="0.1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="user-tp2-qty">Close %</label>
+                                    <input type="number" id="user-tp2-qty" class="text-input" value="25" step="5" min="1" max="100">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tp-level-row" id="user-tp-row-3" style="display:none">
+                            <div class="tp-level-header">
+                                <span class="tp-badge tp3">TP3</span>
+                            </div>
+                            <div class="form-row two-col" style="margin-top:0">
+                                <div class="form-group">
+                                    <label for="user-tp3-pct">Distance %</label>
+                                    <input type="number" id="user-tp3-pct" class="text-input" value="6" step="0.5" min="0.1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="user-tp3-qty">Close %</label>
+                                    <input type="number" id="user-tp3-qty" class="text-input" value="25" step="5" min="1" max="100">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tp-level-row" id="user-tp-row-4" style="display:none">
+                            <div class="tp-level-header">
+                                <span class="tp-badge tp4">TP4</span>
+                            </div>
+                            <div class="form-row two-col" style="margin-top:0">
+                                <div class="form-group">
+                                    <label for="user-tp4-pct">Distance %</label>
+                                    <input type="number" id="user-tp4-pct" class="text-input" value="10" step="0.5" min="0.1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="user-tp4-qty">Close %</label>
+                                    <input type="number" id="user-tp4-qty" class="text-input" value="25" step="5" min="1" max="100">
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     <button class="btn btn-success" onclick="saveUserTPSettings()"><i class="ri-save-line"></i> Save TP</button>
                 </div>
@@ -806,6 +1128,450 @@
             <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-vip-crown-line"></i> Subscription & Recharge</h3></div>
                 <div id="user-subscription-panel" style="padding:20px">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Page: Backtest (Admin Only) -->
+        <div class="page" id="page-backtest">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Strategy Simulation</span>
+                    <h2>Backtest</h2>
+                    <p>Validate signal logic, trailing exits, fees, slippage, and drawdown before production execution.</p>
+                </div>
+            </section>
+            <div class="card">
+                <div class="card-header"><h3><i class="ri-test-tube-line"></i> Strategy Backtest</h3></div>
+                <div class="backtest-config" style="padding:20px">
+                    <div class="settings-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="bt-ticker">Ticker</label>
+                                <input type="text" id="bt-ticker" class="text-input" value="BTCUSDT" placeholder="BTCUSDT">
+                            </div>
+                            <div class="form-group">
+                                <label for="bt-timeframe">Timeframe</label>
+                                <select id="bt-timeframe" class="select-input">
+                                    <option value="1h" selected>1 Hour</option>
+                                    <option value="4h">4 Hours</option>
+                                    <option value="1d">1 Day</option>
+                                    <option value="15m">15 Minutes</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="bt-days">Days</label>
+                                <input type="number" id="bt-days" class="text-input" value="30" min="7" max="365">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="bt-strategy">Strategy</label>
+                                <select id="bt-strategy" class="select-input">
+                                    <option value="simple_trend" selected>Simple Trend (EMA)</option>
+                                    <option value="smc_trend">SMC Trend (FVG + OB)</option>
+                                    <option value="ai_assistant">AI Assistant (Multi-Indicator)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="bt-capital">Initial Capital (USDT)</label>
+                                <input type="number" id="bt-capital" class="text-input" value="10000" min="100">
+                            </div>
+                            <div class="form-group">
+                                <label for="bt-position-size">Position Size (%)</label>
+                                <input type="number" id="bt-position-size" class="text-input" value="10" min="1" max="100">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="bt-leverage">Leverage</label>
+                                <input type="number" id="bt-leverage" class="text-input" value="1" min="1" max="125">
+                            </div>
+                            <div class="form-group">
+                                <label for="bt-stop-loss">Stop Loss (%)</label>
+                                <input type="number" id="bt-stop-loss" class="text-input" value="2" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label for="bt-trailing-mode">Trailing Mode</label>
+                                <select id="bt-trailing-mode" class="select-input">
+                                    <option value="none" selected>None (Fixed SL)</option>
+                                    <option value="moving">Moving Trailing</option>
+                                    <option value="breakeven_on_tp1">Breakeven on TP1</option>
+                                    <option value="step_trailing">Step Trailing</option>
+                                    <option value="profit_pct_trailing">Profit % Trailing</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="bt-fee">Fee (%)</label>
+                                <input type="number" id="bt-fee" class="text-input" value="0.04" step="0.01">
+                            </div>
+                            <div class="form-group">
+                                <label for="bt-slippage">Slippage (%)</label>
+                                <input type="number" id="bt-slippage" class="text-input" value="0.01" step="0.01">
+                            </div>
+                            <div class="form-group" style="display:flex;align-items:flex-end">
+                                <button class="btn btn-primary" id="btn-run-backtest" onclick="runBacktest()">
+                                    <i class="ri-play-line"></i> Run Backtest
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Backtest Results -->
+            <div class="card mt-4" id="bt-results-card" style="display:none">
+                <div class="card-header">
+                    <h3><i class="ri-chart-box-line"></i> Backtest Results</h3>
+                    <span id="bt-execution-time" class="badge"></span>
+                </div>
+
+                <!-- Metrics Grid -->
+                <div class="kpi-grid" style="padding:20px">
+                    <div class="kpi-card">
+                        <div class="kpi-icon green"><i class="ri-funds-line"></i></div>
+                        <div class="kpi-content">
+                            <span class="kpi-label">Total Return</span>
+                            <span class="kpi-value" id="bt-total-return">--</span>
+                        </div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon"><i class="ri-percent-line"></i></div>
+                        <div class="kpi-content">
+                            <span class="kpi-label">Win Rate</span>
+                            <span class="kpi-value" id="bt-win-rate">--</span>
+                        </div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon red"><i class="ri-arrow-down-line"></i></div>
+                        <div class="kpi-content">
+                            <span class="kpi-label">Max Drawdown</span>
+                            <span class="kpi-value" id="bt-max-dd">--</span>
+                        </div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon blue"><i class="ri-bar-chart-line"></i></div>
+                        <div class="kpi-content">
+                            <span class="kpi-label">Sharpe Ratio</span>
+                            <span class="kpi-value" id="bt-sharpe">--</span>
+                        </div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon purple"><i class="ri-exchange-line"></i></div>
+                        <div class="kpi-content">
+                            <span class="kpi-label">Profit Factor</span>
+                            <span class="kpi-value" id="bt-pf">--</span>
+                        </div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-icon"><i class="ri-line-chart-line"></i></div>
+                        <div class="kpi-content">
+                            <span class="kpi-label">Total Trades</span>
+                            <span class="kpi-value" id="bt-total-trades">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Equity Curve Chart -->
+                <div class="chart-card" style="padding:20px">
+                    <div class="card-header"><h3>Equity Curve</h3></div>
+                    <div class="chart-container" style="height:300px">
+                        <canvas id="bt-equity-chart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Trade List -->
+                <div class="trade-table-container" style="padding:20px">
+                    <div class="card-header"><h3>Trade History</h3></div>
+                    <div style="overflow-x:auto">
+                        <table class="table" id="bt-trade-table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Direction</th>
+                                    <th>Entry</th>
+                                    <th>Exit</th>
+                                    <th>PnL %</th>
+                                    <th>PnL USDT</th>
+                                    <th>Fees</th>
+                                    <th>Bars</th>
+                                    <th>Reason</th>
+                                </tr>
+                            </thead>
+                            <tbody id="bt-trade-list"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Detailed Metrics -->
+                <div class="metrics-detail" style="padding:20px">
+                    <div class="card-header"><h3>Detailed Metrics</h3></div>
+                    <div class="metrics-grid">
+                        <div class="metric-item">
+                            <span class="metric-label">Avg Win</span>
+                            <span class="metric-value" id="bt-avg-win">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">Avg Loss</span>
+                            <span class="metric-value" id="bt-avg-loss">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">Largest Win</span>
+                            <span class="metric-value" id="bt-largest-win">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">Largest Loss</span>
+                            <span class="metric-value" id="bt-largest-loss">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">Expectancy</span>
+                            <span class="metric-value" id="bt-expectancy">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">Risk/Reward</span>
+                            <span class="metric-value" id="bt-rr">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">Max Consecutive Wins</span>
+                            <span class="metric-value" id="bt-max-wins">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">Max Consecutive Losses</span>
+                            <span class="metric-value" id="bt-max-losses">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">CAGR</span>
+                            <span class="metric-value" id="bt-cagr">--</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">Kelly Fraction</span>
+                            <span class="metric-value" id="bt-kelly">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Strategy Comparison -->
+            <div class="card mt-4" id="bt-comparison-card" style="display:none">
+                <div class="card-header"><h3><i class="ri-bar-chart-grouped-line"></i> Strategy Comparison</h3></div>
+                <div style="padding:20px">
+                    <button class="btn btn-secondary" onclick="compareStrategies()">
+                        <i class="ri-git-merge-line"></i> Compare All Strategies
+                    </button>
+                    <div class="comparison-table mt-4" id="bt-comparison-table"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Page: Strategies (DCA & Grid) -->
+        <div class="page" id="page-strategies">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Automation Workbench</span>
+                    <h2>Strategies</h2>
+                    <p>Operate DCA and grid bots from persisted strategy state with status, capital, and PnL at a glance.</p>
+                </div>
+            </section>
+            <!-- Strategy Overview -->
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <div class="kpi-icon blue"><i class="ri-node-tree"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Active DCA</span>
+                        <span class="kpi-value" id="st-dca-active">0</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon green"><i class="ri-grid-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Active Grid</span>
+                        <span class="kpi-value" id="st-grid-active">0</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon purple"><i class="ri-money-dollar-circle-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Total PnL</span>
+                        <span class="kpi-value" id="st-total-pnl">$0</span>
+                    </div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-icon"><i class="ri-time-line"></i></div>
+                    <div class="kpi-content">
+                        <span class="kpi-label">Monitor Status</span>
+                        <span class="kpi-value" id="st-monitor-status">Stopped</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DCA Strategy Card -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-arrow-down-circle-line"></i> DCA Strategy</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadDCAList()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div class="strategy-config" style="padding:20px">
+                    <div class="settings-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="dca-ticker">Ticker</label>
+                                <input type="text" id="dca-ticker" class="text-input" value="BTCUSDT">
+                            </div>
+                            <div class="form-group">
+                                <label for="dca-direction">Direction</label>
+                                <select id="dca-direction" class="select-input">
+                                    <option value="long" selected>Long</option>
+                                    <option value="short">Short</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="dca-initial-capital">Initial Capital (USDT)</label>
+                                <input type="number" id="dca-initial-capital" class="text-input" value="1000">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="dca-max-entries">Max Entries</label>
+                                <input type="number" id="dca-max-entries" class="text-input" value="5" min="2" max="10">
+                            </div>
+                            <div class="form-group">
+                                <label for="dca-spacing">Entry Spacing (%)</label>
+                                <input type="number" id="dca-spacing" class="text-input" value="2">
+                            </div>
+                            <div class="form-group">
+                                <label for="dca-sizing">Sizing Method</label>
+                                <select id="dca-sizing" class="select-input">
+                                    <option value="fixed" selected>Fixed</option>
+                                    <option value="martingale">Martingale</option>
+                                    <option value="geometric">Geometric</option>
+                                    <option value="fibonacci">Fibonacci</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="dca-sl">Stop Loss (%)</label>
+                                <input type="number" id="dca-sl" class="text-input" value="10">
+                            </div>
+                            <div class="form-group">
+                                <label for="dca-tp">Take Profit (%)</label>
+                                <input type="number" id="dca-tp" class="text-input" value="5">
+                            </div>
+                            <div class="form-group">
+                                <label for="dca-activation">Activation Loss (%)</label>
+                                <input type="number" id="dca-activation" class="text-input" value="1">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="dca-max-capital">Max Total Capital (USDT)</label>
+                                <input type="number" id="dca-max-capital" class="text-input" value="5000">
+                            </div>
+                            <div class="form-group">
+                                <label for="dca-mode">Mode</label>
+                                <select id="dca-mode" class="select-input">
+                                    <option value="average_down" selected>Average Down</option>
+                                    <option value="average_up">Average Up</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="display:flex;align-items:flex-end">
+                                <button class="btn btn-primary" onclick="createDCA()"><i class="ri-add-line"></i> Create DCA</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Active DCA List -->
+                <div id="dca-list-container" style="padding:20px">
+                    <div class="card-header"><h4>Active DCA Positions</h4></div>
+                    <div id="dca-list">No active DCA strategies</div>
+                </div>
+            </div>
+
+            <!-- Grid Strategy Card -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-grid-line"></i> Grid Trading</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadGridList()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div class="strategy-config" style="padding:20px">
+                    <div class="settings-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="grid-ticker">Ticker</label>
+                                <input type="text" id="grid-ticker" class="text-input" value="BTCUSDT">
+                            </div>
+                            <div class="form-group">
+                                <label for="grid-count">Grid Count</label>
+                                <input type="number" id="grid-count" class="text-input" value="10" min="5" max="50">
+                            </div>
+                            <div class="form-group">
+                                <label for="grid-capital">Total Capital (USDT)</label>
+                                <input type="number" id="grid-capital" class="text-input" value="1000">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="grid-spacing">Grid Spacing (%)</label>
+                                <input type="number" id="grid-spacing" class="text-input" value="1">
+                            </div>
+                            <div class="form-group">
+                                <label for="grid-spacing-mode">Spacing Mode</label>
+                                <select id="grid-spacing-mode" class="select-input">
+                                    <option value="arithmetic" selected>Arithmetic</option>
+                                    <option value="geometric">Geometric</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="grid-mode">Grid Mode</label>
+                                <select id="grid-mode" class="select-input">
+                                    <option value="neutral" selected>Neutral</option>
+                                    <option value="long">Long Bias</option>
+                                    <option value="short">Short Bias</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="grid-upper">Upper Price (0=Auto)</label>
+                                <input type="number" id="grid-upper" class="text-input" value="0" step="0.01">
+                            </div>
+                            <div class="form-group">
+                                <label for="grid-lower">Lower Price (0=Auto)</label>
+                                <input type="number" id="grid-lower" class="text-input" value="0" step="0.01">
+                            </div>
+                            <div class="form-group" style="display:flex;align-items:flex-end">
+                                <button class="btn btn-primary" onclick="createGrid()"><i class="ri-add-line"></i> Create Grid</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Active Grid List -->
+                <div id="grid-list-container" style="padding:20px">
+                    <div class="card-header"><h4>Active Grid Positions</h4></div>
+                    <div id="grid-list">No active grid strategies</div>
+                </div>
+            </div>
+
+            <!-- Strategy Monitor Controls -->
+            <div class="card mt-4 admin-only">
+                <div class="card-header"><h3><i class="ri-heart-pulse-line"></i> Strategy Monitor</h3></div>
+                <div style="padding:20px">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="monitor-interval">Check Interval (seconds)</label>
+                            <input type="number" id="monitor-interval" class="text-input" value="60" min="30" max="300">
+                        </div>
+                        <div class="form-group" style="display:flex;align-items:flex-end">
+                            <button class="btn btn-success" onclick="startStrategyMonitor()"><i class="ri-play-line"></i> Start Monitor</button>
+                        </div>
+                        <div class="form-group" style="display:flex;align-items:flex-end">
+                            <button class="btn btn-danger" onclick="stopStrategyMonitor()"><i class="ri-stop-line"></i> Stop Monitor</button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -841,6 +1607,47 @@
 
         <!-- Page: Admin -->
         <div class="page" id="page-admin">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Operations Console</span>
+                    <h2>Admin</h2>
+                    <p>Control trading modes, reconcile order events, manage users, monitor filters, and review system health.</p>
+                </div>
+            </section>
+            <section class="ops-console">
+                <div class="ops-primary card">
+                    <div class="card-header">
+                        <div>
+                            <span class="section-kicker">Global Risk Control</span>
+                            <h3><i class="ri-shield-keyhole-line"></i> Trading Control Center</h3>
+                        </div>
+                        <span class="badge" id="admin-control-badge">Loading</span>
+                    </div>
+                    <div class="control-grid">
+                        <div class="control-state">
+                            <span>Current Mode</span>
+                            <strong id="admin-control-mode">--</strong>
+                            <small id="admin-control-reason">No active restriction</small>
+                        </div>
+                        <div class="control-actions">
+                            <button class="btn btn-success" onclick="setTradingControlMode('enabled')"><i class="ri-play-circle-line"></i> Enable</button>
+                            <button class="btn btn-warning" onclick="setTradingControlMode('read_only')"><i class="ri-eye-line"></i> Read Only</button>
+                            <button class="btn btn-warning" onclick="setTradingControlMode('paused')"><i class="ri-pause-circle-line"></i> Pause</button>
+                            <button class="btn btn-danger" onclick="emergencyStopTrading()"><i class="ri-alarm-warning-line"></i> Emergency Stop</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="ops-secondary card">
+                    <div class="card-header">
+                        <div>
+                            <span class="section-kicker">Execution Health</span>
+                            <h3><i class="ri-route-line"></i> Order Reconciliation</h3>
+                        </div>
+                        <button class="btn btn-sm" onclick="runOrderReconciliation()"><i class="ri-loop-left-line"></i> Reconcile</button>
+                    </div>
+                    <div id="admin-order-events" class="order-events-list">Loading...</div>
+                </div>
+            </section>
             <div class="card">
                 <div class="card-header"><h3><i class="ri-user-settings-line"></i> User Management</h3></div>
                 <div id="admin-users" style="padding:20px">Loading...</div>
@@ -870,6 +1677,22 @@
                 <div id="admin-position-monitor" style="padding:20px">Loading...</div>
             </div>
             <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-filter-3-line"></i> Pre-Filter Thresholds</h3></div>
+                <div id="admin-filter-thresholds" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-bar-chart-box-line"></i> Filter Blocking Statistics</h3></div>
+                <div id="admin-filter-stats" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-key-2-line"></i> External API Keys <span class="badge badge-experimental">On-chain Data</span></h3></div>
+                <div id="admin-external-api-keys" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-fish-line"></i> Enhanced Whale Filters</h3></div>
+                <div id="admin-enhanced-filters" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-archive-line"></i> Backup & Restore</h3></div>
                 <div id="admin-backups" style="padding:20px">Loading...</div>
             </div>
@@ -889,5 +1712,12 @@
     <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
 
     <script src="/static/app.js"></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+            });
+        }
+    </script>
 </body>
 </html>

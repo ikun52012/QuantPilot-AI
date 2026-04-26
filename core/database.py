@@ -55,6 +55,13 @@ class UserModel(Base):
     max_position_pct = Column(Float, default=10.0)
     token_version = Column(Integer, default=0)
     password_changed_at = Column(DateTime, nullable=True)
+    # Soft delete support
+    deleted_at = Column(DateTime, nullable=True, default=None, index=True)
+
+    # 2FA fields
+    totp_secret = Column(String(256), default="", doc="Encrypted TOTP secret")
+    totp_enabled = Column(Boolean, default=False)
+    totp_recovery_codes_json = Column(Text, default="[]", doc="JSON array of hashed recovery codes")
 
     # Relationships
     subscriptions = relationship("SubscriptionModel", back_populates="user", lazy="dynamic")
@@ -126,7 +133,16 @@ class TradeModel(Base):
     direction = Column(String(20), default="")
     execute = Column(Boolean, default=False)
     order_status = Column(String(20), default="")
+    entry_price = Column(Float, nullable=True)
+    exit_price = Column(Float, nullable=True)
+    quantity = Column(Float, default=0.0)
     pnl_pct = Column(Float, default=0.0)
+    pnl_usdt = Column(Float, default=0.0)
+    fees_usdt = Column(Float, default=0.0)
+    fees_pct = Column(Float, default=0.0)
+    execution_latency_ms = Column(Integer, default=0)
+    strategy_name = Column(String(120), default="")
+    signal_source = Column(String(20), default="tradingview")
     payload_json = Column(Text, nullable=False)
 
     user = relationship("UserModel", back_populates="trades")
@@ -221,16 +237,23 @@ class PositionModel(Base):
     opened_at = Column(DateTime, nullable=False)
     open_trade_id = Column(String(36), nullable=True)
     entry_order_id = Column(String(128), default="")
+    order_type = Column(String(40), default="market")
+    limit_timeout_secs = Column(Float, default=300.0)
     stop_loss = Column(Float, nullable=True)
     take_profit_json = Column(Text, default="[]")
     stop_loss_order_id = Column(String(128), default="")
     take_profit_order_ids_json = Column(Text, default="[]")
+    trailing_stop_config_json = Column(Text, default="{}")
     exchange = Column(String(40), default="")
     live_trading = Column(Boolean, default=False)
     sandbox_mode = Column(Boolean, default=False)
     leverage = Column(Float, default=1.0)
+    strategy_name = Column(String(120), default="")
+    user_risk_profile = Column(String(20), default="balanced")
     realized_pnl_pct = Column(Float, default=0.0)
     current_pnl_pct = Column(Float, default=0.0)
+    unrealized_pnl_usdt = Column(Float, default=0.0)
+    fees_total_usdt = Column(Float, default=0.0)
     last_price = Column(Float, nullable=True)
     close_reason = Column(String(80), default="")
     updated_at = Column(DateTime, default=lambda: utcnow())
@@ -238,6 +261,98 @@ class PositionModel(Base):
     pnl_pct = Column(Float, default=0.0)
     closed_at = Column(DateTime, nullable=True)
     close_trade_id = Column(String(36), nullable=True)
+
+
+class OrderEventModel(Base):
+    """Order execution event ledger for reconciliation and retry review."""
+    __tablename__ = "order_events"
+    __table_args__ = (
+        Index("idx_order_events_status_retry", "status", "retry_state", "next_retry_at"),
+        Index("idx_order_events_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), nullable=True, index=True)
+    position_id = Column(String(36), nullable=True, index=True)
+    trade_id = Column(String(36), nullable=True, index=True)
+    client_order_id = Column(String(128), default="", index=True)
+    exchange_order_id = Column(String(128), default="", index=True)
+    ticker = Column(String(40), default="", index=True)
+    direction = Column(String(20), default="")
+    order_type = Column(String(40), default="")
+    status = Column(String(30), default="created", index=True)
+    retry_state = Column(String(30), default="not_required", index=True)
+    attempt_count = Column(Integer, default=0)
+    last_error = Column(Text, default="")
+    payload_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=lambda: utcnow(), index=True)
+    updated_at = Column(DateTime, default=lambda: utcnow())
+    next_retry_at = Column(DateTime, nullable=True)
+
+
+class StrategyStateModel(Base):
+    """Persistent runtime state for DCA, grid, and custom strategies."""
+    __tablename__ = "strategy_states"
+    __table_args__ = (
+        Index("idx_strategy_states_user_type", "user_id", "strategy_type"),
+        Index("idx_strategy_states_type_status", "strategy_type", "status"),
+    )
+
+    id = Column(String(120), primary_key=True)
+    user_id = Column(String(36), nullable=True, index=True)
+    strategy_type = Column(String(32), nullable=False, index=True)
+    ticker = Column(String(40), default="", index=True)
+    name = Column(String(120), default="")
+    status = Column(String(30), default="active", index=True)
+    config_json = Column(Text, default="{}")
+    state_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=lambda: utcnow())
+    updated_at = Column(DateTime, default=lambda: utcnow())
+
+
+class SharedSignalModel(Base):
+    """Community signal shared by a user."""
+    __tablename__ = "shared_signals"
+    __table_args__ = (
+        Index("idx_shared_signals_status_created", "status", "created_at"),
+        Index("idx_shared_signals_ticker_direction", "ticker", "direction"),
+    )
+
+    id = Column(String(80), primary_key=True)
+    user_id = Column(String(36), nullable=True, index=True)
+    username = Column(String(64), default="")
+    ticker = Column(String(40), default="", index=True)
+    direction = Column(String(20), default="", index=True)
+    entry_price = Column(Float, default=0.0)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    confidence = Column(Float, default=0.0)
+    strategy_name = Column(String(120), default="")
+    reason = Column(Text, default="")
+    status = Column(String(20), default="active", index=True)
+    is_private = Column(Boolean, default=False)
+    subscribers_count = Column(Integer, default=0)
+    executions_count = Column(Integer, default=0)
+    success_rate = Column(Float, default=0.0)
+    stats_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=lambda: utcnow(), index=True)
+    updated_at = Column(DateTime, default=lambda: utcnow())
+
+
+class SignalSubscriptionModel(Base):
+    """User subscription to a shared community signal."""
+    __tablename__ = "signal_subscriptions"
+    __table_args__ = (
+        Index("idx_signal_subscriptions_user", "user_id"),
+        Index("idx_signal_subscriptions_signal", "signal_id"),
+    )
+
+    id = Column(String(120), primary_key=True)
+    user_id = Column(String(36), nullable=True, index=True)
+    signal_id = Column(String(80), ForeignKey("shared_signals.id"), nullable=False, index=True)
+    auto_execute = Column(Boolean, default=False)
+    max_position_pct = Column(Float, default=10.0)
+    created_at = Column(DateTime, default=lambda: utcnow())
 
 
 # ─────────────────────────────────────────────
@@ -299,11 +414,12 @@ class DatabaseManager:
         """Apply lightweight additive migrations for deployments without Alembic."""
         inspector = inspect(sync_conn)
         tables = set(inspector.get_table_names())
-        
+
         VALID_TABLES = {
             "users", "subscription_plans", "subscriptions", "payments",
             "trades", "webhook_events", "invite_codes", "redeem_codes",
             "admin_settings", "admin_audit_logs", "positions",
+            "order_events", "strategy_states", "shared_signals", "signal_subscriptions",
         }
         VALID_COLUMN_TYPES = {
             "FLOAT", "BOOLEAN", "TIMESTAMP", "TEXT", "VARCHAR", "INTEGER",
@@ -348,6 +464,10 @@ class DatabaseManager:
             "max_position_pct": "FLOAT DEFAULT 10",
             "token_version": "INTEGER DEFAULT 0",
             "password_changed_at": "TIMESTAMP",
+            "totp_secret": "VARCHAR(256) DEFAULT ''",
+            "totp_enabled": "BOOLEAN DEFAULT false",
+            "totp_recovery_codes_json": "TEXT DEFAULT '[]'",
+            "deleted_at": "TIMESTAMP",
         })
         add_missing_columns("subscription_plans", {
             "description": "TEXT DEFAULT ''",
@@ -421,6 +541,8 @@ class DatabaseManager:
             "remaining_quantity": "FLOAT DEFAULT 0",
             "open_trade_id": "VARCHAR(36)",
             "entry_order_id": "VARCHAR(128) DEFAULT ''",
+            "order_type": "VARCHAR(40) DEFAULT 'market'",
+            "limit_timeout_secs": "FLOAT DEFAULT 300",
             "stop_loss": "FLOAT",
             "take_profit_json": "TEXT DEFAULT '[]'",
             "stop_loss_order_id": "VARCHAR(128) DEFAULT ''",
@@ -439,11 +561,75 @@ class DatabaseManager:
             "closed_at": "TIMESTAMP",
             "close_trade_id": "VARCHAR(36)",
         })
+        add_missing_columns("order_events", {
+            "user_id": "VARCHAR(36)",
+            "position_id": "VARCHAR(36)",
+            "trade_id": "VARCHAR(36)",
+            "client_order_id": "VARCHAR(128) DEFAULT ''",
+            "exchange_order_id": "VARCHAR(128) DEFAULT ''",
+            "ticker": "VARCHAR(40) DEFAULT ''",
+            "direction": "VARCHAR(20) DEFAULT ''",
+            "order_type": "VARCHAR(40) DEFAULT ''",
+            "status": "VARCHAR(30) DEFAULT 'created'",
+            "retry_state": "VARCHAR(30) DEFAULT 'not_required'",
+            "attempt_count": "INTEGER DEFAULT 0",
+            "last_error": "TEXT DEFAULT ''",
+            "payload_json": "TEXT DEFAULT '{}'",
+            "created_at": "TIMESTAMP",
+            "updated_at": "TIMESTAMP",
+            "next_retry_at": "TIMESTAMP",
+        })
+        add_missing_columns("strategy_states", {
+            "user_id": "VARCHAR(36)",
+            "strategy_type": "VARCHAR(32) DEFAULT ''",
+            "ticker": "VARCHAR(40) DEFAULT ''",
+            "name": "VARCHAR(120) DEFAULT ''",
+            "status": "VARCHAR(30) DEFAULT 'active'",
+            "config_json": "TEXT DEFAULT '{}'",
+            "state_json": "TEXT DEFAULT '{}'",
+            "created_at": "TIMESTAMP",
+            "updated_at": "TIMESTAMP",
+        })
+        add_missing_columns("shared_signals", {
+            "user_id": "VARCHAR(36)",
+            "username": "VARCHAR(64) DEFAULT ''",
+            "ticker": "VARCHAR(40) DEFAULT ''",
+            "direction": "VARCHAR(20) DEFAULT ''",
+            "entry_price": "FLOAT DEFAULT 0",
+            "stop_loss": "FLOAT",
+            "take_profit": "FLOAT",
+            "confidence": "FLOAT DEFAULT 0",
+            "strategy_name": "VARCHAR(120) DEFAULT ''",
+            "reason": "TEXT DEFAULT ''",
+            "status": "VARCHAR(20) DEFAULT 'active'",
+            "is_private": "BOOLEAN DEFAULT false",
+            "subscribers_count": "INTEGER DEFAULT 0",
+            "executions_count": "INTEGER DEFAULT 0",
+            "success_rate": "FLOAT DEFAULT 0",
+            "stats_json": "TEXT DEFAULT '{}'",
+            "created_at": "TIMESTAMP",
+            "updated_at": "TIMESTAMP",
+        })
+        add_missing_columns("signal_subscriptions", {
+            "user_id": "VARCHAR(36)",
+            "signal_id": "VARCHAR(80) DEFAULT ''",
+            "auto_execute": "BOOLEAN DEFAULT false",
+            "max_position_pct": "FLOAT DEFAULT 10",
+            "created_at": "TIMESTAMP",
+        })
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_webhook_secret_hash ON users(webhook_secret_hash)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_trades_user_timestamp ON trades(user_id, timestamp)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_webhook_fingerprint_created ON webhook_events(fingerprint, created_at)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_order_events_status_retry ON order_events(status, retry_state, next_retry_at)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_order_events_user_created ON order_events(user_id, created_at)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_strategy_states_user_type ON strategy_states(user_id, strategy_type)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_strategy_states_type_status ON strategy_states(strategy_type, status)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shared_signals_status_created ON shared_signals(status, created_at)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shared_signals_ticker_direction ON shared_signals(ticker, direction)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_signal_subscriptions_user ON signal_subscriptions(user_id)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_signal_subscriptions_signal ON signal_subscriptions(signal_id)"))
 
     async def close(self):
         """Close database connections."""
@@ -563,6 +749,35 @@ async def update_user_password_hash(session: AsyncSession, user_id: str, passwor
     return result.rowcount > 0
 
 
+async def soft_delete_user(session: AsyncSession, user_id: str) -> bool:
+    """Soft delete a user by setting deleted_at timestamp."""
+    result = await session.execute(
+        update(UserModel)
+        .where(UserModel.id == user_id, UserModel.deleted_at.is_(None))
+        .values(deleted_at=utcnow(), is_active=False, token_version=UserModel.token_version + 1)
+    )
+    return result.rowcount > 0
+
+
+async def restore_user(session: AsyncSession, user_id: str) -> bool:
+    """Restore a soft-deleted user."""
+    result = await session.execute(
+        update(UserModel)
+        .where(UserModel.id == user_id, UserModel.deleted_at.isnot(None))
+        .values(deleted_at=None, is_active=True, token_version=UserModel.token_version + 1)
+    )
+    return result.rowcount > 0
+
+
+async def get_all_users(session: AsyncSession, include_deleted: bool = False) -> list[UserModel]:
+    """Get all users, optionally including soft-deleted ones."""
+    query = select(UserModel).order_by(UserModel.created_at.desc())
+    if not include_deleted:
+        query = query.where(UserModel.deleted_at.is_(None))
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
 # ─────────────────────────────────────────────
 # Subscription CRUD
 # ─────────────────────────────────────────────
@@ -622,6 +837,8 @@ async def log_trade_db(
         "analysis": payload.get("analysis") or {},
         "order_details": payload.get("result") or payload.get("order_details") or {},
         "exchange_config": payload.get("exchange_config") or payload.get("exchange") or {},
+        "strategy_name": payload.get("strategy_name") or (payload.get("signal") or {}).get("strategy", ""),
+        "user_risk_profile": payload.get("user_risk_profile") or "balanced",
     }
 
     entry = await sync_position_from_trade_entry_async(session, entry)
@@ -819,6 +1036,17 @@ async def close_position_async(
     ) * remaining_weight
     pnl_pct = round(_safe_float(position.realized_pnl_pct) + remaining_pnl, 6)
 
+    # Calculate actual USDT PnL for balance update
+    entry_price = _safe_float(position.entry_price)
+    leverage = _safe_float(position.leverage, 1.0)
+    if entry_price > 0 and opened_qty > 0:
+        # Margin used = (entry_price * quantity) / leverage
+        margin_used = (entry_price * opened_qty) / max(1.0, leverage)
+        # PnL in USDT = margin_used * (pnl_pct / 100) * remaining_weight
+        pnl_usdt = margin_used * (remaining_pnl / 100.0)
+    else:
+        pnl_usdt = 0.0
+
     now = closed_at or utcnow()
     position.status = "closed"
     position.exit_price = exit_price
@@ -830,8 +1058,25 @@ async def close_position_async(
     position.updated_at = now
     if close_trade_id:
         position.close_trade_id = close_trade_id
+
+    # Update user balance with realized PnL for paper trading
+    if not position.live_trading and position.user_id and pnl_usdt != 0.0:
+        await update_user_balance(session, position.user_id, pnl_usdt)
+
     await session.flush()
     return pnl_pct
+
+
+async def update_user_balance(session: AsyncSession, user_id: str, delta_usdt: float) -> float:
+    """Update user balance by adding delta (positive for profit, negative for loss)."""
+    from sqlalchemy import select
+    user = await session.get(UserModel, user_id)
+    if user:
+        current_balance = _safe_float(user.balance_usdt, 0.0)
+        new_balance = round(current_balance + delta_usdt, 2)
+        user.balance_usdt = max(0.0, new_balance)  # Prevent negative balance
+        return user.balance_usdt
+    return 0.0
 
 
 async def record_position_close_trade_async(
@@ -932,25 +1177,45 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
                 1.0,
             )
             live_trading = _safe_bool(exchange_config.get("live_trading"), status != "simulated")
+            order_type = str(order_details.get("order_type") or "market").lower()
+            limit_timeout_secs = _safe_float(order_details.get("limit_timeout_secs"), 300.0)
+            position_status = "pending" if order_type == "limit" else "open"
+
+            trailing_stop_config = order_details.get("trailing_stop_config") or {}
+            if not trailing_stop_config:
+                ts_mode = order_details.get("trailing_stop-mode") or order_details.get("trailing_stop_mode")
+                if ts_mode:
+                    trailing_stop_config = {
+                        "mode": str(ts_mode),
+                        "trail_pct": _safe_float(order_details.get("trailing_pct"), 1.0),
+                        "activation_profit_pct": _safe_float(order_details.get("trailing_activation_profit_pct"), 1.0),
+                        "trailing_step_pct": _safe_float(order_details.get("trailing_step_pct"), 0.5),
+                    }
+
             position = PositionModel(
                 user_id=user_id,
                 ticker=ticker,
                 direction=direction,
-                status="open",
+                status=position_status,
                 entry_price=entry_price,
                 quantity=quantity,
                 remaining_quantity=quantity,
                 opened_at=opened_at,
                 open_trade_id=entry.get("id"),
                 entry_order_id=str(order_details.get("order_id") or ""),
+                order_type=order_type,
+                limit_timeout_secs=limit_timeout_secs,
                 stop_loss=stop_loss if stop_loss > 0 else None,
                 take_profit_json=json.dumps(take_profit_levels, ensure_ascii=False, default=str),
                 stop_loss_order_id=str(order_details.get("stop_loss_order_id") or ""),
                 take_profit_order_ids_json=json.dumps(tp_order_ids, ensure_ascii=False),
+                trailing_stop_config_json=json.dumps(trailing_stop_config, ensure_ascii=False) if trailing_stop_config else "{}",
                 exchange=str(exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name),
                 live_trading=live_trading,
                 sandbox_mode=_safe_bool(exchange_config.get("sandbox_mode"), False),
                 leverage=max(1.0, leverage),
+                strategy_name=str(entry.get("strategy_name") or ""),
+                user_risk_profile=str(entry.get("user_risk_profile") or "balanced"),
                 last_price=entry_price,
                 updated_at=opened_at,
             )

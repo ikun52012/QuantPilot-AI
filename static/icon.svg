@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="QuantPilot AI">
+  <rect width="512" height="512" rx="96" fill="#0b1020"/>
+  <path d="M96 322h320" stroke="#06b6d4" stroke-width="28" stroke-linecap="round"/>
+  <path d="M118 284l64-64 54 54 94-112 64 86" fill="none" stroke="#8b5cf6" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="182" cy="220" r="24" fill="#22c55e"/>
+  <circle cx="236" cy="274" r="24" fill="#f8fafc"/>
+  <circle cx="330" cy="162" r="24" fill="#22c55e"/>
+  <path d="M146 376h220" stroke="#f8fafc" stroke-width="24" stroke-linecap="round" opacity=".9"/>
+</svg>

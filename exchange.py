@@ -5,10 +5,32 @@ Enhanced with multi-TP and trailing-stop execution
 """
 import asyncio
 import inspect
-import ccxt
 from loguru import logger
 from core.config import settings
 from models import TradeDecision, SignalDirection, TrailingStopMode
+
+try:
+    import ccxt
+    _CCXT_AVAILABLE = True
+except ModuleNotFoundError:
+    _CCXT_AVAILABLE = False
+
+    class _MissingCCXT:
+        class Exchange:
+            pass
+
+        class InsufficientFunds(Exception):
+            pass
+
+        class NetworkError(Exception):
+            pass
+
+        class AuthenticationError(Exception):
+            pass
+
+        binance = okx = bybit = bitget = gate = coinbase = None
+
+    ccxt = _MissingCCXT()
 
 
 async def _close_exchange(exchange):
@@ -42,7 +64,7 @@ def _get_or_create_exchange(
 ) -> ccxt.Exchange:
     """Return a cached CCXT instance or create a new one."""
     eid = (exchange_id or settings.exchange.name).lower().strip()
-    cred_hash = _hashlib.md5(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:8]
+    cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:8]
     sb = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
     cache_key = f"{eid}:{sb}:{cred_hash}"
 
@@ -54,9 +76,16 @@ def _get_or_create_exchange(
     instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox)
 
     with _exchange_pool_lock:
-        if len(_exchange_pool) >= 50:
+        if len(_exchange_pool) >= settings.exchange.pool_max_size:
             oldest_key = next(iter(_exchange_pool))
-            _exchange_pool.pop(oldest_key, None)
+            evicted = _exchange_pool.pop(oldest_key, None)
+            if evicted is not None:
+                try:
+                    close = getattr(evicted, "close", None)
+                    if close:
+                        close()
+                except Exception:
+                    pass
         _exchange_pool[cache_key] = instance
 
     return instance
@@ -115,6 +144,9 @@ def _build_exchange(
     sandbox: bool | None = None,
 ) -> ccxt.Exchange:
     """Build CCXT exchange instance with proper configuration."""
+    if not _CCXT_AVAILABLE:
+        raise RuntimeError("ccxt is not installed; install project requirements to enable live exchange execution")
+
     if exchange_id is None:
         exchange_id = settings.exchange.name
     exchange_id = exchange_id.lower().strip()
@@ -231,10 +263,16 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         logger.warning("[Exchange] 🔶 PAPER TRADING MODE - not sending real orders")
         return _simulate_order(decision)
 
+    if not _CCXT_AVAILABLE:
+        return {
+            "status": "error",
+            "reason": "ccxt is not installed; install project requirements to enable live exchange execution",
+        }
+
     if sandbox_mode:
         logger.warning("[Exchange] 🧪 EXCHANGE SANDBOX MODE - sending orders to testnet/sandbox")
 
-    exchange = _build_exchange(
+    exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
         api_key=exchange_config.get("api_key") or settings.exchange.api_key,
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
@@ -269,16 +307,32 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         if decision.quantity is None or decision.quantity <= 0:
             return {"status": "error", "reason": "Quantity must be greater than zero"}
 
-        logger.info(f"[Exchange] Placing {side} order: {symbol} qty={decision.quantity}")
-        order = await asyncio.to_thread(
-            exchange.create_order,
-            symbol=symbol,
-            type="market",
-            side=side,
-            amount=decision.quantity,
-        )
+        # Support both market and limit orders
+        order_type = getattr(decision, "order_type", "market") or "market"
+
+        if order_type == "limit" and decision.entry_price and decision.entry_price > 0:
+            logger.info(f"[Exchange] Placing {side} LIMIT order: {symbol} qty={decision.quantity} @ {decision.entry_price}")
+            order = await asyncio.to_thread(
+                exchange.create_order,
+                symbol=symbol,
+                type="limit",
+                side=side,
+                amount=decision.quantity,
+                price=decision.entry_price,
+            )
+        else:
+            logger.info(f"[Exchange] Placing {side} MARKET order: {symbol} qty={decision.quantity}")
+            order = await asyncio.to_thread(
+                exchange.create_order,
+                symbol=symbol,
+                type="market",
+                side=side,
+                amount=decision.quantity,
+            )
+
         order_id = order.get("id", "unknown")
-        logger.info(f"[Exchange] ✅ Entry order placed: {order_id}")
+        order_status = order.get("status", "unknown")
+        logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status})")
 
         result = {
             "status": "filled",
@@ -288,9 +342,18 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "quantity": decision.quantity,
             "entry_price": order.get("average", decision.entry_price),
             "sandbox_mode": sandbox_mode,
+            "order_type": order_type,
         }
         if leverage:
             result["recommended_leverage"] = leverage
+
+        if decision.trailing_stop:
+            result["trailing_stop_config"] = {
+                "mode": decision.trailing_stop.mode.value,
+                "trail_pct": decision.trailing_stop.trail_pct,
+                "activation_profit_pct": decision.trailing_stop.activation_profit_pct,
+                "trailing_step_pct": decision.trailing_stop.trailing_step_pct,
+            }
 
         # ── Multi Take-Profit Orders ──
         if decision.take_profit_levels:
@@ -369,11 +432,6 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
     except Exception as e:
         logger.error(f"[Exchange] Order failed: {e}")
         return {"status": "error", "reason": "Order execution failed"}
-    finally:
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass  
 
 
 async def _place_stop_loss(exchange, symbol, side, quantity, stop_price, result):
@@ -481,7 +539,7 @@ async def place_protective_stop(
     exchange_config = exchange_config or {}
     if not exchange_config.get("live_trading", settings.exchange.live_trading):
         return {"status": "simulated", "stop_price": stop_price}
-    exchange = _build_exchange(
+    exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
         api_key=exchange_config.get("api_key") or settings.exchange.api_key,
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
@@ -494,11 +552,9 @@ async def place_protective_stop(
         side = "sell" if str(direction).lower() == SignalDirection.LONG.value else "buy"
         order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price)
         return {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price}
-    finally:
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass
+    except Exception as e:
+        logger.error(f"[Exchange] Failed to place protective stop: {e}")
+        return {"status": "error", "reason": str(e)}
 
 
 async def _close_position(exchange: ccxt.Exchange, symbol: str, side: str) -> dict:
@@ -523,7 +579,7 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, side: str) -> di
 
 
 def _simulate_order(decision: TradeDecision) -> dict:
-    """Simulate order execution for paper trading."""
+    """Simulate order execution for paper trading with intelligent entry tracking."""
     tp_info = []
     for i, tp in enumerate(decision.take_profit_levels):
         tp_info.append({
@@ -533,16 +589,36 @@ def _simulate_order(decision: TradeDecision) -> dict:
             "status": "simulated",
         })
 
-    trailing_mode = decision.trailing_stop.mode if decision.trailing_stop else "none"
+    trailing_mode = decision.trailing_stop.mode if decision.trailing_stop else TrailingStopMode.NONE
+    order_type = getattr(decision, "order_type", "market") or "market"
 
-    logger.info(
-        f"[Exchange] 📝 SIMULATED: {decision.direction} {decision.ticker} "
-        f"qty={decision.quantity} entry={decision.entry_price} "
-        f"SL={decision.stop_loss} TPs={len(decision.take_profit_levels)} "
-        f"trailing={trailing_mode}"
-    )
+    trailing_config = {}
+    if decision.trailing_stop:
+        trailing_config = {
+            "mode": trailing_mode.value if hasattr(trailing_mode, "value") else str(trailing_mode),
+            "trail_pct": decision.trailing_stop.trail_pct,
+            "activation_profit_pct": decision.trailing_stop.activation_profit_pct,
+            "trailing_step_pct": decision.trailing_stop.trailing_step_pct,
+        }
+
+    if order_type == "limit" and decision.entry_price and decision.entry_price > 0:
+        status = "pending"
+        note = f"Limit order pending at {decision.entry_price}. Waiting for price to reach entry."
+        logger.info(
+            f"[Exchange] 📝 SIMULATED LIMIT ORDER: {decision.direction} {decision.ticker} "
+            f"qty={decision.quantity} entry={decision.entry_price} "
+            f"(waiting for price to reach entry point)"
+        )
+    else:
+        status = "simulated"
+        note = "Market order - immediate execution at current price"
+        logger.info(
+            f"[Exchange] ✅ SIMULATED MARKET ORDER: {decision.direction} {decision.ticker} "
+            f"qty={decision.quantity} entry={decision.entry_price} SL={decision.stop_loss} TPs={len(decision.take_profit_levels)} "
+        )
+
     return {
-        "status": "simulated",
+        "status": status,
         "symbol": decision.ticker,
         "direction": decision.direction.value if decision.direction else "unknown",
         "quantity": decision.quantity,
@@ -550,9 +626,13 @@ def _simulate_order(decision: TradeDecision) -> dict:
         "stop_loss": decision.stop_loss,
         "take_profit": decision.take_profit,
         "take_profit_orders": tp_info,
-        "trailing_stop_mode": trailing_mode if isinstance(trailing_mode, str) else trailing_mode.value,
+        "trailing_stop_config": trailing_config,
+        "trailing_stop-mode": trailing_mode if isinstance(trailing_mode, str) else trailing_mode.value,
         "trailing_pct": decision.trailing_stop.trail_pct if decision.trailing_stop else 0,
         "sandbox_mode": False,
+        "order_type": order_type,
+        "limit_timeout_secs": decision.limit_timeout_secs,
+        "note": note,
     }
 
 
@@ -570,7 +650,7 @@ async def get_account_balance(exchange_config: dict | None = None) -> dict:
             "free": {"USDT": settings.risk.account_equity_usdt},
             "used": {"USDT": 0.0},
         }
-    exchange = _build_exchange(
+    exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
         api_key=exchange_config.get("api_key") or settings.exchange.api_key,
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
@@ -581,7 +661,6 @@ async def get_account_balance(exchange_config: dict | None = None) -> dict:
     try:
         balance = await asyncio.to_thread(exchange.fetch_balance)
         quote = "USDT" if "USDT" in balance.get("total", {}) else "USD"
-        # Extract relevant balance info
         result = {
             "total": balance.get("total", {}),
             "free": balance.get("free", {}),
@@ -597,11 +676,6 @@ async def get_account_balance(exchange_config: dict | None = None) -> dict:
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch balance: {e}")
         return {}
-    finally:
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass  
 
 
 async def get_balance(exchange_config: dict | None = None) -> dict:
@@ -614,7 +688,7 @@ async def get_balance(exchange_config: dict | None = None) -> dict:
             "free": {"USDT": settings.risk.account_equity_usdt},
             "used": {"USDT": 0.0},
         }
-    exchange = _build_exchange(
+    exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
         api_key=exchange_config.get("api_key") or settings.exchange.api_key,
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
@@ -624,7 +698,6 @@ async def get_balance(exchange_config: dict | None = None) -> dict:
     )
     try:
         balance = await asyncio.to_thread(exchange.fetch_balance)
-        # Extract relevant balance info
         result = {
             "total": balance.get("total", {}),
             "free": balance.get("free", {}),
@@ -636,17 +709,12 @@ async def get_balance(exchange_config: dict | None = None) -> dict:
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch balance: {e}")
         return {}
-    finally:
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass  
 
 
 async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
     """Fetch ticker data for a symbol."""
     exchange_config = exchange_config or {}
-    exchange = _build_exchange(
+    exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
         api_key=exchange_config.get("api_key") or settings.exchange.api_key,
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
@@ -671,17 +739,12 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch ticker for {symbol}: {e}")
         return {}
-    finally:
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass  
 
 
 async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config: dict | None = None) -> dict:
     """Fetch the latest OHLCV candle for paper-trading TP/SL checks."""
     exchange_config = exchange_config or {}
-    exchange = _build_exchange(
+    exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
         api_key=exchange_config.get("api_key") or settings.exchange.api_key,
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
@@ -709,11 +772,6 @@ async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config:
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch latest candle for {symbol}: {e}")
         return {}
-    finally:
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass
 
 
 async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
@@ -721,7 +779,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
     exchange_config = exchange_config or {}
     if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
         return []
-    exchange = _build_exchange(
+    exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
         api_key=exchange_config.get("api_key") or settings.exchange.api_key,
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
@@ -768,11 +826,6 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch positions: {e}")
         return []
-    finally:
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass  
 
 
 async def get_recent_orders(symbol: str = None, limit: int = 50, exchange_config: dict | None = None) -> list[dict]:
@@ -780,7 +833,7 @@ async def get_recent_orders(symbol: str = None, limit: int = 50, exchange_config
     exchange_config = exchange_config or {}
     if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
         return []
-    exchange = _build_exchange(
+    exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
         api_key=exchange_config.get("api_key") or settings.exchange.api_key,
         api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
@@ -815,11 +868,6 @@ async def get_recent_orders(symbol: str = None, limit: int = 50, exchange_config
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch orders: {e}")
         return []
-    finally:
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass  
 
 
 async def test_exchange_connection(
@@ -831,7 +879,7 @@ async def test_exchange_connection(
 ) -> dict:
     """Test if exchange API keys are valid."""
     try:
-        exchange = _build_exchange(
+        exchange = _get_or_create_exchange(
             exchange_id=exchange_id,
             api_key=api_key,
             api_secret=api_secret,
@@ -840,10 +888,6 @@ async def test_exchange_connection(
             sandbox=sandbox_mode,
         )
         balance = await asyncio.to_thread(exchange.fetch_balance)
-        try:
-            await _close_exchange(exchange)
-        except AttributeError:
-            pass  
         mode = " sandbox/testnet" if sandbox_mode else ""
         return {"success": True, "message": f"Connected to {exchange_id}{mode} successfully"}
     except ccxt.AuthenticationError as e:

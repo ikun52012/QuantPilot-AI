@@ -1,0 +1,69 @@
+{
+  "name": "QuantPilot AI Trading",
+  "short_name": "QuantPilot",
+  "description": "Production-grade crypto trading platform with AI analysis, backtesting, and automated strategies",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07090d",
+  "theme_color": "#0f151f",
+  "orientation": "any",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable any"
+    }
+  ],
+  "categories": ["finance", "business", "trading"],
+  "shortcuts": [
+    {
+      "name": "Dashboard",
+      "short_name": "Dashboard",
+      "description": "View trading dashboard",
+      "url": "/dashboard",
+      "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+    },
+    {
+      "name": "Positions",
+      "short_name": "Positions",
+      "description": "View active positions",
+      "url": "/dashboard#positions",
+      "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+    },
+    {
+      "name": "Backtest",
+      "short_name": "Backtest",
+      "description": "Run strategy backtest",
+      "url": "/dashboard#backtest",
+      "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+    }
+  ],
+  "related_applications": [],
+  "prefer_related_applications": false,
+  "edge_side_panel": {
+    "preferred_width": 400
+  },
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "protocol_handlers": [
+    {
+      "protocol": "web+quantpilot",
+      "url": "/signal?data=%s"
+    }
+  ],
+  "launch_handler": {
+    "client_mode": ["focus-existing", "auto"]
+  },
+  "handle_links": "preferred",
+  "capture_links": "existing-client-navigate"
+}

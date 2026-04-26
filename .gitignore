@@ -35,6 +35,10 @@ runtime_settings.json
 .coverage
 htmlcov/
 .pytest_cache/
+pytest-cache-files-*/
+
+# Temp test directories
+.test_tmp/
 
 # OS
 .DS_Store

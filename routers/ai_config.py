@@ -19,11 +19,30 @@ from core.database import get_db
 router = APIRouter(prefix="/api/admin/ai", tags=["ai-config"])
 
 
+def _parse_model_id(model_id: str) -> tuple[str, str]:
+    """Parse model ID in format 'provider/model_name' or legacy 'provider:model_name'."""
+    model_id = model_id.strip().lower()
+
+    if "/" in model_id:
+        parts = model_id.split("/", 1)
+        return parts[0].strip(), parts[1].strip() if len(parts) > 1 else ""
+
+    if ":" in model_id:
+        parts = model_id.split(":", 1)
+        return parts[0].strip(), parts[1].strip() if len(parts) > 1 else ""
+
+    legacy_providers = {"openai", "anthropic", "deepseek", "openrouter", "custom"}
+    if model_id in legacy_providers:
+        return model_id, ""
+
+    return "openrouter", model_id
+
+
 class VotingConfigRequest(BaseModel):
     """Request to update voting configuration."""
     enabled: bool = Field(description="Enable/disable stored voting configuration")
-    models: List[str] = Field(default_factory=list, description="List of models configured for voting")
-    weights: Dict[str, float] = Field(default_factory=dict, description="Weight for each model")
+    models: List[str] = Field(default_factory=list, description="List of models in format provider/model_name")
+    weights: Dict[str, float] = Field(default_factory=dict, description="Weight for each model (should sum to ~1.0)")
     strategy: str = Field(default="weighted", description="Voting strategy: weighted/consensus/best_confidence")
 
 
@@ -68,7 +87,7 @@ async def get_voting_config(
 ):
     """
     Get current stored voting configuration.
-    
+
     Returns:
         - enabled: Whether voting configuration is enabled
         - models: List of configured models
@@ -79,7 +98,7 @@ async def get_voting_config(
         - openrouter_enabled: Whether OpenRouter is enabled
         - openrouter_model: Current OpenRouter model
         - custom_provider_enabled: Whether custom provider is enabled
-    
+
     Note: the active analyzer currently executes the primary provider path.
     These settings are persisted for voting-capable deployments or future use.
     """
@@ -105,65 +124,82 @@ async def update_voting_config(
 ):
     """
     Update stored voting configuration.
-    
-    Model ID format:
-    - 'openai:gpt-4o' - OpenAI with specific model
-    - 'anthropic:claude-3.5-sonnet' - Anthropic with specific model
-    - 'deepseek:deepseek-chat' - DeepSeek
-    - 'openrouter:openai/gpt-4o' - OpenRouter model ID
-    - 'openrouter:anthropic/claude-3.5-sonnet' - Claude via OpenRouter
-    - 'openrouter:google/gemini-pro-1.5' - Gemini via OpenRouter
-    - 'local' - Local rule-based fallback
-    
+
+    Model ID format (use slash separator):
+    - 'openai/gpt-4o' - OpenAI GPT-4o
+    - 'openai/gpt-4o-mini' - OpenAI GPT-4o-mini
+    - 'anthropic/claude-3-5-sonnet-latest' - Anthropic Claude 3.5 Sonnet
+    - 'anthropic/claude-3-5-haiku-latest' - Anthropic Claude 3.5 Haiku
+    - 'deepseek/deepseek-chat' - DeepSeek Chat
+    - 'deepseek/deepseek-reasoner' - DeepSeek Reasoner
+    - 'openrouter/openai/gpt-4o' - GPT-4o via OpenRouter
+    - 'openrouter/anthropic/claude-3.5-sonnet' - Claude via OpenRouter
+    - 'openrouter/google/gemini-pro-1.5' - Gemini via OpenRouter
+    - 'openrouter/meta-llama/llama-3.1-70b-instruct' - Llama via OpenRouter
+    - 'openrouter/mistralai/mistral-large' - Mistral via OpenRouter
+    - 'openrouter/qwen/qwen-2.5-72b-instruct' - Qwen via OpenRouter
+    - 'custom/<model_name>' - Custom provider model
+    - 'local' - Local rule-based fallback (no API call)
+
+    Legacy format also supported: 'provider:model_name' (colon separator)
+
     Voting strategies:
     - **weighted**: Weighted average of confidence, vote on recommendation (recommended)
-    - **consensus**: Only proceed if majority agrees
+    - **consensus**: Only proceed if majority (>50%) votes execute
     - **best_confidence**: Take result from highest confidence model
-    
-    Example weights: {"openai:gpt-4o": 0.4, "deepseek:deepseek-chat": 0.3, "local": 0.3}
+
+    Example weights: {"openai/gpt-4o": 0.4, "deepseek/deepseek-chat": 0.3, "local": 0.3}
     """
-    # Validate models
     valid_models = []
     for model_id in req.models:
+        model_id = model_id.strip()
+
         if model_id == "local":
             valid_models.append(model_id)
             continue
-        
-        if ":" in model_id:
-            provider, model = model_id.split(":", 1)
-            if provider in ["openai", "anthropic", "deepseek", "openrouter", "custom"]:
-                valid_models.append(model_id)
-        elif model_id in ["openai", "anthropic", "deepseek", "openrouter", "custom"]:
-            valid_models.append(model_id)
-    
+
+        provider, model_name = _parse_model_id(model_id)
+
+        valid_providers = ["openai", "anthropic", "deepseek", "openrouter", "custom"]
+        if provider in valid_providers:
+            normalized_id = f"{provider}/{model_name}" if model_name else provider
+            valid_models.append(normalized_id)
+        else:
+            logger.warning(f"[AI Config] Invalid model ID format: {model_id}")
+
     if not valid_models:
         raise HTTPException(400, "No valid models specified")
-    
+
     # Validate strategy
     if req.strategy not in ["weighted", "consensus", "best_confidence"]:
         raise HTTPException(400, "Invalid voting strategy")
-    
-    # Validate weights sum to ~1.0
-    if req.weights:
-        total_weight = sum(req.weights.values())
-        if abs(total_weight - 1.0) > 0.1:
-            logger.warning(f"[AI Config] Weights sum to {total_weight}, should be ~1.0")
-    
-    # Save to database (persisted settings)
+
+    normalized_weights = {}
+    for model_id, weight in req.weights.items():
+        if model_id == "local":
+            normalized_weights[model_id] = float(weight)
+        else:
+            provider, model_name = _parse_model_id(model_id)
+            normalized_key = f"{provider}/{model_name}" if model_name else provider
+            normalized_weights[normalized_key] = float(weight)
+
+    total_weight = sum(normalized_weights.values())
+    if normalized_weights and abs(total_weight - 1.0) > 0.15:
+        logger.warning(f"[AI Config] Weights sum to {total_weight}, should be ~1.0")
+
     await set_admin_setting(db, "ai_voting_enabled", json.dumps(req.enabled))
     await set_admin_setting(db, "ai_voting_models", json.dumps(valid_models))
-    await set_admin_setting(db, "ai_voting_weights", json.dumps(req.weights))
+    await set_admin_setting(db, "ai_voting_weights", json.dumps(normalized_weights))
     await set_admin_setting(db, "ai_voting_strategy", req.strategy)
     await db.commit()
-    
-    # Update runtime settings
+
     settings.ai.voting_enabled = req.enabled
     settings.ai.voting_models = valid_models
-    settings.ai.voting_weights = req.weights
+    settings.ai.voting_weights = normalized_weights
     settings.ai.voting_strategy = req.strategy
-    
+
     logger.info(f"[AI Config] Voting config updated by {admin['username']}: enabled={req.enabled}, models={valid_models}")
-    
+
     return {
         "status": "success",
         "message": "Voting configuration updated",
@@ -182,7 +218,7 @@ async def get_provider_config(
 ):
     """
     Get current AI provider configuration.
-    
+
     Returns all provider settings including API keys (masked).
     """
     return {
@@ -232,7 +268,7 @@ async def update_provider_config(
 ):
     """
     Update AI provider configuration.
-    
+
     OpenRouter provider uses OpenAI-compatible model IDs through a single API:
     - OpenAI: openai/gpt-4o, openai/gpt-4o-mini
     - Anthropic: anthropic/claude-3.5-sonnet
@@ -241,7 +277,7 @@ async def update_provider_config(
     - Mistral: mistralai/mistral-large
     - DeepSeek: deepseek/deepseek-chat
     - Qwen: qwen/qwen-2.5-72b-instruct
-    
+
     This endpoint configures provider routing; execution still follows the selected primary provider.
     """
     # Update settings
@@ -250,7 +286,7 @@ async def update_provider_config(
             raise HTTPException(400, "Invalid provider")
         settings.ai.provider = req.provider
         await set_admin_setting(db, "ai_provider", req.provider)
-    
+
     # Update provider-specific settings
     if req.openai_api_key:
         settings.ai.openai_api_key = req.openai_api_key
@@ -258,21 +294,21 @@ async def update_provider_config(
     if req.openai_model:
         settings.ai.openai_model = req.openai_model
         await set_admin_setting(db, "openai_model", req.openai_model)
-    
+
     if req.anthropic_api_key:
         settings.ai.anthropic_api_key = req.anthropic_api_key
         await set_admin_setting(db, "anthropic_api_key", req.anthropic_api_key)
     if req.anthropic_model:
         settings.ai.anthropic_model = req.anthropic_model
         await set_admin_setting(db, "anthropic_model", req.anthropic_model)
-    
+
     if req.deepseek_api_key:
         settings.ai.deepseek_api_key = req.deepseek_api_key
         await set_admin_setting(db, "deepseek_api_key", req.deepseek_api_key)
     if req.deepseek_model:
         settings.ai.deepseek_model = req.deepseek_model
         await set_admin_setting(db, "deepseek_model", req.deepseek_model)
-    
+
     # OpenRouter
     if req.openrouter_enabled is not None:
         settings.ai.openrouter_enabled = req.openrouter_enabled
@@ -283,7 +319,7 @@ async def update_provider_config(
     if req.openrouter_model:
         settings.ai.openrouter_model = req.openrouter_model
         await set_admin_setting(db, "openrouter_model", req.openrouter_model)
-    
+
     # Custom provider
     if req.custom_provider_enabled is not None:
         settings.ai.custom_provider_enabled = req.custom_provider_enabled
@@ -300,7 +336,7 @@ async def update_provider_config(
     if req.custom_provider_api_url:
         settings.ai.custom_provider_api_url = req.custom_provider_api_url
         await set_admin_setting(db, "custom_ai_api_url", req.custom_provider_api_url)
-    
+
     # Common settings
     if req.temperature is not None:
         settings.ai.temperature = req.temperature
@@ -308,11 +344,11 @@ async def update_provider_config(
     if req.max_tokens is not None:
         settings.ai.max_tokens = req.max_tokens
         await set_admin_setting(db, "ai_max_tokens", str(req.max_tokens))
-    
+
     await db.commit()
-    
+
     logger.info(f"[AI Config] Provider config updated by {admin['username']}")
-    
+
     return {
         "status": "success",
         "message": "Provider configuration updated",
@@ -326,7 +362,7 @@ async def get_available_models(
 ):
     """
     Get list of all available models across providers.
-    
+
     Returns complete model catalog for selection in voting configuration.
     """
     return {

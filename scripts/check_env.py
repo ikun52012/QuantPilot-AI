@@ -53,17 +53,19 @@ REQUIRED_PACKAGES = [
     ("pydantic_settings", "pydantic-settings"),
     ("sqlalchemy", "sqlalchemy"),
     ("aiosqlite", "aiosqlite"),
+    ("greenlet", "greenlet"),
     ("httpx", "httpx"),
     ("loguru", "loguru"),
     ("apscheduler", "apscheduler"),
-    ("ccxt", "ccxt"),
     ("cryptography", "cryptography"),
-    ("passlib", "passlib"),
-    ("jose", "python-jose[cryptography]"),
+    ("jwt", "PyJWT"),
+    ("pyotp", "pyotp"),
+    ("qrcode", "qrcode[pil]"),
     ("aiofiles", "aiofiles"),
     ("dotenv", "python-dotenv"),
 ]
 OPTIONAL_PACKAGES = [
+    ("ccxt", "ccxt (实盘交易/行情数据支持)"),
     ("asyncpg", "asyncpg (PostgreSQL 支持)"),
     ("redis", "redis (Redis 缓存支持)"),
     ("prometheus_client", "prometheus-client (监控指标)"),
@@ -93,7 +95,11 @@ if env_file.exists():
     check("JWT_SECRET 已设置", bool(jwt_secret), "未设置，建议生成: python -c \"import secrets; print(secrets.token_hex(32))\"", warn=True)
 
     live_trading = env_vals.get("LIVE_TRADING", "false").lower() == "true"
+    ccxt_available = importlib.util.find_spec("ccxt") is not None
     if live_trading:
+        check("LIVE_TRADING=true 时 ccxt 已安装",
+              ccxt_available,
+              "实盘交易必须安装 ccxt；当前 32-bit Python 可能需要换 64-bit Python")
         check("LIVE_TRADING=true 时 EXCHANGE_API_KEY 已设置",
               bool(env_vals.get("EXCHANGE_API_KEY", "")),
               "实盘交易必须设置 Exchange API Key")
@@ -105,6 +111,8 @@ if env_file.exists():
               "实盘交易必须设置 JWT_SECRET")
     else:
         print(f"  {INFO}  LIVE_TRADING=false (模拟交易模式，安全)")
+        if not ccxt_available:
+            print(f"  {INFO}  ccxt 未安装：纸交易/后台可启动，实盘交易和交易所实时行情不可用")
 
     db_url = env_vals.get("DATABASE_URL", "sqlite+aiosqlite:///./data/server.db")
     check("DATABASE_URL 已配置", bool(db_url), "DATABASE_URL 未设置")

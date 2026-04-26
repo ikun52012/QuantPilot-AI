@@ -39,7 +39,8 @@ COPY . .
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
     && mkdir -p data/backups logs trade_logs \
     && chown -R appuser:appgroup /app/data /app/logs /app/trade_logs \
-    && chmod -R 775 /app/data /app/logs /app/trade_logs
+    && chmod -R 775 /app/data /app/logs /app/trade_logs \
+    && chmod +x scripts/docker-entrypoint.sh
 
 RUN cp -r /root/.local /home/appuser/.local 2>/dev/null || true \
     && chown -R appuser:appgroup /home/appuser/.local 2>/dev/null || true
@@ -53,4 +54,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["scripts/docker-entrypoint.sh"]

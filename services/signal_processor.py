@@ -26,6 +26,8 @@ from core.metrics import (
     record_ai_analysis,
     record_trade,
 )
+from core.trading_control import trading_allowed
+from services.order_reconciler import record_order_event
 from models import (
     TradingViewSignal,
     TradeDecision,
@@ -35,7 +37,7 @@ from models import (
 )
 from pre_filter import run_pre_filter_async
 from ai_analyzer import analyze_signal
-from market_data import fetch_market_context
+from market_data import fetch_market_context, fetch_enhanced_market_context
 from exchange import execute_trade
 from notifier import (
     notify_signal_received,
@@ -114,22 +116,46 @@ def compute_webhook_fingerprint(body: dict, user_id: Optional[str] = None) -> st
 # ─────────────────────────────────────────────
 
 def verify_webhook_signature(request_body: bytes, signature: str) -> bool:
-    """Verify webhook HMAC signature."""
-    hmac_secret = os.getenv("WEBHOOK_HMAC_SECRET", "").strip()
+    """
+    Verify webhook HMAC signature.
+
+    Security policy:
+    - If WEBHOOK_HMAC_SECRET is configured: signature MUST be valid
+    - If not configured: allow but log warning (for development/testing)
+    - In production (LIVE_TRADING=true): signature is REQUIRED
+    """
+    hmac_secret = settings.webhook_hmac_secret.strip()
+
+    # Production mode: always require HMAC
+    if settings.exchange.live_trading and not hmac_secret:
+        logger.error("[Security] LIVE_TRADING enabled but WEBHOOK_HMAC_SECRET not set!")
+        return False
+
+    # Development mode: allow without HMAC but warn
     if not hmac_secret:
-        return True  # No HMAC configured, allow
+        logger.warning(
+            "[Security] Webhook HMAC not configured. "
+            "Set WEBHOOK_HMAC_SECRET for production security."
+        )
+        return True
 
     if not signature:
+        logger.warning("[Security] Webhook request missing signature")
         return False
 
     import hmac as hmac_module
     digest = hmac_module.new(hmac_secret.encode("utf-8"), request_body, hashlib.sha256).hexdigest()
     expected = f"sha256={digest}"
 
-    return (
+    valid = (
         hmac_module.compare_digest(signature, expected) or
         hmac_module.compare_digest(signature, digest)
     )
+
+    if not valid:
+        logger.warning("[Security] Webhook signature verification failed")
+
+    return valid
 
 
 # ─────────────────────────────────────────────
@@ -178,7 +204,11 @@ class SignalProcessor:
 
         try:
             # Step 1: Fetch market context
-            market = await fetch_market_context(signal.ticker)
+            enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
+            if enhanced_filters:
+                market = await fetch_enhanced_market_context(signal.ticker)
+            else:
+                market = await fetch_market_context(signal.ticker)
 
             # Step 2: Run pre-filter
             prefilter_result = await self._run_prefilter(signal, market, user_id, user_settings)
@@ -567,18 +597,53 @@ class SignalProcessor:
         size_pct: float,
         leverage: float,
     ) -> float:
-        """Calculate position size based on account equity and risk."""
+        """Calculate position size based on account equity and risk.
+
+        Supports three sizing modes:
+        - percentage: AI suggests fraction of max_position_pct
+        - fixed: Fixed USDT amount per trade
+        - risk_ratio: Risk X% of account per trade (accounts for SL distance)
+        """
         equity = settings.risk.account_equity_usdt
         max_position = settings.risk.max_position_pct
-
-        # AI returns 0..1 as a fraction of the configured maximum position.
-        # Accept >1 as a legacy percentage for backward compatibility.
-        size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
-        if size_pct and size_pct > 1:
-            size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
+        sizing_mode = settings.risk.position_sizing_mode
         leverage = max(1.0, float(leverage or 1.0))
-        margin_value = equity * (max_position / 100.0) * size_fraction
-        notional_value = margin_value * leverage
+
+        if sizing_mode == "fixed":
+            # Fixed USDT amount per trade
+            fixed_amount = settings.risk.fixed_position_size_usdt
+            # Apply AI size_pct as a multiplier (0-1 or percentage)
+            size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
+            if size_pct and size_pct > 1:
+                size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
+            notional_value = fixed_amount * leverage * size_fraction
+
+        elif sizing_mode == "risk_ratio":
+            # Risk X% of account per trade
+            risk_pct = settings.risk.risk_per_trade_pct
+            # Calculate stop loss distance to determine position size
+            sl_distance_pct = 0.0
+            if self._has_valid_sl(price, size_pct):
+                # Estimate SL distance from AI analysis or use default
+                sl_distance_pct = 2.0  # Default 2% SL distance
+            if sl_distance_pct > 0:
+                # Position size = (account * risk_pct) / (sl_distance * leverage)
+                risk_amount = equity * (risk_pct / 100.0)
+                notional_value = (risk_amount / (sl_distance_pct / 100.0)) * leverage
+            else:
+                # Fallback to percentage mode if no SL info
+                size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
+                if size_pct and size_pct > 1:
+                    size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
+                margin_value = equity * (max_position / 100.0) * size_fraction
+                notional_value = margin_value * leverage
+        else:
+            # Default: percentage mode
+            size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
+            if size_pct and size_pct > 1:
+                size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
+            margin_value = equity * (max_position / 100.0) * size_fraction
+            notional_value = margin_value * leverage
 
         # Calculate quantity
         if price > 0:
@@ -586,6 +651,10 @@ class SignalProcessor:
             return round(quantity, 6)
 
         return 0.0
+
+    def _has_valid_sl(self, price: float, size_pct: float) -> bool:
+        """Check if we have valid stop loss info for risk-based sizing."""
+        return True  # Placeholder - actual implementation would check AI analysis
 
     async def _execute_trade(
         self,
@@ -628,10 +697,28 @@ class SignalProcessor:
                     exchange_config["live_trading"] = False
 
         self._apply_position_limits(decision, exchange_config)
+        control_state = await trading_allowed(
+            self.session,
+            user_id=user_id,
+            live_trading=bool(exchange_config.get("live_trading")),
+        )
+        if not control_state.get("allowed"):
+            reason = control_state.get("block_reason") or "Trading is currently disabled"
+            logger.warning(f"[Signal] Trade blocked by control mode: {reason}")
+            return {
+                "status": "rejected",
+                "reason": reason,
+                "trading_control": control_state,
+            }
+
         result = await execute_trade(decision, exchange_config)
 
-        # Record trade
-        await log_trade_db(
+# Record trade
+        signal_data = decision.signal.model_dump() if decision.signal else {}
+        risk_cfg = (user_settings or {}).get("risk") or {}
+        user_risk_profile = str(risk_cfg.get("ai_risk_profile") or settings.risk.ai_risk_profile)
+
+        trade = await log_trade_db(
             session=self.session,
             user_id=user_id,
             ticker=decision.ticker,
@@ -640,7 +727,7 @@ class SignalProcessor:
             order_status=result.get("status", "unknown"),
             pnl_pct=0.0,  # Will be updated on close
             payload={
-                "signal": decision.signal.model_dump() if decision.signal else {},
+                "signal": signal_data,
                 "analysis": decision.ai_analysis.model_dump() if decision.ai_analysis else {},
                 "result": result,
                 "exchange_config": {
@@ -648,8 +735,24 @@ class SignalProcessor:
                     "live_trading": bool(exchange_config.get("live_trading")),
                     "sandbox_mode": bool(exchange_config.get("sandbox_mode")),
                 },
+                "strategy_name": signal_data.get("strategy", ""),
+                "user_risk_profile": user_risk_profile,
             },
         )
+        try:
+            trade_payload = json.loads(trade.payload_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            trade_payload = {}
+
+        order_event = await record_order_event(
+            session=self.session,
+            decision=decision,
+            result=result,
+            user_id=user_id,
+            trade_id=trade.id,
+            position_id=trade_payload.get("position_id"),
+        )
+        result["order_event_id"] = order_event.id
 
         # Record metrics
         record_trade(

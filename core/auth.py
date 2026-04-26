@@ -1,17 +1,14 @@
 """
 Signal Server - Authentication Module (Enhanced)
-JWT-based auth with PBKDF2 password hashing.
+JWT-based auth with PyJWT, TOTP 2FA support.
 """
 import os
 import time
-import hashlib
-import hmac
-import json
-import base64
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import jwt
 from fastapi import Request, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from loguru import logger
@@ -49,30 +46,17 @@ JWT_SECRET = _get_jwt_secret()
 
 
 # ─────────────────────────────────────────────
-# JWT Token (Minimal implementation)
+# JWT Token (PyJWT implementation)
 # ─────────────────────────────────────────────
-
-def _b64url_encode(data: bytes) -> str:
-    """Base64 URL-safe encode without padding."""
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-
-def _b64url_decode(s: str) -> bytes:
-    """Base64 URL-safe decode with padding restoration."""
-    padding = 4 - len(s) % 4
-    if padding != 4:
-        s += "=" * padding
-    return base64.urlsafe_b64decode(s)
-
 
 def create_token(
     user_id: str,
     username: str,
     role: str = "user",
-    token_version: int = 0
+    token_version: int = 0,
+    pending_2fa: bool = False,
 ) -> str:
-    """Create a JWT token."""
-    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
+    """Create a JWT token using PyJWT."""
     now = int(time.time())
     payload = {
         "sub": user_id,
@@ -82,45 +66,30 @@ def create_token(
         "iat": now,
         "exp": now + (settings.jwt_expiry_hours * 3600),
     }
+    if pending_2fa:
+        payload["2fa_pending"] = True
+        # Short-lived token for 2FA verification (5 minutes)
+        payload["exp"] = now + 300
 
-    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode())
-    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
-    message = f"{header_b64}.{payload_b64}"
-    signature = hmac.new(JWT_SECRET.encode(), message.encode(), hashlib.sha256).digest()
-    sig_b64 = _b64url_encode(signature)
-
-    return f"{message}.{sig_b64}"
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def verify_token(token: str) -> Optional[dict]:
-    """Verify and decode a JWT token."""
+    """Verify and decode a JWT token using PyJWT."""
     try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            return None
-
-        header_b64, payload_b64, sig_b64 = parts
-        message = f"{header_b64}.{payload_b64}"
-        expected_sig = hmac.new(JWT_SECRET.encode(), message.encode(), hashlib.sha256).digest()
-        actual_sig = _b64url_decode(sig_b64)
-
-        if not hmac.compare_digest(expected_sig, actual_sig):
-            return None
-
-        header = json.loads(_b64url_decode(header_b64))
-        if header.get("alg") != JWT_ALGORITHM or header.get("typ") != "JWT":
-            return None
-
-        payload = json.loads(_b64url_decode(payload_b64))
-
-        # Check expiry
-        if payload.get("exp", 0) < int(time.time()):
-            return None
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            options={"require": ["sub", "username", "exp", "iat"]},
+        )
         if not payload.get("sub") or not payload.get("username"):
             return None
-
         return payload
-    except Exception as e:
+    except jwt.ExpiredSignatureError:
+        logger.debug("[Auth] Token expired")
+        return None
+    except jwt.InvalidTokenError as e:
         logger.debug(f"[Auth] Token verification failed: {e}")
         return None
 
@@ -191,8 +160,6 @@ def set_auth_cookie(response, token: str, request: Optional[Request] = None):
 
 def clear_auth_cookie(response, request: Optional[Request] = None):
     """Clear authentication cookies."""
-    # Emit both Secure and non-Secure expirations so logout also works when a
-    # reverse proxy changes X-Forwarded-Proto or a browser holds an old cookie.
     for secure in (False, True):
         response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="lax")
         response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure, samesite="lax")
@@ -209,7 +176,7 @@ async def get_current_user(
 ) -> dict:
     """
     FastAPI dependency to extract and verify user from JWT.
-    Raises HTTPException if not authenticated.
+    Raises HTTPException if not authenticated or 2FA is pending.
     """
     token = ""
 
@@ -226,6 +193,10 @@ async def get_current_user(
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    # Block access if 2FA verification is still pending
+    if payload.get("2fa_pending"):
+        raise HTTPException(status_code=403, detail="2FA verification required")
+
     # Verify user still exists and is active
     user = await get_user_by_id(db, payload["sub"])
     if not user:
@@ -240,6 +211,43 @@ async def get_current_user(
         "username": user.username,
         "role": user.role,
         "email": user.email,
+    }
+
+
+async def get_pending_2fa_user(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    """
+    FastAPI dependency for 2FA verification endpoint.
+    Accepts tokens with 2fa_pending=True.
+    """
+    token = ""
+    if credentials:
+        token = credentials.credentials
+    else:
+        token = request.cookies.get(AUTH_COOKIE_NAME, "")
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = await get_user_by_id(db, payload["sub"])
+    if not user:
+        raise HTTPException(status_code=401, detail="User no longer exists")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    return {
+        "sub": user.id,
+        "username": user.username,
+        "role": user.role,
+        "email": getattr(user, "email", ""),
+        "2fa_pending": payload.get("2fa_pending", False),
     }
 
 
@@ -263,6 +271,10 @@ async def get_optional_user(
 
     payload = verify_token(token)
     if not payload:
+        return None
+
+    # Don't count 2FA-pending tokens as fully authenticated
+    if payload.get("2fa_pending"):
         return None
 
     try:

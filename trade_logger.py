@@ -119,32 +119,28 @@ async def log_trade_async(decision: TradeDecision, order_result: dict, user_id: 
 
 def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None = None) -> str:
     """
-    Log a trade decision and its execution result (sync wrapper for backward compatibility).
-
-    DEPRECATED: This function uses asyncio.run() which can cause issues in async contexts.
-    Prefer using log_trade_async() directly.
-
-    Returns the trade ID.
+    DEPRECATED: Use log_trade_async() instead.
+    Kept as a thin shim for any remaining sync callers.
     """
     import asyncio
     import warnings
 
     warnings.warn(
-        "log_trade() is deprecated. Use log_trade_async() instead.",
+        "log_trade() is deprecated and will be removed in v5.0. Use log_trade_async() instead.",
         DeprecationWarning,
-        stacklevel=2
+        stacklevel=2,
     )
 
     try:
         loop = asyncio.get_running_loop()
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run,
-                log_trade_async(decision, order_result, user_id)
-            )
-            return future.result()
     except RuntimeError:
         return asyncio.run(log_trade_async(decision, order_result, user_id))
+
+    # Already inside an event loop — schedule as a task
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(asyncio.run, log_trade_async(decision, order_result, user_id))
+        return future.result(timeout=30)
 
 
 def get_today_trades(user_id: str | None = None) -> list[dict]:
@@ -218,6 +214,45 @@ def get_recent_trade_results(limit: int = 5, user_id: str | None = None) -> list
     """Get the most recent executed trade results (for consecutive loss check)."""
     all_trades = get_trade_history(days=3, user_id=user_id)
     executed = [t for t in all_trades if t.get("execute")]
-    # Sort by timestamp descending
     executed.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
     return executed[:limit]
+
+
+async def get_today_pnl_async(user_id: str | None = None) -> float:
+    """Return today's cumulative realised PnL percentage (async version)."""
+    try:
+        trades = await get_trade_history_async(1, user_id=user_id)
+        return sum(t.get("pnl_pct", 0.0) or 0.0 for t in trades if t.get("execute"))
+    except Exception as e:
+        logger.debug(f"[TradeLog] Async PnL fetch failed: {e}")
+        return get_today_pnl(user_id)
+
+
+async def get_recent_trade_results_async(limit: int = 5, user_id: str | None = None) -> list[dict]:
+    """Get the most recent executed trade results (async version)."""
+    try:
+        all_trades = await get_trade_history_async(days=3, user_id=user_id)
+        executed = [t for t in all_trades if t.get("execute")]
+        executed.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+        return executed[:limit]
+    except Exception as e:
+        logger.debug(f"[TradeLog] Async trade results fetch failed: {e}")
+        return get_recent_trade_results(limit, user_id)
+
+
+async def get_today_stats_async(user_id: str | None = None) -> dict:
+    """Get today's trading statistics (async version)."""
+    try:
+        trades = await get_trade_history_async(1, user_id=user_id)
+        executed = [t for t in trades if t.get("execute")]
+        rejected = [t for t in trades if not t.get("execute")]
+
+        return {
+            "total_signals": len(trades),
+            "executed": len(executed),
+            "rejected": len(rejected),
+            "tickers": list(set(t.get("ticker", "") for t in executed)),
+        }
+    except Exception as e:
+        logger.debug(f"[TradeLog] Async stats fetch failed: {e}")
+        return get_today_stats(user_id)

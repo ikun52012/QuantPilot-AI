@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -146,6 +147,30 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.ai.openrouter_model = str(ai.get("openrouter_model") or settings.ai.openrouter_model)
         settings.ai.openrouter_site_url = str(ai.get("openrouter_site_url") or settings.ai.openrouter_site_url)
         settings.ai.openrouter_app_name = str(ai.get("openrouter_app_name") or settings.ai.openrouter_app_name)
+        if "voting_enabled" in ai:
+            settings.ai.voting_enabled = _to_bool(ai.get("voting_enabled"), settings.ai.voting_enabled)
+        if ai.get("voting_models"):
+            models = ai.get("voting_models")
+            if isinstance(models, list):
+                settings.ai.voting_models = models
+            elif isinstance(models, str):
+                try:
+                    settings.ai.voting_models = json.loads(models)
+                except Exception as e:
+                    logger.debug(f"[RuntimeSettings] Failed to parse voting_models: {e}")
+        if ai.get("voting_weights"):
+            weights = ai.get("voting_weights")
+            if isinstance(weights, dict):
+                settings.ai.voting_weights = weights
+            elif isinstance(weights, str):
+                try:
+                    settings.ai.voting_weights = json.loads(weights)
+                except Exception as e:
+                    logger.debug(f"[RuntimeSettings] Failed to parse voting_weights: {e}")
+        if ai.get("voting_strategy"):
+            strategy = str(ai.get("voting_strategy") or "weighted").lower().strip()
+            if strategy in {"weighted", "consensus", "best_confidence"}:
+                settings.ai.voting_strategy = strategy
 
     telegram = runtime.get("telegram") or {}
     if telegram:
@@ -163,6 +188,11 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.risk.ai_risk_profile = profile if profile in {"conservative", "balanced", "aggressive"} else "balanced"
         settings.risk.custom_stop_loss_pct = _to_float(risk.get("custom_stop_loss_pct"), settings.risk.custom_stop_loss_pct, 0.1, 100)
         settings.risk.ai_exit_system_prompt = str(risk.get("ai_exit_system_prompt") or "")
+        # Position sizing settings
+        sizing_mode = str(risk.get("position_sizing_mode") or settings.risk.position_sizing_mode)
+        settings.risk.position_sizing_mode = sizing_mode if sizing_mode in {"percentage", "fixed", "risk_ratio"} else "percentage"
+        settings.risk.fixed_position_size_usdt = _to_float(risk.get("fixed_position_size_usdt"), settings.risk.fixed_position_size_usdt, 1, 1000000)
+        settings.risk.risk_per_trade_pct = _to_float(risk.get("risk_per_trade_pct"), settings.risk.risk_per_trade_pct, 0.1, 100)
 
     take_profit = runtime.get("take_profit") or {}
     if take_profit:
@@ -187,6 +217,68 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
 async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dict[str, Any]]:
     runtime = await load_admin_runtime_settings(session)
     apply_runtime_settings(runtime)
+
+    try:
+        from core.database import get_admin_setting
+
+        voting_enabled_raw = await get_admin_setting(session, "ai_voting_enabled", "")
+        if voting_enabled_raw:
+            settings.ai.voting_enabled = _to_bool(json.loads(voting_enabled_raw) if voting_enabled_raw.startswith("{") or voting_enabled_raw.startswith("[") else voting_enabled_raw)
+
+        voting_models_raw = await get_admin_setting(session, "ai_voting_models", "")
+        if voting_models_raw:
+            try:
+                models = json.loads(voting_models_raw)
+                if isinstance(models, list):
+                    settings.ai.voting_models = models
+            except Exception as e:
+                logger.debug(f"[RuntimeSettings] Failed to parse voting_models_raw: {e}")
+
+        voting_weights_raw = await get_admin_setting(session, "ai_voting_weights", "")
+        if voting_weights_raw:
+            try:
+                weights = json.loads(voting_weights_raw)
+                if isinstance(weights, dict):
+                    settings.ai.voting_weights = weights
+            except Exception as e:
+                logger.debug(f"[RuntimeSettings] Failed to parse voting_weights_raw: {e}")
+
+        voting_strategy_raw = await get_admin_setting(session, "ai_voting_strategy", "")
+        if voting_strategy_raw:
+            strategy = str(voting_strategy_raw).lower().strip()
+            if strategy in {"weighted", "consensus", "best_confidence"}:
+                settings.ai.voting_strategy = strategy
+
+        external_keys_raw = await get_admin_setting(session, "external_api_keys", "")
+        if external_keys_raw:
+            try:
+                from core.security import decrypt_settings_payload, set_secure_api_key
+                keys_data = json.loads(external_keys_raw)
+                decrypted = decrypt_settings_payload(keys_data)
+                if isinstance(decrypted, dict):
+                    for key_name, key_value in decrypted.items():
+                        if key_value:
+                            set_secure_api_key(key_name, key_value)
+            except Exception as e:
+                logger.debug(f"[RuntimeSettings] Failed to load external API keys: {e}")
+
+        enhanced_filters_raw = await get_admin_setting(session, "enhanced_filters", "")
+        if enhanced_filters_raw:
+            try:
+                ef_settings = json.loads(enhanced_filters_raw)
+                if isinstance(ef_settings, dict):
+                    os.environ["ENHANCED_FILTERS_ENABLED"] = str(ef_settings.get("enhanced_filters_enabled", True)).lower()
+                    if ef_settings.get("whale_threshold_usd"):
+                        os.environ["WHALE_THRESHOLD_USD"] = str(ef_settings.get("whale_threshold_usd"))
+                    if ef_settings.get("correlated_threshold_pct"):
+                        os.environ["CORRELATED_THRESHOLD_PCT"] = str(ef_settings.get("correlated_threshold_pct"))
+                    if ef_settings.get("oi_change_threshold_pct"):
+                        os.environ["OI_CHANGE_THRESHOLD_PCT"] = str(ef_settings.get("oi_change_threshold_pct"))
+            except Exception as e:
+                logger.debug(f"[RuntimeSettings] Failed to parse enhanced_filters_raw: {e}")
+    except Exception as e:
+        logger.debug(f"[RuntimeSettings] Failed to apply persisted admin settings: {e}")
+
     return runtime
 
 
@@ -222,6 +314,10 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
         "openrouter_model": str(data.get("openrouter_model") or current.get("openrouter_model") or settings.ai.openrouter_model),
         "openrouter_site_url": str(data.get("openrouter_site_url") or current.get("openrouter_site_url") or settings.ai.openrouter_site_url),
         "openrouter_app_name": str(data.get("openrouter_app_name") or current.get("openrouter_app_name") or settings.ai.openrouter_app_name),
+        "voting_enabled": settings.ai.voting_enabled,
+        "voting_models": settings.ai.voting_models,
+        "voting_weights": settings.ai.voting_weights,
+        "voting_strategy": settings.ai.voting_strategy,
     }
     await _save_encrypted_dict(session, AI_KEY, updated)
     apply_runtime_settings({"ai": updated})
@@ -240,14 +336,19 @@ async def save_telegram_settings(session: AsyncSession, data: dict[str, Any]) ->
 
 
 async def save_risk_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
+    current = await _load_encrypted_dict(session, RISK_KEY)
     updated = {
-        "max_position_pct": _to_float(data.get("max_position_pct"), settings.risk.max_position_pct, 0.1, 100),
-        "max_daily_trades": _to_int(data.get("max_daily_trades"), settings.risk.max_daily_trades, 1, 10000),
-        "max_daily_loss_pct": _to_float(data.get("max_daily_loss_pct"), settings.risk.max_daily_loss_pct, 0.1, 100),
-        "exit_management_mode": str(data.get("exit_management_mode") or settings.risk.exit_management_mode),
-        "ai_risk_profile": str(data.get("ai_risk_profile") or settings.risk.ai_risk_profile),
-        "custom_stop_loss_pct": _to_float(data.get("custom_stop_loss_pct"), settings.risk.custom_stop_loss_pct, 0.1, 100),
-        "ai_exit_system_prompt": str(data.get("ai_exit_system_prompt") or ""),
+        "max_position_pct": _to_float(data.get("max_position_pct"), _to_float(current.get("max_position_pct"), settings.risk.max_position_pct), 0.1, 100),
+        "max_daily_trades": _to_int(data.get("max_daily_trades"), _to_int(current.get("max_daily_trades"), settings.risk.max_daily_trades), 1, 10000),
+        "max_daily_loss_pct": _to_float(data.get("max_daily_loss_pct"), _to_float(current.get("max_daily_loss_pct"), settings.risk.max_daily_loss_pct), 0.1, 100),
+        "exit_management_mode": str(data.get("exit_management_mode") or current.get("exit_management_mode") or settings.risk.exit_management_mode),
+        "ai_risk_profile": str(data.get("ai_risk_profile") or current.get("ai_risk_profile") or settings.risk.ai_risk_profile),
+        "custom_stop_loss_pct": _to_float(data.get("custom_stop_loss_pct"), _to_float(current.get("custom_stop_loss_pct"), settings.risk.custom_stop_loss_pct), 0.1, 100),
+        "ai_exit_system_prompt": str(data.get("ai_exit_system_prompt") if data.get("ai_exit_system_prompt") is not None else current.get("ai_exit_system_prompt", "")),
+        # Position sizing settings
+        "position_sizing_mode": str(data.get("position_sizing_mode") or current.get("position_sizing_mode") or settings.risk.position_sizing_mode),
+        "fixed_position_size_usdt": _to_float(data.get("fixed_position_size_usdt"), _to_float(current.get("fixed_position_size_usdt"), settings.risk.fixed_position_size_usdt), 1, 1000000),
+        "risk_per_trade_pct": _to_float(data.get("risk_per_trade_pct"), _to_float(current.get("risk_per_trade_pct"), settings.risk.risk_per_trade_pct), 0.1, 100),
     }
     await _save_encrypted_dict(session, RISK_KEY, updated)
     apply_runtime_settings({"risk": updated})
@@ -255,16 +356,17 @@ async def save_risk_settings(session: AsyncSession, data: dict[str, Any]) -> dic
 
 
 async def save_take_profit_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
+    current = await _load_encrypted_dict(session, TAKE_PROFIT_KEY)
     updated = {
-        "num_levels": _to_int(data.get("num_levels"), settings.take_profit.num_levels, 1, 4),
-        "tp1_pct": _to_float(data.get("tp1_pct"), settings.take_profit.tp1_pct, 0.1, 200),
-        "tp2_pct": _to_float(data.get("tp2_pct"), settings.take_profit.tp2_pct, 0.1, 200),
-        "tp3_pct": _to_float(data.get("tp3_pct"), settings.take_profit.tp3_pct, 0.1, 200),
-        "tp4_pct": _to_float(data.get("tp4_pct"), settings.take_profit.tp4_pct, 0.1, 200),
-        "tp1_qty": _to_float(data.get("tp1_qty"), settings.take_profit.tp1_qty, 0, 100),
-        "tp2_qty": _to_float(data.get("tp2_qty"), settings.take_profit.tp2_qty, 0, 100),
-        "tp3_qty": _to_float(data.get("tp3_qty"), settings.take_profit.tp3_qty, 0, 100),
-        "tp4_qty": _to_float(data.get("tp4_qty"), settings.take_profit.tp4_qty, 0, 100),
+        "num_levels": _to_int(data.get("num_levels"), _to_int(current.get("num_levels"), settings.take_profit.num_levels), 1, 4),
+        "tp1_pct": _to_float(data.get("tp1_pct"), _to_float(current.get("tp1_pct"), settings.take_profit.tp1_pct), 0.1, 200),
+        "tp2_pct": _to_float(data.get("tp2_pct"), _to_float(current.get("tp2_pct"), settings.take_profit.tp2_pct), 0.1, 200),
+        "tp3_pct": _to_float(data.get("tp3_pct"), _to_float(current.get("tp3_pct"), settings.take_profit.tp3_pct), 0.1, 200),
+        "tp4_pct": _to_float(data.get("tp4_pct"), _to_float(current.get("tp4_pct"), settings.take_profit.tp4_pct), 0.1, 200),
+        "tp1_qty": _to_float(data.get("tp1_qty"), _to_float(current.get("tp1_qty"), settings.take_profit.tp1_qty), 0, 100),
+        "tp2_qty": _to_float(data.get("tp2_qty"), _to_float(current.get("tp2_qty"), settings.take_profit.tp2_qty), 0, 100),
+        "tp3_qty": _to_float(data.get("tp3_qty"), _to_float(current.get("tp3_qty"), settings.take_profit.tp3_qty), 0, 100),
+        "tp4_qty": _to_float(data.get("tp4_qty"), _to_float(current.get("tp4_qty"), settings.take_profit.tp4_qty), 0, 100),
     }
     await _save_encrypted_dict(session, TAKE_PROFIT_KEY, updated)
     apply_runtime_settings({"take_profit": updated})
@@ -272,11 +374,12 @@ async def save_take_profit_settings(session: AsyncSession, data: dict[str, Any])
 
 
 async def save_trailing_stop_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
+    current = await _load_encrypted_dict(session, TRAILING_STOP_KEY)
     updated = {
-        "mode": str(data.get("mode") or settings.trailing_stop.mode),
-        "trail_pct": _to_float(data.get("trail_pct"), settings.trailing_stop.trail_pct, 0.1, 100),
-        "activation_profit_pct": _to_float(data.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct, 0, 100),
-        "trailing_step_pct": _to_float(data.get("trailing_step_pct"), settings.trailing_stop.trailing_step_pct, 0, 100),
+        "mode": str(data.get("mode") or current.get("mode") or settings.trailing_stop.mode),
+        "trail_pct": _to_float(data.get("trail_pct"), _to_float(current.get("trail_pct"), settings.trailing_stop.trail_pct), 0.1, 100),
+        "activation_profit_pct": _to_float(data.get("activation_profit_pct"), _to_float(current.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct), 0, 100),
+        "trailing_step_pct": _to_float(data.get("trailing_step_pct"), _to_float(current.get("trailing_step_pct"), settings.trailing_stop.trailing_step_pct), 0, 100),
     }
     await _save_encrypted_dict(session, TRAILING_STOP_KEY, updated)
     apply_runtime_settings({"trailing_stop": updated})
@@ -339,5 +442,14 @@ def runtime_status() -> dict[str, Any]:
             "ai_risk_profile": settings.risk.ai_risk_profile,
             "custom_stop_loss_pct": settings.risk.custom_stop_loss_pct,
             "ai_exit_system_prompt": settings.risk.ai_exit_system_prompt,
+            "position_sizing_mode": settings.risk.position_sizing_mode,
+            "fixed_position_size_usdt": settings.risk.fixed_position_size_usdt,
+            "risk_per_trade_pct": settings.risk.risk_per_trade_pct,
+        },
+        "voting": {
+            "enabled": settings.ai.voting_enabled,
+            "models": settings.ai.voting_models,
+            "weights": settings.ai.voting_weights,
+            "strategy": settings.ai.voting_strategy,
         },
     }

@@ -1,10 +1,10 @@
-# 📡 QuantPilot AI (v4.2)
+# 📡 QuantPilot AI (v4.4)
 
 ![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
 
 **QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, **OpenRouter 100+ models**, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
 
-**NEW in v4.2**: Multi-model voting system, OpenRouter integration, realistic fee calculation, and 45 audit fixes.
+**NEW in v4.4**: Persistent DCA/Grid/Social/Strategy Editor state, global trading kill switch/read-only controls, order event reconciliation, v1 API aliases, and hardened PWA assets.
 
 ---
 
@@ -12,48 +12,173 @@
 
 - **🤖 Invincible AI Trading Analysis Pipeline**
   - Built-in integration with OpenAI (GPT-4o), Anthropic (Claude 3.5 Sonnet), DeepSeek, and custom endpoints.
-  - **NEW: OpenRouter** - Access 100+ models via single API (GPT-4o, Claude, Gemini, Llama 3.1, Mistral, Qwen).
-  - **NEW: Multi-Model Voting** - Combine multiple AI providers for robust decisions. Strategies: weighted, consensus, best-confidence.
+  - **OpenRouter** - Access 100+ models via single API (GPT-4o, Claude, Gemini, Llama 3.1, Mistral, Qwen).
+  - **Multi-Model Voting** - Combine multiple AI providers for robust decisions. Strategies: weighted, consensus, best-confidence.
   - AI performs secondary risk assessment, identifies false breakouts, recommends optimal TP/SL.
-- **🛡️ 15-Layer Pre-Filter System**
+
+- **🛡️ 19-Layer Pre-Filter System**
   - Strict Webhook signal processor preventing entries during whale manipulation/black swan events.
   - Circuit breakers for max daily trades and drawdown.
+  - Whale activity monitoring (Whale Alert, Etherscan, Blockchain.com).
+
+- **🧪 Backtest Engine (NEW)**
+  - 3 built-in strategies: Simple Trend (EMA), SMC Trend (FVG+OB), AI Assistant (Multi-indicator).
+  - 25+ performance metrics: Sharpe, Sortino, CAGR, Kelly, Max Drawdown, Profit Factor.
+  - Full Trailing Stop simulation: Moving, Breakeven, Step, Profit-%.
+  - Multi-TP execution with partial close simulation.
+  - Strategy comparison for benchmarking.
+
+- **📊 DCA Strategy (NEW)**
+  - Average Down / Average Up modes.
+  - 4 sizing methods: Fixed, Martingale, Geometric, Fibonacci.
+  - Configurable activation loss threshold.
+  - Auto-monitoring with interval control.
+  - Full position lifecycle tracking.
+
+- **🔲 Grid Trading (NEW)**
+  - Neutral / Long Bias / Short Bias modes.
+  - Arithmetic / Geometric spacing.
+  - Auto range calculation based on current price.
+  - Auto grid replenishment on price movement.
+  - Buy/Sell pair PnL tracking.
+
+- **⚡ WebSocket Real-time Streaming (NEW)**
+  - `/ws/positions` - Real-time position updates with PnL.
+  - `/ws/prices` - Live price streaming for subscribed tickers.
+  - `/ws/system` - Admin system status monitoring.
+  - Auto ping/pong heartbeat, channel subscription.
+
 - **💸 Robust Multi-Tenant Architecture & Crypto Payment System**
   - JWT session control with user dashboards and admin panel.
   - Multi-chain USDT verification (TRC20, ERC20, BEP20, Solana), invite codes, subscription plans.
+
 - **⚡ Multi-Exchange Live & Paper Trading Engine**
   - Binance, OKX, Bybit, Bitget, Gate.io, Coinbase support.
   - Paper trading, sandbox/testnet, live trading modes.
-  - **NEW: Realistic fees** - Maker 0.02%, Taker 0.05% for accurate PnL.
+  - Realistic fees - Maker 0.02%, Taker 0.05% for accurate PnL.
+
 - **🎯 Smart Tiered Risk Management & Trailing Stops**
   - Up to 4 TP levels (TP1-TP4) with configurable distances and close percentages.
   - 5 trailing stop modes: Moving, Breakeven-on-TP1, Step, Profit-%, Static.
+
+- **📈 K-line Charts (NEW)**
+  - TradingView Lightweight Charts integration.
+  - Multi-timeframe: 1m, 5m, 15m, 1h, 4h, 1d.
+  - Real-time price updates via WebSocket.
+  - Position markers on chart.
+
+- **🎨 Strategy Visual Editor (NEW)**
+  - Drag-and-drop strategy parameter configuration.
+  - Visual TP/SL level placement.
+  - Real-time strategy preview.
+  - Export/Import strategy templates.
+
+- **🌐 Social Signal Sharing (NEW)**
+  - Share trading signals to community.
+  - Subscribe to top performers.
+  - Signal performance leaderboard.
+  - Privacy controls for sharing.
+
+- **📱 Mobile PWA Support (NEW)**
+  - Progressive Web App for iOS/Android.
+  - Push notifications for trade alerts.
+  - Offline mode for viewing history.
+  - Responsive touch-friendly UI.
+
+- **🌍 Multi-language i18n (NEW)**
+  - English, Chinese, Japanese, Korean, Spanish.
+  - Auto language detection.
+  - User language preference settings.
+
 - **📱 Real-time Telegram Notifications**
   - Pipeline events broadcast to Telegram Bot.
 
 ---
 
-## 🆕 v4.2 New Features
+## 🆕 v4.4 New Features
 
-### Multi-Model Voting
-Combine analysis from multiple AI providers for more robust trading decisions:
-- **Weighted**: Recommended. Weighted average of confidence.
-- **Consensus**: Only proceed if majority agrees.
-- **Best Confidence**: Take highest confidence result.
+- Global trading controls: enabled/read-only/paused/emergency stop modes.
+- Order event ledger with reconciliation review flow.
+- Persistent DCA/Grid runtime state scoped per user.
+- Persistent Social Signals subscriptions and feedback stats.
+- Persistent custom strategy editor configurations.
+- Working `/api/v1/*` aliases for versioned clients.
+- PWA manifest/service worker assets aligned with real static files.
 
-### OpenRouter Integration
-Access 100+ AI models through a single API key:
-- OpenAI: `openai/gpt-4o`, `openai/gpt-4o-mini`
-- Anthropic: `anthropic/claude-3.5-sonnet`
-- Google: `google/gemini-pro-1.5`
-- Meta: `meta-llama/llama-3.1-70b-instruct`
-- DeepSeek: `deepseek/deepseek-chat` (~$0.14/1M tokens - very cost-effective)
+## 🆕 v4.3 Features
 
-### Paper Trading Fee Fix
-Realistic fee calculation for accurate PnL:
-- Maker fee: 0.02% (limit orders)
-- Taker fee: 0.05% (market orders)
-- Configurable order types affect fee tier
+### Backtest Engine
+Run historical simulations to validate strategies before live deployment:
+- **Simple Trend**: EMA crossover strategy
+- **SMC Trend**: Smart Money Concepts (FVG + Order Blocks)
+- **AI Assistant**: Multi-indicator (EMA + RSI + Volume)
+
+**Performance Metrics**:
+```
+- Total Return %
+- Win Rate
+- Profit Factor
+- Sharpe Ratio
+- Sortino Ratio
+- Max Drawdown
+- CAGR
+- Kelly Fraction
+- Expectancy
+- Recovery Factor
+```
+
+### DCA (Dollar Cost Average) Strategy
+Automated position averaging with intelligent sizing:
+- **Average Down**: Add to position as price drops
+- **Average Up**: Add to position as price rises
+- **Sizing Methods**: Fixed, Martingale (1.5x), Geometric, Fibonacci
+
+Example DCA config:
+```json
+{
+  "ticker": "BTCUSDT",
+  "direction": "long",
+  "max_entries": 5,
+  "entry_spacing_pct": 2.0,
+  "sizing_method": "martingale",
+  "stop_loss_pct": 10.0,
+  "take_profit_pct": 5.0
+}
+```
+
+### Grid Trading
+Profit from price oscillation within a range:
+- **Neutral Grid**: Equal buy/sell distribution
+- **Long Grid**: More buy levels below current price
+- **Short Grid**: More sell levels above current price
+
+Example Grid config:
+```json
+{
+  "ticker": "BTCUSDT",
+  "grid_count": 10,
+  "grid_spacing_pct": 1.0,
+  "total_capital_usdt": 1000,
+  "spacing_mode": "arithmetic"
+}
+```
+
+### WebSocket Streaming
+Real-time data without polling:
+- **Positions**: `ws://localhost:8000/ws/positions?token=<jwt>`
+- **Prices**: `ws://localhost:8000/ws/prices?token=<jwt>`
+- **System**: `ws://localhost:8000/ws/system?token=<jwt>` (admin only)
+
+Message format:
+```json
+{
+  "type": "position_update",
+  "position_id": "pos123",
+  "ticker": "BTCUSDT",
+  "pnl_pct": 5.2,
+  "timestamp": "2024-01-01T12:00:00Z"
+}
+```
 
 ---
 
@@ -61,172 +186,196 @@ Realistic fee calculation for accurate PnL:
 
 ```mermaid
 graph LR
-A[TradingView Webhook] --> B(15-Layer Pre-Filter)
-B --> |Passed| C{AI Strategy & Secondary Decision}
-B --> |Rejected| F[Local Logs & Telegram Notification]
-C --> |Trade Approved| D[Exchange API Order Execution]
-C --> |Trade Rejected| F
-D --> E[Real-time Multi-TP & Trailing Stop Mounting]
-D --> G[Full-pipeline Telegram Broadcast]
+    A[TradingView Webhook] --> B(19-Layer Pre-Filter)
+    B --> |Passed| C{AI Strategy & Voting}
+    B --> |Rejected| F[Logs & Telegram]
+    C --> |Trade Approved| D[Exchange Execution]
+    C --> |Trade Rejected| F
+    D --> E[Multi-TP & Trailing Stop]
+    D --> G[WebSocket Broadcast]
+    E --> H[Position Monitor]
+    H --> I[DCA/Grid Strategy Engine]
+    I --> G
 ```
-
----
-
-## 🎨 Cutting-edge Interactive Dashboard (Midnight Glassmorphism)
-
-We've completely overhauled the "boring financial backend" stereotype. The dashboard implements a **Midnight Glassmorphism** design aesthetic:
-- **Deep, dreamy cyberpunk abyss interface** paired with dynamic colorful micro-animation particles, showcasing your quant-geek taste.
-- **Spotlight Hover micro-interaction system**.
-- Seamless real-time responsive modern UI (mobile and web compatible) for maximum operational comfort.
 
 ---
 
 ## 🚀 Quick Start Guide
 
 ### 1. Prerequisites
-Before starting your money-making machine, ensure your server terminal has the following:
 - **Python 3.10+**
-- **Docker & Docker Compose** (Recommended deployment method).
-- A TradingView account (Any tier, but paid tiers are recommended to create Webhooks).
+- **Docker & Docker Compose** (Recommended)
+- TradingView account (Any tier)
 
-Use **Python 3.10+** for local installs. Docker uses Python 3.12 by default and is the recommended path on Windows, especially if your local machine only has a 32-bit Python interpreter.
-
-### 2. Local Source Deployment (For Custom Development)
+### 2. Local Deployment
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/ikun52012/QuantPilot-AI.git
-cd signal-server
+cd QuantPilot-AI
 
-# 2. Install core Python dependencies (venv recommended)
 pip install -r requirements.txt
-
-# 3. Configure your pipeline
 cp .env.example .env
-nano .env # Setup API keys for Exchanges, AI, Telegram Bot, etc.
+nano .env  # Configure API keys
 
-# 4. Ignite! 🔥
 uvicorn app:app --host 0.0.0.0 --port 8000
-# Set UVICORN_RELOAD=true only for local auto-reload development.
 ```
-Visit `http://0.0.0.0:8000` locally or on your LAN to access the quant dashboard!
 
-Open:
+### 3. Docker Deployment
 
-- Homepage: `http://localhost:8000/`
-- Login: `http://localhost:8000/login`
-- Dashboard: `http://localhost:8000/dashboard`
+```bash
+docker-compose up -d --build
+docker-compose logs -f
+```
 
-Default first-deployment login:
+### 4. Database Migration
 
-```text
+```bash
+# Initialize migrations
+alembic init migrations
+
+# Create initial migration
+alembic revision --autogenerate -m "Initial schema"
+
+# Apply migrations
+alembic upgrade head
+```
+
+**Default Login**:
+```
 Username: admin
 Password: 123456
 ```
 
-**⚠️ SECURITY WARNING:** The default password `123456` is intentionally weak for initial setup only. You MUST change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` to strong, unique values before exposing the service to the internet. Failure to do so puts your trading accounts and funds at extreme risk.
-
-### 3. One-Click Docker Deployment
-When you are ready to deploy it as a 24/7 cloud miner:
-
-```bash
-# After configuring your .env file
-docker-compose up -d --build
-
-# Monitor live terminal logs
-docker-compose logs -f
-```
-_Note: Generated SQLite databases and critical logs will be persistently mapped to `./data` and `./logs`. If you encounter permission errors on Linux host machines, run `chmod -R 777 ./data ./logs` to allow the internal `appuser` container user to write._
+⚠️ Change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` immediately!
 
 ---
 
-## ⚙️ Core `.env` Configuration Guide
+## ⚙️ API Reference
 
-Here are the high-frequency variables you must pay attention to:
-*   **`AI_PROVIDER`**: Model integration base. Valid fields are `openai`, `anthropic`, `deepseek`, or `custom` for your own base (if `custom`, ensure you fill out the related custom fields below it).
-*   **`EXCHANGE`**: Default platform egress, like `binance`. If operating as a SaaS provider, tenant users can also enter their own Exchange Keys in their web dashboard.
-*   **`LIVE_TRADING`**: Critical! Keep `false` for Local Paper Trading. Set `true` only when you want the server to send orders through exchange APIs.
-*   **`EXCHANGE_SANDBOX_MODE`**: Set to `true` together with `LIVE_TRADING=true` to route supported exchanges to testnet/sandbox endpoints. This is different from Local Paper Trading because real API calls are still sent, but to the exchange test environment.
-*   **`JWT_SECRET`** & **`WEBHOOK_SECRET`**: The authorization lifelines of the entire server. **Must be set to unbreakable, random, ultra-long hashes!**
-*   **`WEBHOOK_HMAC_SECRET`**: Optional strict webhook body signature secret. If set, webhook senders must include `X-TVSS-Signature: sha256=<hmac_sha256_raw_body>`.
-*   **`DEFAULT_ADMIN_PASSWORD`**: The default super-admin password generated on first run (Default: 123456). Please change this immediately after your first successful login.
-*   **`PREFILTER_DISABLED_CHECKS`**: Optional comma-separated list of pre-filter rule keys to bypass, for example `spread,market_hours`.
-*   **`AI_READ_TIMEOUT_SECS`**: AI provider read timeout. Default is 90 seconds for larger prompts and congested model providers.
+### Backtest API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/backtest/run` | POST | Run backtest simulation |
+| `/api/backtest/strategies` | GET | List available strategies |
+| `/api/backtest/compare` | GET | Compare all strategies |
+
+### DCA Strategy API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/strategies/dca/create` | POST | Create DCA position |
+| `/api/strategies/dca/list` | GET | List active DCA |
+| `/api/strategies/dca/check/{id}` | POST | Check & execute DCA |
+| `/api/strategies/dca/close/{id}` | DELETE | Close DCA position |
+
+### Grid Strategy API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/strategies/grid/create` | POST | Create grid |
+| `/api/strategies/grid/list` | GET | List active grids |
+| `/api/strategies/grid/check/{id}` | POST | Check & execute grid |
+| `/api/strategies/grid/close/{id}` | DELETE | Close grid |
+
+### WebSocket API
+
+| Endpoint | Description |
+|----------|-------------|
+| `/ws/positions` | Position updates stream |
+| `/ws/prices` | Price streaming |
+| `/ws/system` | System status (admin) |
 
 ---
 
-## 📬 TradingView Webhook Integration
+## 📬 TradingView Webhook
 
-1. Craft your high-win-rate strategy chart in TradingView.
-2. Open the "Create Alert" dialog.
-3. Under the Notifications tab, check `Webhook URL` -> Enter your HTTPS endpoint, for example `https://<your-domain>/webhook`.
-4. The "Message" box requires a structured JSON Payload. To view your specific authenticated Payload template, please log into the platform and check your User Settings dashboard.
-
-Minimal long signal:
-
+Minimal payload:
 ```json
 {
-  "secret": "copy-from-dashboard",
+  "secret": "your-webhook-secret",
   "ticker": "{{ticker}}",
   "exchange": "{{exchange}}",
   "direction": "long",
   "price": {{close}},
   "timeframe": "{{interval}}",
-  "strategy": "{{strategy.order.comment}}",
-  "message": "{{strategy.order.action}} {{ticker}} @ {{close}}",
-  "bar_time": "{{time}}"
+  "strategy": "{{strategy.order.comment}}"
 }
 ```
 
-For short signals, change only `"direction": "short"`.
+---
 
-The server records webhook events and reserves duplicate payload fingerprints atomically in SQLite before running AI/exchange logic. This protects against TradingView retries or concurrent duplicate deliveries placing repeated orders.
+## 🧪 Running Tests
+
+```bash
+# Install test dependencies
+pip install pytest pytest-asyncio httpx
+
+# Run all tests
+pytest tests/ -v
+
+# Run specific test files
+pytest tests/test_backtest_engine.py -v
+pytest tests/test_strategies.py -v
+pytest tests/test_websocket.py -v
+pytest tests/test_voting.py -v
+pytest tests/test_trailing_stop.py -v
+pytest tests/test_smc.py -v
+```
 
 ---
 
-## Production Hardening
+## 🌐 Internationalization
 
-- Runtime admin secrets, webhook secrets, and per-user exchange keys are encrypted at rest with `APP_ENCRYPTION_KEY`. If it is omitted, the app generates a persistent key in `data/app_encryption.key`; back this file up and keep the `data/` volume mounted permanently.
-- Admin dashboard settings are persisted in the database and reapplied on startup. In Exchange Configuration, choose `Local Paper Trading` for no exchange orders, `Exchange API Trading + sandbox/testnet` for supported exchange demo environments, or `Exchange API Trading` without sandbox for real live orders.
-- Per-user webhook lookup uses a stored hash, so the dashboard can show each user's real secret while the database index does not keep the raw value.
-- Browser write APIs use a double-submit CSRF token in addition to the HttpOnly session cookie.
-- Login and registration endpoints use IP sliding-window rate limits. Passwords must include lowercase, uppercase, number, and symbol characters.
-- JWT sessions carry a token version. Disabling a user, changing role/active state, or resetting a password revokes older sessions immediately.
-- SQLite uses WAL, foreign keys, and a busy timeout for better webhook concurrency. The current database layer remains SQLite-based; PostgreSQL is still the recommended next step for very high-volume multi-instance deployments.
-- Leave `PUBLIC_BASE_URL` empty to auto-detect the current domain from request/proxy headers. Set it only if auto-detection is wrong, such as `https://cs.hyzcjs.com` or `https://127.0.0.1`.
-- Optional webhook HMAC verification is available through `WEBHOOK_HMAC_SECRET`. Normal TradingView JSON `secret` verification remains supported when HMAC is not configured.
-- Set `COOKIE_SECURE=true` when deploying behind HTTPS.
-- Docker Compose binds the app to `127.0.0.1:8000` by default. Expose it through Nginx, Caddy, Cloudflare Tunnel, or another HTTPS reverse proxy.
-- Trade logs are written to SQLite as the source of truth while legacy JSON logs remain a best-effort readable mirror.
-- A lightweight position ledger tracks open and close signals and computes realized `pnl_pct` on matching close signals, keeping each user's analytics isolated.
-- Admin actions are recorded in an audit log and displayed in the Admin System panel.
-- `/health` performs database, writable storage, disk-space, AI configuration, and exchange configuration checks. `/metrics` exposes basic Prometheus-style counters for operational monitoring.
-- Payment TX hashes are checked for duplicate submission before admin confirmation. Admins can also run best-effort on-chain verification for TRC20, ERC20, BEP20, and Arbitrum from the Pending Payments panel. Aptos is detected but staged for manual/indexer review.
-- Advanced trailing modes are monitored by a scheduled position monitor. Set `POSITION_MONITOR_INTERVAL_SECS` to tune the scan interval, and review the Position Monitor panel after enabling live trading.
-- Backups can be created from the Admin Backup panel. `.env` is intentionally excluded from backup ZIP files; always keep `data/app_encryption.key` or `APP_ENCRYPTION_KEY`; encrypted secrets cannot be recovered without it.
+Supported languages:
+- 🇺🇸 English (default)
+- 🇨🇳 中文
+- 🇯🇵 日本語
+- 🇰🇷 한국어
+- 🇪🇸 Español
 
-### Commercial Operation Notes
-
-- Each user has isolated exchange keys, webhook secret, TP settings, trade history, and performance charts.
-- Admins can decide whether a user may enable live trading, plus set max leverage and max position percentage caps.
-- Exchange TP/SL order parameters are tried through exchange-aware candidates. Always test each target exchange with a small paper/live pilot before trusting automation with real size.
-- Webhook Diagnostics shows recent invalid secrets, duplicate alerts, pre-filter blocks, AI rejects, and executed signals so TradingView issues can be traced from the dashboard.
-- For fully unattended payments, configure explorer API keys in `.env` and still keep manual review available for chain/API outages.
+Set language in `.env`:
+```
+DEFAULT_LANGUAGE=zh
+```
 
 ---
 
-## 🛠️ Troubleshooting & FAQ
+## 📱 Mobile PWA
 
-- **Database Locks (SQLite WAL)**: High concurrency of webhooks might occasionally cause `database is locked` errors. Ensure `data/` is on a fast SSD and consider migrating to PostgreSQL for heavy SaaS loads.
-- **Port 8000 in Use**: If the server fails to start, check if another service is using port 8000 (`lsof -i :8000`). Change the port in `docker-compose.yml` or the `uvicorn` startup command.
-- **AI Timeout Errors**: If GPT-4 or Claude takes too long to respond, increase `AI_READ_TIMEOUT_SECS` (default 90) in your `.env` file.
-- **Supported Payment Chains**: The built-in scanner supports TRC20, ERC20, BEP20, and Arbitrum. Ensure you configure the respective block explorer API keys (e.g., TronGrid, Etherscan) in the `.env` file for automatic verification.
+Access from mobile:
+1. Open `https://your-domain` in mobile browser
+2. Tap "Add to Home Screen"
+3. App installs as PWA with push notifications
 
 ---
 
-## 🛡️ Disclaimer & Risk Warning
+## 🛡️ Security Features
 
-**Please review this declaration carefully before launching:**
-Deploying and running automated quantitative trading for futures or spot markets is an **extremely high-risk operation**. This project serves as an open structured routing hub and AI empowerment tool. All commands executed through this tool **do not constitute, nor are they equivalent to, any financial or investment advice**. The developers and contributors of this codebase **assume no liability whatsoever** for any asset liquidations, slippage blowouts, or total capital losses caused by exchange API outages, network jitter, or rare AI hallucinations. We strongly advise all users to maintain long-term paper trading using `LIVE_TRADING=false` before injecting real capital.
+- **HMAC Verification**: Production mode requires webhook signature
+- **JWT Secure Storage**: API keys stored in memory, not env vars
+- **Rate Limiting**: IP-based sliding window protection
+- **CSRF Tokens**: Double-submit cookie validation
+- **Encrypted Secrets**: AES-256 encryption for sensitive data
+- **Audit Logging**: All admin actions recorded
+- **Session Versioning**: Immediate revoke on password change
+
+---
+
+## 🛠️ Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Database Locks | Use PostgreSQL for high load |
+| AI Timeout | Increase `AI_READ_TIMEOUT_SECS` |
+| WebSocket Disconnect | Check JWT token validity |
+| Grid Out of Range | Enable auto-replenish |
+| DCA Max Capital | Check `max_total_capital_usdt` |
+
+---
+
+## 🛡️ Disclaimer
+
+**Automated trading involves extreme risk.** This project is a routing hub and AI tool, not financial advice. Developers assume no liability for losses. Always test with `LIVE_TRADING=false` first.
 
 > *All Trading Involves Absolute Risk. Code your own destiny.* ☕

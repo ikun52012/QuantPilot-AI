@@ -124,6 +124,7 @@ class PreFilterResult(BaseModel):
     passed: bool
     reason: str = ""
     checks: dict = Field(default_factory=dict)
+    score: float = Field(default=100.0, ge=0.0, le=100.0, description="Weighted filter score 0-100")
 
 
 # ─────────────────────────────────────────────
@@ -132,21 +133,54 @@ class PreFilterResult(BaseModel):
 class MarketContext(BaseModel):
     ticker: str
     current_price: float
-    price_change_1h: float = 0.0        # % change
+    price_change_1h: float = 0.0
     price_change_4h: float = 0.0
     price_change_24h: float = 0.0
     volume_24h: float = 0.0
-    volume_change_pct: float = 0.0      # vs 24h avg
+    volume_change_pct: float = 0.0
     high_24h: float = 0.0
     low_24h: float = 0.0
     bid_ask_spread: float = 0.0
     funding_rate: Optional[float] = None
     open_interest: Optional[float] = None
+    open_interest_change_pct: Optional[float] = None
     rsi_1h: Optional[float] = None
     atr_pct: Optional[float] = None
     ema_fast: Optional[float] = None
     ema_slow: Optional[float] = None
-    orderbook_imbalance: Optional[float] = None  # bid/ask ratio
+    orderbook_imbalance: Optional[float] = None
+    long_short_ratio: Optional[float] = None
+
+    model_config = {"extra": "allow"}
+
+    @property
+    def price(self) -> float:
+        """Compatibility alias used by newer routers."""
+        return self.current_price
+
+    @property
+    def price_change_pct_1h(self) -> float:
+        return self.price_change_1h
+
+    @property
+    def price_change_pct_4h(self) -> float:
+        return self.price_change_4h
+
+    @property
+    def price_change_pct_24h(self) -> float:
+        return self.price_change_24h
+
+    @property
+    def atr_1h(self) -> Optional[float]:
+        return self.atr_pct
+
+    @property
+    def ema_20(self) -> Optional[float]:
+        return self.ema_fast
+
+    @property
+    def ema_50(self) -> Optional[float]:
+        return self.ema_slow
 
 
 # ─────────────────────────────────────────────
@@ -193,6 +227,10 @@ class TradeDecision(BaseModel):
     signal: Optional[TradingViewSignal] = None
     ai_analysis: Optional[AIAnalysis] = None
     timestamp: datetime = Field(default_factory=lambda: utcnow())
+    # Order type: market or limit
+    order_type: str = Field(default="market", description="market or limit")
+    # For limit orders: maximum time to wait before cancelling (seconds)
+    limit_timeout_secs: int = Field(default=300, ge=10, le=3600)
 
 
 # ─────────────────────────────────────────────

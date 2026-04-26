@@ -135,6 +135,7 @@ class ExchangeConfig(BaseModel):
     password: str = ""
     live_trading: bool = False
     sandbox_mode: bool = False
+    pool_max_size: int = 50
 
     @field_validator('name')
     @classmethod
@@ -154,6 +155,7 @@ class ExchangeConfig(BaseModel):
             password=os.getenv("EXCHANGE_PASSWORD", ""),
             live_trading=os.getenv("LIVE_TRADING", "false").lower() == "true",
             sandbox_mode=os.getenv("EXCHANGE_SANDBOX_MODE", "false").lower() == "true",
+            pool_max_size=int(os.getenv("EXCHANGE_POOL_MAX_SIZE", "50")),
         )
 
 
@@ -180,6 +182,12 @@ class RiskConfig(BaseModel):
     ai_risk_profile: str = "balanced"
     custom_stop_loss_pct: float = 1.5
     ai_exit_system_prompt: str = ""
+    # Position sizing mode: percentage, fixed, risk_ratio
+    position_sizing_mode: str = "percentage"
+    # Fixed amount per trade (USDT) - used when mode is 'fixed'
+    fixed_position_size_usdt: float = 100.0
+    # Risk ratio per trade (percentage of account to risk) - used when mode is 'risk_ratio'
+    risk_per_trade_pct: float = 1.0
 
     @field_validator('exit_management_mode')
     @classmethod
@@ -195,6 +203,13 @@ class RiskConfig(BaseModel):
             raise ValueError("ai_risk_profile must be 'conservative', 'balanced', or 'aggressive'")
         return v
 
+    @field_validator('position_sizing_mode')
+    @classmethod
+    def validate_position_sizing_mode(cls, v: str) -> str:
+        if v not in ('percentage', 'fixed', 'risk_ratio'):
+            raise ValueError("position_sizing_mode must be 'percentage', 'fixed', or 'risk_ratio'")
+        return v
+
     @classmethod
     def from_env(cls) -> "RiskConfig":
         return cls(
@@ -206,6 +221,9 @@ class RiskConfig(BaseModel):
             ai_risk_profile=os.getenv("AI_RISK_PROFILE", "balanced"),
             custom_stop_loss_pct=float(os.getenv("CUSTOM_STOP_LOSS_PCT", "1.5")),
             ai_exit_system_prompt=os.getenv("AI_EXIT_SYSTEM_PROMPT", ""),
+            position_sizing_mode=os.getenv("POSITION_SIZING_MODE", "percentage"),
+            fixed_position_size_usdt=float(os.getenv("FIXED_POSITION_SIZE_USDT", "100")),
+            risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
         )
 
 
@@ -313,7 +331,7 @@ class DatabaseConfig(BaseModel):
 
 
 class RedisConfig(BaseModel):
-    """Redis cache configuration."""
+    """Redis cache configuration (currently unused - placeholder for future)."""
     url: str = "redis://localhost:6379/0"
     enabled: bool = False
     ttl: int = 300
@@ -328,12 +346,14 @@ class RedisConfig(BaseModel):
 
 
 class RateLimitConfig(BaseModel):
-    """Rate limiting configuration."""
+    """Rate limiting configuration (implemented in core/middleware.py)."""
     enabled: bool = True
     login_max_attempts: int = 10
     login_window_secs: int = 300
     register_max_attempts: int = 5
     register_window_secs: int = 600
+    webhook_max_attempts: int = 30
+    webhook_window_secs: int = 60
     api_default_limit: str = "60/minute"
 
     @classmethod
@@ -344,6 +364,8 @@ class RateLimitConfig(BaseModel):
             login_window_secs=int(os.getenv("LOGIN_WINDOW_SECS", "300")),
             register_max_attempts=int(os.getenv("REGISTER_MAX_ATTEMPTS", "5")),
             register_window_secs=int(os.getenv("REGISTER_WINDOW_SECS", "600")),
+            webhook_max_attempts=int(os.getenv("WEBHOOK_MAX_ATTEMPTS", "30")),
+            webhook_window_secs=int(os.getenv("WEBHOOK_WINDOW_SECS", "60")),
             api_default_limit=os.getenv("API_DEFAULT_LIMIT", "60/minute"),
         )
 
@@ -351,7 +373,7 @@ class RateLimitConfig(BaseModel):
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
     app_name: str = "QuantPilot AI"
-    app_version: str = "4.1.0"
+    app_version: str = "4.4.0"
     debug: bool = False
     json_logs: bool = False
 
@@ -390,17 +412,17 @@ class Settings(BaseModel):
         """Validate settings for all environments."""
         warnings = []
         errors = []
-        
+
         WEAK_PASSWORDS = {"123456", "password", "admin", "changeme", "change-me", "change_this"}
         WEAK_SECRETS = {
             "change-this-to-a-long-random-secret-at-least-32-characters",
             "your-jwt-secret", "your_jwt_secret", "changeme", "change-me",
             "secret", "jwt-secret", "jwt_secret", "tvss-change-this-secret",
         }
-        
+
         if self.default_admin_password.lower() in WEAK_PASSWORDS:
             warnings.append("DEFAULT_ADMIN_PASSWORD uses a weak default value. Change it before deployment!")
-        
+
         if self.jwt_secret:
             if len(self.jwt_secret) < 32:
                 warnings.append("JWT_SECRET should be at least 32 characters for security")
@@ -409,20 +431,20 @@ class Settings(BaseModel):
                 if weak.replace("-", "").replace("_", "") in normalized_secret:
                     warnings.append("JWT_SECRET appears to use a placeholder value. Change it!")
                     break
-        
+
         if self.server.webhook_secret:
             if len(self.server.webhook_secret) < 16:
                 warnings.append("WEBHOOK_SECRET should be at least 16 characters")
-        
+
         if self.server.public_base_url and "your-domain" in self.server.public_base_url.lower():
             warnings.append("PUBLIC_BASE_URL appears to use a placeholder value")
-        
+
         if self.server.cors_origins == ["*"] and self.is_production:
             warnings.append("CORS_ORIGINS=['*'] is too permissive for production")
-        
+
         if self.server.trusted_hosts == ["*"] and self.is_production:
             warnings.append("TRUSTED_HOSTS=['*'] is too permissive for production")
-        
+
         if self.is_production:
             if not self.jwt_secret:
                 errors.append("JWT_SECRET must be set when LIVE_TRADING=true")
@@ -430,11 +452,11 @@ class Settings(BaseModel):
                 errors.append("Exchange API credentials required for live trading")
             if self.default_admin_password.lower() in WEAK_PASSWORDS:
                 errors.append("DEFAULT_ADMIN_PASSWORD must be changed for live trading")
-        
+
         for warning in warnings:
             import warnings as warn_module
             warn_module.warn(warning, UserWarning)
-        
+
         if errors:
             raise RuntimeError("\n".join(errors))
 

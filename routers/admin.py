@@ -98,12 +98,31 @@ class GrantSubscriptionRequest(BaseModel):
 
 class PaymentAddressRequest(BaseModel):
     network: str = Field(min_length=2, max_length=30)
+
+
+class ExternalAPIKeysRequest(BaseModel):
+    whale_alert_api_key: Optional[str] = Field(default="", max_length=100, description="Whale Alert API Key (free tier: 500/day)")
+    etherscan_api_key: Optional[str] = Field(default="", max_length=100, description="Etherscan API Key (free tier: 5 calls/sec)")
+    glassnode_api_key: Optional[str] = Field(default="", max_length=100, description="Glassnode API Key (paid)")
+    cryptoquant_api_key: Optional[str] = Field(default="", max_length=100, description="CryptoQuant API Key (paid)")
+
+
+class EnhancedFiltersRequest(BaseModel):
+    enhanced_filters_enabled: bool = Field(default=True, description="Enable whale/correlated assets/OI checks")
+    whale_threshold_usd: float = Field(default=1_000_000, ge=100_000, description="Whale transfer threshold in USD")
+    correlated_threshold_pct: float = Field(default=5.0, ge=1.0, le=20.0, description="Correlated asset change threshold %")
+    oi_change_threshold_pct: float = Field(default=15.0, ge=5.0, le=50.0, description="OI change threshold %")
     address: str = Field(min_length=1, max_length=200)
     currency: str = Field(default="USDT", min_length=2, max_length=12)
 
 
 class RegistrationSettingsRequest(BaseModel):
     invite_required: bool = False
+
+
+class TradingControlRequest(BaseModel):
+    mode: str = Field(default="enabled", description="enabled, read_only, paused, emergency_stop")
+    reason: str = Field(default="", max_length=500)
 
 
 def _generate_code(prefix: str) -> str:
@@ -155,11 +174,11 @@ async def list_users(
 ):
     """List all users with subscriptions (optimized batch query)."""
     from sqlalchemy.orm import selectinload
-    
+
     users = await get_all_users(db)
-    
+
     user_ids = [u.id for u in users]
-    
+
     sub_results = await db.execute(
         select(SubscriptionModel, SubscriptionPlanModel)
         .join(SubscriptionPlanModel, SubscriptionModel.plan_id == SubscriptionPlanModel.id, isouter=True)
@@ -169,7 +188,7 @@ async def list_users(
             SubscriptionModel.end_date >= utcnow(),
         )
     )
-    
+
     subscriptions_by_user = {}
     for sub, plan in sub_results.all():
         if sub.user_id not in subscriptions_by_user:
@@ -195,6 +214,7 @@ async def list_users(
             "live_trading_allowed": u.live_trading_allowed,
             "max_leverage": u.max_leverage,
             "max_position_pct": u.max_position_pct,
+            "totp_enabled": bool(getattr(u, "totp_enabled", False)),
             "subscription": subscriptions_by_user.get(u.id),
         })
     return output
@@ -323,10 +343,12 @@ async def delete_user(
     db: AsyncSession = Depends(get_db),
     request: Request = None,
 ):
-    """Delete a user."""
+    """Soft delete a user (preserves historical data)."""
     user = await get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(404, "User not found")
+    if user.deleted_at is not None:
+        raise HTTPException(400, "User already deleted")
     if user.id == admin.get("sub"):
         raise HTTPException(400, "Use another admin account to delete your own user")
 
@@ -335,22 +357,50 @@ async def delete_user(
         if await _admin_count(db) <= 1:
             raise HTTPException(400, "Cannot delete the last admin account")
 
+    # Soft delete: set deleted_at and deactivate
+    user.deleted_at = utcnow()
+    user.is_active = False
+    user.token_version = (user.token_version or 0) + 1
+
+    # Invalidate active subscriptions
     await db.execute(
-        update(RedeemCodeModel)
-        .where(RedeemCodeModel.redeemed_by == user_id)
-        .values(redeemed_by=None)
+        update(SubscriptionModel)
+        .where(SubscriptionModel.user_id == user_id, SubscriptionModel.status == "active")
+        .values(status="cancelled")
     )
-    await db.execute(delete(PaymentModel).where(PaymentModel.user_id == user_id))
-    await db.execute(delete(SubscriptionModel).where(SubscriptionModel.user_id == user_id))
-    await db.execute(delete(TradeModel).where(TradeModel.user_id == user_id))
-    await db.execute(delete(PositionModel).where(PositionModel.user_id == user_id))
-    await db.execute(delete(UserModel).where(UserModel.id == user_id))
+
     await db.commit()
 
     # Audit log
-    await _add_audit_log(db, admin, "delete_user", "user", user_id, f"Deleted user {user.username}", request)
+    await _add_audit_log(db, admin, "delete_user", "user", user_id, f"Soft deleted user {user.username}", request)
 
-    return {"status": "ok"}
+    return {"status": "ok", "message": "User soft deleted. Historical data preserved."}
+
+
+@router.post("/user/{user_id}/restore")
+async def restore_user(
+    user_id: str,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Restore a soft-deleted user."""
+    from core.database import soft_delete_user, restore_user as db_restore_user
+
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.deleted_at is None:
+        raise HTTPException(400, "User is not deleted")
+
+    success = await db_restore_user(db, user_id)
+    if not success:
+        raise HTTPException(500, "Failed to restore user")
+
+    await db.commit()
+    await _add_audit_log(db, admin, "restore_user", "user", user_id, f"Restored user {user.username}", request)
+
+    return {"status": "ok", "message": f"User {user.username} restored"}
 
 
 @router.post("/user/{user_id}/toggle")
@@ -434,7 +484,7 @@ async def reset_user_password(
     request: Request = None,
 ):
     """Reset a user's password to a random value.
-    
+
     The new password is NOT returned in the response for security reasons.
     It should be communicated to the user via a secure channel (email, etc).
     """
@@ -978,6 +1028,145 @@ async def get_system_status(
     }
 
 
+@router.get("/trading-controls")
+async def get_trading_controls(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get global trading controls and kill-switch state."""
+    from core.trading_control import get_trading_control_state
+
+    return await get_trading_control_state(db)
+
+
+@router.post("/trading-controls")
+async def update_trading_controls(
+    req: TradingControlRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Update global trading mode."""
+    from core.trading_control import set_trading_control_state
+
+    state = await set_trading_control_state(
+        db,
+        mode=req.mode,
+        reason=req.reason,
+        updated_by=admin.get("username") or admin.get("sub") or "",
+    )
+    await _add_audit_log(
+        db,
+        admin,
+        "update_trading_controls",
+        "settings",
+        "trading_controls",
+        f"Set trading mode to {state['mode']}",
+        request,
+    )
+    await db.commit()
+    return state
+
+
+@router.post("/trading-controls/emergency-stop")
+async def emergency_stop_trading(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Immediately block all new trade execution."""
+    from core.trading_control import set_trading_control_state
+
+    state = await set_trading_control_state(
+        db,
+        mode="emergency_stop",
+        reason="Emergency stop activated from admin console",
+        updated_by=admin.get("username") or admin.get("sub") or "",
+    )
+    await _add_audit_log(db, admin, "emergency_stop", "settings", "trading_controls", "Activated emergency stop", request)
+    await db.commit()
+    return state
+
+
+@router.post("/trading-controls/resume")
+async def resume_trading(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Resume new trade execution."""
+    from core.trading_control import set_trading_control_state
+
+    state = await set_trading_control_state(
+        db,
+        mode="enabled",
+        reason="Trading resumed from admin console",
+        updated_by=admin.get("username") or admin.get("sub") or "",
+    )
+    await _add_audit_log(db, admin, "resume_trading", "settings", "trading_controls", "Resumed trading", request)
+    await db.commit()
+    return state
+
+
+@router.get("/order-events")
+async def get_order_events(
+    status: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=500),
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List recent order events for reconciliation/audit."""
+    from services.order_reconciler import list_order_events
+
+    events = await list_order_events(db, status=status, limit=limit)
+    return {
+        "events": [
+            {
+                "id": event.id,
+                "user_id": event.user_id,
+                "position_id": event.position_id,
+                "trade_id": event.trade_id,
+                "ticker": event.ticker,
+                "direction": event.direction,
+                "status": event.status,
+                "retry_state": event.retry_state,
+                "attempt_count": event.attempt_count,
+                "last_error": event.last_error,
+                "client_order_id": event.client_order_id,
+                "exchange_order_id": event.exchange_order_id,
+                "next_retry_at": event.next_retry_at.isoformat() if event.next_retry_at else None,
+                "created_at": event.created_at.isoformat() if event.created_at else None,
+                "updated_at": event.updated_at.isoformat() if event.updated_at else None,
+            }
+            for event in events
+        ],
+        "count": len(events),
+    }
+
+
+@router.post("/order-events/reconcile")
+async def reconcile_order_events(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Promote stale retryable order events into manual review."""
+    from services.order_reconciler import run_order_reconciliation
+
+    result = await run_order_reconciliation(db)
+    await _add_audit_log(
+        db,
+        admin,
+        "reconcile_order_events",
+        "order_event",
+        "",
+        f"Checked {result.get('checked', 0)} order events",
+        request,
+    )
+    await db.commit()
+    return result
+
+
 @router.get("/backups")
 async def get_backups(
     admin: dict = Depends(require_admin),
@@ -1039,6 +1228,24 @@ async def stage_backup_restore(
         raise HTTPException(404, result.get("reason", "Backup not found"))
     await _add_audit_log(db, admin, "stage_restore", "backup", backup_name, "Staged backup restore", request)
     return {"status": "staged", "message": result.get("instructions", ""), **result}
+
+
+@router.post("/backups/{filename}/restore-pg")
+async def restore_postgresql_backup(
+    filename: str,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Restore a PostgreSQL backup using pg_restore. Only works with PostgreSQL databases."""
+    from backups import restore_postgresql
+
+    backup_name = Path(filename).stem
+    result = await restore_postgresql(backup_name)
+    if result.get("status") == "error":
+        raise HTTPException(400, result.get("reason", "Restore failed"))
+    await _add_audit_log(db, admin, "restore_postgresql", "backup", backup_name, "Restored PostgreSQL backup", request)
+    return result
 
 
 @router.get("/position-monitor")
@@ -1108,3 +1315,316 @@ async def _add_audit_log(
         client_ip=admin_client_ip,
     )
     db.add(log)
+
+
+# ─────────────────────────────────────────────
+# Pre-Filter Thresholds & Statistics
+# ─────────────────────────────────────────────
+
+class FilterThresholdsRequest(BaseModel):
+    atr_pct_max: Optional[float] = None
+    spread_pct_max: Optional[float] = None
+    volume_24h_min: Optional[float] = None
+    price_change_1h_max: Optional[float] = None
+    rsi_long_max: Optional[float] = None
+    rsi_short_min: Optional[float] = None
+    funding_rate_threshold: Optional[float] = None
+    orderbook_long_min: Optional[float] = None
+    orderbook_short_max: Optional[float] = None
+    signal_saturation_max: Optional[int] = None
+    ema_diff_pct_min: Optional[float] = None
+    consecutive_loss_max: Optional[int] = None
+    cooldown_seconds: Optional[int] = None
+    price_deviation_pct_max: Optional[float] = None
+    oi_change_pct_max: Optional[float] = None
+    correlated_asset_change_max: Optional[float] = None
+    min_pass_score: Optional[float] = None
+
+
+@router.get("/filter-thresholds")
+async def get_filter_thresholds(
+    admin: dict = Depends(require_admin),
+):
+    """Get current pre-filter thresholds."""
+    from pre_filter import get_thresholds
+    thresholds = get_thresholds()
+    return {
+        "thresholds": thresholds.to_dict(),
+        "weights": thresholds.DEFAULT_THRESHOLDS,
+        "dynamic": thresholds.DYNAMIC_THRESHOLDS,
+    }
+
+
+@router.post("/filter-thresholds")
+async def update_filter_thresholds(
+    req: FilterThresholdsRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Update pre-filter thresholds."""
+    from pre_filter import get_thresholds
+    thresholds = get_thresholds()
+
+    updates = {}
+    for key, value in req.model_dump(exclude_none=True).items():
+        thresholds.set_custom(key, value)
+        updates[key] = value
+
+    await set_admin_setting(db, "prefilter_thresholds", json.dumps(updates))
+    await db.commit()
+
+    await _add_audit_log(db, admin, "update_filter_thresholds", "settings", "", f"Updated {len(updates)} thresholds", request)
+
+    return {"status": "success", "updated": updates}
+
+
+@router.get("/filter-stats")
+async def get_filter_statistics(
+    admin: dict = Depends(require_admin),
+):
+    """Get pre-filter blocking statistics."""
+    from pre_filter import get_filter_stats
+    stats = get_filter_stats()
+
+    summary = {}
+    for check_name, ticker_counts in stats.items():
+        total = sum(ticker_counts.values())
+        summary[check_name] = {
+            "total_blocks": total,
+            "top_tickers": sorted(ticker_counts.items(), key=lambda x: x[1], reverse=True)[:5],
+        }
+
+    return {"statistics": stats, "summary": summary}
+
+
+@router.post("/filter-stats/reset")
+async def reset_filter_statistics(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Reset pre-filter blocking statistics."""
+    from pre_filter import reset_filter_stats
+    reset_filter_stats()
+
+    await _add_audit_log(db, admin, "reset_filter_stats", "settings", "", "Reset filter statistics", request)
+
+    return {"status": "success", "message": "Filter statistics reset"}
+
+
+# ─────────────────────────────────────────────
+# External API Keys Management
+# ─────────────────────────────────────────────
+
+EXTERNAL_API_KEYS_SETTING = "external_api_keys"
+ENHANCED_FILTERS_SETTING = "enhanced_filters"
+
+
+@router.get("/external-api-keys")
+async def get_external_api_keys(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get external API key configurations (masked for security)."""
+    from core.database import get_admin_setting
+
+    raw = await get_admin_setting(db, EXTERNAL_API_KEYS_SETTING, "")
+
+    keys = {}
+    if raw:
+        try:
+            from core.security import decrypt_settings_payload
+            data = json.loads(raw)
+            decrypted = decrypt_settings_payload(data)
+            if isinstance(decrypted, dict):
+                keys = decrypted
+        except Exception as e:
+            logger.debug(f"[Admin] Failed to decrypt external API keys: {e}")
+
+    def mask_key(key: str) -> str:
+        if not key or len(key) < 8:
+            return ""
+        return key[:4] + "..." + key[-4:]
+
+    return {
+        "whale_alert_api_key": mask_key(keys.get("whale_alert_api_key", "")),
+        "whale_alert_configured": bool(keys.get("whale_alert_api_key")),
+        "etherscan_api_key": mask_key(keys.get("etherscan_api_key", "")),
+        "etherscan_configured": bool(keys.get("etherscan_api_key")),
+        "glassnode_api_key": mask_key(keys.get("glassnode_api_key", "")),
+        "glassnode_configured": bool(keys.get("glassnode_api_key")),
+        "cryptoquant_api_key": mask_key(keys.get("cryptoquant_api_key", "")),
+        "cryptoquant_configured": bool(keys.get("cryptoquant_api_key")),
+        "description": {
+            "whale_alert": "Free tier: 500 requests/day. Tracks large crypto transfers.",
+            "etherscan": "Free tier: 5 calls/sec. Tracks ETH/USDT on-chain transactions.",
+            "glassnode": "Paid. Comprehensive on-chain analytics (exchange flows, holder metrics).",
+            "cryptoquant": "Paid. Exchange reserve tracking and market indicators.",
+        },
+    }
+
+
+@router.post("/external-api-keys")
+async def update_external_api_keys(
+    req: ExternalAPIKeysRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Update external API key configurations."""
+    from core.database import get_admin_setting, set_admin_setting
+
+    # Decrypt existing keys
+    raw = await get_admin_setting(db, EXTERNAL_API_KEYS_SETTING, "")
+
+    existing = {}
+    if raw:
+        try:
+            from core.security import decrypt_settings_payload
+            data = json.loads(raw)
+            decrypted = decrypt_settings_payload(data)
+            if isinstance(decrypted, dict):
+                existing = decrypted
+        except Exception as e:
+            logger.debug(f"[Admin] Failed to decrypt existing external API keys: {e}")
+
+    # Update with new values (only non-empty)
+    updated = {}
+    for key_name in ["whale_alert_api_key", "etherscan_api_key", "glassnode_api_key", "cryptoquant_api_key"]:
+        new_value = getattr(req, key_name, None)
+        if new_value and new_value.strip():
+            updated[key_name] = new_value.strip()
+        elif existing.get(key_name):
+            updated[key_name] = existing[key_name]
+
+    # Encrypt and save
+    from core.security import encrypt_settings_payload
+    encrypted = encrypt_settings_payload(updated)
+    await set_admin_setting(db, EXTERNAL_API_KEYS_SETTING, json.dumps(encrypted))
+    await db.commit()
+
+    # Update in-memory secure storage (NOT environment variables)
+    from core.security import set_secure_api_key
+    for key_name, key_value in updated.items():
+        set_secure_api_key(key_name, key_value)
+
+    await _add_audit_log(db, admin, "update_external_api_keys", "settings", "", f"Updated {len(updated)} API keys", request)
+
+    return {"status": "success", "message": "External API keys updated", "configured_keys": list(updated.keys())}
+
+
+@router.delete("/external-api-keys/{key_name}")
+async def delete_external_api_key(
+    key_name: str,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Delete a specific external API key."""
+    from core.database import get_admin_setting, set_admin_setting
+    from core.security import decrypt_settings_payload, encrypt_settings_payload, clear_secure_api_key
+
+    valid_keys = {"whale_alert_api_key", "etherscan_api_key", "glassnode_api_key", "cryptoquant_api_key"}
+    if key_name not in valid_keys:
+        raise HTTPException(400, f"Invalid key name: {key_name}")
+
+    raw = await get_admin_setting(db, EXTERNAL_API_KEYS_SETTING, "")
+
+    existing = {}
+    if raw:
+        try:
+            data = json.loads(raw)
+            decrypted = decrypt_settings_payload(data)
+            if isinstance(decrypted, dict):
+                existing = decrypted
+        except Exception as e:
+            logger.debug(f"[Admin] Failed to decrypt keys for deletion: {e}")
+
+    if key_name in existing:
+        del existing[key_name]
+
+    encrypted = encrypt_settings_payload(existing)
+    await set_admin_setting(db, EXTERNAL_API_KEYS_SETTING, json.dumps(encrypted))
+    await db.commit()
+
+    # Clear from in-memory secure storage
+    clear_secure_api_key(key_name)
+
+    await _add_audit_log(db, admin, "delete_external_api_key", "settings", key_name, f"Deleted {key_name}", request)
+
+    return {"status": "success", "message": f"{key_name} deleted"}
+
+
+# ─────────────────────────────────────────────
+# Enhanced Filters Settings
+# ─────────────────────────────────────────────
+
+@router.get("/enhanced-filters")
+async def get_enhanced_filters_settings(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get enhanced filter settings (whale, correlated assets, OI)."""
+    from core.database import get_admin_setting
+
+    raw = await get_admin_setting(db, ENHANCED_FILTERS_SETTING, "")
+
+    settings_data = {
+        "enhanced_filters_enabled": True,
+        "whale_threshold_usd": 1_000_000,
+        "correlated_threshold_pct": 5.0,
+        "oi_change_threshold_pct": 15.0,
+    }
+
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                settings_data.update(loaded)
+        except Exception as e:
+            logger.debug(f"[Admin] Failed to parse enhanced filters settings: {e}")
+
+    return {
+        **settings_data,
+        "description": {
+            "enhanced_filters_enabled": "Enable whale activity, correlated assets, and OI change checks",
+            "whale_threshold_usd": "Minimum USD value to consider as whale transfer (default $1M)",
+            "correlated_threshold_pct": "BTC/ETH change % threshold for correlated check (default 5%)",
+            "oi_change_threshold_pct": "Open Interest change % threshold (default 15%)",
+        },
+    }
+
+
+@router.post("/enhanced-filters")
+async def update_enhanced_filters_settings(
+    req: EnhancedFiltersRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Update enhanced filter settings."""
+    from core.database import set_admin_setting
+
+    settings_data = {
+        "enhanced_filters_enabled": req.enhanced_filters_enabled,
+        "whale_threshold_usd": req.whale_threshold_usd,
+        "correlated_threshold_pct": req.correlated_threshold_pct,
+        "oi_change_threshold_pct": req.oi_change_threshold_pct,
+    }
+
+    await set_admin_setting(db, ENHANCED_FILTERS_SETTING, json.dumps(settings_data))
+    await db.commit()
+
+    # Update runtime settings
+    os.environ["ENHANCED_FILTERS_ENABLED"] = str(req.enhanced_filters_enabled).lower()
+
+    # Update pre_filter thresholds
+    from pre_filter import get_thresholds
+    thresholds = get_thresholds()
+    thresholds.set_custom("oi_change_pct_max", req.oi_change_threshold_pct)
+    thresholds.set_custom("correlated_asset_change_max", req.correlated_threshold_pct)
+
+    await _add_audit_log(db, admin, "update_enhanced_filters", "settings", "", "Updated enhanced filter settings", request)
+
+    return {"status": "success", "message": "Enhanced filters updated", "settings": settings_data}

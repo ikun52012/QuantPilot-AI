@@ -9,6 +9,7 @@ import secrets
 import re
 import hmac
 import json
+import threading
 from typing import Any, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -32,6 +33,10 @@ SENSITIVE_KEYS = {
     "anthropic_api_key",
     "deepseek_api_key",
     "custom_provider_api_key",
+    "whale_alert_api_key",
+    "etherscan_api_key",
+    "glassnode_api_key",
+    "cryptoquant_api_key",
 }
 
 # Password hashing settings
@@ -43,6 +48,58 @@ _COMMON_PASSWORDS = {
     "123456", "12345678", "123456789", "password", "qwerty123",
     "admin123", "admin123456", "letmein123", "tradingview",
 }
+
+
+# ─────────────────────────────────────────────
+# In-Memory Secure API Key Storage
+# ─────────────────────────────────────────────
+
+_secure_keys_lock = threading.Lock()
+_secure_keys: dict[str, str] = {}
+
+
+def set_secure_api_key(key_name: str, key_value: str) -> None:
+    """
+    Store an API key in secure in-memory storage.
+
+    Keys are NOT written to environment variables to prevent
+    exposure through process listings or subprocess spawning.
+    """
+    with _secure_keys_lock:
+        _secure_keys[key_name] = key_value
+
+
+def get_secure_api_key(key_name: str) -> Optional[str]:
+    """
+    Retrieve an API key from secure in-memory storage.
+
+    Falls back to environment variable if not in memory,
+    but logs a warning about the security risk.
+    """
+    with _secure_keys_lock:
+        if key_name in _secure_keys:
+            return _secure_keys[key_name]
+
+    # Fallback to env for backwards compatibility
+    env_value = os.getenv(key_name.upper(), "")
+    if env_value:
+        logger.warning(
+            f"[Security] API key '{key_name}' read from environment variable. "
+            "Consider using secure storage via admin panel."
+        )
+    return env_value
+
+
+def clear_secure_api_key(key_name: str) -> None:
+    """Remove an API key from secure storage."""
+    with _secure_keys_lock:
+        _secure_keys.pop(key_name, None)
+
+
+def has_secure_api_key(key_name: str) -> bool:
+    """Check if an API key exists in secure storage."""
+    with _secure_keys_lock:
+        return key_name in _secure_keys or os.getenv(key_name.upper(), "")
 
 
 # ─────────────────────────────────────────────
@@ -67,7 +124,7 @@ def _load_or_create_key() -> bytes:
         return _derive_fernet_key(env_key)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    
+
     if KEY_FILE.exists():
         try:
             return KEY_FILE.read_text(encoding="utf-8").strip().encode()
@@ -76,18 +133,18 @@ def _load_or_create_key() -> bytes:
             raise RuntimeError(f"Cannot read encryption key file: {KEY_FILE}. Ensure proper permissions (chmod 600).")
 
     key = Fernet.generate_key()
-    
+
     try:
         KEY_FILE.write_text(key.decode(), encoding="utf-8")
     except PermissionError:
         logger.error(f"[Security] Permission denied writing to {KEY_FILE}. Check directory permissions.")
         raise RuntimeError(f"Cannot write encryption key file: {KEY_FILE}. Ensure directory is writable.")
-    
+
     try:
         KEY_FILE.chmod(0o600)
     except (OSError, PermissionError):
         pass
-    
+
     logger.warning("[Security] Generated persistent APP_ENCRYPTION_KEY in data/app_encryption.key")
     return key
 
