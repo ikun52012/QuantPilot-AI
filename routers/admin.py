@@ -100,6 +100,8 @@ class GrantSubscriptionRequest(BaseModel):
 
 class PaymentAddressRequest(BaseModel):
     network: str = Field(min_length=2, max_length=30)
+    address: str = Field(min_length=1, max_length=200)
+    currency: str = Field(default="USDT", min_length=2, max_length=12)
 
 
 class ExternalAPIKeysRequest(BaseModel):
@@ -114,8 +116,6 @@ class EnhancedFiltersRequest(BaseModel):
     whale_threshold_usd: float = Field(default=1_000_000, ge=100_000, description="Whale transfer threshold in USD")
     correlated_threshold_pct: float = Field(default=5.0, ge=1.0, le=20.0, description="Correlated asset change threshold %")
     oi_change_threshold_pct: float = Field(default=15.0, ge=5.0, le=50.0, description="OI change threshold %")
-    address: str = Field(min_length=1, max_length=200)
-    currency: str = Field(default="USDT", min_length=2, max_length=12)
 
 
 class RegistrationSettingsRequest(BaseModel):

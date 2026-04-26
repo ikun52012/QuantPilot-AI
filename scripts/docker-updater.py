@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -84,13 +85,18 @@ def queued_requests() -> list[Path]:
     return sorted(REQUEST_DIR.glob("upd_*.json"), key=lambda item: item.stat().st_mtime)
 
 
+def _safe_task_id(value: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", str(value))
+    return safe[:64] or "unknown"
+
+
 def process_request(path: Path) -> None:
     request = read_json(path)
     if not request:
         path.unlink(missing_ok=True)
         return
 
-    task_id = str(request.get("task_id") or path.stem)
+    task_id = _safe_task_id(str(request.get("task_id") or path.stem))
     status_path = STATUS_DIR / f"{task_id}.json"
     payload = read_json(status_path) or request
     payload["task_id"] = task_id
