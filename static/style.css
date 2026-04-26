@@ -804,6 +804,8 @@ h1, h2, h3, h4, h5, h6 {
     margin-left: var(--sidebar-width);
     flex: 1;
     min-height: 100vh;
+    min-width: 0;
+    overflow-x: hidden;
 }
 
 .header {
@@ -874,9 +876,16 @@ h1, h2, h3, h4, h5, h6 {
     display: none;
     padding: 24px 32px;
     animation: fadeIn 0.3s ease;
+    min-width: 0;
 }
 
 .page.active { display: block; }
+
+@media (max-width: 768px) {
+    .page {
+        padding: 16px;
+    }
+}
 
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(8px); }
@@ -1628,12 +1637,60 @@ textarea:focus-visible {
     backdrop-filter: blur(2px);
 }
 
+/* ── Admin Panel Responsive Fixes ── */
+@media (max-width: 1400px) {
+    .ops-console {
+        grid-template-columns: 1fr;
+    }
+    .control-grid {
+        grid-template-columns: 1fr;
+    }
+    .control-actions {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 1200px) {
+    .admin-users-table .text-input,
+    .admin-users-table .select-input {
+        min-width: 100px;
+        padding: 6px 8px;
+        font-size: 11px;
+    }
+    .admin-stack {
+        min-width: 140px;
+    }
+    .admin-actions {
+        min-width: 100px;
+    }
+    .admin-actions .btn {
+        padding: 4px 8px;
+        font-size: 11px;
+    }
+}
+
 /* ── Responsive ── */
 @media (max-width: 1024px) {
     .kpi-grid { grid-template-columns: repeat(2, 1fr); }
     .charts-row.two-col { grid-template-columns: 1fr; }
     .metrics-table { grid-template-columns: repeat(2, 1fr); }
     .form-row.three-col { grid-template-columns: 1fr; }
+    .admin-users-table {
+        font-size: 11px;
+    }
+    .admin-users-table th,
+    .admin-users-table td {
+        padding: 8px 10px;
+    }
+    /* Backtest and strategy forms */
+    .backtest-config .form-row,
+    .strategy-config .form-row {
+        flex-direction: column;
+    }
+    .backtest-config .form-row .form-group,
+    .strategy-config .form-row .form-group {
+        width: 100%;
+    }
 }
 
 @media (max-width: 768px) {
@@ -1666,17 +1723,102 @@ textarea:focus-visible {
     .option-card-grid { grid-template-columns: 1fr; }
     .admin-inline { grid-template-columns: 1fr; }
     .admin-address-row { padding: 12px; }
+    /* Admin page specific */
+    .ops-console {
+        grid-template-columns: 1fr;
+    }
+    .control-actions {
+        grid-template-columns: 1fr 1fr;
+    }
+    .admin-users-table thead {
+        display: none;
+    }
+    .admin-users-table tbody tr {
+        display: block;
+        margin-bottom: 12px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 12px;
+    }
+    .admin-users-table tbody td {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 0;
+        border: none;
+        border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .admin-users-table tbody td:last-child {
+        border-bottom: none;
+    }
+    .admin-users-table tbody td::before {
+        content: attr(data-label);
+        font-weight: 600;
+        color: var(--text-secondary);
+        font-size: 11px;
+        text-transform: uppercase;
+    }
 }
 
 /* True single-column layout for very small screens */
 @media (max-width: 480px) {
     .kpi-grid { grid-template-columns: 1fr; }
     .balance-grid { grid-template-columns: 1fr; }
+    .control-actions {
+        grid-template-columns: 1fr;
+    }
+    .admin-users-table tbody td {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+    }
+    /* Modal adjustments */
+    #payment-modal > div {
+        padding: 20px;
+        max-height: 90vh;
+        border-radius: 12px;
+    }
+    /* Page intro text wrapping */
+    .page-intro h2 {
+        font-size: 20px;
+    }
+    .page-intro p {
+        font-size: 12px;
+    }
+    /* Chart container height reduction */
+    .command-chart .chart-container {
+        height: 240px;
+    }
+    .chart-container {
+        height: 220px;
+    }
 }
 
 /* ═══════════════════════════════════
    v4.0 — Auth, Subscriptions, Admin
    ═══════════════════════════════════ */
+
+/* ── Language Selector ── */
+.language-selector {
+    display: flex;
+    align-items: center;
+}
+.language-selector .select-input {
+    background: rgba(8, 13, 21, 0.82);
+    border-color: rgba(148, 163, 184, 0.16);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+}
+.language-selector .select-input:focus {
+    border-color: var(--accent-blue);
+}
+
+@media (max-width: 768px) {
+    .language-selector {
+        display: none;
+    }
+}
 
 /* ── User Info (Header) ── */
 .user-info {

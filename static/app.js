@@ -18,6 +18,114 @@ let winlossChart = null;
 let userEquityChart = null;
 let currentUserSettings = null;
 
+// ─── i18n / Multi-language Support ───
+let _i18nCache = {};
+let _currentLang = localStorage.getItem('qp_lang') || navigator.language.split('-')[0] || 'en';
+const _supportedLangs = ['en', 'zh', 'ja', 'ko', 'es'];
+
+async function loadTranslations(lang) {
+    if (!_supportedLangs.includes(lang)) lang = 'en';
+    if (_i18nCache[lang]) return _i18nCache[lang];
+    try {
+        const r = await fetch(`/api/i18n/translations/${lang}`, { credentials: 'include' });
+        if (!r.ok) throw new Error('Failed to load translations');
+        const data = await r.json();
+        _i18nCache[lang] = data.translations || {};
+        return _i18nCache[lang];
+    } catch (e) {
+        console.warn('[i18n] Translation load failed:', e);
+        return {};
+    }
+}
+
+function t(key, fallback) {
+    const parts = key.split('.');
+    let current = _i18nCache[_currentLang];
+    if (!current) return fallback || key;
+    for (const part of parts) {
+        if (current && typeof current === 'object' && part in current) {
+            current = current[part];
+        } else {
+            return fallback || key;
+        }
+    }
+    return typeof current === 'string' ? current : (fallback || key);
+}
+
+function applyTranslations() {
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.getAttribute('data-i18n');
+        const fallback = el.getAttribute('data-i18n-fallback') || el.textContent;
+        const translation = t(key, fallback);
+        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+            if (el.getAttribute('data-i18n-attr') === 'placeholder') {
+                el.placeholder = translation;
+            } else {
+                el.value = translation;
+            }
+        } else {
+            el.textContent = translation;
+        }
+    });
+}
+
+async function changeLanguage(lang) {
+    if (!_supportedLangs.includes(lang)) return;
+    _currentLang = lang;
+    localStorage.setItem('qp_lang', lang);
+    await loadTranslations(lang);
+    applyTranslations();
+    // Update nav item texts
+    updateNavTexts();
+    // Update page title if on a recognized page
+    const activePage = document.querySelector('.page.active');
+    if (activePage) {
+        const pageId = activePage.id.replace('page-', '');
+        const navItem = document.querySelector(`.nav-item[data-page="${pageId}"]`);
+        if (navItem) {
+            const titleEl = document.getElementById('page-title');
+            if (titleEl) titleEl.textContent = navItem.querySelector('span')?.textContent || pageId;
+        }
+    }
+    showToast(t('messages.updated', 'Language updated'), 'success');
+}
+
+function updateNavTexts() {
+    const navMap = {
+        'nav-dashboard': 'nav.dashboard',
+        'nav-user': 'nav.my_trading',
+        'nav-positions': 'nav.positions',
+        'nav-history': 'nav.history',
+        'nav-analytics': 'nav.analytics',
+        'nav-backtest': 'nav.backtest',
+        'nav-strategies': 'nav.strategies',
+        'nav-subscription': 'nav.subscription',
+        'nav-settings': 'nav.settings',
+        'nav-admin': 'nav.admin',
+    };
+    Object.entries(navMap).forEach(([id, key]) => {
+        const el = document.getElementById(id);
+        if (el) {
+            const span = el.querySelector('span');
+            if (span) {
+                const fallback = span.getAttribute('data-i18n-fallback') || span.textContent;
+                span.textContent = t(key, fallback);
+            }
+        }
+    });
+}
+
+async function initI18n() {
+    const langSelect = document.getElementById('lang-select');
+    if (langSelect) {
+        langSelect.value = _currentLang;
+        document.getElementById('language-selector').style.display = '';
+    }
+    await loadTranslations(_currentLang);
+    applyTranslations();
+    updateNavTexts();
+}
+
 // ─── Auth Helper ───
 // Token lives in httpOnly cookie managed by the server.
 // We keep a lightweight in-memory user profile fetched via /api/auth/me.
@@ -68,6 +176,7 @@ async function logout() {
 // ─── Initialization ───
 document.addEventListener('DOMContentLoaded', async () => {
     if (!await requireAuth()) return;
+    await initI18n();
     setupNavigation();
     setupExchangeToggle();
     detectWebhookUrl();
@@ -1181,15 +1290,15 @@ function renderAdminUsers(users, plans) {
         const active = Boolean(u.is_active);
         const sub = u.subscription ? `<strong>${escapeHtml(u.subscription.plan_name || u.subscription.plan_id)}</strong><br><span class="hint">Until ${escapeHtml(formatDateTime(u.subscription.end_date))}</span>` : '<span style="color:var(--text-muted)">None</span>';
         return `<tr>
-            <td><div class="admin-stack"><input id="admin-username-${id}" class="text-input table-input" value="${escapeHtml(u.username)}" autocomplete="off"><input id="admin-email-${id}" class="text-input table-input" value="${escapeHtml(u.email)}" autocomplete="off">${u.totp_enabled ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#22c55e;margin-top:2px"><i class="ri-shield-check-line"></i>2FA</span>' : ''}</div></td>
-            <td><select id="admin-role-${id}" class="select-input table-input"><option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
-            <td><select id="admin-active-${id}" class="select-input table-input"><option value="true" ${active ? 'selected' : ''}>Active</option><option value="false" ${!active ? 'selected' : ''}>Disabled</option></select></td>
-            <td><input id="admin-balance-${id}" type="number" class="text-input table-input" value="${Number(u.balance_usdt || 0).toFixed(2)}" min="0" step="0.01"></td>
-            <td><div class="admin-stack"><select id="admin-live-${id}" class="select-input table-input"><option value="false" ${!u.live_trading_allowed ? 'selected' : ''}>Paper only</option><option value="true" ${u.live_trading_allowed ? 'selected' : ''}>Live allowed</option></select><div class="admin-inline"><input id="admin-max-lev-${id}" type="number" class="text-input table-input" min="1" max="125" value="${escapeHtml(u.max_leverage || 20)}"><input id="admin-max-pos-${id}" type="number" class="text-input table-input" min="0.1" max="100" step="0.1" value="${escapeHtml(u.max_position_pct || 10)}"></div></div></td>
-            <td><div class="admin-stack"><input id="admin-password-${id}" type="password" class="text-input table-input" placeholder="New password" autocomplete="new-password"><button class="btn btn-sm btn-primary" onclick="resetAdminPassword('${jsId}')">Reset</button></div></td>
-            <td>${sub}</td>
-            <td><div class="admin-stack"><select id="admin-plan-${id}" class="select-input table-input">${planOptions(plans)}</select><div class="admin-inline"><input id="admin-duration-${id}" type="number" class="text-input table-input" min="0" step="1" placeholder="Plan days"><select id="admin-substatus-${id}" class="select-input table-input"><option value="active">Active</option><option value="pending">Pending</option></select></div><button class="btn btn-sm btn-primary" onclick="grantSubscription('${jsId}')">Grant</button></div></td>
-            <td><div class="admin-actions"><button class="btn btn-sm btn-success" onclick="saveAdminUser('${jsId}')">Save</button>${u.role !== 'admin' ? `<button class="btn btn-sm" onclick="toggleUser('${jsId}')">${active ? 'Disable' : 'Enable'}</button>` : ''}<button class="btn btn-sm btn-danger" onclick="deleteAdminUser('${jsId}')">Delete</button></div></td>
+            <td data-label="Account"><div class="admin-stack"><input id="admin-username-${id}" class="text-input table-input" value="${escapeHtml(u.username)}" autocomplete="off"><input id="admin-email-${id}" class="text-input table-input" value="${escapeHtml(u.email)}" autocomplete="off">${u.totp_enabled ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#22c55e;margin-top:2px"><i class="ri-shield-check-line"></i>2FA</span>' : ''}</div></td>
+            <td data-label="Role"><select id="admin-role-${id}" class="select-input table-input"><option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
+            <td data-label="Status"><select id="admin-active-${id}" class="select-input table-input"><option value="true" ${active ? 'selected' : ''}>Active</option><option value="false" ${!active ? 'selected' : ''}>Disabled</option></select></td>
+            <td data-label="Balance"><input id="admin-balance-${id}" type="number" class="text-input table-input" value="${Number(u.balance_usdt || 0).toFixed(2)}" min="0" step="0.01"></td>
+            <td data-label="Live Controls"><div class="admin-stack"><select id="admin-live-${id}" class="select-input table-input"><option value="false" ${!u.live_trading_allowed ? 'selected' : ''}>Paper only</option><option value="true" ${u.live_trading_allowed ? 'selected' : ''}>Live allowed</option></select><div class="admin-inline"><input id="admin-max-lev-${id}" type="number" class="text-input table-input" min="1" max="125" value="${escapeHtml(u.max_leverage || 20)}"><input id="admin-max-pos-${id}" type="number" class="text-input table-input" min="0.1" max="100" step="0.1" value="${escapeHtml(u.max_position_pct || 10)}"></div></div></td>
+            <td data-label="Password"><div class="admin-stack"><input id="admin-password-${id}" type="password" class="text-input table-input" placeholder="New password" autocomplete="new-password"><button class="btn btn-sm btn-primary" onclick="resetAdminPassword('${jsId}')">Reset</button></div></td>
+            <td data-label="Subscription">${sub}</td>
+            <td data-label="Grant Plan"><div class="admin-stack"><select id="admin-plan-${id}" class="select-input table-input">${planOptions(plans)}</select><div class="admin-inline"><input id="admin-duration-${id}" type="number" class="text-input table-input" min="0" step="1" placeholder="Plan days"><select id="admin-substatus-${id}" class="select-input table-input"><option value="active">Active</option><option value="pending">Pending</option></select></div><button class="btn btn-sm btn-primary" onclick="grantSubscription('${jsId}')">Grant</button></div></td>
+            <td data-label="Actions"><div class="admin-actions"><button class="btn btn-sm btn-success" onclick="saveAdminUser('${jsId}')">Save</button>${u.role !== 'admin' ? `<button class="btn btn-sm" onclick="toggleUser('${jsId}')">${active ? 'Disable' : 'Enable'}</button>` : ''}<button class="btn btn-sm btn-danger" onclick="deleteAdminUser('${jsId}')">Delete</button></div></td>
         </tr>`;
     }).join('')}</tbody></table></div>`;
 }

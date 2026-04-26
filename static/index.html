@@ -29,37 +29,37 @@
         </div>
         <nav class="sidebar-nav" role="navigation" aria-label="Main navigation">
             <a href="/" class="nav-item" id="nav-home">
-                <i class="ri-home-4-line" aria-hidden="true"></i><span>Home</span>
+                <i class="ri-home-4-line" aria-hidden="true"></i><span data-i18n="nav.home" data-i18n-fallback="Home">Home</span>
             </a>
             <a href="#" class="nav-item active" data-page="dashboard" id="nav-dashboard" aria-current="page">
-                <i class="ri-dashboard-3-line" aria-hidden="true"></i><span>Dashboard</span>
+                <i class="ri-dashboard-3-line" aria-hidden="true"></i><span data-i18n="nav.dashboard" data-i18n-fallback="Dashboard">Dashboard</span>
             </a>
             <a href="#" class="nav-item user-only" data-page="user" id="nav-user">
-                <i class="ri-user-heart-line" aria-hidden="true"></i><span>My Trading</span>
+                <i class="ri-user-heart-line" aria-hidden="true"></i><span data-i18n="nav.my_trading" data-i18n-fallback="My Trading">My Trading</span>
             </a>
             <a href="#" class="nav-item" data-page="positions" id="nav-positions">
-                <i class="ri-stock-line" aria-hidden="true"></i><span>Positions</span>
+                <i class="ri-stock-line" aria-hidden="true"></i><span data-i18n="nav.positions" data-i18n-fallback="Positions">Positions</span>
             </a>
             <a href="#" class="nav-item" data-page="history" id="nav-history">
-                <i class="ri-history-line" aria-hidden="true"></i><span>History</span>
+                <i class="ri-history-line" aria-hidden="true"></i><span data-i18n="nav.history" data-i18n-fallback="History">History</span>
             </a>
             <a href="#" class="nav-item" data-page="analytics" id="nav-analytics">
-                <i class="ri-pie-chart-2-line" aria-hidden="true"></i><span>Analytics</span>
+                <i class="ri-pie-chart-2-line" aria-hidden="true"></i><span data-i18n="nav.analytics" data-i18n-fallback="Analytics">Analytics</span>
             </a>
             <a href="#" class="nav-item admin-only" data-page="backtest" id="nav-backtest">
-                <i class="ri-test-tube-line" aria-hidden="true"></i><span>Backtest</span>
+                <i class="ri-test-tube-line" aria-hidden="true"></i><span data-i18n="nav.backtest" data-i18n-fallback="Backtest">Backtest</span>
             </a>
             <a href="#" class="nav-item user-only" data-page="strategies" id="nav-strategies">
-                <i class="ri-node-tree" aria-hidden="true"></i><span>Strategies</span>
+                <i class="ri-node-tree" aria-hidden="true"></i><span data-i18n="nav.strategies" data-i18n-fallback="Strategies">Strategies</span>
             </a>
             <a href="#" class="nav-item" data-page="subscription" id="nav-subscription">
-                <i class="ri-vip-crown-line" aria-hidden="true"></i><span>Subscription</span>
+                <i class="ri-vip-crown-line" aria-hidden="true"></i><span data-i18n="nav.subscription" data-i18n-fallback="Subscription">Subscription</span>
             </a>
             <a href="#" class="nav-item" data-page="settings" id="nav-settings">
-                <i class="ri-settings-3-line" aria-hidden="true"></i><span>Settings</span>
+                <i class="ri-settings-3-line" aria-hidden="true"></i><span data-i18n="nav.settings" data-i18n-fallback="Settings">Settings</span>
             </a>
             <a href="#" class="nav-item admin-only" data-page="admin" id="nav-admin">
-                <i class="ri-admin-line" aria-hidden="true"></i><span>Admin</span>
+                <i class="ri-admin-line" aria-hidden="true"></i><span data-i18n="nav.admin" data-i18n-fallback="Admin">Admin</span>
             </a>
         </nav>
         <div class="sidebar-footer">
@@ -79,6 +79,15 @@
                 <h1 id="page-title">Dashboard</h1>
             </div>
             <div class="header-right">
+                <div class="language-selector" id="language-selector" style="display:none">
+                    <select id="lang-select" class="select-input" onchange="changeLanguage(this.value)" style="width:auto;min-width:100px;padding:6px 28px 6px 10px;font-size:12px">
+                        <option value="en">English</option>
+                        <option value="zh">中文</option>
+                        <option value="ja">日本語</option>
+                        <option value="ko">한국어</option>
+                        <option value="es">Español</option>
+                    </select>
+                </div>
                 <div class="trading-mode" id="trading-mode">
                     <span class="mode-dot paper"></span>
                     <span>Paper Trading</span>
