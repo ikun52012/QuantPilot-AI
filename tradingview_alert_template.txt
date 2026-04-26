@@ -12,7 +12,7 @@ TradingView Alert Webhook Configuration Template
 
 4. Enter the following in Webhook URL:
 
-https://yourdomain or IP:8000/webhook
+https://www.xxx.xxx/webhook
 
 5. Paste the following JSON into Alert Message:
 
