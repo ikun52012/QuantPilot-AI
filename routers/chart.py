@@ -2,7 +2,6 @@
 Chart Router - dashboard chart data endpoints.
 Provides OHLCV, realtime price, indicators, and marker data for the frontend.
 """
-import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Optional
@@ -10,8 +9,11 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from loguru import logger
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user
+from core.database import get_db, PositionModel, WebhookEventModel
 from market_data import fetch_ohlcv_history
 
 
@@ -134,39 +136,37 @@ async def get_chart_indicators(
 @router.get("/positions/{ticker}")
 async def get_position_markers(
     ticker: str,
+    db: AsyncSession = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     """Get position markers for chart display."""
     try:
-        from core.database import db_manager, PositionModel
-        from sqlalchemy import select
-
         user_id = user.get("sub") or user.get("id")
 
-        async with db_manager.async_session_factory() as session:
-            result = await session.execute(
-                select(PositionModel)
-                .where(PositionModel.user_id == user_id)
-                .where(PositionModel.ticker == ticker)
-                .where(PositionModel.status == "open")
-            )
-            positions = result.scalars().all()
+        result = await db.execute(
+            select(PositionModel)
+            .where(PositionModel.user_id == user_id)
+            .where(PositionModel.ticker == ticker)
+            .where(PositionModel.status == "open")
+        )
+        positions = result.scalars().all()
 
-            markers = []
-            for pos in positions:
-                markers.append({
-                    "time": int(pos.opened_at.timestamp()),
-                    "position": "belowBar" if pos.direction == "long" else "aboveBar",
-                    "color": "#26a69a" if pos.direction == "long" else "#ef5350",
-                    "shape": "arrowUp" if pos.direction == "long" else "arrowDown",
-                    "text": f"{pos.direction.upper()} @ {pos.entry_price:.2f}",
-                })
+        markers = []
+        for pos in positions:
+            opened_at_utc = pos.opened_at.replace(tzinfo=timezone.utc) if pos.opened_at.tzinfo is None else pos.opened_at.astimezone(timezone.utc)
+            markers.append({
+                "time": int(opened_at_utc.timestamp()),
+                "position": "belowBar" if pos.direction == "long" else "aboveBar",
+                "color": "#26a69a" if pos.direction == "long" else "#ef5350",
+                "shape": "arrowUp" if pos.direction == "long" else "arrowDown",
+                "text": f"{pos.direction.upper()} @ {pos.entry_price:.2f}",
+            })
 
-            return {
-                "ticker": ticker,
-                "markers": markers,
-                "count": len(markers),
-            }
+        return {
+            "ticker": ticker,
+            "markers": markers,
+            "count": len(markers),
+        }
 
     except Exception as e:
         logger.error(f"[Chart] Failed to get position markers: {e}")
@@ -177,51 +177,50 @@ async def get_position_markers(
 async def get_signal_markers(
     ticker: str,
     days: int = 7,
+    db: AsyncSession = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     """Get historical signal markers for chart."""
     try:
-        from core.database import db_manager, WebhookEventModel
-        from sqlalchemy import select
         from datetime import timedelta
+        from core.utils.datetime import utcnow
 
         user_id = user.get("sub") or user.get("id")
-        since = datetime.now(timezone.utc) - timedelta(days=days)
+        since = utcnow() - timedelta(days=days)
 
-        async with db_manager.async_session_factory() as session:
-            result = await session.execute(
-                select(WebhookEventModel)
-                .where(WebhookEventModel.user_id == user_id)
-                .where(WebhookEventModel.ticker == ticker)
-                .where(WebhookEventModel.status == "executed")
-                .where(WebhookEventModel.created_at >= since)
-                .order_by(WebhookEventModel.created_at.desc())
-                .limit(50)
-            )
-            events = result.scalars().all()
+        result = await db.execute(
+            select(WebhookEventModel)
+            .where(WebhookEventModel.user_id == user_id)
+            .where(WebhookEventModel.ticker == ticker)
+            .where(WebhookEventModel.status == "executed")
+            .where(WebhookEventModel.created_at >= since)
+            .order_by(WebhookEventModel.created_at.desc())
+            .limit(50)
+        )
+        events = result.scalars().all()
 
-            markers = []
-            for event in events:
-                try:
-                    payload = json.loads(event.payload_json or "{}")
-                except (TypeError, json.JSONDecodeError):
-                    payload = {}
-                price = payload.get("price", 0)
+        markers = []
+        for event in events:
+            try:
+                payload = json.loads(event.payload_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            price = payload.get("price", 0)
 
-                markers.append({
-                    "time": int(event.created_at.timestamp()),
-                    "position": "belowBar" if event.direction == "long" else "aboveBar",
-                    "color": "#4caf50" if event.direction == "long" else "#f44336",
-                    "shape": "circle",
-                    "size": 2,
-                    "text": f"{event.direction.upper()}",
-                })
+            markers.append({
+                "time": int(event.created_at.replace(tzinfo=timezone.utc).timestamp()),
+                "position": "belowBar" if event.direction == "long" else "aboveBar",
+                "color": "#4caf50" if event.direction == "long" else "#f44336",
+                "shape": "circle",
+                "size": 2,
+                "text": f"{event.direction.upper()}",
+            })
 
-            return {
-                "ticker": ticker,
-                "markers": markers,
-                "count": len(markers),
-            }
+        return {
+            "ticker": ticker,
+            "markers": markers,
+            "count": len(markers),
+        }
 
     except Exception as e:
         logger.error(f"[Chart] Failed to get signal markers: {e}")

@@ -8,7 +8,6 @@ let equityChart = null;
 let dailyPnlChart = null;
 let winlossChart = null;
 let userEquityChart = null;
-let marketChart = null;
 
 /**
  * Default chart options

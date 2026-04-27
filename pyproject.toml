@@ -1,6 +1,6 @@
 [project]
 name = "signal-server"
-version = "4.5.2"
+version = "4.5.3"
 description = "AI-powered crypto trading signal processor with subscriptions"
 readme = "README.md"
 requires-python = ">=3.10"
