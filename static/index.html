@@ -114,9 +114,9 @@
         <div class="page active command-page" id="page-dashboard">
             <section class="command-hero">
                 <div class="hero-copy">
-                    <span class="eyebrow"><i class="ri-sparkling-2-line"></i> AI Trading Command Center</span>
+                    <span class="eyebrow"><i class="ri-sparkling-2-line"></i> <span data-i18n="pages.dashboard.kicker" data-i18n-fallback="AI Trading Command Center">AI Trading Command Center</span></span>
                     <h2>QuantPilot AI</h2>
-                    <p>Signal intelligence, risk control, automated strategies, and order health in one operating view.</p>
+                    <p data-i18n="pages.dashboard.description" data-i18n-fallback="Signal intelligence, risk control, automated strategies, and order health in one operating view.">Signal intelligence, risk control, automated strategies, and order health in one operating view.</p>
                 </div>
                 <div class="hero-status-grid">
                     <div class="status-chip">
@@ -140,28 +140,28 @@
                         <div class="kpi-card">
                             <div class="kpi-icon green"><i class="ri-funds-line"></i></div>
                             <div class="kpi-content">
-                                <span class="kpi-label">Total P&L</span>
+                                <span class="kpi-label" data-i18n="kpi.total_pnl" data-i18n-fallback="Total P&L">Total P&L</span>
                                 <span class="kpi-value" id="kpi-pnl">--</span>
                             </div>
                         </div>
                         <div class="kpi-card">
                             <div class="kpi-icon blue"><i class="ri-bar-chart-grouped-line"></i></div>
                             <div class="kpi-content">
-                                <span class="kpi-label">Total Trades</span>
+                                <span class="kpi-label" data-i18n="kpi.total_trades" data-i18n-fallback="Total Trades">Total Trades</span>
                                 <span class="kpi-value" id="kpi-trades">--</span>
                             </div>
                         </div>
                         <div class="kpi-card">
                             <div class="kpi-icon purple"><i class="ri-trophy-line"></i></div>
                             <div class="kpi-content">
-                                <span class="kpi-label">Win Rate</span>
+                                <span class="kpi-label" data-i18n="kpi.win_rate" data-i18n-fallback="Win Rate">Win Rate</span>
                                 <span class="kpi-value" id="kpi-winrate">--</span>
                             </div>
                         </div>
                         <div class="kpi-card">
                             <div class="kpi-icon orange"><i class="ri-flashlight-line"></i></div>
                             <div class="kpi-content">
-                                <span class="kpi-label">Sharpe Ratio</span>
+                                <span class="kpi-label" data-i18n="kpi.sharpe_ratio" data-i18n-fallback="Sharpe Ratio">Sharpe Ratio</span>
                                 <span class="kpi-value" id="kpi-sharpe">--</span>
                             </div>
                         </div>
@@ -170,8 +170,8 @@
                     <div class="chart-card command-chart">
                         <div class="card-header">
                             <div>
-                                <span class="section-kicker">Portfolio Intelligence</span>
-                                <h3>Equity Curve</h3>
+                                <span class="section-kicker" data-i18n="pages.dashboard.portfolio_intelligence" data-i18n-fallback="Portfolio Intelligence">Portfolio Intelligence</span>
+                                <h3 data-i18n="pages.dashboard.equity_curve" data-i18n-fallback="Equity Curve">Equity Curve</h3>
                             </div>
                             <div class="card-actions segmented">
                                 <button class="btn btn-sm active" onclick="setChartPeriod(event, 7)">7D</button>
@@ -188,8 +188,8 @@
                         <div class="chart-card">
                             <div class="card-header">
                                 <div>
-                                    <span class="section-kicker">Execution Metrics</span>
-                                    <h3>Performance Matrix</h3>
+                                    <span class="section-kicker" data-i18n="pages.dashboard.execution_metrics" data-i18n-fallback="Execution Metrics">Execution Metrics</span>
+                                    <h3 data-i18n="pages.dashboard.performance_matrix" data-i18n-fallback="Performance Matrix">Performance Matrix</h3>
                                 </div>
                             </div>
                             <div class="metrics-grid" id="metrics-grid"></div>
@@ -197,8 +197,8 @@
                         <div class="chart-card">
                             <div class="card-header">
                                 <div>
-                                    <span class="section-kicker">Signal Tape</span>
-                                    <h3>Recent Signals</h3>
+                                    <span class="section-kicker" data-i18n="pages.dashboard.signal_tape" data-i18n-fallback="Signal Tape">Signal Tape</span>
+                                    <h3 data-i18n="pages.dashboard.recent_signals" data-i18n-fallback="Recent Signals">Recent Signals</h3>
                                 </div>
                             </div>
                             <div class="signals-list terminal-feed" id="recent-signals"></div>
@@ -211,7 +211,7 @@
                         <div class="ai-panel-head">
                             <div class="ai-orb"><i class="ri-brain-line"></i></div>
                             <div>
-                                <span class="section-kicker">AI Copilot</span>
+                                <span class="section-kicker" data-i18n="pages.dashboard.ai_copilot" data-i18n-fallback="AI Copilot">AI Copilot</span>
                                 <h3 id="ai-brief-title">System Brief</h3>
                             </div>
                         </div>
@@ -227,8 +227,8 @@
                     <div class="card action-queue">
                         <div class="card-header">
                             <div>
-                                <span class="section-kicker">Risk Engine</span>
-                                <h3>Action Queue</h3>
+                                <span class="section-kicker" data-i18n="pages.dashboard.risk_engine" data-i18n-fallback="Risk Engine">Risk Engine</span>
+                                <h3 data-i18n="pages.dashboard.action_queue" data-i18n-fallback="Action Queue">Action Queue</h3>
                             </div>
                             <button class="btn btn-icon" onclick="refreshAll()" title="Refresh"><i class="ri-refresh-line"></i></button>
                         </div>
@@ -247,8 +247,8 @@
                     <div class="card bot-strip">
                         <div class="card-header">
                             <div>
-                                <span class="section-kicker">Automation</span>
-                                <h3>Bot Status</h3>
+                                <span class="section-kicker" data-i18n="pages.dashboard.automation" data-i18n-fallback="Automation">Automation</span>
+                                <h3 data-i18n="pages.dashboard.bot_status" data-i18n-fallback="Bot Status">Bot Status</h3>
                             </div>
                         </div>
                         <div class="bot-metrics">
@@ -265,9 +265,9 @@
         <div class="page" id="page-positions">
             <section class="page-intro terminal-intro">
                 <div>
-                    <span class="section-kicker">Institutional Terminal</span>
-                    <h2>Positions</h2>
-                    <p>Scan exposure, margin usage, liquidation distance, and unrealized performance with minimal friction.</p>
+                    <span class="section-kicker" data-i18n="pages.positions.kicker" data-i18n-fallback="Institutional Terminal">Institutional Terminal</span>
+                    <h2 data-i18n="nav.positions" data-i18n-fallback="Positions">Positions</h2>
+                    <p data-i18n="pages.positions.description" data-i18n-fallback="Scan exposure, margin usage, liquidation distance, and unrealized performance with minimal friction.">Scan exposure, margin usage, liquidation distance, and unrealized performance with minimal friction.</p>
                 </div>
                 <button class="btn btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
             </section>
@@ -322,9 +322,9 @@
         <div class="page" id="page-history">
             <section class="page-intro terminal-intro">
                 <div>
-                    <span class="section-kicker">Execution Ledger</span>
-                    <h2>Trade History</h2>
-                    <p>Audit fills, rejected signals, paper simulations, and realized performance over selectable windows.</p>
+                    <span class="section-kicker" data-i18n="pages.history.kicker" data-i18n-fallback="Execution Ledger">Execution Ledger</span>
+                    <h2 data-i18n="nav.history" data-i18n-fallback="Trade History">Trade History</h2>
+                    <p data-i18n="pages.history.description" data-i18n-fallback="Audit fills, rejected signals, paper simulations, and realized performance over selectable windows.">Audit fills, rejected signals, paper simulations, and realized performance over selectable windows.</p>
                 </div>
             </section>
             <div class="card">
@@ -365,9 +365,9 @@
         <div class="page" id="page-analytics">
             <section class="page-intro terminal-intro">
                 <div>
-                    <span class="section-kicker">Performance Lab</span>
-                    <h2>Analytics</h2>
-                    <p>Review drawdown, expectancy, daily PnL, signal quality, and risk-adjusted strategy behavior.</p>
+                    <span class="section-kicker" data-i18n="pages.analytics.kicker" data-i18n-fallback="Performance Lab">Performance Lab</span>
+                    <h2 data-i18n="nav.analytics" data-i18n-fallback="Analytics">Analytics</h2>
+                    <p data-i18n="pages.analytics.description" data-i18n-fallback="Review drawdown, expectancy, daily PnL, signal quality, and risk-adjusted strategy behavior.">Review drawdown, expectancy, daily PnL, signal quality, and risk-adjusted strategy behavior.</p>
                 </div>
             </section>
             <!-- Summary Cards -->
@@ -375,28 +375,28 @@
                 <div class="kpi-card">
                     <div class="kpi-icon green"><i class="ri-percent-line"></i></div>
                     <div class="kpi-content">
-                        <span class="kpi-label">Profit Factor</span>
+                        <span class="kpi-label" data-i18n="pages.analytics.profit_factor" data-i18n-fallback="Profit Factor">Profit Factor</span>
                         <span class="kpi-value" id="an-pf">--</span>
                     </div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-icon red"><i class="ri-arrow-down-line"></i></div>
                     <div class="kpi-content">
-                        <span class="kpi-label">Max Drawdown</span>
+                        <span class="kpi-label" data-i18n="kpi.max_drawdown" data-i18n-fallback="Max Drawdown">Max Drawdown</span>
                         <span class="kpi-value" id="an-dd">--</span>
                     </div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-icon blue"><i class="ri-scales-3-line"></i></div>
                     <div class="kpi-content">
-                        <span class="kpi-label">Risk/Reward</span>
+                        <span class="kpi-label" data-i18n="pages.analytics.risk_reward" data-i18n-fallback="Risk/Reward">Risk/Reward</span>
                         <span class="kpi-value" id="an-rr">--</span>
                     </div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-icon purple"><i class="ri-line-chart-line"></i></div>
                     <div class="kpi-content">
-                        <span class="kpi-label">Sortino Ratio</span>
+                        <span class="kpi-label" data-i18n="pages.analytics.sortino_ratio" data-i18n-fallback="Sortino Ratio">Sortino Ratio</span>
                         <span class="kpi-value" id="an-sortino">--</span>
                     </div>
                 </div>
@@ -405,14 +405,14 @@
             <div class="charts-row two-col">
                 <!-- Daily PnL Chart -->
                 <div class="chart-card">
-                    <div class="card-header"><h3>Daily P&L</h3></div>
+                    <div class="card-header"><h3 data-i18n="pages.analytics.daily_pnl" data-i18n-fallback="Daily P&L">Daily P&L</h3></div>
                     <div class="chart-container">
                         <canvas id="daily-pnl-chart"></canvas>
                     </div>
                 </div>
                 <!-- Win/Loss Distribution -->
                 <div class="chart-card">
-                    <div class="card-header"><h3>Win / Loss Distribution</h3></div>
+                    <div class="card-header"><h3 data-i18n="pages.analytics.winloss" data-i18n-fallback="Win / Loss Distribution">Win / Loss Distribution</h3></div>
                     <div class="chart-container">
                         <canvas id="winloss-chart"></canvas>
                     </div>
@@ -1166,9 +1166,9 @@
         <div class="page" id="page-backtest">
             <section class="page-intro terminal-intro">
                 <div>
-                    <span class="section-kicker">Strategy Simulation</span>
-                    <h2>Backtest</h2>
-                    <p>Validate signal logic, trailing exits, fees, slippage, and drawdown before production execution.</p>
+                    <span class="section-kicker" data-i18n="pages.backtest.kicker" data-i18n-fallback="Strategy Simulation">Strategy Simulation</span>
+                    <h2 data-i18n="nav.backtest" data-i18n-fallback="Backtest">Backtest</h2>
+                    <p data-i18n="pages.backtest.description" data-i18n-fallback="Validate signal logic, trailing exits, fees, slippage, and drawdown before production execution.">Validate signal logic, trailing exits, fees, slippage, and drawdown before production execution.</p>
                 </div>
             </section>
             <div class="card">
@@ -1399,9 +1399,9 @@
         <div class="page" id="page-strategies">
             <section class="page-intro terminal-intro">
                 <div>
-                    <span class="section-kicker">Automation Workbench</span>
-                    <h2>Strategies</h2>
-                    <p>Operate DCA and grid bots from persisted strategy state with status, capital, and PnL at a glance.</p>
+                    <span class="section-kicker" data-i18n="pages.strategies.kicker" data-i18n-fallback="Automation Workbench">Automation Workbench</span>
+                    <h2 data-i18n="nav.strategies" data-i18n-fallback="Strategies">Strategies</h2>
+                    <p data-i18n="pages.strategies.description" data-i18n-fallback="Operate DCA and grid bots from persisted strategy state with status, capital, and PnL at a glance.">Operate DCA and grid bots from persisted strategy state with status, capital, and PnL at a glance.</p>
                 </div>
             </section>
             <!-- Strategy Overview -->
@@ -1409,28 +1409,28 @@
                 <div class="kpi-card">
                     <div class="kpi-icon blue"><i class="ri-node-tree"></i></div>
                     <div class="kpi-content">
-                        <span class="kpi-label">Active DCA</span>
+                        <span class="kpi-label" data-i18n="pages.strategies.active_dca" data-i18n-fallback="Active DCA">Active DCA</span>
                         <span class="kpi-value" id="st-dca-active">0</span>
                     </div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-icon green"><i class="ri-grid-line"></i></div>
                     <div class="kpi-content">
-                        <span class="kpi-label">Active Grid</span>
+                        <span class="kpi-label" data-i18n="pages.strategies.active_grid" data-i18n-fallback="Active Grid">Active Grid</span>
                         <span class="kpi-value" id="st-grid-active">0</span>
                     </div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-icon purple"><i class="ri-money-dollar-circle-line"></i></div>
                     <div class="kpi-content">
-                        <span class="kpi-label">Total PnL</span>
+                        <span class="kpi-label" data-i18n="pages.strategies.total_pnl" data-i18n-fallback="Total PnL">Total PnL</span>
                         <span class="kpi-value" id="st-total-pnl">$0</span>
                     </div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-icon"><i class="ri-time-line"></i></div>
                     <div class="kpi-content">
-                        <span class="kpi-label">Monitor Status</span>
+                        <span class="kpi-label" data-i18n="pages.strategies.monitor_status" data-i18n-fallback="Monitor Status">Monitor Status</span>
                         <span class="kpi-value" id="st-monitor-status">Stopped</span>
                     </div>
                 </div>
@@ -1439,7 +1439,7 @@
             <!-- DCA Strategy Card -->
             <div class="card mt-4">
                 <div class="card-header">
-                    <h3><i class="ri-arrow-down-circle-line"></i> DCA Strategy</h3>
+                    <h3><i class="ri-arrow-down-circle-line"></i> <span data-i18n="pages.strategies.dca_strategy" data-i18n-fallback="DCA Strategy">DCA Strategy</span></h3>
                     <button class="btn btn-secondary btn-sm" onclick="loadDCAList()"><i class="ri-refresh-line"></i></button>
                 </div>
                 <div class="strategy-config" style="padding:20px">
@@ -1523,7 +1523,7 @@
             <!-- Grid Strategy Card -->
             <div class="card mt-4">
                 <div class="card-header">
-                    <h3><i class="ri-grid-line"></i> Grid Trading</h3>
+                    <h3><i class="ri-grid-line"></i> <span data-i18n="pages.strategies.grid_strategy" data-i18n-fallback="Grid Trading">Grid Trading</span></h3>
                     <button class="btn btn-secondary btn-sm" onclick="loadGridList()"><i class="ri-refresh-line"></i></button>
                 </div>
                 <div class="strategy-config" style="padding:20px">
@@ -1608,7 +1608,7 @@
             <!-- Strategy History -->
             <div class="card mt-4">
                 <div class="card-header">
-                    <h3><i class="ri-history-line"></i> Strategy History & Details</h3>
+                    <h3><i class="ri-history-line"></i> <span data-i18n="pages.strategies.strategy_history" data-i18n-fallback="Strategy History & Details">Strategy History & Details</span></h3>
                     <div class="card-actions">
                         <select id="strategy-history-type" class="select-input" onchange="loadStrategyHistory()" style="width:auto;min-width:120px;padding:6px 28px 6px 10px;font-size:12px">
                             <option value="all">All Types</option>
@@ -1825,9 +1825,9 @@
         <div class="page" id="page-admin">
             <section class="page-intro terminal-intro">
                 <div>
-                    <span class="section-kicker">Operations Console</span>
-                    <h2>Admin</h2>
-                    <p>Control trading modes, reconcile order events, manage users, monitor filters, and review system health.</p>
+                    <span class="section-kicker" data-i18n="pages.admin.kicker" data-i18n-fallback="Operations Console">Operations Console</span>
+                    <h2 data-i18n="nav.admin" data-i18n-fallback="Admin">Admin</h2>
+                    <p data-i18n="pages.admin.description" data-i18n-fallback="Control trading modes, reconcile order events, manage users, monitor filters, and review system health.">Control trading modes, reconcile order events, manage users, monitor filters, and review system health.</p>
                 </div>
             </section>
             <section class="ops-console">

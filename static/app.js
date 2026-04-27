@@ -333,6 +333,8 @@ function switchPage(page) {
         loadStrategyHistory();
     }
     if (page === 'strategy-editor') loadStrategyEditorPage();
+    // Re-apply translations after page switch so content pages get translated
+    applyTranslations();
 }
 
 // ─── Dashboard ───
