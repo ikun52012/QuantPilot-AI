@@ -95,37 +95,6 @@
 
 ---
 
-## 🆕 v4.5 New Features
-
-- **Login brute-force protection**: 5 failed attempts → 15-minute IP lockout.
-- **AI cost tracking**: Token usage and estimated cost per provider call, viewable in Admin panel.
-- **Position conflict detection**: Blocks opposite-direction trades on the same ticker.
-- **Voting timeout control**: Per-model timeout prevents slow models from blocking the entire vote.
-- **Automated daily backups**: Scheduled at 02:00 UTC via APScheduler.
-- **Telegram i18n notifications**: Trade alerts support Chinese and English.
-- **Nginx reverse proxy template**: Production-ready config with SSL, WebSocket, and rate limiting.
-- **Full content page i18n**: Dashboard, positions, history, analytics, backtest, strategies, and admin pages now translate on language switch.
-- **Production deployment checklist**: `PRODUCTION_CHECKLIST.md` for go-live readiness.
-- **CI improvements**: Added `master` branch to test triggers, test dependency install.
-
-## 🆕 v4.4 New Features
-
-- Global trading controls: enabled/read-only/paused/emergency stop modes.
-- Order event ledger with reconciliation review flow.
-- Persistent DCA/Grid runtime state scoped per user.
-- Persistent Social Signals subscriptions and feedback stats.
-- Persistent custom strategy editor configurations.
-- Working `/api/v1/*` aliases for versioned clients.
-- PWA manifest/service worker assets aligned with real static files.
-
-## 🆕 v4.3 Features
-
-### Backtest Engine
-Run historical simulations to validate strategies before live deployment:
-- **Simple Trend**: EMA crossover strategy
-- **SMC Trend**: Smart Money Concepts (FVG + Order Blocks)
-- **AI Assistant**: Multi-indicator (EMA + RSI + Volume)
-
 **Performance Metrics**:
 ```
 - Total Return %
