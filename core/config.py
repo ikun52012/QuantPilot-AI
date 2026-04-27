@@ -378,7 +378,7 @@ class RateLimitConfig(BaseModel):
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
     app_name: str = "QuantPilot AI"
-    app_version: str = "4.5.1"
+    app_version: str = "4.5.2"
     debug: bool = False
     json_logs: bool = False
 
