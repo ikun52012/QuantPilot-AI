@@ -45,6 +45,8 @@ class AIConfig(BaseModel):
     openrouter_model: str = "openai/gpt-4o-mini"
     openrouter_site_url: str = ""
     openrouter_app_name: str = "QuantPilot AI"
+    mistral_api_key: str = ""
+    mistral_model: str = "mistral-large-latest"
     temperature: float = 0.3
     max_tokens: int = 1000
     custom_system_prompt: str = ""
@@ -61,6 +63,7 @@ class AIConfig(BaseModel):
         "openai": ["gpt-4o", "gpt-4o-mini"],
         "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
         "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+        "mistral": ["mistral-large-latest", "mistral-small-latest", "codestral-latest", "mistral-embed"],
         "openrouter": [
             "openai/gpt-4o",
             "openai/gpt-4o-mini",
@@ -77,7 +80,7 @@ class AIConfig(BaseModel):
     @field_validator('provider')
     @classmethod
     def validate_provider(cls, v: str) -> str:
-        allowed = {'openai', 'anthropic', 'deepseek', 'openrouter', 'custom'}
+        allowed = {'openai', 'anthropic', 'deepseek', 'openrouter', 'custom', 'mistral'}
         normalized = v.lower().strip()
         if normalized not in allowed:
             raise ValueError(f"AI provider must be one of: {allowed}")
@@ -112,6 +115,8 @@ class AIConfig(BaseModel):
             openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
             openrouter_site_url=os.getenv("OPENROUTER_SITE_URL", ""),
             openrouter_app_name=os.getenv("OPENROUTER_APP_NAME", "QuantPilot AI"),
+            mistral_api_key=os.getenv("MISTRAL_API_KEY", ""),
+            mistral_model=os.getenv("MISTRAL_MODEL", "mistral-large-latest"),
             temperature=float(os.getenv("AI_TEMPERATURE", "0.3")),
             max_tokens=int(os.getenv("AI_MAX_TOKENS", "1000")),
             custom_system_prompt=os.getenv("AI_CUSTOM_PROMPT", ""),
@@ -387,7 +392,7 @@ class Settings(BaseModel):
 
     default_admin_username: str = "admin"
     default_admin_email: str = "admin@localhost"
-    default_admin_password: str = "123456"
+    default_admin_password: str = ""
 
     position_monitor_interval_secs: int = 60
 
@@ -420,7 +425,7 @@ class Settings(BaseModel):
             "secret", "jwt-secret", "jwt_secret", "tvss-change-this-secret",
         }
 
-        if self.default_admin_password.lower() in WEAK_PASSWORDS:
+        if self.default_admin_password and self.default_admin_password.lower() in WEAK_PASSWORDS:
             warnings.append("DEFAULT_ADMIN_PASSWORD uses a weak default value. Change it before deployment!")
 
         if self.jwt_secret:
@@ -450,7 +455,7 @@ class Settings(BaseModel):
                 errors.append("JWT_SECRET must be set when LIVE_TRADING=true")
             if not self.exchange.api_key or not self.exchange.api_secret:
                 errors.append("Exchange API credentials required for live trading")
-            if self.default_admin_password.lower() in WEAK_PASSWORDS:
+            if self.default_admin_password and self.default_admin_password.lower() in WEAK_PASSWORDS:
                 errors.append("DEFAULT_ADMIN_PASSWORD must be changed for live trading")
 
         for warning in warnings:
@@ -477,7 +482,7 @@ class Settings(BaseModel):
             app_encryption_key=os.getenv("APP_ENCRYPTION_KEY", ""),
             default_admin_username=os.getenv("DEFAULT_ADMIN_USERNAME", "admin"),
             default_admin_email=os.getenv("DEFAULT_ADMIN_EMAIL", "admin@localhost"),
-            default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", "123456"),
+            default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", "").strip(),
             position_monitor_interval_secs=int(os.getenv("POSITION_MONITOR_INTERVAL_SECS", "60")),
             ai=AIConfig.from_env(),
             exchange=ExchangeConfig.from_env(),

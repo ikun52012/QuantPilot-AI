@@ -4,11 +4,12 @@ User-facing routes for dashboard, settings, and trading.
 """
 import json
 import copy
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Request, Response, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -89,6 +90,38 @@ class TrailingStopSettingsRequest(BaseModel):
     trail_pct: float = Field(default=1.0, ge=0.1, le=100.0)
     activation_profit_pct: float = Field(default=1.0, ge=0.0, le=100.0)
     trailing_step_pct: float = Field(default=0.5, ge=0.0, le=100.0)
+
+
+class OfflineTradeSyncRequest(BaseModel):
+    id: str = Field(default="", max_length=80)
+    ticker: str = Field(min_length=1, max_length=40)
+    direction: str = Field(default="manual", max_length=20)
+    timestamp: Optional[datetime] = None
+    entry_price: Optional[float] = Field(default=None, ge=0)
+    exit_price: Optional[float] = Field(default=None, ge=0)
+    quantity: float = Field(default=0.0, ge=0)
+    pnl_pct: float = Field(default=0.0, ge=-1000, le=1000)
+    execute: bool = False
+    order_status: str = Field(default="offline_synced", max_length=30)
+    payload: dict = Field(default_factory=dict)
+
+    @field_validator("ticker")
+    @classmethod
+    def _normalize_ticker(cls, value: str) -> str:
+        normalized = value.upper().strip()
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/:._-")
+        if not normalized or any(ch not in allowed for ch in normalized):
+            raise ValueError("ticker contains unsupported characters")
+        return normalized
+
+    @field_validator("direction")
+    @classmethod
+    def _normalize_direction(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        allowed = {"long", "short", "close_long", "close_short", "manual"}
+        if normalized not in allowed:
+            raise ValueError(f"direction must be one of: {', '.join(sorted(allowed))}")
+        return normalized
 
 
 def _is_admin(user: dict) -> bool:
@@ -352,6 +385,58 @@ async def get_history(
         })
 
     return history
+
+
+@router.post("/user/trades/sync")
+async def sync_offline_trade(
+    req: OfflineTradeSyncRequest,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Sync one authenticated user's offline cached trade note from the PWA service worker.
+
+    These rows are scoped to the current user and marked as offline-synced so a
+    stale service worker request does not 404 or create live exchange activity.
+    """
+    db_user = await get_user_by_id(db, user["sub"])
+    if not db_user:
+        raise HTTPException(404, "User not found")
+
+    trade_id = req.id.strip() or None
+    if trade_id:
+        existing = await db.get(TradeModel, trade_id)
+        if existing and existing.user_id == db_user.id:
+            return {"status": "duplicate", "id": existing.id}
+        if existing:
+            trade_id = None
+
+    payload = {
+        **(req.payload or {}),
+        "source": "pwa_offline_sync",
+        "entry_price": req.entry_price,
+        "exit_price": req.exit_price,
+        "quantity": req.quantity,
+        "pnl_pct": req.pnl_pct,
+    }
+    trade = TradeModel(
+        id=trade_id or str(uuid.uuid4()),
+        user_id=db_user.id,
+        timestamp=req.timestamp or utcnow(),
+        ticker=req.ticker,
+        direction=req.direction,
+        execute=bool(req.execute),
+        order_status=req.order_status or "offline_synced",
+        entry_price=req.entry_price,
+        exit_price=req.exit_price,
+        quantity=req.quantity,
+        pnl_pct=req.pnl_pct,
+        signal_source="offline",
+        payload_json=json.dumps(payload, ensure_ascii=False, default=str),
+    )
+    db.add(trade)
+    await db.flush()
+    return {"status": "synced", "id": trade.id}
 
 
 # ─────────────────────────────────────────────

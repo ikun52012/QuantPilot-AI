@@ -238,6 +238,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         if request.url.path in self.EXEMPT_PATHS:
             return await call_next(request)
 
+        # Background Sync runs from the service worker, which cannot read the
+        # non-HttpOnly CSRF cookie after the page is gone. Require a custom
+        # same-origin header so plain cross-site form posts still cannot hit it.
+        if (
+            request.url.path == "/api/user/trades/sync"
+            and request.headers.get("x-pwa-sync") == "1"
+        ):
+            return await call_next(request)
+
         # Check for auth cookie
         if not request.cookies.get("tvss_token"):
             return await call_next(request)

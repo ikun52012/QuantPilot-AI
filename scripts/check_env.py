@@ -94,6 +94,18 @@ if env_file.exists():
     jwt_secret = env_vals.get("JWT_SECRET", "")
     check("JWT_SECRET 已设置", bool(jwt_secret), "未设置，建议生成: python -c \"import secrets; print(secrets.token_hex(32))\"", warn=True)
 
+    admin_password = (env_vals.get("DEFAULT_ADMIN_PASSWORD", "") or "").strip()
+    weak_admin_passwords = {"123456", "password", "admin", "changeme", "change-me", "change_this"}
+    if admin_password:
+        check(
+            "DEFAULT_ADMIN_PASSWORD 强度",
+            admin_password.lower() not in weak_admin_passwords and len(admin_password) >= 8,
+            "当前管理员初始密码偏弱，建议改为强随机密码",
+            warn=True,
+        )
+    else:
+        print(f"  {INFO}  DEFAULT_ADMIN_PASSWORD 留空：首次建库会生成 data/bootstrap_admin_password.txt")
+
     live_trading = env_vals.get("LIVE_TRADING", "false").lower() == "true"
     ccxt_available = importlib.util.find_spec("ccxt") is not None
     if live_trading:

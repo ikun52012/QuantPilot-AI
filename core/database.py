@@ -8,6 +8,7 @@ import uuid
 import os
 import secrets
 import hashlib
+import string
 from datetime import datetime, timedelta
 from typing import Optional, Any
 from pathlib import Path
@@ -500,7 +501,16 @@ class DatabaseManager:
             "direction": "VARCHAR(20) DEFAULT ''",
             "execute": "BOOLEAN DEFAULT false",
             "order_status": "VARCHAR(20) DEFAULT ''",
+            "entry_price": "FLOAT",
+            "exit_price": "FLOAT",
+            "quantity": "FLOAT DEFAULT 0",
             "pnl_pct": "FLOAT DEFAULT 0",
+            "pnl_usdt": "FLOAT DEFAULT 0",
+            "fees_usdt": "FLOAT DEFAULT 0",
+            "fees_pct": "FLOAT DEFAULT 0",
+            "execution_latency_ms": "INTEGER DEFAULT 0",
+            "strategy_name": "VARCHAR(120) DEFAULT ''",
+            "signal_source": "VARCHAR(20) DEFAULT 'tradingview'",
             "payload_json": "TEXT DEFAULT '{}'",
         })
         add_missing_columns("webhook_events", {
@@ -547,12 +557,17 @@ class DatabaseManager:
             "take_profit_json": "TEXT DEFAULT '[]'",
             "stop_loss_order_id": "VARCHAR(128) DEFAULT ''",
             "take_profit_order_ids_json": "TEXT DEFAULT '[]'",
+            "trailing_stop_config_json": "TEXT DEFAULT '{}'",
             "exchange": "VARCHAR(40) DEFAULT ''",
             "live_trading": "BOOLEAN DEFAULT false",
             "sandbox_mode": "BOOLEAN DEFAULT false",
             "leverage": "FLOAT DEFAULT 1",
+            "strategy_name": "VARCHAR(120) DEFAULT ''",
+            "user_risk_profile": "VARCHAR(20) DEFAULT 'balanced'",
             "realized_pnl_pct": "FLOAT DEFAULT 0",
             "current_pnl_pct": "FLOAT DEFAULT 0",
+            "unrealized_pnl_usdt": "FLOAT DEFAULT 0",
+            "fees_total_usdt": "FLOAT DEFAULT 0",
             "last_price": "FLOAT",
             "close_reason": "VARCHAR(80) DEFAULT ''",
             "updated_at": "TIMESTAMP",
@@ -1380,6 +1395,67 @@ async def set_admin_setting(session: AsyncSession, key: str, value: str):
 # Seed Default Data
 # ─────────────────────────────────────────────
 
+_BOOTSTRAP_PASSWORD_FILE = Path("data") / "bootstrap_admin_password.txt"
+
+
+def _generate_bootstrap_admin_password(length: int = 28) -> str:
+    """Generate a strong admin bootstrap password with login-form-safe characters."""
+    lowers = string.ascii_lowercase
+    uppers = string.ascii_uppercase
+    digits = string.digits
+    specials = "!@#$%^&*_-+="
+    alphabet = lowers + uppers + digits + specials
+
+    required = [
+        secrets.choice(lowers),
+        secrets.choice(uppers),
+        secrets.choice(digits),
+        secrets.choice(specials),
+    ]
+    remaining = [secrets.choice(alphabet) for _ in range(max(length, 12) - len(required))]
+    chars = required + remaining
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
+def _read_bootstrap_admin_password(path: Path = _BOOTSTRAP_PASSWORD_FILE) -> str:
+    if not path.exists():
+        return ""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip().lower() == "password" and value.strip():
+                return value.strip()
+    except OSError as exc:
+        logger.warning(f"[Database] Failed to read bootstrap admin password file: {exc}")
+    return ""
+
+
+def _load_or_create_bootstrap_admin_password(
+    username: str,
+    path: Path = _BOOTSTRAP_PASSWORD_FILE,
+) -> tuple[str, Path]:
+    existing = _read_bootstrap_admin_password(path)
+    if existing:
+        return existing, path
+
+    password = _generate_bootstrap_admin_password()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "# QuantPilot AI bootstrap admin password\n"
+        "# Generated because DEFAULT_ADMIN_PASSWORD was left blank.\n"
+        "# Delete this file after changing the admin password.\n"
+        f"username={username}\n"
+        f"password={password}\n"
+    )
+    path.write_text(content, encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return password, path
+
+
 async def seed_defaults(session: AsyncSession):
     """Seed default admin user and subscription plans."""
     from core.security import hash_password
@@ -1391,14 +1467,27 @@ async def seed_defaults(session: AsyncSession):
     admin = result.scalar_one_or_none()
 
     if not admin:
+        admin_username = settings.default_admin_username.lower().strip()
+        admin_password = settings.default_admin_password
+        bootstrap_path = None
+        if not admin_password:
+            admin_password, bootstrap_path = _load_or_create_bootstrap_admin_password(admin_username)
+
         admin = UserModel(
-            username=settings.default_admin_username.lower().strip(),
+            username=admin_username,
             email=settings.default_admin_email.lower().strip(),
-            password_hash=hash_password(settings.default_admin_password),
+            password_hash=hash_password(admin_password),
             role="admin",
         )
         session.add(admin)
-        logger.warning(f"[Database] Default admin created: {admin.username}")
+        if bootstrap_path:
+            logger.warning(
+                "[Database] Bootstrap admin created: {}. Password file: {}. Change it after first login.",
+                admin.username,
+                bootstrap_path,
+            )
+        else:
+            logger.warning(f"[Database] Default admin created from DEFAULT_ADMIN_PASSWORD: {admin.username}")
 
     # Check for existing plans
     result = await session.execute(select(SubscriptionPlanModel).limit(1))

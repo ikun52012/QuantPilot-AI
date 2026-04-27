@@ -1,6 +1,6 @@
 """
-Strategy Editor Router - Visual strategy configuration.
-Provides drag-and-drop style strategy editing interface.
+Strategy Editor Router - custom strategy configuration.
+Provides template, JSON editing, activation, export, and import endpoints.
 """
 import json
 from datetime import datetime, timezone

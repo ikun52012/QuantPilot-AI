@@ -15,6 +15,7 @@ from exchange import _CCXT_AVAILABLE, ccxt, _get_or_create_exchange, _resolve_sy
 
 _MARKET_CACHE_TTL = 30
 _MARKET_CACHE_MAX_SIZE = 500
+_PUBLIC_MARKET_DATA_FALLBACKS = ("okx", "bitget", "gate", "coinbase")
 _market_cache: OrderedDict[str, tuple[float, MarketContext]] = OrderedDict()
 _market_cache_locks: dict[str, asyncio.Lock] = {}
 _market_cache_locks_guard = asyncio.Lock()
@@ -32,6 +33,45 @@ def _get_exchange() -> ccxt.Exchange:
         live=False,
         sandbox=False,
     )
+
+
+def _get_public_market_exchange(exchange_id: str) -> ccxt.Exchange:
+    """Create a public-only market-data exchange without user credentials."""
+    exchange_cls = getattr(ccxt, exchange_id)
+    exchange = exchange_cls({"enableRateLimit": True, "timeout": 12000})
+    exchange.options["adjustForTimeDifference"] = True
+    if exchange_id in {"okx", "bybit", "bitget", "gate"}:
+        exchange.options["defaultType"] = "spot"
+    return exchange
+
+
+def _market_data_exchange_ids() -> list[str]:
+    """Use the configured exchange first, then public fallbacks for market data."""
+    return list(dict.fromkeys([settings.exchange.name, *_PUBLIC_MARKET_DATA_FALLBACKS]))
+
+
+def _get_market_data_exchange(exchange_id: str) -> ccxt.Exchange:
+    if exchange_id == settings.exchange.name:
+        return _get_exchange()
+    return _get_public_market_exchange(exchange_id)
+
+
+def _candles_to_ohlcv_dicts(candles: list) -> list[dict]:
+    ohlcv_data = []
+    for candle in candles:
+        timestamp_ms = candle[0]
+        timestamp_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        ohlcv_data.append({
+            "timestamp": timestamp_dt.isoformat(),
+            "datetime": timestamp_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "open": float(candle[1]),
+            "high": float(candle[2]),
+            "low": float(candle[3]),
+            "close": float(candle[4]),
+            "volume": float(candle[5]),
+        })
+    ohlcv_data.sort(key=lambda x: x.get("timestamp", ""))
+    return ohlcv_data
 
 
 def _empty_market_context(ticker: str) -> MarketContext:
@@ -98,84 +138,91 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
         logger.warning("[MarketData] ccxt is not installed; returning empty market context")
         return _empty_market_context(ticker)
 
-    exchange = _get_exchange()
-    symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
+    last_error = None
+    for exchange_id in _market_data_exchange_ids():
+        try:
+            exchange = _get_market_data_exchange(exchange_id)
+            symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
 
-    try:
-        ticker_data, ohlcv_1h, ohlcv_4h, orderbook = await asyncio.gather(
-            asyncio.to_thread(exchange.fetch_ticker, symbol),
-            asyncio.to_thread(exchange.fetch_ohlcv, symbol, "1h", None, 30),
-            asyncio.to_thread(exchange.fetch_ohlcv, symbol, "4h", None, 10),
-            asyncio.to_thread(exchange.fetch_order_book, symbol, 20),
-        )
+            ticker_data, ohlcv_1h, ohlcv_4h, orderbook = await asyncio.gather(
+                asyncio.to_thread(exchange.fetch_ticker, symbol),
+                asyncio.to_thread(exchange.fetch_ohlcv, symbol, "1h", None, 30),
+                asyncio.to_thread(exchange.fetch_ohlcv, symbol, "4h", None, 10),
+                asyncio.to_thread(exchange.fetch_order_book, symbol, 20),
+            )
 
-        current_price = ticker_data.get("last", 0.0)
-        price_1h_ago = ohlcv_1h[-2][4] if len(ohlcv_1h) >= 2 else current_price
-        price_4h_ago = ohlcv_4h[-2][4] if len(ohlcv_4h) >= 2 else current_price
+            current_price = ticker_data.get("last", 0.0)
+            price_1h_ago = ohlcv_1h[-2][4] if len(ohlcv_1h) >= 2 else current_price
+            price_4h_ago = ohlcv_4h[-2][4] if len(ohlcv_4h) >= 2 else current_price
 
-        price_change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0.0
-        price_change_4h = ((current_price - price_4h_ago) / price_4h_ago * 100) if price_4h_ago else 0.0
+            price_change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0.0
+            price_change_4h = ((current_price - price_4h_ago) / price_4h_ago * 100) if price_4h_ago else 0.0
 
-        volumes = [c[5] for c in ohlcv_1h[-24:]]
-        avg_volume = sum(volumes) / len(volumes) if volumes else 1.0
-        current_volume = volumes[-1] if volumes else 0.0
-        volume_change_pct = ((current_volume - avg_volume) / avg_volume * 100) if avg_volume else 0.0
+            volumes = [c[5] for c in ohlcv_1h[-24:]]
+            avg_volume = sum(volumes) / len(volumes) if volumes else 1.0
+            current_volume = volumes[-1] if volumes else 0.0
+            volume_change_pct = ((current_volume - avg_volume) / avg_volume * 100) if avg_volume else 0.0
 
-        total_bids = sum(b[1] for b in orderbook["bids"][:10])
-        total_asks = sum(a[1] for a in orderbook["asks"][:10])
-        ob_imbalance = (total_bids / total_asks) if total_asks > 0 else 1.0
+            total_bids = sum(b[1] for b in orderbook["bids"][:10])
+            total_asks = sum(a[1] for a in orderbook["asks"][:10])
+            ob_imbalance = (total_bids / total_asks) if total_asks > 0 else 1.0
 
-        best_bid = orderbook["bids"][0][0] if orderbook["bids"] else current_price
-        best_ask = orderbook["asks"][0][0] if orderbook["asks"] else current_price
-        spread = ((best_ask - best_bid) / current_price * 100) if current_price else 0.0
+            best_bid = orderbook["bids"][0][0] if orderbook["bids"] else current_price
+            best_ask = orderbook["asks"][0][0] if orderbook["asks"] else current_price
+            spread = ((best_ask - best_bid) / current_price * 100) if current_price else 0.0
 
-        rsi = _calculate_rsi([c[4] for c in ohlcv_1h], 14)
-        atr = _calculate_atr(ohlcv_1h, 14)
-        atr_pct = (atr / current_price * 100) if current_price else 0.0
+            rsi = _calculate_rsi([c[4] for c in ohlcv_1h], 14)
+            atr = _calculate_atr(ohlcv_1h, 14)
+            atr_pct = (atr / current_price * 100) if current_price else 0.0
 
-        closes = [c[4] for c in ohlcv_1h]
-        ema_fast = _calculate_ema(closes, 8)
-        ema_slow = _calculate_ema(closes, 21)
+            closes = [c[4] for c in ohlcv_1h]
+            ema_fast = _calculate_ema(closes, 8)
+            ema_slow = _calculate_ema(closes, 21)
 
-        funding_rate, open_interest, open_interest_change_pct, long_short_ratio = await asyncio.gather(
-            _safe_fetch_funding_rate(exchange, symbol),
-            _safe_fetch_open_interest(exchange, symbol),
-            _safe_fetch_long_short_ratio(exchange, symbol),
-        )
+            funding_rate, open_interest_data, long_short_ratio = await asyncio.gather(
+                _safe_fetch_funding_rate(exchange, symbol),
+                _safe_fetch_open_interest(exchange, symbol),
+                _safe_fetch_long_short_ratio(exchange, symbol),
+            )
+            open_interest, open_interest_change_pct = open_interest_data
 
-        context = MarketContext(
-            ticker=ticker,
-            current_price=current_price,
-            price_change_1h=round(price_change_1h, 4),
-            price_change_4h=round(price_change_4h, 4),
-            price_change_24h=ticker_data.get("percentage", 0.0) or 0.0,
-            volume_24h=ticker_data.get("quoteVolume", 0.0) or 0.0,
-            volume_change_pct=round(volume_change_pct, 2),
-            high_24h=ticker_data.get("high", 0.0) or 0.0,
-            low_24h=ticker_data.get("low", 0.0) or 0.0,
-            bid_ask_spread=round(spread, 6),
-            funding_rate=funding_rate,
-            open_interest=open_interest,
-            open_interest_change_pct=round(open_interest_change_pct, 2) if open_interest_change_pct else None,
-            rsi_1h=round(rsi, 2) if rsi else None,
-            atr_pct=round(atr_pct, 4) if atr else None,
-            ema_fast=round(ema_fast, 2) if ema_fast else None,
-            ema_slow=round(ema_slow, 2) if ema_slow else None,
-            orderbook_imbalance=round(ob_imbalance, 4),
-            long_short_ratio=long_short_ratio,
-        )
+            context = MarketContext(
+                ticker=ticker,
+                current_price=current_price,
+                price_change_1h=round(price_change_1h, 4),
+                price_change_4h=round(price_change_4h, 4),
+                price_change_24h=ticker_data.get("percentage", 0.0) or 0.0,
+                volume_24h=ticker_data.get("quoteVolume", 0.0) or 0.0,
+                volume_change_pct=round(volume_change_pct, 2),
+                high_24h=ticker_data.get("high", 0.0) or 0.0,
+                low_24h=ticker_data.get("low", 0.0) or 0.0,
+                bid_ask_spread=round(spread, 6),
+                funding_rate=funding_rate,
+                open_interest=open_interest,
+                open_interest_change_pct=round(open_interest_change_pct, 2) if open_interest_change_pct else None,
+                rsi_1h=round(rsi, 2) if rsi else None,
+                atr_pct=round(atr_pct, 4) if atr else None,
+                ema_fast=round(ema_fast, 2) if ema_fast else None,
+                ema_slow=round(ema_slow, 2) if ema_slow else None,
+                orderbook_imbalance=round(ob_imbalance, 4),
+                long_short_ratio=long_short_ratio,
+            )
 
-        ohlcv_15m = await _safe_fetch_ohlcv(exchange, symbol, "15m", 50)
-        context._ohlcv_15m = ohlcv_15m
-        context._ohlcv_1h = ohlcv_1h
-        context._ohlcv_4h = ohlcv_4h
+            ohlcv_15m = await _safe_fetch_ohlcv(exchange, symbol, "15m", 50)
+            context._ohlcv_15m = ohlcv_15m
+            context._ohlcv_1h = ohlcv_1h
+            context._ohlcv_4h = ohlcv_4h
+            context._market_data_source = exchange_id
 
-        logger.info(f"[MarketData] Fetched context for {ticker}: price={current_price}, RSI={rsi}, ATR%={atr_pct}")
-        return context
+            logger.info(f"[MarketData] Fetched context for {ticker} via {exchange_id}: price={current_price}, RSI={rsi}, ATR%={atr_pct}")
+            return context
 
-    except Exception as e:
-        logger.error(f"[MarketData] Failed to fetch context for {ticker}: {e}")
-        return MarketContext(ticker=ticker, current_price=0.0)
+        except Exception as e:
+            last_error = e
+            logger.warning(f"[MarketData] {exchange_id} market context unavailable for {ticker}: {e}")
+
+    logger.error(f"[MarketData] Failed to fetch context for {ticker} from all market data sources: {last_error}")
+    return MarketContext(ticker=ticker, current_price=0.0)
 
 
 async def _safe_fetch_funding_rate(exchange, symbol) -> Optional[float]:
@@ -632,69 +679,43 @@ async def fetch_ohlcv_history(
     Returns:
         List of OHLCV candles with timestamp
     """
-    ohlcv_data = []
+    if not _CCXT_AVAILABLE:
+        logger.warning("[MarketData] ccxt is not installed; OHLCV history unavailable")
+        return []
 
-    try:
-        if not _CCXT_AVAILABLE:
-            logger.warning("[MarketData] ccxt is not installed; OHLCV history unavailable")
-            return []
-        exchange = _get_exchange()
-        symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
+    timeframe_minutes = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "1h": 60,
+        "4h": 240,
+        "1d": 1440,
+    }
+    minutes = timeframe_minutes.get(timeframe, 60)
+    bars_needed = max(1, (days * 24 * 60) // minutes)
 
-        timeframe_minutes = {
-            "1m": 1,
-            "5m": 5,
-            "15m": 15,
-            "1h": 60,
-            "4h": 240,
-            "1d": 1440,
-        }
+    # Most public exchange endpoints cap a single OHLCV call. A recent window is
+    # enough for the dashboard chart and avoids broken pseudo-pagination.
+    limit = min(bars_needed, 1000)
+    last_error = None
 
-        minutes = timeframe_minutes.get(timeframe, 60)
-        bars_needed = (days * 24 * 60) // minutes
-
-        max_per_request = 500
-
-        all_candles = []
-
-        for offset in range(0, bars_needed, max_per_request):
-            limit = min(max_per_request, bars_needed - offset)
-
-            candles = await asyncio.to_thread(
-                exchange.fetch_ohlcv,
-                symbol,
-                timeframe,
-                None,
-                limit,
-            )
-
+    for exchange_id in _market_data_exchange_ids():
+        try:
+            exchange = _get_market_data_exchange(exchange_id)
+            symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
+            candles = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
             if not candles:
-                break
+                logger.warning(f"[MarketData] {exchange_id} returned no OHLCV candles for {ticker}")
+                continue
+            ohlcv_data = _candles_to_ohlcv_dicts(candles)
+            logger.info(
+                f"[MarketData] Fetched {len(ohlcv_data)} {timeframe} bars for {ticker} "
+                f"over {days} days via {exchange_id}"
+            )
+            return ohlcv_data
+        except Exception as e:
+            last_error = e
+            logger.warning(f"[MarketData] {exchange_id} OHLCV unavailable for {ticker}: {e}")
 
-            all_candles.extend(candles)
-
-            if len(candles) < limit:
-                break
-
-        for candle in all_candles:
-            timestamp_ms = candle[0]
-            timestamp_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
-
-            ohlcv_data.append({
-                "timestamp": timestamp_dt.isoformat(),
-                "datetime": timestamp_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "open": float(candle[1]),
-                "high": float(candle[2]),
-                "low": float(candle[3]),
-                "close": float(candle[4]),
-                "volume": float(candle[5]),
-            })
-
-        ohlcv_data.sort(key=lambda x: x.get("timestamp", ""))
-
-        logger.info(f"[MarketData] Fetched {len(ohlcv_data)} {timeframe} bars for {ticker} over {days} days")
-
-    except Exception as e:
-        logger.error(f"[MarketData] Failed to fetch OHLCV history: {e}")
-
-    return ohlcv_data
+    logger.error(f"[MarketData] Failed to fetch OHLCV history for {ticker} from all market data sources: {last_error}")
+    return []

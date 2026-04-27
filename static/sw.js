@@ -142,7 +142,10 @@ async function syncTrades() {
       await fetch('/api/user/trades/sync', {
         method: 'POST',
         body: JSON.stringify(trade),
-        headers: {'Content-Type': 'application/json'}
+        headers: {
+          'Content-Type': 'application/json',
+          'X-PWA-Sync': '1'
+        }
       });
       await removePendingTrade(trade.id);
     } catch (error) {

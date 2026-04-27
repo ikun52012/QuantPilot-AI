@@ -415,6 +415,35 @@ async def _call_deepseek(system: str, user: str, model: str = None) -> str:
     return await _with_retry(_do, "deepseek")
 
 
+async def _call_mistral(system: str, user: str, model: str = None) -> str:
+    """Call Mistral API (OpenAI-compatible) with automatic retry."""
+    model_name = model or settings.ai.mistral_model
+    async def _do():
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
+            resp = await client.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.ai.mistral_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": settings.ai.temperature,
+                    "max_tokens": settings.ai.max_tokens,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+
+    return await _with_retry(_do, "mistral")
+
+
 async def _call_openrouter(system: str, user: str, model: str = None) -> str:
     """Call OpenRouter's OpenAI-compatible chat completions API."""
     model_name = model or settings.ai.openrouter_model
@@ -521,7 +550,7 @@ def _parse_model_id(model_id: str) -> tuple[str, str]:
         provider, model = model_id.split(":", 1)
         return provider.strip(), model.strip()
 
-    legacy_providers = {"openai", "anthropic", "deepseek", "openrouter", "custom"}
+    legacy_providers = {"openai", "anthropic", "deepseek", "openrouter", "custom", "mistral"}
     if model_id in legacy_providers:
         return model_id, ""
 
@@ -547,6 +576,10 @@ async def _call_model_by_id(model_id: str, system: str, user: str) -> tuple[str,
 
     elif provider == "deepseek":
         raw = await _call_deepseek(system, user, model=model_name)
+        return raw, model_id
+
+    elif provider == "mistral":
+        raw = await _call_mistral(system, user, model=model_name)
         return raw, model_id
 
     elif provider == "openrouter":
@@ -869,6 +902,8 @@ async def analyze_signal(
             raw = await _call_anthropic(system_prompt, user_prompt)
         elif provider == "deepseek":
             raw = await _call_deepseek(system_prompt, user_prompt)
+        elif provider == "mistral":
+            raw = await _call_mistral(system_prompt, user_prompt)
         elif provider == "openrouter":
             raw = await _call_openrouter(system_prompt, user_prompt)
         elif (

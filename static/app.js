@@ -16,7 +16,9 @@ let equityChart = null;
 let dailyPnlChart = null;
 let winlossChart = null;
 let userEquityChart = null;
+let marketChart = null;
 let currentUserSettings = null;
+let _strategyTemplates = [];
 
 // ─── i18n / Multi-language Support ───
 let _i18nCache = {};
@@ -87,6 +89,7 @@ async function changeLanguage(lang) {
             if (titleEl) titleEl.textContent = navItem.querySelector('span')?.textContent || pageId;
         }
     }
+    await refreshAll().catch(() => {});
     showToast(t('messages.updated', 'Language updated'), 'success');
 }
 
@@ -97,8 +100,11 @@ function updateNavTexts() {
         'nav-positions': 'nav.positions',
         'nav-history': 'nav.history',
         'nav-analytics': 'nav.analytics',
+        'nav-charts': 'nav.charts',
+        'nav-social': 'nav.social',
         'nav-backtest': 'nav.backtest',
         'nav-strategies': 'nav.strategies',
+        'nav-strategy-editor': 'nav.strategy_editor',
         'nav-subscription': 'nav.subscription',
         'nav-settings': 'nav.settings',
         'nav-admin': 'nav.admin',
@@ -291,7 +297,21 @@ function switchPage(page) {
     navEl?.classList.add('active');
     navEl?.setAttribute('aria-current','page');
     document.getElementById(`page-${page}`)?.classList.add('active');
-    const titles = { dashboard:'Dashboard', user:'My Trading', positions:'Positions', history:'Trade History', analytics:'Analytics', settings:'Settings', subscription:'Subscription', admin:'Admin Panel', backtest:'Backtest', strategies:'Strategies' };
+    const titles = {
+        dashboard: t('nav.dashboard', 'Dashboard'),
+        user: t('nav.my_trading', 'My Trading'),
+        positions: t('nav.positions', 'Positions'),
+        history: t('nav.history', 'Trade History'),
+        analytics: t('nav.analytics', 'Analytics'),
+        charts: t('nav.charts', 'Charts'),
+        social: t('nav.social', 'Signals'),
+        settings: t('nav.settings', 'Settings'),
+        subscription: t('nav.subscription', 'Subscription'),
+        admin: t('nav.admin', 'Admin Panel'),
+        backtest: t('nav.backtest', 'Backtest'),
+        strategies: t('nav.strategies', 'Strategies'),
+        'strategy-editor': t('nav.strategy_editor', 'Editor'),
+    };
     document.getElementById('page-title').textContent = titles[page] || page;
     if (window.location.hash !== `#${page}`) {
         history.replaceState(null, '', `${window.location.pathname}#${page}`);
@@ -300,6 +320,8 @@ function switchPage(page) {
     if (page === 'positions') loadPositions();
     if (page === 'history') loadHistory();
     if (page === 'analytics') loadAnalytics();
+    if (page === 'charts') loadChartPage();
+    if (page === 'social') loadSocialPage();
     if (page === 'settings') loadSettings();
     if (page === 'user') loadUserPortal();
     if (page === 'subscription') loadSubscription();
@@ -309,6 +331,7 @@ function switchPage(page) {
         loadDCAList();
         loadGridList();
     }
+    if (page === 'strategy-editor') loadStrategyEditorPage();
 }
 
 // ─── Dashboard ───
@@ -2415,6 +2438,7 @@ async function refreshAll() {
     const p = document.querySelector('.page.active')?.id?.replace('page-','');
     if (p==='dashboard') await loadDashboard(); else if (p==='positions') await loadPositions();
     else if (p==='user') await loadUserPortal(); else if (p==='history') await loadHistory(); else if (p==='analytics') await loadAnalytics();
+    else if (p==='charts') await loadChartPage(); else if (p==='social') await loadSocialPage(); else if (p==='strategy-editor') await loadStrategyEditorPage();
     else if (p==='subscription') await loadSubscription(); else if (p==='admin') await loadAdmin();
     else if (p==='strategies') { await loadStrategiesOverview(); await loadDCAList(); await loadGridList(); }
 }
@@ -2927,5 +2951,323 @@ async function stopStrategyMonitor() {
         document.getElementById('st-monitor-status').textContent = 'Stopped';
     } catch (err) {
         showToast(err.message, 'error', 'Monitor Failed');
+    }
+}
+
+// ─── Market Charts ───
+async function loadChartPage() {
+    const ticker = (document.getElementById('chart-ticker')?.value || 'BTCUSDT').trim().toUpperCase();
+    const timeframe = document.getElementById('chart-timeframe')?.value || '1h';
+    const days = parseInt(document.getElementById('chart-days')?.value) || 30;
+    try {
+        const [ohlcv, realtime, indicators, positions, signals] = await Promise.all([
+            fetchAPI(`/api/chart/ohlcv/${encodeURIComponent(ticker)}?timeframe=${encodeURIComponent(timeframe)}&days=${days}`),
+            fetchAPI(`/api/chart/realtime/${encodeURIComponent(ticker)}`).catch(() => null),
+            fetchAPI(`/api/chart/indicators/${encodeURIComponent(ticker)}?timeframe=${encodeURIComponent(timeframe)}`).catch(() => null),
+            fetchAPI(`/api/chart/positions/${encodeURIComponent(ticker)}`).catch(() => ({ markers: [] })),
+            fetchAPI(`/api/chart/signals/${encodeURIComponent(ticker)}?days=${days}`).catch(() => ({ markers: [] })),
+        ]);
+        renderMarketChart(ohlcv.data || []);
+        const lastBar = ohlcv.data?.length ? ohlcv.data[ohlcv.data.length - 1] : null;
+        const price = realtime?.price ?? lastBar?.close;
+        setText('chart-price', price ? `$${formatNum(price)}` : '--');
+        const change = Number(realtime?.change_24h_pct || 0);
+        const changeEl = document.getElementById('chart-change');
+        if (changeEl) {
+            changeEl.textContent = `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+            changeEl.className = `kpi-value ${change >= 0 ? 'pnl-positive' : 'pnl-negative'}`;
+        }
+        setText('chart-rsi', formatValue(indicators?.indicators?.rsi_1h));
+        setText('chart-volume', formatCompact(indicators?.indicators?.volume_24h ?? realtime?.volume_24h));
+        renderMarkerList('chart-positions', positions.markers || [], t('pages.charts.no_positions', 'No open position markers'));
+        renderMarkerList('chart-signals', signals.markers || [], t('pages.charts.no_signals', 'No executed signal markers'));
+    } catch (err) {
+        showToast(err.message, 'error', 'Chart Load Failed');
+    }
+}
+
+function renderMarketChart(data) {
+    const ctx = document.getElementById('market-chart')?.getContext('2d');
+    if (!ctx) return;
+    if (marketChart) marketChart.destroy();
+    const labels = data.map(bar => new Date((bar.time || 0) * 1000).toLocaleString());
+    const close = data.map(bar => Number(bar.close || 0));
+    const high = data.map(bar => Number(bar.high || 0));
+    const low = data.map(bar => Number(bar.low || 0));
+    marketChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [
+                { label: 'Close', data: close, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,.12)', borderWidth: 2, pointRadius: 0, tension: .25, fill: true },
+                { label: 'High', data: high, borderColor: 'rgba(59,130,246,.55)', borderWidth: 1, pointRadius: 0, tension: .2 },
+                { label: 'Low', data: low, borderColor: 'rgba(239,68,68,.55)', borderWidth: 1, pointRadius: 0, tension: .2 },
+            ],
+        },
+        options: chartOptions('Price'),
+    });
+}
+
+function renderMarkerList(id, markers, emptyText) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!markers.length) {
+        el.innerHTML = `<div class="empty-state">${escapeHtml(emptyText)}</div>`;
+        return;
+    }
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('common.time', 'Time'))}</th><th>${escapeHtml(t('pages.charts.marker', 'Marker'))}</th></tr></thead><tbody>${markers.map(m => `<tr><td>${escapeHtml(formatDateTime(new Date((m.time || 0) * 1000).toISOString()))}</td><td>${escapeHtml(m.text || m.position || '--')}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function formatCompact(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n === 0) return '--';
+    if (Math.abs(n) >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+    if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+    if (Math.abs(n) >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
+    return n.toFixed(2);
+}
+
+// ─── Social Signals ───
+async function loadSocialPage() {
+    try {
+        const [stats, feed, subs, leaderboard] = await Promise.all([
+            fetchAPI('/api/social/stats'),
+            fetchAPI('/api/social/list?limit=50'),
+            fetchAPI('/api/social/subscriptions'),
+            fetchAPI('/api/social/leaderboard?limit=10'),
+        ]);
+        setText('social-total-signals', stats.total_signals || 0);
+        setText('social-total-subs', stats.total_subscriptions || 0);
+        setText('social-active-users', stats.active_users || 0);
+        setText('social-top-ticker', stats.top_tickers?.[0]?.ticker || '--');
+        renderSocialFeed(feed.signals || []);
+        renderSocialSubscriptions(subs.subscriptions || []);
+        renderSocialLeaderboard(leaderboard.leaderboard || []);
+    } catch (err) {
+        showToast(err.message, 'error', 'Signals Load Failed');
+    }
+}
+
+async function shareSocialSignal() {
+    const payload = {
+        ticker: (document.getElementById('social-ticker')?.value || 'BTCUSDT').trim().toUpperCase(),
+        direction: document.getElementById('social-direction')?.value || 'long',
+        entry_price: Number(document.getElementById('social-entry')?.value || 0),
+        stop_loss: optionalNumber('social-sl'),
+        take_profit: optionalNumber('social-tp'),
+        confidence: Number(document.getElementById('social-confidence')?.value || 0),
+        reason: document.getElementById('social-reason')?.value || '',
+        strategy_name: 'manual-share',
+    };
+    if (!payload.entry_price || payload.entry_price <= 0) {
+        showToast('Entry price must be greater than zero.', 'warning', 'Invalid Signal');
+        return;
+    }
+    try {
+        await fetchAPI('/api/social/share', { method: 'POST', body: JSON.stringify(payload) });
+        showToast('Signal shared.', 'success', 'Shared');
+        await loadSocialPage();
+    } catch (err) {
+        showToast(err.message, 'error', 'Share Failed');
+    }
+}
+
+function optionalNumber(id) {
+    const value = Number(document.getElementById(id)?.value || 0);
+    return value > 0 ? value : null;
+}
+
+function renderSocialFeed(signals) {
+    const el = document.getElementById('social-feed');
+    if (!el) return;
+    if (!signals.length) {
+        el.innerHTML = `<div class="empty-state">${escapeHtml(t('pages.social.no_signals', 'No shared signals yet'))}</div>`;
+        return;
+    }
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('common.ticker', 'Ticker'))}</th><th>${escapeHtml(t('common.direction', 'Direction'))}</th><th>${escapeHtml(t('trading.entry', 'Entry'))}</th><th>${escapeHtml(t('common.confidence', 'Confidence'))}</th><th>${escapeHtml(t('pages.social.provider', 'Provider'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${signals.map(s => `<tr><td><strong>${escapeHtml(s.ticker)}</strong></td><td><span class="badge badge-${safeClassToken(s.direction)}">${escapeHtml(t(`trading.${s.direction}`, s.direction))}</span></td><td>$${formatNum(s.entry_price)}</td><td>${Math.round(Number(s.confidence || 0) * 100)}%</td><td>${escapeHtml(s.username || '--')}</td><td><div class="admin-actions"><button class="btn btn-sm btn-primary" onclick="subscribeSocialSignal('${escapeJsSingle(s.signal_id)}')">${escapeHtml(t('actions.subscribe', 'Subscribe'))}</button><button class="btn btn-sm btn-secondary" onclick="followSignalUser('${escapeJsSingle(s.username || '')}')">${escapeHtml(t('actions.follow', 'Follow'))}</button></div></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderSocialSubscriptions(subs) {
+    const el = document.getElementById('social-subscriptions');
+    if (!el) return;
+    if (!subs.length) {
+        el.innerHTML = `<div class="empty-state">${escapeHtml(t('pages.social.no_subscriptions', 'No signal subscriptions'))}</div>`;
+        return;
+    }
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('pages.social.signal', 'Signal'))}</th><th>${escapeHtml(t('pages.social.auto_execute', 'Auto Execute'))}</th><th>${escapeHtml(t('pages.social.max_position', 'Max Position'))}</th><th>${escapeHtml(t('pages.social.subscribed', 'Subscribed'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${subs.map(s => `<tr><td><code>${escapeHtml(s.signal_id)}</code></td><td>${s.auto_execute ? t('common.yes', 'Yes') : t('common.no', 'No')}</td><td>${formatNum(s.max_position_pct)}%</td><td>${escapeHtml(formatDateTime(s.subscribed_at))}</td><td><button class="btn btn-sm btn-danger" onclick="unsubscribeSocialSignal('${escapeJsSingle(s.signal_id)}')">${escapeHtml(t('actions.unsubscribe', 'Unsubscribe'))}</button></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderSocialLeaderboard(rows) {
+    const el = document.getElementById('social-leaderboard');
+    if (!el) return;
+    if (!rows.length) {
+        el.innerHTML = `<div class="empty-state">${escapeHtml(t('pages.social.no_leaderboard', 'No leaderboard data'))}</div>`;
+        return;
+    }
+    el.innerHTML = rows.map((r, idx) => `<div class="metric-item"><span class="metric-label">#${idx + 1} ${escapeHtml(r.username || '--')} · ${escapeHtml(r.ticker || '--')}</span><span class="metric-value">${formatNum(r.success_rate || 0)}%</span></div>`).join('');
+}
+
+async function subscribeSocialSignal(signalId) {
+    try {
+        await fetchAPI(`/api/social/subscribe/${encodeURIComponent(signalId)}`, {
+            method: 'POST',
+            body: JSON.stringify({ signal_id: signalId, auto_execute: false, max_position_pct: 10 }),
+        });
+        showToast('Signal subscribed.', 'success', 'Subscribed');
+        await loadSocialPage();
+    } catch (err) {
+        showToast(err.message, 'error', 'Subscribe Failed');
+    }
+}
+
+async function unsubscribeSocialSignal(signalId) {
+    try {
+        await fetchAPI(`/api/social/unsubscribe/${encodeURIComponent(signalId)}`, { method: 'DELETE' });
+        showToast('Signal subscription removed.', 'warning', 'Unsubscribed');
+        await loadSocialPage();
+    } catch (err) {
+        showToast(err.message, 'error', 'Unsubscribe Failed');
+    }
+}
+
+async function followSignalUser(username) {
+    if (!username) return;
+    try {
+        await fetchAPI(`/api/social/follow/${encodeURIComponent(username)}`);
+        showToast(`Following ${username}.`, 'success', 'Following');
+    } catch (err) {
+        showToast(err.message, 'error', 'Follow Failed');
+    }
+}
+
+// ─── Strategy Editor ───
+async function loadStrategyEditorPage() {
+    try {
+        const [templates, strategies] = await Promise.all([
+            fetchAPI('/api/strategy-editor/templates'),
+            fetchAPI('/api/strategy-editor/list'),
+        ]);
+        renderStrategyTemplates(templates.templates || []);
+        renderEditorStrategies(strategies.strategies || []);
+    } catch (err) {
+        showToast(err.message, 'error', 'Editor Load Failed');
+    }
+}
+
+function renderStrategyTemplates(templates) {
+    const el = document.getElementById('strategy-template-list');
+    if (!el) return;
+    _strategyTemplates = templates;
+    if (!templates.length) {
+        el.innerHTML = `<div class="empty-state">${escapeHtml(t('pages.editor.no_templates', 'No templates available'))}</div>`;
+        return;
+    }
+    el.innerHTML = templates.map(item => `<div class="template-card"><div><strong>${escapeHtml(item.name)}</strong><span class="hint">${escapeHtml(item.category)} · ${escapeHtml(item.description)}</span></div><button class="btn btn-sm btn-secondary" onclick="useStrategyTemplateById('${escapeJsSingle(item.id || item.name)}')">${escapeHtml(t('actions.use', 'Use'))}</button></div>`).join('');
+}
+
+function useStrategyTemplateById(templateId) {
+    const template = _strategyTemplates.find(t => (t.id || t.name) === templateId);
+    if (template) useStrategyTemplate(template);
+}
+
+function useStrategyTemplate(template) {
+    const config = template.config || {};
+    setFieldValue('editor-strategy-id', '');
+    setFieldValue('editor-name', template.name || 'Custom Strategy');
+    setFieldValue('editor-entry-json', JSON.stringify(config.entry_conditions || [], null, 2));
+    setFieldValue('editor-exit-json', JSON.stringify(config.exit_conditions || [], null, 2));
+    setFieldValue('editor-risk-json', JSON.stringify(config.risk_management || {}, null, 2));
+    setFieldValue('editor-tp-json', JSON.stringify(config.tp_levels || [], null, 2));
+    setFieldValue('editor-trailing-json', JSON.stringify(config.trailing_stop || {}, null, 2));
+}
+
+function resetStrategyEditorForm() {
+    setFieldValue('editor-strategy-id', '');
+    setFieldValue('editor-name', 'My Strategy');
+    setFieldValue('editor-ticker', 'BTCUSDT');
+    setFieldValue('editor-direction', 'long');
+    setFieldValue('editor-entry-json', '[]');
+    setFieldValue('editor-exit-json', '[]');
+    setFieldValue('editor-risk-json', '{}');
+    setFieldValue('editor-tp-json', '[]');
+    setFieldValue('editor-trailing-json', '{}');
+}
+
+async function saveEditorStrategy() {
+    let payload;
+    try {
+        payload = {
+            strategy_id: document.getElementById('editor-strategy-id')?.value || '',
+            name: document.getElementById('editor-name')?.value || 'My Strategy',
+            ticker: (document.getElementById('editor-ticker')?.value || 'BTCUSDT').trim().toUpperCase(),
+            direction: document.getElementById('editor-direction')?.value || 'long',
+            entry_conditions: JSON.parse(document.getElementById('editor-entry-json')?.value || '[]'),
+            exit_conditions: JSON.parse(document.getElementById('editor-exit-json')?.value || '[]'),
+            risk_management: JSON.parse(document.getElementById('editor-risk-json')?.value || '{}'),
+            tp_levels: JSON.parse(document.getElementById('editor-tp-json')?.value || '[]'),
+            trailing_stop: JSON.parse(document.getElementById('editor-trailing-json')?.value || '{}'),
+        };
+    } catch (err) {
+        showToast('One of the JSON fields is invalid.', 'warning', 'Invalid JSON');
+        return;
+    }
+    try {
+        const existingId = payload.strategy_id;
+        const endpoint = existingId ? `/api/strategy-editor/${encodeURIComponent(existingId)}` : '/api/strategy-editor/create';
+        const method = existingId ? 'PUT' : 'POST';
+        const result = await fetchAPI(endpoint, { method, body: JSON.stringify(payload) });
+        setFieldValue('editor-strategy-id', result.strategy_id || existingId);
+        showToast('Strategy saved.', 'success', 'Saved');
+        await loadStrategyEditorPage();
+    } catch (err) {
+        showToast(err.message, 'error', 'Save Failed');
+    }
+}
+
+function renderEditorStrategies(strategies) {
+    const el = document.getElementById('editor-strategy-list');
+    if (!el) return;
+    if (!strategies.length) {
+        el.innerHTML = `<div class="empty-state">${escapeHtml(t('pages.editor.no_saved_strategies', 'No saved custom strategies'))}</div>`;
+        return;
+    }
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('common.name', 'Name'))}</th><th>${escapeHtml(t('common.ticker', 'Ticker'))}</th><th>${escapeHtml(t('common.direction', 'Direction'))}</th><th>${escapeHtml(t('common.status', 'Status'))}</th><th>${escapeHtml(t('messages.updated', 'Updated'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${strategies.map(s => `<tr><td><strong>${escapeHtml(s.name || '--')}</strong></td><td>${escapeHtml(s.ticker || '--')}</td><td><span class="badge badge-${safeClassToken(s.direction || 'long')}">${escapeHtml(t(`trading.${s.direction || 'long'}`, s.direction || '--'))}</span></td><td><span class="badge badge-${s.is_active ? 'active' : 'pending'}">${s.is_active ? t('common.active', 'active') : t('common.draft', 'draft')}</span></td><td>${escapeHtml(formatDateTime(s.updated_at))}</td><td><div class="admin-actions"><button class="btn btn-sm btn-secondary" onclick="editStrategyDraft('${escapeJsSingle(s.strategy_id)}')">${escapeHtml(t('actions.edit', 'Edit'))}</button><button class="btn btn-sm btn-primary" onclick="toggleEditorStrategy('${escapeJsSingle(s.strategy_id)}', ${s.is_active ? 'false' : 'true'})">${escapeHtml(s.is_active ? t('actions.deactivate', 'Deactivate') : t('actions.activate', 'Activate'))}</button><button class="btn btn-sm btn-danger" onclick="deleteEditorStrategy('${escapeJsSingle(s.strategy_id)}')">${escapeHtml(t('actions.delete', 'Delete'))}</button></div></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+async function editStrategyDraft(strategyId) {
+    try {
+        const s = await fetchAPI(`/api/strategy-editor/${encodeURIComponent(strategyId)}`);
+        setFieldValue('editor-strategy-id', s.strategy_id || strategyId);
+        setFieldValue('editor-name', s.name || '');
+        setFieldValue('editor-ticker', s.ticker || 'BTCUSDT');
+        setFieldValue('editor-direction', s.direction || 'long');
+        setFieldValue('editor-entry-json', JSON.stringify(s.entry_conditions || [], null, 2));
+        setFieldValue('editor-exit-json', JSON.stringify(s.exit_conditions || [], null, 2));
+        setFieldValue('editor-risk-json', JSON.stringify(s.risk_management || {}, null, 2));
+        setFieldValue('editor-tp-json', JSON.stringify(s.tp_levels || [], null, 2));
+        setFieldValue('editor-trailing-json', JSON.stringify(s.trailing_stop || {}, null, 2));
+    } catch (err) {
+        showToast(err.message, 'error', 'Load Failed');
+    }
+}
+
+async function toggleEditorStrategy(strategyId, activate) {
+    try {
+        await fetchAPI(`/api/strategy-editor/${encodeURIComponent(strategyId)}/${activate ? 'activate' : 'deactivate'}`, { method: 'POST' });
+        showToast(activate ? 'Strategy activated.' : 'Strategy deactivated.', 'success', 'Updated');
+        await loadStrategyEditorPage();
+    } catch (err) {
+        showToast(err.message, 'error', 'Update Failed');
+    }
+}
+
+async function deleteEditorStrategy(strategyId) {
+    if (!confirm('Delete this strategy?')) return;
+    try {
+        await fetchAPI(`/api/strategy-editor/${encodeURIComponent(strategyId)}`, { method: 'DELETE' });
+        showToast('Strategy deleted.', 'warning', 'Deleted');
+        await loadStrategyEditorPage();
+    } catch (err) {
+        showToast(err.message, 'error', 'Delete Failed');
     }
 }

@@ -22,7 +22,7 @@
 
 | Component | Minimum Version | Notes |
 |-----------|-----------------|-------|
-| Python | **3.10+** | Required for `X\|Y` union type syntax |
+| Python | **3.10+ 64-bit** | Python 3.12 64-bit is recommended; avoid 32-bit Windows Python because exchange dependencies such as `ccxt` may fail to build |
 | pip | 21.0+ | - |
 | Docker | 24.0+ | Docker deployment only |
 | Docker Compose | 2.20+ | Docker deployment only |
@@ -106,7 +106,14 @@ curl http://localhost:8000/health
 
 Open browser at `http://localhost:8000`, login with default account:
 - Username: `admin`
-- Password: `123456` (change immediately after first login!)
+- Password: if `DEFAULT_ADMIN_PASSWORD` is blank, read `data/bootstrap_admin_password.txt`; otherwise use the value you set in `.env`.
+
+Change the admin password immediately after first login. The bootstrap password file is only created
+when the first admin account is seeded and no `DEFAULT_ADMIN_PASSWORD` was supplied.
+For Docker deployments, read it with:
+```bash
+docker compose exec signal-server cat /app/data/bootstrap_admin_password.txt
+```
 
 ---
 
@@ -295,6 +302,10 @@ server {
 | `WEBHOOK_SECRET` | TradingView webhook password | Custom string |
 | `DATABASE_URL` | Database connection string | See below |
 
+`DEFAULT_ADMIN_PASSWORD` is optional. Leave it blank for a random first-deployment bootstrap password
+written to `data/bootstrap_admin_password.txt`, or set a strong password yourself before the first
+startup.
+
 ### 5.2 Database Configuration
 
 ```bash
@@ -439,7 +450,7 @@ Verify each item before production deployment:
 
 - [ ] `JWT_SECRET` uses at least 32-byte random value (`openssl rand -hex 32`)
 - [ ] `WEBHOOK_SECRET` is set and matches TradingView alert configuration
-- [ ] `DEFAULT_ADMIN_PASSWORD` changed (or change immediately after first login)
+- [ ] Bootstrap admin password from `data/bootstrap_admin_password.txt` has been changed, or `DEFAULT_ADMIN_PASSWORD` was set to a strong unique value before first startup
 - [ ] `LIVE_TRADING=false` (unless confirmed for live trading, explicitly set `true`)
 - [ ] PostgreSQL password not using default `signal`
 - [ ] Port `8000` not exposed to public, access via Nginx/reverse proxy
@@ -531,7 +542,7 @@ QuantPilot-AI/
 ├── backtest/
 │   ├── engine.py              # Backtest engine
 │   ├── strategies.py          # Strategy implementations
-│   └ metrics.py              # Performance metrics calculator
+│   └── metrics.py             # Performance metrics calculator
 ├── services/
 │   ├── signal_processor.py    # Signal processing pipeline
 │   └── order_reconciler.py    # Order audit/reconciliation

@@ -107,6 +107,63 @@ class TestPlanEndpoints:
         assert isinstance(data, list)
 
 
+class TestI18nEndpoints:
+    """Tests for public and authenticated translation endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_public_translations_available_without_auth(self, client: AsyncClient):
+        response = await client.get("/api/i18n/public/translations/zh")
+        assert response.status_code == 200
+        data = response.json()["translations"]
+        assert data["nav"]["charts"] == "图表"
+        assert data["nav"]["strategy_editor"] == "编辑器"
+        assert data["pages"]["editor"]["strategy_draft"] == "策略草稿"
+
+    @pytest.mark.asyncio
+    async def test_private_translations_still_require_auth(self, client: AsyncClient):
+        response = await client.get("/api/i18n/translations/zh")
+        assert response.status_code == 401
+
+
+class TestOfflineTradeSync:
+    """Tests for PWA offline trade sync endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_sync_offline_trade_requires_auth(self, client: AsyncClient):
+        response = await client.post("/api/user/trades/sync", json={
+            "ticker": "BTCUSDT",
+            "direction": "manual",
+        })
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_sync_offline_trade_records_current_user(self, client: AsyncClient, test_user_data):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+
+        response = await client.post(
+            "/api/user/trades/sync",
+            headers={"X-PWA-Sync": "1"},
+            json={
+                "id": "offline-1",
+                "ticker": "btcusdt",
+                "direction": "long",
+                "entry_price": 50000,
+                "quantity": 0.01,
+                "pnl_pct": 1.5,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "synced", "id": "offline-1"}
+
+        trades = await client.get("/api/trades")
+        assert trades.status_code == 200
+        data = trades.json()
+        assert data[0]["id"] == "offline-1"
+        assert data[0]["ticker"] == "BTCUSDT"
+        assert data[0]["order_status"] == "offline_synced"
+
+
 class TestWebhookEndpoint:
     """Tests for webhook endpoint."""
 

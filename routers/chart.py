@@ -1,8 +1,9 @@
 """
-Chart Router - TradingView Lightweight Charts Integration.
-Provides K-line/candlestick charts with real-time updates.
+Chart Router - dashboard chart data endpoints.
+Provides OHLCV, realtime price, indicators, and marker data for the frontend.
 """
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -68,6 +69,8 @@ async def get_chart_ohlcv(
             "data": chart_data,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Chart] Failed to get OHLCV: {e}")
         raise HTTPException(500, f"Chart data error: {str(e)}")
@@ -138,7 +141,7 @@ async def get_position_markers(
         from core.database import db_manager, PositionModel
         from sqlalchemy import select
 
-        user_id = user.get("id")
+        user_id = user.get("sub") or user.get("id")
 
         async with db_manager.async_session_factory() as session:
             result = await session.execute(
@@ -182,7 +185,7 @@ async def get_signal_markers(
         from sqlalchemy import select
         from datetime import timedelta
 
-        user_id = user.get("id")
+        user_id = user.get("sub") or user.get("id")
         since = datetime.now(timezone.utc) - timedelta(days=days)
 
         async with db_manager.async_session_factory() as session:
@@ -199,7 +202,10 @@ async def get_signal_markers(
 
             markers = []
             for event in events:
-                payload = event.payload_json or {}
+                try:
+                    payload = json.loads(event.payload_json or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
                 price = payload.get("price", 0)
 
                 markers.append({

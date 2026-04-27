@@ -1,6 +1,10 @@
 """
 Security tests.
 """
+import shutil
+import uuid
+from pathlib import Path
+
 import pytest
 
 from core.security import (
@@ -11,6 +15,10 @@ from core.security import (
     decrypt_value,
     generate_token,
     webhook_secret_hash,
+)
+from core.database import (
+    _generate_bootstrap_admin_password,
+    _load_or_create_bootstrap_admin_password,
 )
 
 
@@ -151,3 +159,28 @@ class TestTokenGeneration:
         """Test hashing empty secret."""
         assert webhook_secret_hash("") == ""
         assert webhook_secret_hash(None) == ""
+
+
+class TestBootstrapAdminPassword:
+    """Tests for first-deployment admin bootstrap password handling."""
+
+    def test_generated_bootstrap_password_is_strong_shape(self):
+        password = _generate_bootstrap_admin_password()
+        assert len(password) >= 28
+        assert any(ch.islower() for ch in password)
+        assert any(ch.isupper() for ch in password)
+        assert any(ch.isdigit() for ch in password)
+        assert any(ch in "!@#$%^&*_-+=" for ch in password)
+
+    def test_bootstrap_password_file_is_reused(self):
+        root = Path(".test_tmp") / f"bootstrap-{uuid.uuid4().hex}"
+        path = root / "data" / "bootstrap_admin_password.txt"
+        try:
+            first, first_path = _load_or_create_bootstrap_admin_password("admin", path)
+            second, second_path = _load_or_create_bootstrap_admin_password("admin", path)
+
+            assert first == second
+            assert first_path == second_path == path
+            assert "password=" in path.read_text(encoding="utf-8")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)

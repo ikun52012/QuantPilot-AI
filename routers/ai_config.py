@@ -31,7 +31,7 @@ def _parse_model_id(model_id: str) -> tuple[str, str]:
         parts = model_id.split(":", 1)
         return parts[0].strip(), parts[1].strip() if len(parts) > 1 else ""
 
-    legacy_providers = {"openai", "anthropic", "deepseek", "openrouter", "custom"}
+    legacy_providers = {"openai", "anthropic", "deepseek", "openrouter", "custom", "mistral"}
     if model_id in legacy_providers:
         return model_id, ""
 
@@ -68,6 +68,8 @@ class ProviderConfigRequest(BaseModel):
     anthropic_model: Optional[str] = None
     deepseek_api_key: Optional[str] = None
     deepseek_model: Optional[str] = None
+    mistral_api_key: Optional[str] = None
+    mistral_model: Optional[str] = None
     openrouter_enabled: Optional[bool] = None
     openrouter_api_key: Optional[str] = None
     openrouter_model: Optional[str] = None
@@ -160,7 +162,7 @@ async def update_voting_config(
 
         provider, model_name = _parse_model_id(model_id)
 
-        valid_providers = ["openai", "anthropic", "deepseek", "openrouter", "custom"]
+        valid_providers = ["openai", "anthropic", "deepseek", "openrouter", "custom", "mistral"]
         if provider in valid_providers:
             normalized_id = f"{provider}/{model_name}" if model_name else provider
             valid_models.append(normalized_id)
@@ -239,6 +241,11 @@ async def get_provider_config(
                 "model": settings.ai.deepseek_model,
                 "available_models": settings.ai.available_models.get("deepseek", []),
             },
+            "mistral": {
+                "enabled": bool(settings.ai.mistral_api_key),
+                "model": settings.ai.mistral_model,
+                "available_models": settings.ai.available_models.get("mistral", []),
+            },
             "openrouter": {
                 "enabled": settings.ai.openrouter_enabled and bool(settings.ai.openrouter_api_key),
                 "model": settings.ai.openrouter_model,
@@ -282,7 +289,7 @@ async def update_provider_config(
     """
     # Update settings
     if req.provider:
-        if req.provider not in ["openai", "anthropic", "deepseek", "openrouter", "custom"]:
+        if req.provider not in ["openai", "anthropic", "deepseek", "openrouter", "custom", "mistral"]:
             raise HTTPException(400, "Invalid provider")
         settings.ai.provider = req.provider
         await set_admin_setting(db, "ai_provider", req.provider)
@@ -308,6 +315,14 @@ async def update_provider_config(
     if req.deepseek_model:
         settings.ai.deepseek_model = req.deepseek_model
         await set_admin_setting(db, "deepseek_model", req.deepseek_model)
+
+    # Mistral
+    if req.mistral_api_key:
+        settings.ai.mistral_api_key = req.mistral_api_key
+        await set_admin_setting(db, "mistral_api_key", req.mistral_api_key)
+    if req.mistral_model:
+        settings.ai.mistral_model = req.mistral_model
+        await set_admin_setting(db, "mistral_model", req.mistral_model)
 
     # OpenRouter
     if req.openrouter_enabled is not None:

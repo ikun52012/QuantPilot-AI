@@ -46,11 +46,20 @@
             <a href="#" class="nav-item" data-page="analytics" id="nav-analytics">
                 <i class="ri-pie-chart-2-line" aria-hidden="true"></i><span data-i18n="nav.analytics" data-i18n-fallback="Analytics">Analytics</span>
             </a>
+            <a href="#" class="nav-item" data-page="charts" id="nav-charts">
+                <i class="ri-line-chart-line" aria-hidden="true"></i><span data-i18n="nav.charts" data-i18n-fallback="Charts">Charts</span>
+            </a>
+            <a href="#" class="nav-item user-only" data-page="social" id="nav-social">
+                <i class="ri-broadcast-line" aria-hidden="true"></i><span data-i18n="nav.social" data-i18n-fallback="Signals">Signals</span>
+            </a>
             <a href="#" class="nav-item admin-only" data-page="backtest" id="nav-backtest">
                 <i class="ri-test-tube-line" aria-hidden="true"></i><span data-i18n="nav.backtest" data-i18n-fallback="Backtest">Backtest</span>
             </a>
             <a href="#" class="nav-item user-only" data-page="strategies" id="nav-strategies">
                 <i class="ri-node-tree" aria-hidden="true"></i><span data-i18n="nav.strategies" data-i18n-fallback="Strategies">Strategies</span>
+            </a>
+            <a href="#" class="nav-item user-only" data-page="strategy-editor" id="nav-strategy-editor">
+                <i class="ri-flow-chart" aria-hidden="true"></i><span data-i18n="nav.strategy_editor" data-i18n-fallback="Editor">Editor</span>
             </a>
             <a href="#" class="nav-item" data-page="subscription" id="nav-subscription">
                 <i class="ri-vip-crown-line" aria-hidden="true"></i><span data-i18n="nav.subscription" data-i18n-fallback="Subscription">Subscription</span>
@@ -1581,6 +1590,165 @@
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Page: Charts -->
+        <div class="page" id="page-charts">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker" data-i18n="pages.charts.kicker" data-i18n-fallback="Market Workspace">Market Workspace</span>
+                    <h2 data-i18n="nav.charts" data-i18n-fallback="Charts">Charts</h2>
+                    <p data-i18n="pages.charts.description" data-i18n-fallback="Live market context, historical OHLCV, indicators, open positions, and executed signal markers.">Live market context, historical OHLCV, indicators, open positions, and executed signal markers.</p>
+                </div>
+            </section>
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="ri-line-chart-line"></i> <span data-i18n="pages.charts.market_chart" data-i18n-fallback="Market Chart">Market Chart</span></h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadChartPage()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div class="strategy-config">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="chart-ticker" data-i18n="common.ticker" data-i18n-fallback="Ticker">Ticker</label>
+                            <input type="text" id="chart-ticker" class="text-input" value="BTCUSDT">
+                        </div>
+                        <div class="form-group">
+                            <label for="chart-timeframe" data-i18n="common.timeframe" data-i18n-fallback="Timeframe">Timeframe</label>
+                            <select id="chart-timeframe" class="select-input">
+                                <option value="1m">1m</option>
+                                <option value="5m">5m</option>
+                                <option value="15m">15m</option>
+                                <option value="1h" selected>1h</option>
+                                <option value="4h">4h</option>
+                                <option value="1d">1d</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="chart-days" data-i18n="common.days" data-i18n-fallback="Days">Days</label>
+                            <input type="number" id="chart-days" class="text-input" value="30" min="1" max="365">
+                        </div>
+                        <div class="form-group" style="display:flex;align-items:flex-end">
+                            <button class="btn btn-primary" onclick="loadChartPage()"><i class="ri-search-line"></i> <span data-i18n="actions.load" data-i18n-fallback="Load">Load</span></button>
+                        </div>
+                    </div>
+                </div>
+                <div class="kpi-grid" style="padding:0 20px 20px">
+                    <div class="kpi-card"><div class="kpi-icon green"><i class="ri-money-dollar-circle-line"></i></div><div class="kpi-content"><span class="kpi-label" data-i18n="common.price" data-i18n-fallback="Price">Price</span><span class="kpi-value" id="chart-price">--</span></div></div>
+                    <div class="kpi-card"><div class="kpi-icon blue"><i class="ri-exchange-line"></i></div><div class="kpi-content"><span class="kpi-label" data-i18n="pages.charts.change_24h" data-i18n-fallback="24h Change">24h Change</span><span class="kpi-value" id="chart-change">--</span></div></div>
+                    <div class="kpi-card"><div class="kpi-icon purple"><i class="ri-pulse-line"></i></div><div class="kpi-content"><span class="kpi-label">RSI</span><span class="kpi-value" id="chart-rsi">--</span></div></div>
+                    <div class="kpi-card"><div class="kpi-icon orange"><i class="ri-bar-chart-line"></i></div><div class="kpi-content"><span class="kpi-label" data-i18n="pages.charts.volume_24h" data-i18n-fallback="Volume 24h">Volume 24h</span><span class="kpi-value" id="chart-volume">--</span></div></div>
+                </div>
+                <div class="chart-container" style="height:360px;padding:0 20px 20px">
+                    <canvas id="market-chart"></canvas>
+                </div>
+            </div>
+            <div class="charts-row two-col mt-4">
+                <div class="card">
+                    <div class="card-header"><h3><i class="ri-map-pin-line"></i> <span data-i18n="pages.charts.position_markers" data-i18n-fallback="Position Markers">Position Markers</span></h3></div>
+                    <div id="chart-positions" style="padding:20px" data-i18n="messages.loading" data-i18n-fallback="Loading...">Loading...</div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3><i class="ri-flashlight-line"></i> <span data-i18n="pages.charts.signal_markers" data-i18n-fallback="Signal Markers">Signal Markers</span></h3></div>
+                    <div id="chart-signals" style="padding:20px" data-i18n="messages.loading" data-i18n-fallback="Loading...">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Page: Social Signals -->
+        <div class="page" id="page-social">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker" data-i18n="pages.social.kicker" data-i18n-fallback="Community Desk">Community Desk</span>
+                    <h2 data-i18n="nav.social" data-i18n-fallback="Signals">Signals</h2>
+                    <p data-i18n="pages.social.description" data-i18n-fallback="Share trade ideas, follow providers, subscribe to signals, and review community activity.">Share trade ideas, follow providers, subscribe to signals, and review community activity.</p>
+                </div>
+            </section>
+            <div class="kpi-grid">
+                <div class="kpi-card"><div class="kpi-icon blue"><i class="ri-broadcast-line"></i></div><div class="kpi-content"><span class="kpi-label" data-i18n="pages.social.shared_signals" data-i18n-fallback="Shared Signals">Shared Signals</span><span class="kpi-value" id="social-total-signals">0</span></div></div>
+                <div class="kpi-card"><div class="kpi-icon green"><i class="ri-notification-badge-line"></i></div><div class="kpi-content"><span class="kpi-label" data-i18n="pages.social.subscriptions" data-i18n-fallback="Subscriptions">Subscriptions</span><span class="kpi-value" id="social-total-subs">0</span></div></div>
+                <div class="kpi-card"><div class="kpi-icon purple"><i class="ri-team-line"></i></div><div class="kpi-content"><span class="kpi-label" data-i18n="pages.social.active_providers" data-i18n-fallback="Active Providers">Active Providers</span><span class="kpi-value" id="social-active-users">0</span></div></div>
+                <div class="kpi-card"><div class="kpi-icon orange"><i class="ri-fire-line"></i></div><div class="kpi-content"><span class="kpi-label" data-i18n="pages.social.top_ticker" data-i18n-fallback="Top Ticker">Top Ticker</span><span class="kpi-value" id="social-top-ticker">--</span></div></div>
+            </div>
+            <div class="charts-row two-col mt-4">
+                <div class="card">
+                    <div class="card-header"><h3><i class="ri-share-forward-line"></i> <span data-i18n="pages.social.share_signal" data-i18n-fallback="Share Signal">Share Signal</span></h3></div>
+                    <div class="settings-form">
+                        <div class="form-row three-col">
+                            <div class="form-group"><label for="social-ticker" data-i18n="common.ticker" data-i18n-fallback="Ticker">Ticker</label><input id="social-ticker" class="text-input" value="BTCUSDT"></div>
+                            <div class="form-group"><label for="social-direction" data-i18n="common.direction" data-i18n-fallback="Direction">Direction</label><select id="social-direction" class="select-input"><option value="long" data-i18n="trading.long" data-i18n-fallback="Long">Long</option><option value="short" data-i18n="trading.short" data-i18n-fallback="Short">Short</option></select></div>
+                            <div class="form-group"><label for="social-confidence" data-i18n="common.confidence" data-i18n-fallback="Confidence">Confidence</label><input id="social-confidence" class="text-input" type="number" value="0.7" min="0" max="1" step="0.05"></div>
+                        </div>
+                        <div class="form-row three-col">
+                            <div class="form-group"><label for="social-entry" data-i18n="trading.entry" data-i18n-fallback="Entry">Entry</label><input id="social-entry" class="text-input" type="number" value="0" step="0.01"></div>
+                            <div class="form-group"><label for="social-sl" data-i18n="trading.stop_loss" data-i18n-fallback="Stop Loss">Stop Loss</label><input id="social-sl" class="text-input" type="number" value="0" step="0.01"></div>
+                            <div class="form-group"><label for="social-tp" data-i18n="trading.take_profit" data-i18n-fallback="Take Profit">Take Profit</label><input id="social-tp" class="text-input" type="number" value="0" step="0.01"></div>
+                        </div>
+                        <div class="form-group"><label for="social-reason" data-i18n="common.reason" data-i18n-fallback="Reason">Reason</label><textarea id="social-reason" class="text-input" rows="3"></textarea></div>
+                        <button class="btn btn-primary" onclick="shareSocialSignal()"><i class="ri-send-plane-line"></i> <span data-i18n="actions.share" data-i18n-fallback="Share">Share</span></button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3><i class="ri-trophy-line"></i> <span data-i18n="pages.social.leaderboard" data-i18n-fallback="Leaderboard">Leaderboard</span></h3></div>
+                    <div id="social-leaderboard" style="padding:20px" data-i18n="messages.loading" data-i18n-fallback="Loading...">Loading...</div>
+                </div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-rss-line"></i> <span data-i18n="pages.social.signal_feed" data-i18n-fallback="Signal Feed">Signal Feed</span></h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadSocialPage()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div id="social-feed" style="padding:20px" data-i18n="messages.loading" data-i18n-fallback="Loading...">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-notification-line"></i> <span data-i18n="pages.social.my_subscriptions" data-i18n-fallback="My Signal Subscriptions">My Signal Subscriptions</span></h3></div>
+                <div id="social-subscriptions" style="padding:20px" data-i18n="messages.loading" data-i18n-fallback="Loading...">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Page: Strategy Editor -->
+        <div class="page" id="page-strategy-editor">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker" data-i18n="pages.editor.kicker" data-i18n-fallback="Strategy Builder">Strategy Builder</span>
+                    <h2 data-i18n="nav.strategy_editor" data-i18n-fallback="Editor">Editor</h2>
+                    <p data-i18n="pages.editor.description" data-i18n-fallback="Create reusable custom strategies from templates, conditions, risk settings, and exit rules.">Create reusable custom strategies from templates, conditions, risk settings, and exit rules.</p>
+                </div>
+            </section>
+            <div class="charts-row two-col">
+                <div class="card">
+                    <div class="card-header"><h3><i class="ri-layout-grid-line"></i> <span data-i18n="pages.editor.templates" data-i18n-fallback="Templates">Templates</span></h3></div>
+                    <div id="strategy-template-list" style="padding:20px" data-i18n="messages.loading" data-i18n-fallback="Loading...">Loading...</div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3><i class="ri-edit-box-line"></i> <span data-i18n="pages.editor.strategy_draft" data-i18n-fallback="Strategy Draft">Strategy Draft</span></h3></div>
+                    <div class="settings-form">
+                        <input type="hidden" id="editor-strategy-id">
+                        <div class="form-row three-col">
+                            <div class="form-group"><label for="editor-name" data-i18n="common.name" data-i18n-fallback="Name">Name</label><input id="editor-name" class="text-input" value="My Strategy"></div>
+                            <div class="form-group"><label for="editor-ticker" data-i18n="common.ticker" data-i18n-fallback="Ticker">Ticker</label><input id="editor-ticker" class="text-input" value="BTCUSDT"></div>
+                            <div class="form-group"><label for="editor-direction" data-i18n="common.direction" data-i18n-fallback="Direction">Direction</label><select id="editor-direction" class="select-input"><option value="long" data-i18n="trading.long" data-i18n-fallback="Long">Long</option><option value="short" data-i18n="trading.short" data-i18n-fallback="Short">Short</option></select></div>
+                        </div>
+                        <div class="form-group"><label for="editor-entry-json" data-i18n="pages.editor.entry_json" data-i18n-fallback="Entry Conditions JSON">Entry Conditions JSON</label><textarea id="editor-entry-json" class="text-input code-input" rows="4">[]</textarea></div>
+                        <div class="form-group"><label for="editor-exit-json" data-i18n="pages.editor.exit_json" data-i18n-fallback="Exit Conditions JSON">Exit Conditions JSON</label><textarea id="editor-exit-json" class="text-input code-input" rows="4">[]</textarea></div>
+                        <div class="form-row three-col">
+                            <div class="form-group"><label for="editor-risk-json" data-i18n="pages.editor.risk_json" data-i18n-fallback="Risk JSON">Risk JSON</label><textarea id="editor-risk-json" class="text-input code-input" rows="4">{}</textarea></div>
+                            <div class="form-group"><label for="editor-tp-json" data-i18n="pages.editor.tp_json" data-i18n-fallback="TP Levels JSON">TP Levels JSON</label><textarea id="editor-tp-json" class="text-input code-input" rows="4">[]</textarea></div>
+                            <div class="form-group"><label for="editor-trailing-json" data-i18n="pages.editor.trailing_json" data-i18n-fallback="Trailing Stop JSON">Trailing Stop JSON</label><textarea id="editor-trailing-json" class="text-input code-input" rows="4">{}</textarea></div>
+                        </div>
+                        <div class="form-row">
+                            <button class="btn btn-primary" onclick="saveEditorStrategy()"><i class="ri-save-line"></i> <span data-i18n="actions.save" data-i18n-fallback="Save">Save</span></button>
+                            <button class="btn btn-secondary" onclick="resetStrategyEditorForm()"><i class="ri-refresh-line"></i> <span data-i18n="actions.reset" data-i18n-fallback="Reset">Reset</span></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-folder-chart-line"></i> <span data-i18n="pages.editor.saved_strategies" data-i18n-fallback="Saved Strategies">Saved Strategies</span></h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadStrategyEditorPage()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div id="editor-strategy-list" style="padding:20px" data-i18n="messages.loading" data-i18n-fallback="Loading...">Loading...</div>
             </div>
         </div>
 

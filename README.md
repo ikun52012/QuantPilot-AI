@@ -62,33 +62,33 @@
   - 5 trailing stop modes: Moving, Breakeven-on-TP1, Step, Profit-%, Static.
 
 - **📈 K-line Charts (NEW)**
-  - TradingView Lightweight Charts integration.
+  - Chart.js dashboard chart backed by authenticated market-data APIs.
   - Multi-timeframe: 1m, 5m, 15m, 1h, 4h, 1d.
-  - Real-time price updates via WebSocket.
-  - Position markers on chart.
+  - REST refresh for OHLCV, realtime price, indicators, and marker data.
+  - Position and signal marker lists beside the chart.
 
-- **🎨 Strategy Visual Editor (NEW)**
-  - Drag-and-drop strategy parameter configuration.
-  - Visual TP/SL level placement.
-  - Real-time strategy preview.
-  - Export/Import strategy templates.
+- **🎨 Strategy JSON Editor (NEW)**
+  - Template-based custom strategy configuration.
+  - JSON editing for entry/exit conditions, risk, TP levels, and trailing stop.
+  - Save, edit, activate/deactivate, and delete strategies from the dashboard.
+  - Backend export/import endpoints for strategy templates.
 
 - **🌐 Social Signal Sharing (NEW)**
   - Share trading signals to community.
   - Subscribe to top performers.
   - Signal performance leaderboard.
-  - Privacy controls for sharing.
 
 - **📱 Mobile PWA Support (NEW)**
   - Progressive Web App for iOS/Android.
-  - Push notifications for trade alerts.
+  - Service worker cache and offline trade-history sync.
   - Offline mode for viewing history.
   - Responsive touch-friendly UI.
+  - Push event handlers are present; push subscription/delivery still requires a notification provider integration.
 
 - **🌍 Multi-language i18n (NEW)**
   - English, Chinese, Japanese, Korean, Spanish.
-  - Auto language detection.
-  - User language preference settings.
+  - Browser language detection and dashboard/public page language selector.
+  - Language preference stored in the browser; the user-language API reports the selected language but does not yet persist it to the user record.
 
 - **📱 Real-time Telegram Notifications**
   - Pipeline events broadcast to Telegram Bot.
@@ -203,7 +203,7 @@ graph LR
 ## 🚀 Quick Start Guide
 
 ### 1. Prerequisites
-- **Python 3.10+**
+- **Python 3.10+ 64-bit** (Python 3.12 64-bit is recommended for local installs; avoid 32-bit Windows Python because exchange dependencies such as `ccxt` may fail to build)
 - **Docker & Docker Compose** (Recommended)
 - TradingView account (Any tier)
 
@@ -245,23 +245,19 @@ docker-compose logs -f
 ### 4. Database Migration
 
 ```bash
-# Initialize migrations
-alembic init migrations
-
-# Create initial migration
-alembic revision --autogenerate -m "Initial schema"
-
-# Apply migrations
+# Apply the bundled migrations
 alembic upgrade head
 ```
 
 **Default Login**:
 ```
 Username: admin
-Password: 123456
+Password: read data/bootstrap_admin_password.txt if DEFAULT_ADMIN_PASSWORD is blank
 ```
 
-⚠️ Change `DEFAULT_ADMIN_PASSWORD` and `JWT_SECRET` immediately!
+On first deployment, leaving `DEFAULT_ADMIN_PASSWORD` blank creates a random bootstrap password in
+`data/bootstrap_admin_password.txt`. If you set `DEFAULT_ADMIN_PASSWORD` yourself, use that value.
+Change the admin password and set a strong `JWT_SECRET` immediately.
 
 ---
 
@@ -349,10 +345,9 @@ Supported languages:
 - 🇰🇷 한국어
 - 🇪🇸 Español
 
-Set language in `.env`:
-```
-DEFAULT_LANGUAGE=zh
-```
+Use the language selector on the public pages or dashboard. The frontend stores the selection in
+browser `localStorage` and loads translations from `/api/i18n/public/translations/{language}` before
+login, then from `/api/i18n/translations/{language}` after login.
 
 ---
 
@@ -361,14 +356,14 @@ DEFAULT_LANGUAGE=zh
 Access from mobile:
 1. Open `https://your-domain` in mobile browser
 2. Tap "Add to Home Screen"
-3. App installs as PWA with push notifications
+3. App installs as PWA with cached static assets and offline history sync
 
 ---
 
 ## 🛡️ Security Features
 
 - **HMAC Verification**: Production mode requires webhook signature
-- **JWT Secure Storage**: API keys stored in memory, not env vars
+- **JWT Session Cookies**: HTTP-only session cookies with CSRF protection
 - **Rate Limiting**: IP-based sliding window protection
 - **CSRF Tokens**: Double-submit cookie validation
 - **Encrypted Secrets**: AES-256 encryption for sensitive data

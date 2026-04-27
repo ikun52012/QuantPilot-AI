@@ -2090,6 +2090,37 @@ textarea:focus-visible {
     background: var(--accent-blue-bg);
 }
 
+.template-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.03);
+}
+
+.template-card + .template-card {
+    margin-top: 10px;
+}
+
+.template-card .hint {
+    display: block;
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.code-input {
+    min-height: 96px;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
 #admin-users,
 #admin-payment-addresses,
 #admin-registration,
