@@ -330,6 +330,7 @@ function switchPage(page) {
         loadStrategiesOverview();
         loadDCAList();
         loadGridList();
+        loadStrategyHistory();
     }
     if (page === 'strategy-editor') loadStrategyEditorPage();
 }
@@ -2440,7 +2441,7 @@ async function refreshAll() {
     else if (p==='user') await loadUserPortal(); else if (p==='history') await loadHistory(); else if (p==='analytics') await loadAnalytics();
     else if (p==='charts') await loadChartPage(); else if (p==='social') await loadSocialPage(); else if (p==='strategy-editor') await loadStrategyEditorPage();
     else if (p==='subscription') await loadSubscription(); else if (p==='admin') await loadAdmin();
-    else if (p==='strategies') { await loadStrategiesOverview(); await loadDCAList(); await loadGridList(); }
+    else if (p==='strategies') { await loadStrategiesOverview(); await loadDCAList(); await loadGridList(); await loadStrategyHistory(); }
 }
 
 function toggleVotingFields() {
@@ -2952,6 +2953,273 @@ async function stopStrategyMonitor() {
     } catch (err) {
         showToast(err.message, 'error', 'Monitor Failed');
     }
+}
+
+async function loadStrategyHistory() {
+    try {
+        const type = document.getElementById('strategy-history-type')?.value || 'all';
+        const status = document.getElementById('strategy-history-status')?.value || 'all';
+        const result = await fetchAPI(`/api/strategies/history?strategy_type=${type}&status=${status}`);
+        const container = document.getElementById('strategy-history-list');
+
+        if (!result.strategies?.length) {
+            container.innerHTML = '<div style="color:#6b7280;text-align:center;padding:40px">No strategies found</div>';
+            return;
+        }
+
+        let html = '<table class="table"><thead><tr><th>ID</th><th>Type</th><th>Ticker</th><th>Status</th><th>Created</th><th>PnL</th><th>Actions</th></tr></thead><tbody>';
+
+        result.strategies.forEach(s => {
+            const statusBadge = getStatusBadge(s.status);
+            const typeBadge = `<span class="badge ${s.strategy_type === 'dca' ? 'badge-green' : 'badge-blue'}">${s.strategy_type.toUpperCase()}</span>`;
+            
+            let pnlText = '--';
+            let pnlClass = '';
+            if (s.strategy_type === 'dca') {
+                const pnl = s.unrealized_pnl_usdt || 0;
+                pnlText = `$${pnl.toFixed(2)}`;
+                pnlClass = pnl >= 0 ? 'text-success' : 'text-danger';
+            } else if (s.strategy_type === 'grid') {
+                const pnl = (s.realized_pnl_usdt || 0) + (s.unrealized_pnl_usdt || 0);
+                pnlText = `$${pnl.toFixed(2)}`;
+                pnlClass = pnl >= 0 ? 'text-success' : 'text-danger';
+            }
+
+            const created = s.created_at ? new Date(s.created_at).toLocaleString() : '--';
+
+            html += `<tr>
+                <td style="font-size:11px">${s.id?.slice(-12) || '--'}</td>
+                <td>${typeBadge}</td>
+                <td><strong>${escapeHtml(s.ticker)}</strong></td>
+                <td>${statusBadge}</td>
+                <td style="font-size:11px">${escapeHtml(created)}</td>
+                <td class="${pnlClass}">${pnlText}</td>
+                <td>
+                    <button class="btn btn-sm btn-secondary" onclick="showStrategyDetail('${s.id}')"><i class="ri-eye-line"></i> Detail</button>
+                </td>
+            </tr>`;
+        });
+
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (err) {
+        console.warn('Failed to load strategy history:', err);
+        document.getElementById('strategy-history-list').innerHTML = `<div style="color:#ef4444;text-align:center;padding:20px">Failed to load: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function getStatusBadge(status) {
+    const statusMap = {
+        'active': 'badge-active',
+        'closed': 'badge-inactive',
+        'manual_close': 'badge-warning',
+        'stop_loss': 'badge-error',
+        'take_profit': 'badge-success',
+        'draft': 'badge-pending',
+    };
+    const className = statusMap[status] || 'badge-inactive';
+    return `<span class="badge ${className}">${escapeHtml(status.replace('_', ' '))}</span>`;
+}
+
+async function showStrategyDetail(strategyId) {
+    const modal = document.getElementById('strategy-detail-modal');
+    const body = document.getElementById('strategy-detail-body');
+    const title = document.getElementById('strategy-detail-title');
+
+    modal.style.display = 'flex';
+    body.innerHTML = '<div style="text-align:center;padding:40px;color:#6b7280"><i class="ri-loader-4-line ri-spin" style="font-size:24px"></i><p>Loading...</p></div>';
+
+    try {
+        const detail = await fetchAPI(`/api/strategies/detail/${strategyId}`);
+        title.textContent = `${detail.strategy_type.toUpperCase()} - ${detail.ticker}`;
+
+        let html = '';
+
+        // Basic Info
+        html += `<div style="margin-bottom:24px">
+            <h4 style="margin:0 0 12px;color:#3b82f6"><i class="ri-information-line"></i> Basic Information</h4>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+                <div style="padding:12px;background:rgba(59,130,246,0.06);border-radius:8px">
+                    <div style="font-size:11px;color:#6b7280">Strategy ID</div>
+                    <div style="font-size:13px;font-family:monospace">${escapeHtml(detail.id)}</div>
+                </div>
+                <div style="padding:12px;background:rgba(59,130,246,0.06);border-radius:8px">
+                    <div style="font-size:11px;color:#6b7280">Status</div>
+                    <div>${getStatusBadge(detail.status)}</div>
+                </div>
+                <div style="padding:12px;background:rgba(59,130,246,0.06);border-radius:8px">
+                    <div style="font-size:11px;color:#6b7280">Created</div>
+                    <div style="font-size:13px">${detail.created_at ? new Date(detail.created_at).toLocaleString() : '--'}</div>
+                </div>
+                <div style="padding:12px;background:rgba(59,130,246,0.06);border-radius:8px">
+                    <div style="font-size:11px;color:#6b7280">Last Updated</div>
+                    <div style="font-size:13px">${detail.updated_at ? new Date(detail.updated_at).toLocaleString() : '--'}</div>
+                </div>
+            </div>
+        </div>`;
+
+        if (detail.strategy_type === 'dca') {
+            // DCA Specific Info
+            html += `<div style="margin-bottom:24px">
+                <h4 style="margin:0 0 12px;color:#10b981"><i class="ri-arrow-down-circle-line"></i> DCA Configuration</h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+                    <div style="padding:12px;background:rgba(16,185,129,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Direction</div>
+                        <div style="font-size:14px"><span class="badge ${detail.direction === 'long' ? 'badge-green' : 'badge-red'}">${escapeHtml(detail.direction)}</span></div>
+                    </div>
+                    <div style="padding:12px;background:rgba(16,185,129,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Sizing Method</div>
+                        <div style="font-size:14px">${escapeHtml(detail.sizing_method || 'fixed')}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(16,185,129,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Max Entries</div>
+                        <div style="font-size:14px">${detail.max_entries || '--'}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(16,185,129,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Entries Made</div>
+                        <div style="font-size:14px">${detail.entries?.length || 0}</div>
+                    </div>
+                </div>
+            </div>`;
+
+            // PnL Info
+            const state = detail.state || {};
+            const pnl = state.unrealized_pnl_usdt || 0;
+            const pnlPct = state.unrealized_pnl_pct || 0;
+            html += `<div style="margin-bottom:24px">
+                <h4 style="margin:0 0 12px;color:#f59e0b"><i class="ri-money-dollar-circle-line"></i> Performance</h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+                    <div style="padding:12px;background:rgba(245,158,11,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Unrealized PnL</div>
+                        <div style="font-size:18px;font-weight:bold" class="${pnl >= 0 ? 'text-success' : 'text-danger'}">$${pnl.toFixed(2)}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(245,158,11,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">PnL %</div>
+                        <div style="font-size:18px;font-weight:bold" class="${pnlPct >= 0 ? 'text-success' : 'text-danger'}">${pnlPct.toFixed(2)}%</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(245,158,11,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Avg Entry Price</div>
+                        <div style="font-size:14px">${state.average_entry_price ? '$' + state.average_entry_price.toFixed(6) : '--'}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(245,158,11,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Total Invested</div>
+                        <div style="font-size:14px">${state.total_invested_usdt ? '$' + state.total_invested_usdt.toFixed(2) : '--'}</div>
+                    </div>
+                </div>
+            </div>`;
+
+            // Entry History
+            if (detail.entries?.length) {
+                html += `<div style="margin-bottom:24px">
+                    <h4 style="margin:0 0 12px;color:#8b5cf6"><i class="ri-list-check"></i> Entry History</h4>
+                    <table class="table"><thead><tr><th>#</th><th>Price</th><th>Quantity</th><th>Time</th></tr></thead><tbody>`;
+                detail.entries.forEach((entry, idx) => {
+                    const time = entry.entry_time ? new Date(entry.entry_time).toLocaleString() : '--';
+                    html += `<tr>
+                        <td>${idx + 1}</td>
+                        <td>${entry.price?.toFixed(6) || '--'}</td>
+                        <td>${entry.quantity?.toFixed(6) || '--'}</td>
+                        <td style="font-size:11px">${escapeHtml(time)}</td>
+                    </tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+        } else if (detail.strategy_type === 'grid') {
+            // Grid Specific Info
+            const state = detail.state || {};
+            const config = detail.config || {};
+            const realizedPnl = state.realized_pnl_usdt || 0;
+            const unrealizedPnl = state.unrealized_pnl_usdt || 0;
+            const totalPnl = realizedPnl + unrealizedPnl;
+
+            html += `<div style="margin-bottom:24px">
+                <h4 style="margin:0 0 12px;color:#10b981"><i class="ri-grid-line"></i> Grid Configuration</h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+                    <div style="padding:12px;background:rgba(16,185,129,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Mode</div>
+                        <div style="font-size:14px">${escapeHtml(detail.mode || 'neutral')}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(16,185,129,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Spacing</div>
+                        <div style="font-size:14px">${escapeHtml(detail.spacing_mode || 'arithmetic')}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(16,185,129,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Grid Levels</div>
+                        <div style="font-size:14px">${config.grid_count || state.grid_levels?.length || '--'}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(16,185,129,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Total Trades</div>
+                        <div style="font-size:14px">${state.total_trades || 0}</div>
+                    </div>
+                </div>
+            </div>`;
+
+            html += `<div style="margin-bottom:24px">
+                <h4 style="margin:0 0 12px;color:#f59e0b"><i class="ri-money-dollar-circle-line"></i> Performance</h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+                    <div style="padding:12px;background:rgba(245,158,11,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Realized PnL</div>
+                        <div style="font-size:18px;font-weight:bold" class="${realizedPnl >= 0 ? 'text-success' : 'text-danger'}">$${realizedPnl.toFixed(2)}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(245,158,11,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Unrealized PnL</div>
+                        <div style="font-size:18px;font-weight:bold" class="${unrealizedPnl >= 0 ? 'text-success' : 'text-danger'}">$${unrealizedPnl.toFixed(2)}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(245,158,11,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Total PnL</div>
+                        <div style="font-size:18px;font-weight:bold" class="${totalPnl >= 0 ? 'text-success' : 'text-danger'}">$${totalPnl.toFixed(2)}</div>
+                    </div>
+                    <div style="padding:12px;background:rgba(245,158,11,0.06);border-radius:8px">
+                        <div style="font-size:11px;color:#6b7280">Pending Orders</div>
+                        <div style="font-size:14px">${state.pending_orders || 0}</div>
+                    </div>
+                </div>
+            </div>`;
+
+            // Grid Levels
+            if (state.grid_levels?.length) {
+                html += `<div style="margin-bottom:24px">
+                    <h4 style="margin:0 0 12px;color:#8b5cf6"><i class="ri-list-check"></i> Grid Levels</h4>
+                    <table class="table"><thead><tr><th>Level</th><th>Price</th><th>Type</th><th>Filled</th><th>Time</th></tr></thead><tbody>`;
+                state.grid_levels.forEach((level, idx) => {
+                    const filled = level.filled ? 'Yes' : 'No';
+                    const time = level.filled_at ? new Date(level.filled_at).toLocaleString() : '--';
+                    html += `<tr>
+                        <td>${idx + 1}</td>
+                        <td>${level.price?.toFixed(6) || '--'}</td>
+                        <td><span class="badge ${level.order_type === 'buy' ? 'badge-green' : 'badge-red'}">${escapeHtml(level.order_type || '--')}</span></td>
+                        <td>${filled}</td>
+                        <td style="font-size:11px">${escapeHtml(time)}</td>
+                    </tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+        }
+
+        // Config JSON (collapsible)
+        html += `<div style="margin-top:24px">
+            <details>
+                <summary style="cursor:pointer;color:#3b82f6;font-size:14px;margin-bottom:8px"><i class="ri-code-line"></i> View Full Configuration (JSON)</summary>
+                <pre style="background:rgba(0,0,0,0.3);padding:16px;border-radius:8px;font-size:11px;overflow-x:auto;margin-top:8px">${escapeHtml(JSON.stringify(detail.config, null, 2))}</pre>
+            </details>
+        </div>`;
+
+        // State JSON (collapsible)
+        html += `<div style="margin-top:16px">
+            <details>
+                <summary style="cursor:pointer;color:#3b82f6;font-size:14px;margin-bottom:8px"><i class="ri-database-2-line"></i> View Full Runtime State (JSON)</summary>
+                <pre style="background:rgba(0,0,0,0.3);padding:16px;border-radius:8px;font-size:11px;overflow-x:auto;margin-top:8px">${escapeHtml(JSON.stringify(detail.state, null, 2))}</pre>
+            </details>
+        </div>`;
+
+        body.innerHTML = html;
+    } catch (err) {
+        body.innerHTML = `<div style="text-align:center;padding:40px;color:#ef4444">Failed to load detail: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function closeStrategyDetail() {
+    document.getElementById('strategy-detail-modal').style.display = 'none';
 }
 
 // ─── Market Charts ───

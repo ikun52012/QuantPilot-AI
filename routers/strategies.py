@@ -609,6 +609,128 @@ async def get_strategies_overview(
     }
 
 
+@router.get("/history")
+async def get_strategy_history(
+    strategy_type: str = "all",
+    status: str = "all",
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all strategies including closed/historical ones with full details."""
+    user_id = _user_id(user)
+
+    query = select(StrategyStateModel).where(
+        StrategyStateModel.user_id == user_id,
+    )
+
+    if strategy_type != "all":
+        query = query.where(StrategyStateModel.strategy_type == strategy_type)
+
+    if status != "all":
+        query = query.where(StrategyStateModel.status == status)
+    else:
+        query = query.where(StrategyStateModel.status != "deleted")
+
+    query = query.order_by(StrategyStateModel.updated_at.desc())
+
+    result = await db.execute(query)
+    rows = result.scalars().all()
+
+    strategies = []
+    for row in rows:
+        config_data = _loads_dict(row.config_json)
+        state_data = _loads_dict(row.state_json)
+
+        strategy_info = {
+            "id": row.id,
+            "strategy_type": row.strategy_type,
+            "ticker": row.ticker,
+            "name": row.name or f"{row.strategy_type.upper()}_{row.id[:8]}",
+            "status": row.status,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "config": config_data,
+            "state": state_data,
+        }
+
+        if row.strategy_type == "dca":
+            strategy_info["direction"] = config_data.get("direction", "long")
+            strategy_info["entries_count"] = len(state_data.get("entries", []))
+            strategy_info["average_entry_price"] = state_data.get("average_entry_price")
+            strategy_info["unrealized_pnl_usdt"] = state_data.get("unrealized_pnl_usdt", 0)
+            strategy_info["unrealized_pnl_pct"] = state_data.get("unrealized_pnl_pct", 0)
+            strategy_info["total_invested_usdt"] = state_data.get("total_invested_usdt")
+            strategy_info["stop_loss_price"] = state_data.get("stop_loss_price")
+            strategy_info["take_profit_price"] = state_data.get("take_profit_price")
+            strategy_info["close_reason"] = state_data.get("close_reason")
+            strategy_info["closed_at"] = state_data.get("closed_at")
+        elif row.strategy_type == "grid":
+            strategy_info["mode"] = config_data.get("mode", "neutral")
+            strategy_info["grid_count"] = config_data.get("grid_count", 0)
+            strategy_info["upper_price"] = state_data.get("upper_price")
+            strategy_info["lower_price"] = state_data.get("lower_price")
+            strategy_info["total_trades"] = state_data.get("total_trades", 0)
+            strategy_info["realized_pnl_usdt"] = state_data.get("realized_pnl_usdt", 0)
+            strategy_info["unrealized_pnl_usdt"] = state_data.get("unrealized_pnl_usdt", 0)
+            strategy_info["pending_orders"] = state_data.get("pending_orders", 0)
+            strategy_info["close_reason"] = state_data.get("close_reason")
+            strategy_info["closed_at"] = state_data.get("closed_at")
+
+        strategies.append(strategy_info)
+
+    return {
+        "total_count": len(strategies),
+        "strategies": strategies,
+    }
+
+
+@router.get("/detail/{strategy_id}")
+async def get_strategy_detail(
+    strategy_id: str,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get full detail of a specific strategy including config and runtime state."""
+    user_id = _user_id(user)
+    row = await db.get(StrategyStateModel, strategy_id)
+
+    if not row or row.user_id != user_id:
+        raise HTTPException(404, "Strategy not found")
+
+    config_data = _loads_dict(row.config_json)
+    state_data = _loads_dict(row.state_json)
+
+    detail = {
+        "id": row.id,
+        "strategy_type": row.strategy_type,
+        "ticker": row.ticker,
+        "name": row.name or f"{row.strategy_type.upper()}_{row.id[:8]}",
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "config": config_data,
+        "state": state_data,
+    }
+
+    if row.strategy_type == "dca":
+        if strategy_id in dca_engine.positions:
+            live_status = dca_engine.get_position_status(strategy_id)
+            detail["live_status"] = live_status
+        detail["entries"] = state_data.get("entries", [])
+        detail["direction"] = config_data.get("direction", "long")
+        detail["sizing_method"] = config_data.get("sizing_method", "fixed")
+        detail["max_entries"] = config_data.get("max_entries", 5)
+    elif row.strategy_type == "grid":
+        if strategy_id in grid_engine.positions:
+            live_status = grid_engine.get_grid_status(strategy_id)
+            detail["live_status"] = live_status
+        detail["grid_levels"] = state_data.get("grid_levels", [])
+        detail["mode"] = config_data.get("mode", "neutral")
+        detail["spacing_mode"] = config_data.get("spacing_mode", "arithmetic")
+
+    return detail
+
+
 @router.post("/monitor/start")
 async def start_strategy_monitor(
     interval_seconds: int = 60,
