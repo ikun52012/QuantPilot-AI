@@ -512,6 +512,7 @@
                             <option value="deepseek">DeepSeek (Cheapest)</option>
                             <option value="openai">OpenAI (GPT-4o)</option>
                             <option value="anthropic">Anthropic (Claude)</option>
+                            <option value="mistral">Mistral (Large)</option>
                             <option value="openrouter">OpenRouter</option>
                             <option value="custom">Custom Provider</option>
                         </select>
@@ -526,6 +527,18 @@
                             <label for="set-openrouter-model">OpenRouter Model</label>
                             <input type="text" id="set-openrouter-model" class="text-input" placeholder="openai/gpt-4o-mini">
                             <p class="hint">Use OpenRouter model IDs such as openai/gpt-4o-mini or deepseek/deepseek-chat</p>
+                        </div>
+                    </div>
+
+                    <div id="mistral-ai-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="set-mistral-model">Mistral Model</label>
+                            <select id="set-mistral-model" class="select-input">
+                                <option value="mistral-large-latest">Mistral Large (Latest)</option>
+                                <option value="mistral-small-latest">Mistral Small (Latest)</option>
+                                <option value="codestral-latest">Codestral (Latest)</option>
+                            </select>
+                            <p class="hint">Select the Mistral model to use for AI analysis</p>
                         </div>
                     </div>
 
