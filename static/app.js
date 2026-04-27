@@ -1,6 +1,6 @@
 /**
  * QuantPilot AI - Dashboard Frontend Logic
- * v4.5 — AI command center redesign, trading controls, strategies, PWA
+ * v4.5 — AI command center redesign, trading controls, strategies, PWA, i18n content pages
  */
 
 const API = '';

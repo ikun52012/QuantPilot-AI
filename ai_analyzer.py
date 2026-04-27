@@ -9,6 +9,7 @@ import httpx
 import os
 from loguru import logger
 from core.config import settings
+from core.ai_cost_tracker import ai_costs, extract_usage_from_response
 from models import TradingViewSignal, MarketContext, AIAnalysis, TrailingStopMode
 
 # Retry configuration for AI API calls
@@ -353,6 +354,8 @@ async def _call_openai(system: str, user: str, model: str = None) -> str:
             )
             resp.raise_for_status()
             data = resp.json()
+            pt, ct, tt = extract_usage_from_response(data)
+            ai_costs.record("openai", model_name, pt, ct, tt)
             return data["choices"][0]["message"]["content"]
 
     return await _with_retry(_do, "openai")
@@ -410,6 +413,8 @@ async def _call_deepseek(system: str, user: str, model: str = None) -> str:
             )
             resp.raise_for_status()
             data = resp.json()
+            pt, ct, tt = extract_usage_from_response(data)
+            ai_costs.record("deepseek", model_name, pt, ct, tt)
             return data["choices"][0]["message"]["content"]
 
     return await _with_retry(_do, "deepseek")
@@ -439,6 +444,8 @@ async def _call_mistral(system: str, user: str, model: str = None) -> str:
             )
             resp.raise_for_status()
             data = resp.json()
+            pt, ct, tt = extract_usage_from_response(data)
+            ai_costs.record("mistral", model_name, pt, ct, tt)
             return data["choices"][0]["message"]["content"]
 
     return await _with_retry(_do, "mistral")
@@ -476,6 +483,8 @@ async def _call_openrouter(system: str, user: str, model: str = None) -> str:
             )
             resp.raise_for_status()
             data = resp.json()
+            pt, ct, tt = extract_usage_from_response(data)
+            ai_costs.record("openrouter", model_name, pt, ct, tt)
             return data["choices"][0]["message"]["content"]
 
     return await _with_retry(_do, "openrouter")
@@ -861,7 +870,12 @@ async def analyze_signal(
             voting_tasks.append(_call_model_by_id(model_id, system_prompt, user_prompt))
 
         try:
-            raw_results = await asyncio.gather(*voting_tasks, return_exceptions=True)
+            # Per-model timeout: don't let one slow model block the entire vote
+            _voting_timeout = settings.ai.read_timeout_secs + 5
+            raw_results = await asyncio.wait_for(
+                asyncio.gather(*voting_tasks, return_exceptions=True),
+                timeout=_voting_timeout,
+            )
 
             valid_results = []
             for i, result in enumerate(raw_results):
@@ -888,6 +902,9 @@ async def analyze_signal(
             await _set_cached_analysis(signal.ticker, signal.direction.value + cache_key_suffix, final_analysis, price_bucket, timeframe)
             return final_analysis
 
+        except asyncio.TimeoutError:
+            logger.error(f"[AI/Voting] Voting timed out after {_voting_timeout}s")
+            return _fallback_analysis(f"Voting timed out after {_voting_timeout}s")
         except Exception as e:
             logger.error(f"[AI/Voting] Voting failed: {e}")
             return _fallback_analysis(f"Voting error: {e}")

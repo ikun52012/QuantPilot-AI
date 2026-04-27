@@ -70,6 +70,14 @@ async def _init_scheduler():
             reset_daily_counters()
         logger.info("[Scheduler] Daily trade counters reset")
 
+    async def _daily_backup_job():
+        try:
+            from backups import create_backup
+            result = await create_backup(note="scheduled-daily")
+            logger.info(f"[Scheduler] Daily backup created: {result.get('name', 'unknown')}")
+        except Exception as e:
+            logger.error(f"[Scheduler] Daily backup failed: {e}")
+
     async def _position_monitor_job():
         from position_monitor import run_position_monitor_once
         result = await run_position_monitor_once()
@@ -81,6 +89,12 @@ async def _init_scheduler():
         CronTrigger(hour=0, minute=0, second=0, timezone="UTC"),
         id="daily_reset",
         name="Daily trade counter reset",
+    )
+    scheduler.add_job(
+        _daily_backup_job,
+        CronTrigger(hour=2, minute=0, second=0, timezone="UTC"),
+        id="daily_backup",
+        name="Daily database backup",
     )
     scheduler.add_job(
         _position_monitor_job,

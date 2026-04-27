@@ -378,7 +378,7 @@ class RateLimitConfig(BaseModel):
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
     app_name: str = "QuantPilot AI"
-    app_version: str = "4.4.0"
+    app_version: str = "4.5.0"
     debug: bool = False
     json_logs: bool = False
 
@@ -395,6 +395,7 @@ class Settings(BaseModel):
     default_admin_password: str = ""
 
     position_monitor_interval_secs: int = 60
+    notification_language: str = "en"
 
     ai: AIConfig = None  # type: ignore[assignment]
     exchange: ExchangeConfig = None  # type: ignore[assignment]
@@ -484,6 +485,7 @@ class Settings(BaseModel):
             default_admin_email=os.getenv("DEFAULT_ADMIN_EMAIL", "admin@localhost"),
             default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", "").strip(),
             position_monitor_interval_secs=int(os.getenv("POSITION_MONITOR_INTERVAL_SECS", "60")),
+            notification_language=os.getenv("NOTIFICATION_LANGUAGE", "en"),
             ai=AIConfig.from_env(),
             exchange=ExchangeConfig.from_env(),
             telegram=TelegramConfig.from_env(),

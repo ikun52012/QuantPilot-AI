@@ -1030,6 +1030,16 @@ async def get_system_status(
     }
 
 
+@router.get("/ai-costs")
+async def get_ai_costs(admin: dict = Depends(require_admin)):
+    """Get AI API usage and cost summary."""
+    from core.ai_cost_tracker import ai_costs
+    return {
+        "summary": ai_costs.get_summary(),
+        "recent": ai_costs.get_recent(50),
+    }
+
+
 @router.get("/trading-controls")
 async def get_trading_controls(
     admin: dict = Depends(require_admin),

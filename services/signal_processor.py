@@ -229,7 +229,14 @@ class SignalProcessor:
             # Step 4: Build trade decision
             decision = self._build_trade_decision(signal, analysis, market, user_id, user_settings)
 
-            # Step 5: Execute trade
+            # Step 5: Check for conflicting open positions
+            if decision.execute:
+                conflict = await self._check_position_conflict(decision, user_id)
+                if conflict:
+                    decision.execute = False
+                    decision.reason = conflict
+
+            # Step 6: Execute trade
             if decision.execute:
                 result = await self._execute_trade(decision, user_id, user_settings)
             else:
@@ -797,6 +804,51 @@ class SignalProcessor:
                 f"[Signal] Quantity capped by max_position_pct: {decision.quantity} -> {max_quantity:.6f}"
             )
             decision.quantity = round(max_quantity, 6)
+
+    async def _check_position_conflict(
+        self,
+        decision: TradeDecision,
+        user_id: Optional[str],
+    ) -> Optional[str]:
+        """
+        Check for conflicting open positions on the same ticker.
+        Returns a rejection reason string, or None if no conflict.
+        """
+        from sqlalchemy import select
+        from core.database import PositionModel
+
+        try:
+            stmt = select(PositionModel).where(
+                PositionModel.status == "open",
+                PositionModel.ticker == decision.ticker,
+            )
+            if user_id:
+                stmt = stmt.where(PositionModel.user_id == user_id)
+
+            result = await self.session.execute(stmt)
+            open_positions = list(result.scalars().all())
+
+            if not open_positions:
+                return None
+
+            direction = decision.direction.value if decision.direction else ""
+            for pos in open_positions:
+                pos_dir = (pos.direction or "").lower()
+                # Block opposite direction on same ticker
+                if (direction in ("long", "short") and pos_dir in ("long", "short")
+                        and direction != pos_dir):
+                    msg = (
+                        f"Conflicting position: open {pos_dir} on {decision.ticker} "
+                        f"(id={pos.id[:8]}). Close it before opening {direction}."
+                    )
+                    logger.warning(f"[Signal] Position conflict: {msg}")
+                    return msg
+
+            # Allow same-direction (scaling in)
+            return None
+        except Exception as e:
+            logger.warning(f"[Signal] Position conflict check failed (allowing trade): {e}")
+            return None
 
     async def _record_and_notify_blocked(
         self,

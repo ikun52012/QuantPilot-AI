@@ -16,6 +16,8 @@ from core.auth import (
     create_token, set_auth_cookie, clear_auth_cookie,
     get_current_user, get_pending_2fa_user,
 )
+from core.request_utils import client_ip
+from core.login_guard import is_locked_out, record_failed_attempt, record_successful_login, remaining_lockout_seconds
 from core.utils.datetime import utcnow, make_naive
 
 
@@ -169,9 +171,18 @@ async def login(
     """Login to an existing account. If 2FA is enabled, returns a pending token."""
     username = req.username.lower().strip()
 
+    # Brute-force protection
+    ip = client_ip(request)
+    if is_locked_out(ip):
+        secs = remaining_lockout_seconds(ip)
+        raise HTTPException(429, f"Too many failed attempts. Try again in {secs} seconds.")
+
     user = await get_user_by_username(db, username)
     if not user or not verify_password(req.password, user.password_hash):
-        raise HTTPException(401, "Invalid username or password")
+        remaining = record_failed_attempt(ip)
+        if remaining is None:
+            raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
+        raise HTTPException(401, f"Invalid username or password. {remaining} attempts remaining.")
 
     if not user.is_active:
         raise HTTPException(403, "Account is disabled")
@@ -190,6 +201,7 @@ async def login(
                 token = create_token(user.id, user.username, user.role, user.token_version or 0)
                 set_auth_cookie(response, token, request)
                 logger.info(f"[Auth] User logged in with 2FA (inline): {username}")
+                record_successful_login(ip)
                 return {
                     "token": token,
                     "user": {
@@ -210,6 +222,7 @@ async def login(
                 token = create_token(user.id, user.username, user.role, user.token_version or 0)
                 set_auth_cookie(response, token, request)
                 logger.info(f"[Auth] User logged in with recovery code: {username}")
+                record_successful_login(ip)
                 return {
                     "token": token,
                     "requires_2fa": False,
@@ -241,6 +254,7 @@ async def login(
     set_auth_cookie(response, token, request)
 
     logger.info(f"[Auth] User logged in: {username}")
+    record_successful_login(ip)
 
     return {
         "token": token,

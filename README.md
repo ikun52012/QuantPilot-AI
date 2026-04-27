@@ -1,10 +1,10 @@
-# 📡 QuantPilot AI (v4.4)
+# 📡 QuantPilot AI (v4.5)
 
 ![System Status](https://img.shields.io/badge/status-active-success) ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688) ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
 
-**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, **OpenRouter 100+ models**, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
+**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral, **OpenRouter 100+ models**, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
 
-**NEW in v4.4**: Persistent DCA/Grid/Social/Strategy Editor state, global trading kill switch/read-only controls, order event reconciliation, v1 API aliases, and hardened PWA assets.
+**NEW in v4.5**: Login brute-force protection, AI cost tracking, position conflict detection, voting timeout control, automated daily backups, Telegram i18n notifications, Nginx reverse proxy template, and full content page i18n coverage.
 
 ---
 
@@ -94,6 +94,19 @@
   - Pipeline events broadcast to Telegram Bot.
 
 ---
+
+## 🆕 v4.5 New Features
+
+- **Login brute-force protection**: 5 failed attempts → 15-minute IP lockout.
+- **AI cost tracking**: Token usage and estimated cost per provider call, viewable in Admin panel.
+- **Position conflict detection**: Blocks opposite-direction trades on the same ticker.
+- **Voting timeout control**: Per-model timeout prevents slow models from blocking the entire vote.
+- **Automated daily backups**: Scheduled at 02:00 UTC via APScheduler.
+- **Telegram i18n notifications**: Trade alerts support Chinese and English.
+- **Nginx reverse proxy template**: Production-ready config with SSL, WebSocket, and rate limiting.
+- **Full content page i18n**: Dashboard, positions, history, analytics, backtest, strategies, and admin pages now translate on language switch.
+- **Production deployment checklist**: `PRODUCTION_CHECKLIST.md` for go-live readiness.
+- **CI improvements**: Added `master` branch to test triggers, test dependency install.
 
 ## 🆕 v4.4 New Features
 
