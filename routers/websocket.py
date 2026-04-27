@@ -13,8 +13,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from loguru import logger
 import inspect
 
-from core.auth import verify_token
+from core.auth import verify_token, require_admin
 from core.config import settings
+from core.database import db_manager, get_user_by_id
 
 
 router = APIRouter(tags=["WebSocket"])
@@ -24,6 +25,46 @@ verify_jwt_token = verify_token
 _WS_CONNECTION_LIMIT_PER_USER = 5  # Max 5 connections per user
 _WS_CONNECTION_COOLDOWN = 60  # 60 seconds cooldown between connections
 _ws_connection_times: dict[str, list[float]] = defaultdict(list)
+
+
+def _verify_ws_token_or_none(token: str) -> Optional[dict]:
+    """Reject expired, invalid, or still-pending-2FA tokens for WebSockets."""
+    payload = verify_token(token)
+    if not payload or payload.get("2fa_pending"):
+        return None
+    return payload
+
+
+async def _authenticate_ws_user_or_none(token: str, require_admin_role: bool = False) -> Optional[dict]:
+    """Validate the token and current user state before opening a socket."""
+    payload = _verify_ws_token_or_none(token)
+    if not payload:
+        return None
+
+    user_id = payload.get("sub") or payload.get("user_id")
+    if not user_id or not db_manager.async_session_factory:
+        return None
+
+    try:
+        async with db_manager.async_session_factory() as session:
+            user = await get_user_by_id(session, user_id)
+    except Exception as e:
+        logger.debug(f"[WebSocket] User lookup failed: {e}")
+        return None
+
+    if not user or not user.is_active:
+        return None
+    if int(payload.get("ver", 0)) != int(user.token_version or 0):
+        return None
+    if require_admin_role and user.role != "admin":
+        return None
+
+    return {
+        "sub": user.id,
+        "username": user.username,
+        "role": user.role,
+        "email": user.email,
+    }
 
 
 def _ws_message(msg_type: str, data: dict, ticker: Optional[str] = None) -> dict:
@@ -126,7 +167,7 @@ async def websocket_positions(websocket: WebSocket):
             await websocket.close(code=4001, reason="Missing authentication token")
             return
 
-        payload = verify_token(token)
+        payload = await _authenticate_ws_user_or_none(token)
         if not payload:
             await websocket.close(code=4001, reason="Invalid token")
             return
@@ -136,7 +177,8 @@ async def websocket_positions(websocket: WebSocket):
             await websocket.close(code=4001, reason="Invalid token payload")
             return
 
-        await manager.connect(websocket, user_id)
+        if not await manager.connect(websocket, user_id):
+            return
 
         await manager.send_personal({
             "type": "connected",
@@ -219,14 +261,15 @@ async def websocket_prices(websocket: WebSocket):
             await websocket.close(code=4001, reason="Missing authentication token")
             return
 
-        payload = verify_token(token)
+        payload = await _authenticate_ws_user_or_none(token)
         if not payload:
             await websocket.close(code=4001, reason="Invalid token")
             return
 
         user_id = payload.get("sub") or payload.get("user_id")
 
-        await manager.connect(websocket, f"prices_{user_id}")
+        if not await manager.connect(websocket, f"prices_{user_id}"):
+            return
 
         subscribed_tickers = set()
 
@@ -237,45 +280,57 @@ async def websocket_prices(websocket: WebSocket):
 
         price_task = None
 
-        while True:
-            data = await websocket.receive_text()
+        try:
+            while True:
+                data = await websocket.receive_text()
 
-            try:
-                message = json.loads(data)
-                msg_type = message.get("type")
+                try:
+                    message = json.loads(data)
+                    msg_type = message.get("type")
 
-                if msg_type == "subscribe_tickers":
-                    tickers = message.get("tickers", [])
-                    subscribed_tickers.update(tickers)
+                    if msg_type == "subscribe_tickers":
+                        tickers = message.get("tickers", [])
+                        subscribed_tickers.update(tickers)
 
-                    if subscribed_tickers and not price_task:
-                        price_task = asyncio.create_task(
-                            _stream_prices(websocket, subscribed_tickers)
-                        )
+                        if subscribed_tickers and not price_task:
+                            price_task = asyncio.create_task(
+                                _stream_prices(websocket, subscribed_tickers)
+                            )
 
-                    await manager.send_personal({
-                        "type": "subscribed_tickers",
-                        "tickers": list(subscribed_tickers),
-                    }, websocket)
+                        await manager.send_personal({
+                            "type": "subscribed_tickers",
+                            "tickers": list(subscribed_tickers),
+                        }, websocket)
 
-                elif msg_type == "unsubscribe_tickers":
-                    tickers = message.get("tickers", [])
-                    subscribed_tickers.difference_update(tickers)
+                    elif msg_type == "unsubscribe_tickers":
+                        tickers = message.get("tickers", [])
+                        subscribed_tickers.difference_update(tickers)
 
-                    if not subscribed_tickers and price_task:
-                        price_task.cancel()
-                        price_task = None
+                        if not subscribed_tickers and price_task:
+                            price_task.cancel()
+                            try:
+                                await price_task
+                            except asyncio.CancelledError:
+                                pass
+                            price_task = None
 
-                    await manager.send_personal({
-                        "type": "unsubscribed_tickers",
-                        "tickers": list(subscribed_tickers),
-                    }, websocket)
+                        await manager.send_personal({
+                            "type": "unsubscribed_tickers",
+                            "tickers": list(subscribed_tickers),
+                        }, websocket)
 
-                elif msg_type == "ping":
-                    await manager.send_personal({"type": "pong"}, websocket)
+                    elif msg_type == "ping":
+                        await manager.send_personal({"type": "pong"}, websocket)
 
-            except json.JSONDecodeError:
-                pass
+                except json.JSONDecodeError:
+                    pass
+        finally:
+            if price_task:
+                price_task.cancel()
+                try:
+                    await price_task
+                except asyncio.CancelledError:
+                    pass
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
@@ -303,19 +358,15 @@ async def websocket_system(websocket: WebSocket):
             await websocket.close(code=4001, reason="Missing authentication token")
             return
 
-        payload = verify_token(token)
+        payload = await _authenticate_ws_user_or_none(token, require_admin_role=True)
         if not payload:
             await websocket.close(code=4001, reason="Invalid token")
             return
 
         user_id = payload.get("sub") or payload.get("user_id")
-        is_admin = payload.get("role") == "admin"
 
-        if not is_admin:
-            await websocket.close(code=4003, reason="Admin access required")
+        if not await manager.connect(websocket, f"system_{user_id}"):
             return
-
-        await manager.connect(websocket, f"system_{user_id}")
 
         await manager.send_personal({
             "type": "connected",
@@ -358,7 +409,7 @@ async def websocket_system(websocket: WebSocket):
 
 
 @router.get("/ws/status")
-async def websocket_status():
+async def websocket_status(admin: dict = Depends(require_admin)):
     """Get WebSocket connection status."""
     return {
         "active_connections": manager.get_user_count(),

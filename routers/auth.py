@@ -235,7 +235,10 @@ async def login(
                     }
                 }
 
-            raise HTTPException(401, "Invalid 2FA code")
+            remaining = record_failed_attempt(ip)
+            if remaining is None:
+                raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
+            raise HTTPException(401, f"Invalid 2FA code. {remaining} attempts remaining.")
 
         # No code provided — issue a short-lived pending token
         pending_token = create_token(
@@ -280,6 +283,11 @@ async def verify_2fa(
     from core.totp import verify_totp_code, decrypt_totp_secret, verify_recovery_code
     from core.database import get_user_by_id
 
+    ip = client_ip(request)
+    if is_locked_out(ip):
+        secs = remaining_lockout_seconds(ip)
+        raise HTTPException(429, f"Too many failed attempts. Try again in {secs} seconds.")
+
     db_user = await get_user_by_id(db, user["sub"])
     if not db_user:
         raise HTTPException(404, "User not found")
@@ -292,6 +300,7 @@ async def verify_2fa(
         await update_user_login(db, db_user.id)
         token = create_token(db_user.id, db_user.username, db_user.role, db_user.token_version or 0)
         set_auth_cookie(response, token, request)
+        record_successful_login(ip)
         logger.info(f"[Auth] 2FA verified for user: {db_user.username}")
         return {
             "token": token,
@@ -312,6 +321,7 @@ async def verify_2fa(
         await update_user_login(db, db_user.id)
         token = create_token(db_user.id, db_user.username, db_user.role, db_user.token_version or 0)
         set_auth_cookie(response, token, request)
+        record_successful_login(ip)
         logger.info(f"[Auth] 2FA verified via recovery code for user: {db_user.username}")
         return {
             "token": token,
@@ -324,7 +334,10 @@ async def verify_2fa(
             }
         }
 
-    raise HTTPException(401, "Invalid 2FA code or recovery code")
+    remaining = record_failed_attempt(ip)
+    if remaining is None:
+        raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
+    raise HTTPException(401, f"Invalid 2FA code or recovery code. {remaining} attempts remaining.")
 
 
 @router.post("/2fa/setup")

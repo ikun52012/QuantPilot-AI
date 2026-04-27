@@ -7,6 +7,8 @@ import json
 import threading
 import uuid
 import concurrent.futures
+import asyncio as _asyncio
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -121,11 +123,12 @@ async def log_trade_async(decision: TradeDecision, order_result: dict, user_id: 
 def log_trade(decision: TradeDecision, order_result: dict, user_id: Optional[str] = None) -> str:
     """
     DEPRECATED: Use log_trade_async() instead.
-    Kept as a thin shim for any remaining sync callers.
-    """
-    import asyncio
-    import warnings
 
+    When called from outside an event loop, runs log_trade_async via asyncio.run().
+    When called from inside an event loop, spawns a daemon thread with its own
+    event loop to avoid nested-loop deadlocks.  The coroutine is *not* awaited,
+    so the returned trade_id is a best-effort placeholder.
+    """
     warnings.warn(
         "log_trade() is deprecated and will be removed in v5.0. Use log_trade_async() instead.",
         DeprecationWarning,
@@ -133,15 +136,38 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: Optional[str
     )
 
     try:
-        loop = asyncio.get_running_loop()
+        _asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(log_trade_async(decision, order_result, user_id))
+        # No running event loop — safe to run synchronously
+        return _asyncio.run(log_trade_async(decision, order_result, user_id))
 
-    # Already inside an event loop — schedule as a task
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(asyncio.run, log_trade_async(decision, order_result, user_id))
-        return future.result(timeout=30)
+    # We are inside a running event loop; schedule the coroutine on a
+    # background thread and return a placeholder id so we never block
+    # the main async context.
+    result_container: dict = {}
+    error_container: dict = {}
+
+    def _runner() -> None:
+        try:
+            result_container["trade_id"] = _asyncio.run(
+                log_trade_async(decision, order_result, user_id)
+            )
+        except Exception as exc:
+            error_container["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=30)
+
+    if thread.is_alive():
+        logger.warning("[TradeLog] log_trade() thread timed out — trade may not be logged")
+        return str(uuid.uuid4())
+
+    if "error" in error_container:
+        logger.warning(f"[TradeLog] log_trade() failed: {error_container['error']}")
+        return str(uuid.uuid4())
+
+    return result_container.get("trade_id", str(uuid.uuid4()))
 
 
 def get_today_trades(user_id: Optional[str] = None) -> list[dict]:

@@ -1,83 +1,379 @@
 """
 QuantPilot AI - Common Utility Functions
-Shared utilities to reduce code duplication across modules.
+Typed utility functions for safer operations.
 """
-import json
-from typing import Any
+from __future__ import annotations
 
-from loguru import logger
+import json
+import re
+from datetime import datetime
+from typing import Any, Optional, Union, Dict, List, Tuple, TypeVar, Callable, overload
+
+
+T = TypeVar('T')
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
-    """Safely convert value to float, returning default on failure."""
+    """
+    Safely convert value to float with fallback.
+    
+    Args:
+        value: Any value to convert
+        default: Default value if conversion fails
+    
+    Returns:
+        Float value or default
+    """
+    if value is None:
+        return default
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        result = float(value)
+        if not isinstance(result, float) or not math.isfinite(result):
+            return default
+        return result
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+import math
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    """
+    Safely convert value to int with fallback.
+    
+    Args:
+        value: Any value to convert
+        default: Default value if conversion fails
+    
+    Returns:
+        Integer value or default
+    """
+    if value is None:
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
 def safe_bool(value: Any, default: bool = False) -> bool:
-    """Safely convert value to bool, returning default on failure."""
+    """
+    Safely convert value to bool with fallback.
+    
+    Args:
+        value: Any value to convert
+        default: Default value if conversion fails
+    
+    Returns:
+        Boolean value or default
+    """
     if isinstance(value, bool):
         return value
     if value is None:
         return default
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    str_val = str(value).strip().lower()
+    if str_val in {'1', 'true', 'yes', 'on', 'enabled'}:
+        return True
+    if str_val in {'0', 'false', 'no', 'off', 'disabled', ''}:
+        return False
+    return default
 
 
-def loads_list(value: Any) -> list:
-    """Safely load value as list."""
-    if isinstance(value, list):
-        return value
-    if not value:
-        return []
+def safe_str(value: Any, default: str = '', max_length: Optional[int] = None) -> str:
+    """
+    Safely convert value to string with fallback and optional truncation.
+    
+    Args:
+        value: Any value to convert
+        default: Default value if conversion fails
+        max_length: Optional maximum length (truncates if exceeded)
+    
+    Returns:
+        String value or default
+    """
+    if value is None:
+        return default
     try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, list) else []
-    except (TypeError, json.JSONDecodeError):
-        return []
+        result = str(value).strip()
+        if max_length and len(result) > max_length:
+            result = result[:max_length]
+        return result
+    except Exception:
+        return default
 
 
-def loads_dict(value: Any) -> dict:
-    """Safely load value as dict."""
+def safe_dict(value: Any, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Safely convert value to dict with fallback.
+    
+    Args:
+        value: Any value to convert
+        default: Default dict if conversion fails
+    
+    Returns:
+        Dictionary value or default empty dict
+    """
+    if default is None:
+        default = {}
     if isinstance(value, dict):
         return value
-    if not value:
-        return {}
+    if value is None or value == '':
+        return default
     try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, dict) else {}
+        parsed = json.loads(str(value))
+        return parsed if isinstance(parsed, dict) else default
     except (TypeError, json.JSONDecodeError):
-        return {}
+        return default
+
+
+def safe_list(value: Any, default: Optional[List[Any]] = None) -> List[Any]:
+    """
+    Safely convert value to list with fallback.
+    
+    Args:
+        value: Any value to convert
+        default: Default list if conversion fails
+    
+    Returns:
+        List value or default empty list
+    """
+    if default is None:
+        default = []
+    if isinstance(value, list):
+        return value
+    if value is None or value == '':
+        return default
+    try:
+        parsed = json.loads(str(value))
+        return parsed if isinstance(parsed, list) else default
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def loads_list(value: Any) -> List[Any]:
+    """Backward-compatible JSON list loader used across older modules."""
+    return safe_list(value, [])
+
+
+def loads_dict(value: Any) -> Dict[str, Any]:
+    """Backward-compatible JSON dict loader used across older modules."""
+    return safe_dict(value, {})
+
+
+def first_valid(*values: Any) -> Any:
+    """
+    Return first non-None value from arguments.
+    
+    Args:
+        *values: Values to check
+    
+    Returns:
+        First valid value or None
+    """
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
+def clamp(value: float, min_val: float, max_val: float) -> float:
+    """
+    Clamp a value to a range.
+    
+    Args:
+        value: Value to clamp
+        min_val: Minimum allowed value
+        max_val: Maximum allowed value
+    
+    Returns:
+        Clamped value
+    """
+    return max(min_val, min(max_val, value))
 
 
 def normalize_symbol(symbol: str) -> str:
-    """Normalize symbol to exchange format (BTCUSDT -> BTC/USDT)."""
-    symbol = str(symbol or "").upper().replace(" ", "").replace("-", "").replace("_", "").replace("/", "")
-    for quote in ["USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]:
-        if symbol.endswith(quote) and len(symbol) > len(quote):
-            base = symbol[:-len(quote)]
-            return f"{base}/{quote}"
-    return symbol
+    """
+    Normalize trading symbol to standard format.
+    
+    Args:
+        symbol: Raw symbol string
+    
+    Returns:
+        Normalized symbol (uppercase, no special chars)
+    """
+    if not symbol:
+        return ''
+    return symbol.upper().replace(' ', '').replace('-', '').replace('_', '').replace('/', '')
 
 
 def symbol_key(symbol: str) -> str:
-    """Convert symbol to compact key for matching (removes /, :, -, _)."""
-    return str(symbol or "").upper().replace("/", "").replace(":", "").replace("-", "").replace("_", "")
+    """
+    Get canonical key for symbol matching.
+    
+    Args:
+        symbol: Symbol string
+    
+    Returns:
+        Lowercase compact symbol key
+    """
+    return normalize_symbol(symbol).lower()
 
 
-def price_pnl_pct(direction: str, entry_price: float, exit_price: float, leverage: float = 1.0) -> float:
-    """Calculate PnL percentage for a position."""
-    entry_price = safe_float(entry_price)
-    exit_price = safe_float(exit_price)
-    leverage = max(1.0, safe_float(leverage, 1.0))
-
+def price_pnl_pct(
+    direction: str,
+    entry_price: float,
+    exit_price: float,
+    leverage: float = 1.0
+) -> float:
+    """
+    Calculate leveraged PnL percentage.
+    
+    Args:
+        direction: Trade direction ('long' or 'short')
+        entry_price: Entry price
+        exit_price: Exit price
+        leverage: Position leverage
+    
+    Returns:
+        PnL percentage
+    """
     if entry_price <= 0 or exit_price <= 0:
         return 0.0
-
-    if str(direction).lower() == "short":
+    leverage = max(1.0, safe_float(leverage, 1.0))
+    if direction.lower() == 'short':
         raw = ((entry_price - exit_price) / entry_price) * 100.0
     else:
         raw = ((exit_price - entry_price) / entry_price) * 100.0
-
     return raw * leverage
+
+
+def is_valid_email(email: str) -> bool:
+    """
+    Validate email format.
+    
+    Args:
+        email: Email string
+    
+    Returns:
+        True if valid email format
+    """
+    if not email:
+        return False
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email.lower()))
+
+
+def truncate_text(text: str, max_length: int = 100, suffix: str = '...') -> str:
+    """
+    Truncate text to max length with suffix.
+    
+    Args:
+        text: Text to truncate
+        max_length: Maximum length
+        suffix: Suffix to append when truncated
+    
+    Returns:
+        Truncated text
+    """
+    if not text or len(text) <= max_length:
+        return text
+    return text[:max_length - len(suffix)] + suffix
+
+
+def merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge two dictionaries, override takes precedence.
+    
+    Args:
+        base: Base dictionary
+        override: Override dictionary
+    
+    Returns:
+        Merged dictionary
+    """
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and key in result and isinstance(result[key], dict):
+            result[key] = merge_dicts(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def chunks(lst: List[T], n: int) -> List[List[T]]:
+    """
+    Split list into chunks of size n.
+    
+    Args:
+        lst: List to split
+        n: Chunk size
+    
+    Returns:
+        List of chunks
+    """
+    return [lst[i:i + n] for i in range(0, len(lst), n)]
+
+
+def debounce_async(func: Callable[..., Any], delay: float) -> Callable[..., Any]:
+    """
+    Create async debounced version of function.
+    
+    Args:
+        func: Function to debounce
+        delay: Delay in seconds
+    
+    Returns:
+        Debounced function
+    """
+    import asyncio
+    task: Optional[asyncio.Task] = None
+    
+    async def debounced(*args: Any, **kwargs: Any) -> Any:
+        nonlocal task
+        if task:
+            task.cancel()
+        await asyncio.sleep(delay)
+        return await func(*args, **kwargs)
+    
+    return debounced
+
+
+def retry_async(
+    func: Callable[..., Any],
+    max_attempts: int = 3,
+    delay: float = 1.0,
+    backoff: float = 2.0,
+    exceptions: Tuple[Type[Exception], ...] = (Exception,)
+) -> Callable[..., Any]:
+    """
+    Create retry wrapper for async function.
+    
+    Args:
+        func: Function to wrap
+        max_attempts: Maximum retry attempts
+        delay: Initial delay
+        backoff: Backoff multiplier
+        exceptions: Exceptions to retry on
+    
+    Returns:
+        Wrapped function with retry logic
+    """
+    import asyncio
+    
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        current_delay = delay
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_attempts):
+            try:
+                return await func(*args, **kwargs)
+            except exceptions as e:
+                last_exc = e
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(current_delay)
+                    current_delay *= backoff
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Retry failed without exception")
+    
+    return wrapper

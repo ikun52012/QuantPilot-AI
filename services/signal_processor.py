@@ -454,6 +454,7 @@ class SignalProcessor:
             market.current_price or signal.price,
             analysis.position_size_pct,
             analysis.recommended_leverage,
+            decision=decision,
         )
 
         decision.reason = analysis.reasoning
@@ -603,6 +604,7 @@ class SignalProcessor:
         price: float,
         size_pct: float,
         leverage: float,
+        decision: Optional[TradeDecision] = None,
     ) -> float:
         """Calculate position size based on account equity and risk.
 
@@ -628,22 +630,15 @@ class SignalProcessor:
         elif sizing_mode == "risk_ratio":
             # Risk X% of account per trade
             risk_pct = settings.risk.risk_per_trade_pct
-            # Calculate stop loss distance to determine position size
+            # Calculate stop loss distance from decision
             sl_distance_pct = 0.0
-            if self._has_valid_sl(price, size_pct):
-                # Estimate SL distance from AI analysis or use default
-                sl_distance_pct = 2.0  # Default 2% SL distance
-            if sl_distance_pct > 0:
-                # Position size = (account * risk_pct) / (sl_distance * leverage)
-                risk_amount = equity * (risk_pct / 100.0)
-                notional_value = (risk_amount / (sl_distance_pct / 100.0)) * leverage
-            else:
-                # Fallback to percentage mode if no SL info
-                size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
-                if size_pct and size_pct > 1:
-                    size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
-                margin_value = equity * (max_position / 100.0) * size_fraction
-                notional_value = margin_value * leverage
+            if decision and decision.stop_loss and self._has_valid_sl(price, decision.stop_loss):
+                sl_distance_pct = self._sl_distance_pct(decision.direction, price, decision.stop_loss)
+            if not sl_distance_pct:
+                sl_distance_pct = 2.0  # Default 2% SL distance as fallback
+            # Position size = (account * risk_pct) / (sl_distance * leverage)
+            risk_amount = equity * (risk_pct / 100.0)
+            notional_value = (risk_amount / (sl_distance_pct / 100.0)) * leverage
         else:
             # Default: percentage mode
             size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
@@ -659,9 +654,19 @@ class SignalProcessor:
 
         return 0.0
 
-    def _has_valid_sl(self, price: float, size_pct: float) -> bool:
+    def _has_valid_sl(self, entry_price: float, stop_loss: Optional[float] = None) -> bool:
         """Check if we have valid stop loss info for risk-based sizing."""
-        return True  # Placeholder - actual implementation would check AI analysis
+        if not stop_loss or stop_loss <= 0 or entry_price <= 0:
+            return False
+        return True
+
+    def _sl_distance_pct(self, direction, entry_price: float, stop_loss: float) -> float:
+        """Calculate stop loss distance as percentage of entry price."""
+        if entry_price <= 0 or stop_loss <= 0:
+            return 0.0
+        if direction and str(direction).lower() == "short":
+            return ((stop_loss - entry_price) / entry_price) * 100.0
+        return ((entry_price - stop_loss) / entry_price) * 100.0
 
     async def _execute_trade(
         self,

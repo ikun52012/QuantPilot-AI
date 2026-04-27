@@ -48,9 +48,11 @@ async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
 
 @pytest_asyncio.fixture(scope="function")
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    from app import app
+    from core.factory import create_app
     from core.database import get_db, db_manager
     from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    app = create_app()
 
     async def override_get_db():
         yield db_session

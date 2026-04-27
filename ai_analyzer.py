@@ -950,6 +950,15 @@ async def analyze_signal(
 def _parse_response(raw: str) -> AIAnalysis:
     """Parse raw LLM response into structured AIAnalysis."""
     try:
+        def _float_or_default(value, default: float) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _clamp(value: float, low: float, high: float) -> float:
+            return max(low, min(high, value))
+
         # Try to extract JSON from the response
         raw_clean = raw.strip()
 
@@ -988,8 +997,13 @@ def _parse_response(raw: str) -> AIAnalysis:
         if isinstance(suggested_direction, str):
             suggested_direction = suggested_direction.lower().strip() or None
 
+        confidence = _clamp(_float_or_default(data.get("confidence", 0.5), 0.5), 0.0, 1.0)
+        risk_score = _clamp(_float_or_default(data.get("risk_score", 0.5), 0.5), 0.0, 1.0)
+        position_size_pct = _clamp(_float_or_default(data.get("position_size_pct", 1.0), 1.0), 0.0, 1.0)
+        recommended_leverage = max(0.0, _float_or_default(data.get("recommended_leverage", 1.0), 1.0))
+
         return AIAnalysis(
-            confidence=float(data.get("confidence", 0.5)),
+            confidence=confidence,
             recommendation=recommendation,
             reasoning=data.get("reasoning", ""),
             suggested_direction=suggested_direction,
@@ -1000,13 +1014,13 @@ def _parse_response(raw: str) -> AIAnalysis:
             suggested_tp2=data.get("suggested_tp2"),
             suggested_tp3=data.get("suggested_tp3"),
             suggested_tp4=data.get("suggested_tp4"),
-            tp1_qty_pct=float(data.get("tp1_qty_pct", 25.0)),
-            tp2_qty_pct=float(data.get("tp2_qty_pct", 25.0)),
-            tp3_qty_pct=float(data.get("tp3_qty_pct", 25.0)),
-            tp4_qty_pct=float(data.get("tp4_qty_pct", 25.0)),
-            position_size_pct=float(data.get("position_size_pct", 1.0)),
-            recommended_leverage=float(data.get("recommended_leverage", 1.0)),
-            risk_score=float(data.get("risk_score", 0.5)),
+            tp1_qty_pct=_clamp(_float_or_default(data.get("tp1_qty_pct", 25.0), 25.0), 0.0, 100.0),
+            tp2_qty_pct=_clamp(_float_or_default(data.get("tp2_qty_pct", 25.0), 25.0), 0.0, 100.0),
+            tp3_qty_pct=_clamp(_float_or_default(data.get("tp3_qty_pct", 25.0), 25.0), 0.0, 100.0),
+            tp4_qty_pct=_clamp(_float_or_default(data.get("tp4_qty_pct", 25.0), 25.0), 0.0, 100.0),
+            position_size_pct=position_size_pct,
+            recommended_leverage=recommended_leverage,
+            risk_score=risk_score,
             market_condition=data.get("market_condition", ""),
             warnings=warnings,
             raw_response=raw,

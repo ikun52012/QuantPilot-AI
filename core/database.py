@@ -412,9 +412,22 @@ class DatabaseManager:
 
     @staticmethod
     def _ensure_schema(sync_conn):
-        """Apply lightweight additive migrations for deployments without Alembic."""
+        """Apply lightweight additive migrations for deployments without Alembic.
+
+        DDL types used are ANSI SQL standard and compatible with SQLite, PostgreSQL,
+        and MySQL. For PostgreSQL production deployments, Alembic migrations are
+        still recommended for complex schema changes.
+        """
         inspector = inspect(sync_conn)
         tables = set(inspector.get_table_names())
+        dialect_name = sync_conn.dialect.name
+        is_postgresql = dialect_name == "postgresql"
+
+        if is_postgresql:
+            logger.info(
+                "[Database] PostgreSQL detected — _ensure_schema uses ANSI-compatible DDL. "
+                "Use Alembic for complex schema migrations."
+            )
 
         VALID_TABLES = {
             "users", "subscription_plans", "subscriptions", "payments",
@@ -424,7 +437,21 @@ class DatabaseManager:
         }
         VALID_COLUMN_TYPES = {
             "FLOAT", "BOOLEAN", "TIMESTAMP", "TEXT", "VARCHAR", "INTEGER",
+            "DOUBLE PRECISION", "REAL",
         }
+
+        # Map ANSI types to dialect-specific equivalents
+        if is_postgresql:
+            _type_map = {
+                "FLOAT": "DOUBLE PRECISION",
+                "BOOLEAN": "BOOLEAN",
+                "TIMESTAMP": "TIMESTAMP",
+                "VARCHAR": "VARCHAR",
+                "INTEGER": "INTEGER",
+                "TEXT": "TEXT",
+            }
+        else:
+            _type_map = None
 
         def validate_identifier(name: str) -> bool:
             return bool(re.match(r'^[a-z_][a-z0-9_]*$', name))
@@ -448,9 +475,15 @@ class DatabaseManager:
                     if not validate_ddl(ddl):
                         logger.warning(f"[Database] Invalid DDL for column {name}: {ddl}")
                         continue
+                    # Translate type for dialect if needed
+                    effective_ddl = ddl
+                    if _type_map:
+                        upper_prefix = ddl.split()[0].upper() if ddl.strip() else ""
+                        if upper_prefix in _type_map and _type_map[upper_prefix] != upper_prefix:
+                            effective_ddl = ddl.replace(upper_prefix, _type_map[upper_prefix], 1)
                     quoted_table = sync_conn.dialect.identifier_preparer.quote(table_name)
                     quoted_column = sync_conn.dialect.identifier_preparer.quote(name)
-                    sync_conn.execute(text(f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {ddl}"))
+                    sync_conn.execute(text(f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {effective_ddl}"))
 
         add_missing_columns("users", {
             "balance_usdt": "FLOAT DEFAULT 0",
@@ -728,14 +761,6 @@ async def get_user_by_email(session: AsyncSession, email: str) -> Optional[UserM
         select(UserModel).where(UserModel.email == email.lower().strip())
     )
     return result.scalar_one_or_none()
-
-
-async def get_all_users(session: AsyncSession) -> list[UserModel]:
-    """Get all users."""
-    result = await session.execute(
-        select(UserModel).order_by(UserModel.created_at.desc())
-    )
-    return list(result.scalars().all())
 
 
 async def update_user_login(session: AsyncSession, user_id: str):

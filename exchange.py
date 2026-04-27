@@ -193,12 +193,48 @@ def _build_exchange(
 
 def _normalize_symbol(symbol: str) -> str:
     """Normalize symbol to exchange format."""
-    # Remove any spaces, slashes, or weird characters
-    symbol = symbol.upper().replace(" ", "").replace("/", "").replace("-", "")
+    if not symbol:
+        return ""
+    symbol = symbol.upper().replace(" ", "")
+    if "/" in symbol:
+        return symbol
+    symbol = symbol.replace("-", "")
     # Add USDT suffix if missing and not already a pair
     if not symbol.endswith(("USDT", "USD", "BTC", "ETH", "BNB")):
         symbol = f"{symbol}USDT"
     return symbol
+
+
+def _valid_stop_loss(direction: SignalDirection, entry: float, price: float | None) -> float | None:
+    """Compatibility helper shared by legacy tests and callers."""
+    try:
+        value = float(price or 0)
+        entry = float(entry or 0)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or entry <= 0:
+        return None
+    if direction == SignalDirection.LONG and value < entry:
+        return value
+    if direction == SignalDirection.SHORT and value > entry:
+        return value
+    return None
+
+
+def _valid_take_profit(direction: SignalDirection, entry: float, price: float | None) -> float | None:
+    """Compatibility helper shared by legacy tests and callers."""
+    try:
+        value = float(price or 0)
+        entry = float(entry or 0)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or entry <= 0:
+        return None
+    if direction == SignalDirection.LONG and value > entry:
+        return value
+    if direction == SignalDirection.SHORT and value < entry:
+        return value
+    return None
 
 
 def _symbol_candidates(symbol: str) -> list[str]:
@@ -308,7 +344,9 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             return {"status": "error", "reason": "Quantity must be greater than zero"}
 
         # Support both market and limit orders
-        order_type = getattr(decision, "order_type", "market") or "market"
+        order_type = str(getattr(decision, "order_type", "") or "").strip().lower()
+        if not order_type or order_type not in ("market", "limit"):
+            order_type = "market"
 
         if order_type == "limit" and decision.entry_price and decision.entry_price > 0:
             logger.info(f"[Exchange] Placing {side} LIMIT order: {symbol} qty={decision.quantity} @ {decision.entry_price}")
@@ -590,7 +628,9 @@ def _simulate_order(decision: TradeDecision) -> dict:
         })
 
     trailing_mode = decision.trailing_stop.mode if decision.trailing_stop else TrailingStopMode.NONE
-    order_type = getattr(decision, "order_type", "market") or "market"
+    order_type = str(getattr(decision, "order_type", "") or "").strip().lower()
+    if not order_type or order_type not in ("market", "limit"):
+        order_type = "market"
 
     trailing_config = {}
     if decision.trailing_stop:

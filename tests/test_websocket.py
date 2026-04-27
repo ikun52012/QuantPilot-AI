@@ -113,6 +113,58 @@ class TestWebSocketPrices:
         assert result.price == 50000.0
         assert result.rsi_1h == 65
 
+    def test_pending_2fa_token_rejected(self):
+        from routers.websocket import _verify_ws_token_or_none
+
+        assert _verify_ws_token_or_none("ignored") is None
+
+    @patch('routers.websocket.verify_token')
+    def test_pending_2fa_payload_rejected(self, mock_verify):
+        from routers.websocket import _verify_ws_token_or_none
+
+        mock_verify.return_value = {"sub": "user123", "2fa_pending": True}
+        assert _verify_ws_token_or_none("token") is None
+
+    @patch('routers.websocket.verify_token')
+    def test_valid_payload_allowed(self, mock_verify):
+        from routers.websocket import _verify_ws_token_or_none
+
+        payload = {"sub": "user123", "role": "user"}
+        mock_verify.return_value = payload
+        assert _verify_ws_token_or_none("token") == payload
+
+    @pytest.mark.asyncio
+    @patch('routers.websocket.get_user_by_id')
+    @patch('routers.websocket._verify_ws_token_or_none')
+    async def test_db_disabled_user_rejected(self, mock_verify, mock_get_user, db_session):
+        from routers.websocket import _authenticate_ws_user_or_none
+        from routers.websocket import db_manager
+
+        mock_verify.return_value = {"sub": "user123", "ver": 0}
+        mock_get_user.return_value = Mock(id="user123", username="alice", role="user", email="a@example.com", is_active=False, token_version=0)
+
+        db_manager.async_session_factory = lambda: db_session
+        try:
+            assert await _authenticate_ws_user_or_none("token") is None
+        finally:
+            db_manager.async_session_factory = None
+
+    @pytest.mark.asyncio
+    @patch('routers.websocket.get_user_by_id')
+    @patch('routers.websocket._verify_ws_token_or_none')
+    async def test_revoked_token_rejected(self, mock_verify, mock_get_user, db_session):
+        from routers.websocket import _authenticate_ws_user_or_none
+        from routers.websocket import db_manager
+
+        mock_verify.return_value = {"sub": "user123", "ver": 1}
+        mock_get_user.return_value = Mock(id="user123", username="alice", role="user", email="a@example.com", is_active=True, token_version=2)
+
+        db_manager.async_session_factory = lambda: db_session
+        try:
+            assert await _authenticate_ws_user_or_none("token") is None
+        finally:
+            db_manager.async_session_factory = None
+
 
 class TestWebSocketSystem:
     @patch('routers.websocket._fetch_system_stats')
@@ -227,3 +279,18 @@ class TestWebSocketStatusEndpoint:
 
         assert status["active_connections"] == 5
         assert len(status["endpoints"]) == 3
+
+
+class TestWebSocketStatusSecurity:
+    @pytest.mark.asyncio
+    async def test_status_requires_auth(self, client):
+        response = await client.get("/ws/status")
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_status_requires_admin(self, client, test_user_data):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+
+        response = await client.get("/ws/status")
+        assert response.status_code == 403

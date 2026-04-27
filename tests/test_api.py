@@ -1,11 +1,30 @@
 """
 API endpoint tests.
 """
+import json
+
 import pytest
 from httpx import AsyncClient
 
 from core.security import hash_password
 from core.database import UserModel
+
+
+def _csrf_headers(response) -> dict[str, str]:
+    csrf = response.cookies.get("tvss_csrf")
+    assert csrf
+    return {"X-CSRF-Token": csrf}
+
+
+@pytest.fixture(autouse=True)
+def clear_login_guard_state():
+    from core.login_guard import _attempts, _lockouts
+
+    _attempts.clear()
+    _lockouts.clear()
+    yield
+    _attempts.clear()
+    _lockouts.clear()
 
 
 class TestHealthEndpoint:
@@ -93,6 +112,144 @@ class TestAuthEndpoints:
         """Test getting user info without auth fails."""
         response = await client.get("/api/auth/me")
         assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_2fa_verify_failed_attempts_are_limited(self, client: AsyncClient, test_user_data, db_session):
+        from core.totp import encrypt_totp_secret
+        from core.login_guard import _attempts, _lockouts
+
+        _attempts.clear()
+        _lockouts.clear()
+
+        user = UserModel(
+            username=test_user_data["username"].lower(),
+            email=test_user_data["email"].lower(),
+            password_hash=hash_password(test_user_data["password"]),
+            totp_secret=encrypt_totp_secret("JBSWY3DPEHPK3PXP"),
+            totp_enabled=True,
+        )
+        db_session.add(user)
+        await db_session.commit()
+
+        login = await client.post("/api/auth/login", json={
+            "username": test_user_data["username"],
+            "password": test_user_data["password"],
+        })
+        assert login.status_code == 200
+        pending_token = login.json()["token"]
+
+        for _ in range(4):
+            response = await client.post(
+                "/api/auth/2fa/verify",
+                headers={"Authorization": f"Bearer {pending_token}"},
+                json={"code": "000000"},
+            )
+            assert response.status_code == 401
+
+        response = await client.post(
+            "/api/auth/2fa/verify",
+            headers={"Authorization": f"Bearer {pending_token}"},
+            json={"code": "000000"},
+        )
+        assert response.status_code == 429
+
+
+class TestUserEndpoints:
+    @pytest.mark.asyncio
+    async def test_positions_returns_real_unrealized_pnl(self, client: AsyncClient, test_user_data, db_session):
+        from core.utils.datetime import utcnow
+        from core.database import PositionModel
+
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        user_id = login.json()["user"]["id"]
+
+        db_session.add(PositionModel(
+            user_id=user_id,
+            ticker="BTCUSDT",
+            direction="long",
+            status="open",
+            entry_price=50000,
+            quantity=0.01,
+            remaining_quantity=0.01,
+            opened_at=utcnow(),
+            unrealized_pnl_usdt=12.34,
+            current_pnl_pct=2.5,
+        ))
+        await db_session.commit()
+
+        response = await client.get("/api/positions")
+        assert response.status_code == 200
+        data = response.json()
+        assert data[0]["unrealizedPnl"] == 12.34
+        assert data[0]["unrealized_pnl"] == 12.34
+
+
+class TestSocialEndpoints:
+    @pytest.mark.asyncio
+    async def test_follow_user_uses_post_and_updates_followers(self, client: AsyncClient, test_user_data):
+        publisher = {
+            "username": "signaler",
+            "email": "signaler@example.com",
+            "password": "Str0ng!Pass123",
+        }
+        follower = {
+            "username": "follower",
+            "email": "follower@example.com",
+            "password": "Str0ng!Pass123",
+        }
+
+        pub_resp = await client.post("/api/auth/register", json=publisher)
+        assert pub_resp.status_code == 200
+        pub_headers = _csrf_headers(pub_resp)
+        share = await client.post("/api/social/share", json={
+            "ticker": "BTCUSDT",
+            "direction": "long",
+            "entry_price": 50000,
+            "confidence": 0.8,
+        }, headers=pub_headers)
+        assert share.status_code == 200
+
+        await client.post("/api/auth/logout", headers=pub_headers)
+        follow_login = await client.post("/api/auth/register", json=follower)
+        assert follow_login.status_code == 200
+        follow_headers = _csrf_headers(follow_login)
+
+        get_response = await client.get(f"/api/social/follow/{publisher['username']}")
+        assert get_response.status_code in {403, 405}
+
+        post_response = await client.post(f"/api/social/follow/{publisher['username']}", headers=follow_headers)
+        assert post_response.status_code == 200
+        assert post_response.json()["status"] == "following"
+
+    @pytest.mark.asyncio
+    async def test_inline_2fa_login_failed_attempts_are_limited(self, client: AsyncClient, test_user_data, db_session):
+        from core.totp import encrypt_totp_secret
+
+        user = UserModel(
+            username=test_user_data["username"].lower(),
+            email=test_user_data["email"].lower(),
+            password_hash=hash_password(test_user_data["password"]),
+            totp_secret=encrypt_totp_secret("JBSWY3DPEHPK3PXP"),
+            totp_enabled=True,
+        )
+        db_session.add(user)
+        await db_session.commit()
+
+        for _ in range(4):
+            response = await client.post("/api/auth/login", json={
+                "username": test_user_data["username"],
+                "password": test_user_data["password"],
+                "totp_code": "000000",
+            })
+            assert response.status_code == 401
+
+        response = await client.post("/api/auth/login", json={
+            "username": test_user_data["username"],
+            "password": test_user_data["password"],
+            "totp_code": "000000",
+        })
+        assert response.status_code == 429
 
 
 class TestPlanEndpoints:

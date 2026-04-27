@@ -12,11 +12,7 @@ const USDT_PAYMENT_NETWORKS = [
     { id: 'APT', name: 'Aptos (APT)' },
     { id: 'SOL', name: 'Solana (SPL)' },
 ];
-let equityChart = null;
-let dailyPnlChart = null;
-let winlossChart = null;
-let userEquityChart = null;
-let marketChart = null;
+
 let currentUserSettings = null;
 let _strategyTemplates = [];
 
@@ -177,6 +173,11 @@ async function logout() {
         });
     } catch {}
     redirectToLogin('logout');
+}
+
+function getCookie(name) {
+    const prefix = `${name}=`;
+    return document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith(prefix))?.slice(prefix.length) || '';
 }
 
 // ─── Initialization ───
@@ -437,38 +438,18 @@ async function loadRecentSignals() {
 }
 
 // ─── Charts ───
-function renderEquityChart(curve) {
-    const ctx = document.getElementById('equity-chart')?.getContext('2d');
-    if (!ctx) return;
-    if (equityChart) equityChart.destroy();
-    const gradient = ctx.createLinearGradient(0,0,0,280);
-    gradient.addColorStop(0,'rgba(59,130,246,0.3)'); gradient.addColorStop(1,'rgba(59,130,246,0.0)');
-    const labels = curve.map(c => {
-        if (c.date) return c.date;
-        if (c.timestamp) return new Date(c.timestamp).toLocaleDateString(undefined, {month:'short', day:'numeric'});
-        return '';
-    });
-    equityChart = new Chart(ctx, { type:'line', data:{ labels, datasets:[{ label:'Cumulative P&L %', data:curve.map(c=>c.cumulative_pnl), borderColor:'#3b82f6', backgroundColor:gradient, borderWidth:2, fill:true, tension:0.4, pointRadius:0, pointHoverRadius:5 }]}, options:chartOptions('P&L %') });
-}
-function renderDailyPnlChart(daily) {
-    const ctx = document.getElementById('daily-pnl-chart')?.getContext('2d');
-    if (!ctx) return;
-    if (dailyPnlChart) dailyPnlChart.destroy();
-    dailyPnlChart = new Chart(ctx, { type:'bar', data:{ labels:daily.map(d=>d.date), datasets:[{ label:'Daily P&L %', data:daily.map(d=>d.pnl), backgroundColor:daily.map(d=>d.pnl>=0?'rgba(16,185,129,0.7)':'rgba(239,68,68,0.7)'), borderRadius:4 }]}, options:chartOptions('P&L %') });
-}
-function renderWinLossChart(perf) {
-    const ctx = document.getElementById('winloss-chart')?.getContext('2d');
-    if (!ctx) return;
-    if (winlossChart) winlossChart.destroy();
-    winlossChart = new Chart(ctx, { type:'doughnut', data:{ labels:['Wins','Losses','Breakeven'], datasets:[{ data:[perf.winning_trades||0,perf.losing_trades||0,perf.breakeven_trades||0], backgroundColor:['#10b981','#ef4444','#6b7280'], borderColor:'transparent', borderWidth:0 }]}, options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'bottom', labels:{color:'#9ca3af',padding:16,font:{size:12}} }}, cutout:'65%' } });
-}
-function chartOptions(yLabel) {
-    return { responsive:true, maintainAspectRatio:false, interaction:{intersect:false,mode:'index'}, plugins:{ legend:{display:false}, tooltip:{backgroundColor:'#1a1f2e',borderColor:'#2a3042',borderWidth:1,titleColor:'#e8eaed',bodyColor:'#9ca3af',cornerRadius:8,padding:12}}, scales:{ x:{grid:{color:'rgba(42,48,66,0.5)'},ticks:{color:'#6b7280',font:{size:11},maxTicksLimit:12}}, y:{grid:{color:'rgba(42,48,66,0.5)'},ticks:{color:'#6b7280',font:{size:11}},title:{display:true,text:yLabel,color:'#6b7280'}}} };
-}
+
+
+
+
 function setChartPeriod(evt, days) {
     document.querySelectorAll('.card-actions .btn-sm').forEach(b => b.classList.remove('active'));
     evt.target.classList.add('active');
-    fetchAPI(`/api/performance?days=${days}`).then(perf => renderEquityChart(perf.equity_curve||[])).catch(e => showToast(e.message,'error'));
+    fetchAPI(`/api/performance?days=${days}`).then(perf => {
+        if (typeof renderEquityChart === 'function') {
+            renderEquityChart(perf.equity_curve || []);
+        }
+    }).catch(e => showToast(e.message, 'error'));
 }
 
 // ─── Positions ───
@@ -912,18 +893,20 @@ function renderUserPerformance(perf, sub) {
 }
 
 function renderUserEquityChart(curve) {
+    if (typeof window.userEquityChart !== 'undefined' && window.userEquityChart) {
+        window.userEquityChart.destroy();
+    }
     const ctx = document.getElementById('user-equity-chart')?.getContext('2d');
     if (!ctx) return;
-    if (userEquityChart) userEquityChart.destroy();
     const labels = curve.map(c => {
         if (c.date) return c.date;
         if (c.timestamp) return new Date(c.timestamp).toLocaleDateString(undefined, {month:'short', day:'numeric'});
         return '';
     });
-    userEquityChart = new Chart(ctx, {
+    window.userEquityChart = new Chart(ctx, {
         type:'line',
         data:{ labels, datasets:[{ label:'My P&L %', data:curve.map(c=>c.cumulative_pnl), borderColor:'#10b981', backgroundColor:'rgba(16,185,129,.12)', borderWidth:2, fill:true, tension:.35, pointRadius:0 }] },
-        options:chartOptions('P&L %')
+        options:typeof chartOptions === 'function' ? chartOptions('P&L %') : {responsive:true, maintainAspectRatio:false}
     });
 }
 
@@ -3406,7 +3389,7 @@ async function unsubscribeSocialSignal(signalId) {
 async function followSignalUser(username) {
     if (!username) return;
     try {
-        await fetchAPI(`/api/social/follow/${encodeURIComponent(username)}`);
+        await fetchAPI(`/api/social/follow/${encodeURIComponent(username)}`, { method: 'POST' });
         showToast(`Following ${username}.`, 'success', 'Following');
     } catch (err) {
         showToast(err.message, 'error', 'Follow Failed');

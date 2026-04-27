@@ -98,6 +98,7 @@ async def _find_user_by_secret(db: AsyncSession, secret: str):
         select(UserModel).where(
             UserModel.webhook_secret_hash == secret_hash,
             UserModel.is_active == True,
+            UserModel.deleted_at.is_(None),
         )
     )
     return result.scalar_one_or_none()

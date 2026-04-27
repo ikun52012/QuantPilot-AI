@@ -148,6 +148,8 @@ async def run_backtest(
             execution_time_ms=round(execution_time, 2),
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Backtest] Failed: {e}")
         raise HTTPException(500, f"Backtest failed: {str(e)}")
@@ -209,6 +211,12 @@ async def start_async_backtest(
             # Clean up expired cache entries
             _cleanup_backtest_cache()
 
+        except HTTPException as e:
+            _backtest_results_cache[task_id] = {
+                "status": "error",
+                "error": e.detail,
+                "status_code": e.status_code,
+            }
         except Exception as e:
             _backtest_results_cache[task_id] = {"status": "error", "error": str(e)}
 

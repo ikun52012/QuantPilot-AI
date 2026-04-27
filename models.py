@@ -132,7 +132,7 @@ class PreFilterResult(BaseModel):
 # ─────────────────────────────────────────────
 class MarketContext(BaseModel):
     ticker: str
-    current_price: float
+    current_price: float = 0.0
     price_change_1h: float = 0.0
     price_change_4h: float = 0.0
     price_change_24h: float = 0.0

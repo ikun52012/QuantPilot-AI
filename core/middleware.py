@@ -102,7 +102,12 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # ─────────────────────────────────────────────
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Simple in-memory rate limiting middleware."""
+    """Rate limiting middleware with in-memory store and optional Redis backing.
+
+    When Redis is enabled (settings.redis.enabled = true), rate-limit counters
+    are persisted in Redis, surviving restarts and working across multiple
+    processes.  Falls back to in-memory dicts when Redis is unavailable.
+    """
 
     def __init__(self, app, enabled: bool = True):
         super().__init__(app)
@@ -112,6 +117,96 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._webhook_attempts: dict[str, list[float]] = {}
         self._api_requests: dict[str, list[float]] = {}
         self._lock = __import__("threading").Lock()
+        self._redis = None
+        self._redis_checked = False
+
+    async def _get_redis(self):
+        """Lazily retrieve Redis client from the cache manager."""
+        if self._redis_checked:
+            return self._redis
+        self._redis_checked = True
+        if not settings.redis.enabled:
+            return None
+        try:
+            from core.cache import cache
+            redis_obj = getattr(cache, "_redis", None)
+            if redis_obj and getattr(redis_obj, "is_connected", lambda: False)():
+                self._redis = redis_obj
+                return self._redis
+            # Try to connect
+            if redis_obj:
+                await redis_obj._get_client()
+                if redis_obj.is_connected():
+                    self._redis = redis_obj
+                    return self._redis
+        except Exception:
+            pass
+        return None
+
+    async def _redis_check_rate(self, prefix: str, key: str, max_attempts: int, window_secs: int) -> bool:
+        """Check rate limit using Redis sliding-window counters."""
+        redis = await self._get_redis()
+        if not redis:
+            return self._check_rate_memory(prefix, key, max_attempts, window_secs)
+
+        redis_key = f"rl:{prefix}:{key}"
+        try:
+            client = await redis._get_client()
+            if not client:
+                return self._check_rate_memory(prefix, key, max_attempts, window_secs)
+
+            current = await client.get(redis_key)
+            if current is None:
+                await client.setex(redis_key, window_secs, "1")
+                return True
+
+            count = int(current)
+            if count >= max_attempts:
+                return False
+
+            # Increment within the remaining TTL
+            ttl = await client.ttl(redis_key)
+            if ttl <= 0:
+                await client.setex(redis_key, window_secs, "1")
+            else:
+                await client.setex(redis_key, ttl, str(count + 1))
+            return True
+        except Exception:
+            return self._check_rate_memory(prefix, key, max_attempts, window_secs)
+
+    async def _redis_clear_key(self, prefix: str, key: str) -> None:
+        """Remove a rate-limit key from Redis."""
+        redis = await self._get_redis()
+        if not redis:
+            return
+        try:
+            client = await redis._get_client()
+            if client:
+                await client.delete(f"rl:{prefix}:{key}")
+        except Exception:
+            pass
+
+    def _check_rate_memory(self, prefix: str, key: str, max_attempts: int, window_secs: int) -> bool:
+        """Fallback in-memory rate limit check."""
+        store_map = {
+            "login": self._login_attempts,
+            "register": self._register_attempts,
+            "webhook": self._webhook_attempts,
+            "api": self._api_requests,
+        }
+        store = store_map.get(prefix, self._api_requests)
+
+        now = time.time()
+        cutoff = now - window_secs
+
+        with self._lock:
+            attempts = [t for t in store.get(key, []) if t > cutoff]
+            if len(attempts) >= max_attempts:
+                store[key] = attempts
+                return False
+            attempts.append(now)
+            store[key] = attempts
+            return True
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         if not self.enabled:
@@ -122,9 +217,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         # Login rate limiting
         if path == "/api/auth/login" and request.method == "POST":
-            if not self._check_rate(
-                self._login_attempts,
-                ip,
+            if not await self._redis_check_rate(
+                "login", ip,
                 settings.rate_limit.login_max_attempts,
                 settings.rate_limit.login_window_secs,
             ):
@@ -136,9 +230,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         # Register rate limiting
         elif path == "/api/auth/register" and request.method == "POST":
-            if not self._check_rate(
-                self._register_attempts,
-                ip,
+            if not await self._redis_check_rate(
+                "register", ip,
                 settings.rate_limit.register_max_attempts,
                 settings.rate_limit.register_window_secs,
             ):
@@ -148,11 +241,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     content={"detail": "Too many registration attempts. Please wait 10 minutes."}
                 )
 
-        # Webhook rate limiting — 30 requests per 60 seconds per IP
+        # Webhook rate limiting
         elif path == "/webhook" and request.method == "POST":
-            if not self._check_rate(
-                self._webhook_attempts,
-                ip,
+            if not await self._redis_check_rate(
+                "webhook", ip,
                 settings.rate_limit.webhook_max_attempts,
                 settings.rate_limit.webhook_window_secs,
             ):
@@ -164,9 +256,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         # General API rate limiting
         elif path.startswith("/api/"):
-            if not self._check_rate(
-                self._api_requests,
-                ip,
+            if not await self._redis_check_rate(
+                "api", ip,
                 120,  # 120 requests per minute
                 60,
             ):
@@ -180,6 +271,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         # Clear rate limit on successful login
         if path == "/api/auth/login" and response.status_code == 200:
+            await self._redis_clear_key("login", ip)
             with self._lock:
                 self._login_attempts.pop(ip, None)
 
@@ -192,7 +284,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         max_attempts: int,
         window_secs: int,
     ) -> bool:
-        """Check if request is within rate limit."""
+        """In-memory rate limit check (kept for backward-compatible signature)."""
         now = time.time()
         cutoff = now - window_secs
 

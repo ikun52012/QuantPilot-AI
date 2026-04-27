@@ -244,19 +244,20 @@ FILTER_WEIGHTS: dict[str, float] = {
 
 def calculate_filter_score(checks: dict[str, dict]) -> float:
     """Calculate weighted score from filter results. Returns 0-100."""
-    total_weight = sum(FILTER_WEIGHTS.values())
+    active_weight = 0.0
     earned_weight = 0.0
 
     for check_name, check_data in checks.items():
         weight = FILTER_WEIGHTS.get(check_name, 5.0)
         if check_data.get("disabled", False):
             continue
+        active_weight += weight
         if check_data.get("passed", True):
             earned_weight += weight
         elif check_data.get("soft_fail", False):
             earned_weight += weight * 0.5
 
-    return (earned_weight / total_weight) * 100.0 if total_weight > 0 else 100.0
+    return (earned_weight / active_weight) * 100.0 if active_weight > 0 else 100.0
 
 
 _state_lock = threading.Lock()

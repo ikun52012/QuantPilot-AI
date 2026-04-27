@@ -410,7 +410,7 @@ async def provide_signal_feedback(
     }
 
 
-@router.get("/follow/{username}")
+@router.post("/follow/{username}")
 async def follow_user(
     username: str,
     user: dict = Depends(get_current_user),
