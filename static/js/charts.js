@@ -8,6 +8,7 @@ let equityChart = null;
 let dailyPnlChart = null;
 let winlossChart = null;
 let userEquityChart = null;
+let marketChart = null;
 
 /**
  * Default chart options
@@ -219,4 +220,16 @@ function destroyAllCharts() {
         userEquityChart.destroy();
         userEquityChart = null;
     }
+    if (marketChart) {
+        marketChart.destroy();
+        marketChart = null;
+    }
 }
+
+// Export functions globally for app.js compatibility
+window.chartOptions = chartOptions;
+window.renderEquityChart = renderEquityChart;
+window.renderDailyPnlChart = renderDailyPnlChart;
+window.renderWinLossChart = renderWinLossChart;
+window.setChartPeriod = setChartPeriod;
+window.destroyAllCharts = destroyAllCharts;
