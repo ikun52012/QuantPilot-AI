@@ -438,6 +438,7 @@ async function loadRecentSignals() {
 }
 
 // ─── Charts ───
+let marketChart = null;
 
 
 

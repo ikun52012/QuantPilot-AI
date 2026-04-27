@@ -233,3 +233,4 @@ window.renderDailyPnlChart = renderDailyPnlChart;
 window.renderWinLossChart = renderWinLossChart;
 window.setChartPeriod = setChartPeriod;
 window.destroyAllCharts = destroyAllCharts;
+window.marketChart = marketChart;
