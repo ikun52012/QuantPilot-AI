@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from loguru import logger
 
+from core.utils.datetime import utcnow
+
 
 class GridMode(Enum):
     NEUTRAL = "neutral"
@@ -81,8 +83,8 @@ class GridPosition:
     current_price: float = 0.0
     highest_price: float = 0.0
     lowest_price: float = 0.0
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
     closed_at: Optional[datetime] = None
     close_reason: str = ""
     pending_orders: int = 0
@@ -118,7 +120,7 @@ class GridEngine:
             current_price=current_price,
             highest_price=current_price,
             lowest_price=current_price,
-            started_at=datetime.now(timezone.utc),
+            started_at=utcnow(),
         )
 
         position.pending_orders = len([l for l in grid_levels if l.status == "pending"])
@@ -223,7 +225,7 @@ class GridEngine:
         if config.auto_replenish and position.filled_buy_count > config.grid_count * config.replenish_threshold_pct / 100:
             self._replenish_grid(position, config, current_price)
 
-        position.updated_at = datetime.now(timezone.utc)
+        position.updated_at = utcnow()
 
         return result
 
@@ -246,7 +248,7 @@ class GridEngine:
 
         fees = level.quantity * fill_price * config.fee_pct / 100
         level.fees_usdt = fees
-        level.filled_at = datetime.now(timezone.utc)
+        level.filled_at = utcnow()
         level.filled_price = fill_price
         level.status = "filled"
 
@@ -364,7 +366,7 @@ class GridEngine:
         final_pnl = position.realized_pnl_usdt + position.unrealized_pnl_usdt - position.total_fees_usdt
 
         position.status = "closed"
-        position.closed_at = datetime.now(timezone.utc)
+        position.closed_at = utcnow()
         position.close_reason = reason
         position.realized_pnl_usdt = final_pnl
 

@@ -15,7 +15,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user, require_admin as get_current_admin
+from core.config import settings
 from core.database import get_db, StrategyStateModel
+from core.utils.datetime import utcnow
 from strategies.dca import DCAEngine, DCAConfig, DCAEntry, DCAPosition
 from strategies.grid import GridEngine, GridConfig, GridLevel, GridPosition
 
@@ -85,7 +87,7 @@ def _parse_datetime(value):
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
-        return datetime.now(timezone.utc)
+        return utcnow()
 
 
 def _filter_dataclass(cls, data: dict) -> dict:
@@ -157,7 +159,7 @@ async def _persist_strategy_state(
     row.status = getattr(position, "status", "active")
     row.config_json = json.dumps(asdict(config), ensure_ascii=False, default=_json_default)
     row.state_json = json.dumps(asdict(position), ensure_ascii=False, default=_json_default)
-    row.updated_at = datetime.now(timezone.utc)
+    row.updated_at = utcnow()
     await db.flush()
     return row
 
@@ -371,7 +373,7 @@ async def close_dca_strategy(
         current_price = context.current_price
 
         dca_engine.positions[strategy_id].status = "manual_close"
-        dca_engine.positions[strategy_id].closed_at = datetime.now(timezone.utc)
+        dca_engine.positions[strategy_id].closed_at = utcnow()
         dca_engine.positions[strategy_id].close_reason = "manual"
 
         final_status = dca_engine.get_position_status(strategy_id)
@@ -553,7 +555,7 @@ async def close_grid_strategy(
         current_price = context.current_price
 
         grid_engine.positions[strategy_id].status = "manual_close"
-        grid_engine.positions[strategy_id].closed_at = datetime.now(timezone.utc)
+        grid_engine.positions[strategy_id].closed_at = utcnow()
         grid_engine.positions[strategy_id].close_reason = "manual"
 
         final_status = grid_engine.get_grid_status(strategy_id)
@@ -796,3 +798,227 @@ async def stop_strategy_monitor(
         grid_engine._monitor_task = None
 
     return {"status": "stopped"}
+
+
+AI_DCA_CONFIG_PROMPT = """You are an expert cryptocurrency quantitative trading analyst specializing in DCA (Dollar Cost Average) strategy design.
+
+Based on the current market conditions for the given ticker, generate optimal DCA configuration parameters.
+
+Your analysis process:
+1. Analyze current price volatility and trend direction
+2. Assess appropriate entry spacing based on ATR and volatility
+3. Determine optimal stop-loss distance based on support/resistance levels
+4. Calculate take-profit targets based on expected price movement
+5. Decide on DCA mode (average_down for bearish, average_up for bullish)
+6. Determine max entries based on volatility and risk tolerance
+7. Set activation loss threshold based on price swings
+
+You MUST respond in valid JSON format with these exact fields:
+{
+    "direction": "long" | "short",
+    "initial_capital_usdt": float (50-2000),
+    "max_entries": int (2-10),
+    "entry_spacing_pct": float (0.5-10.0),
+    "sizing_method": "fixed" | "martingale" | "geometric" | "fibonacci",
+    "sizing_multiplier": float (1.0-3.0),
+    "stop_loss_pct": float (0-50),
+    "take_profit_pct": float (0-30),
+    "activation_loss_pct": float (0.5-5.0),
+    "max_total_capital_usdt": float (500-20000),
+    "mode": "average_down" | "average_up",
+    "leverage": float (1-10),
+    "reasoning": "Brief explanation of why these parameters suit current market conditions"
+}
+
+Key rules:
+- High volatility (>5% 24h change): wider spacing (2-5%), fewer entries (3-5), larger stop-loss (15-25%)
+- Low volatility (<2% 24h change): tighter spacing (1-2%), more entries (5-8), smaller stop-loss (5-10%)
+- Trending up: prefer "long" direction, "average_up" mode, smaller activation loss
+- Trending down: prefer "short" direction, "average_down" mode, larger activation loss
+- Ranging market: prefer "long" direction, "average_down" mode, moderate parameters
+- Extreme RSI (>75 or <25): reduce position size, increase stop-loss buffer
+- High funding rate (>0.05%): cautious sizing, consider counter-trend
+
+Respond ONLY with the JSON object, no other text."""
+
+
+AI_GRID_CONFIG_PROMPT = """You are an expert cryptocurrency quantitative trading analyst specializing in Grid Trading strategy design.
+
+Based on the current market conditions for the given ticker, generate optimal Grid configuration parameters.
+
+Your analysis process:
+1. Analyze current price volatility and trading range
+2. Determine appropriate grid range based on support/resistance levels
+3. Calculate optimal grid count based on volatility and capital
+4. Choose spacing mode based on price distribution
+5. Decide on grid mode based on market bias
+6. Set grid spacing percentage based on ATR
+
+You MUST respond in valid JSON format with these exact fields:
+{
+    "upper_price": float (current_price * 1.02 to 1.20),
+    "lower_price": float (current_price * 0.80 to 0.98),
+    "grid_count": int (5-50),
+    "total_capital_usdt": float (100-5000),
+    "grid_spacing_pct": float (0.5-5.0),
+    "spacing_mode": "arithmetic" | "geometric",
+    "mode": "neutral" | "long" | "short",
+    "stop_loss_pct": float (0-20),
+    "leverage": float (1-10),
+    "reasoning": "Brief explanation of why these parameters suit current market conditions"
+}
+
+Key rules:
+- High volatility (>5% 24h change): wider range (±10-15%), more grids (20-40), larger spacing (1.5-3%)
+- Low volatility (<2% 24h change): tighter range (±3-5%), fewer grids (10-20), smaller spacing (0.5-1%)
+- Trending up: prefer "long" mode, asymmetric range (higher upper bound)
+- Trending down: prefer "short" mode, asymmetric range (lower lower bound)
+- Ranging market: prefer "neutral" mode, symmetric range around current price
+- High volume: can use more grids with smaller spacing
+- Low volume: use fewer grids with larger spacing to avoid partial fills
+
+Respond ONLY with the JSON object, no other text."""
+
+
+class AIGenerateRequest(BaseModel):
+    ticker: str = Field(default="BTCUSDT", description="Trading pair")
+    strategy_type: str = Field(default="dca", description="Strategy type: dca or grid")
+    risk_level: str = Field(default="medium", description="Risk level: low, medium, high")
+
+
+@router.post("/ai/generate")
+async def ai_generate_strategy_config(
+    request: AIGenerateRequest,
+    user: dict = Depends(get_current_user),
+):
+    """AI generates optimal DCA or Grid configuration based on current market conditions."""
+    try:
+        from market_data import fetch_market_context
+        from ai_analyzer import (
+            _call_openai, _call_anthropic, _call_deepseek, 
+            _call_openrouter, _call_custom, _call_mistral,
+        )
+
+        context = await fetch_market_context(request.ticker)
+        current_price = context.current_price
+
+        if current_price <= 0:
+            raise HTTPException(400, f"Cannot get current price for {request.ticker}")
+
+        risk_adjustment = {
+            "low": {"capital_mult": 0.5, "sl_mult": 0.8, "entries_mult": 0.8},
+            "medium": {"capital_mult": 1.0, "sl_mult": 1.0, "entries_mult": 1.0},
+            "high": {"capital_mult": 1.5, "sl_mult": 1.2, "entries_mult": 1.2},
+        }
+        risk = risk_adjustment.get(request.risk_level, risk_adjustment["medium"])
+
+        if request.strategy_type == "dca":
+            system_prompt = AI_DCA_CONFIG_PROMPT
+            user_prompt = f"""Generate DCA configuration for:
+
+Ticker: {request.ticker}
+Current Price: {current_price}
+24h Price Change: {context.price_change_24h:+.4f}%
+4h Price Change: {context.price_change_4h:+.4f}%
+1h Price Change: {context.price_change_1h:+.4f}%
+24h Volume: ${context.volume_24h:,.0f}
+24h High: {context.high_24h}
+24h Low: {context.low_24h}
+RSI (1h): {context.rsi_1h if context.rsi_1h is not None else 'N/A'}
+ATR%: {context.atr_pct if context.atr_pct is not None else 'N/A'}%
+EMA Fast: {context.ema_fast if context.ema_fast is not None else 'N/A'}
+EMA Slow: {context.ema_slow if context.ema_slow is not None else 'N/A'}
+Funding Rate: {context.funding_rate if context.funding_rate is not None else 'N/A'}
+Orderbook Imbalance: {context.orderbook_imbalance if context.orderbook_imbalance is not None else 'N/A'}
+
+Risk Level: {request.risk_level}
+
+Generate optimal DCA parameters for this market condition."""
+        else:
+            system_prompt = AI_GRID_CONFIG_PROMPT
+            user_prompt = f"""Generate Grid Trading configuration for:
+
+Ticker: {request.ticker}
+Current Price: {current_price}
+24h Price Change: {context.price_change_24h:+.4f}%
+4h Price Change: {context.price_change_4h:+.4f}%
+1h Price Change: {context.price_change_1h:+.4f}%
+24h Volume: ${context.volume_24h:,.0f}
+24h High: {context.high_24h}
+24h Low: {context.low_24h}
+RSI (1h): {context.rsi_1h if context.rsi_1h is not None else 'N/A'}
+ATR%: {context.atr_pct if context.atr_pct is not None else 'N/A'}%
+EMA Fast: {context.ema_fast if context.ema_fast is not None else 'N/A'}
+EMA Slow: {context.ema_slow if context.ema_slow is not None else 'N/A'}
+Funding Rate: {context.funding_rate if context.funding_rate is not None else 'N/A'}
+Orderbook Imbalance: {context.orderbook_imbalance if context.orderbook_imbalance is not None else 'N/A'}
+
+Risk Level: {request.risk_level}
+
+Generate optimal Grid Trading parameters for this market condition."""
+
+        provider = settings.ai.provider.lower()
+        logger.info(f"[AI/Generate] Generating {request.strategy_type} config for {request.ticker} via {provider}")
+
+        if provider == "openai":
+            ai_response = await _call_openai(system_prompt, user_prompt)
+        elif provider == "anthropic":
+            ai_response = await _call_anthropic(system_prompt, user_prompt)
+        elif provider == "deepseek":
+            ai_response = await _call_deepseek(system_prompt, user_prompt)
+        elif provider == "mistral":
+            ai_response = await _call_mistral(system_prompt, user_prompt)
+        elif provider == "openrouter":
+            ai_response = await _call_openrouter(system_prompt, user_prompt)
+        elif settings.ai.custom_provider_enabled and provider in {"custom", settings.ai.custom_provider_name.lower()}:
+            ai_response = await _call_custom(system_prompt, user_prompt)
+        else:
+            raise HTTPException(400, f"AI provider '{provider}' is not configured or not supported")
+
+        config_start = ai_response.find("{")
+        config_end = ai_response.rfind("}") + 1
+        if config_start == -1 or config_end == 0:
+            raise HTTPException(500, "AI response did not contain valid JSON")
+
+        config_json_str = ai_response[config_start:config_end]
+        ai_config = json.loads(config_json_str)
+
+        if request.strategy_type == "dca":
+            ai_config["initial_capital_usdt"] = ai_config.get("initial_capital_usdt", 1000) * risk["capital_mult"]
+            ai_config["max_total_capital_usdt"] = ai_config.get("max_total_capital_usdt", 5000) * risk["capital_mult"]
+            ai_config["stop_loss_pct"] = ai_config.get("stop_loss_pct", 10) * risk["sl_mult"]
+            ai_config["max_entries"] = int(ai_config.get("max_entries", 5) * risk["entries_mult"])
+            ai_config["ticker"] = request.ticker
+            ai_config["paper_mode"] = True
+        else:
+            ai_config["total_capital_usdt"] = ai_config.get("total_capital_usdt", 1000) * risk["capital_mult"]
+            ai_config["stop_loss_pct"] = ai_config.get("stop_loss_pct", 5) * risk["sl_mult"]
+            ai_config["grid_count"] = int(ai_config.get("grid_count", 15) * risk["entries_mult"])
+            ai_config["ticker"] = request.ticker
+            ai_config["paper_mode"] = True
+
+        logger.info(f"[AI/Generate] Generated {request.strategy_type} config for {request.ticker}: {ai_config.get('reasoning', '')}")
+
+        return {
+            "status": "generated",
+            "strategy_type": request.strategy_type,
+            "ticker": request.ticker,
+            "current_price": round(current_price, 6),
+            "config": ai_config,
+            "market_context": {
+                "price_change_24h": round(context.price_change_24h, 4),
+                "price_change_4h": round(context.price_change_4h, 4),
+                "price_change_1h": round(context.price_change_1h, 4),
+                "volume_24h": context.volume_24h,
+                "rsi_1h": context.rsi_1h,
+                "atr_pct": context.atr_pct,
+                "funding_rate": context.funding_rate,
+            },
+        }
+
+    except json.JSONDecodeError as e:
+        logger.error(f"[AI/Generate] JSON parse error: {e}")
+        raise HTTPException(500, f"AI response parsing failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"[AI/Generate] Failed: {e}")
+        raise HTTPException(500, f"Failed to generate strategy config: {str(e)}")

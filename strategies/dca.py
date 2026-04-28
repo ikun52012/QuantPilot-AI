@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from loguru import logger
 
+from core.utils.datetime import utcnow
+
 
 class DCAMode(Enum):
     AVERAGE_DOWN = "average_down"
@@ -87,8 +89,8 @@ class DCAPosition:
     entries_remaining: int = 0
     highest_price: float = 0.0
     lowest_price: float = 0.0
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
     closed_at: Optional[datetime] = None
     close_reason: str = ""
 
@@ -109,7 +111,7 @@ class DCAEngine:
             ticker=config.ticker,
             direction=config.direction,
             entries_remaining=config.max_entries - 1,
-            started_at=datetime.now(timezone.utc),
+            started_at=utcnow(),
         )
 
         initial_qty = self._calculate_initial_quantity(config, current_price)
@@ -119,7 +121,7 @@ class DCAEngine:
             entry_price=current_price,
             quantity=initial_qty,
             capital_usdt=initial_capital,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=utcnow(),
             entry_idx=1,
             reason="initial_entry",
         )
@@ -318,7 +320,7 @@ class DCAEngine:
             entry_price=current_price,
             quantity=new_quantity,
             capital_usdt=new_capital,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=utcnow(),
             entry_idx=new_entry_idx,
             reason=f"dca_entry_{new_entry_idx}",
             fees_usdt=fees,
@@ -338,7 +340,7 @@ class DCAEngine:
         self._update_stop_take(position, config)
         self._calculate_next_entry(position, config)
 
-        position.updated_at = datetime.now(timezone.utc)
+        position.updated_at = utcnow()
 
         logger.info(f"[DCA] Added entry #{new_entry_idx} for {position.ticker}: price={current_price}, qty={new_quantity}, avg_entry={weighted_avg:.4f}")
 
@@ -365,7 +367,7 @@ class DCAEngine:
 
         position.realized_pnl_usdt = pnl_usdt
         position.status = "closed"
-        position.closed_at = datetime.now(timezone.utc)
+        position.closed_at = utcnow()
         position.close_reason = reason
         position.current_price = exit_price
 

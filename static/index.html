@@ -855,6 +855,72 @@
                         </div>
                     </div>
                     <div class="form-group">
+                        <label>Position Sizing Mode</label>
+                        <div class="option-card-grid">
+                            <label class="option-card">
+                                <input type="radio" name="position-sizing-mode" id="sizing-percentage" value="percentage" checked onchange="togglePositionSizingFields()">
+                                <span class="option-card-icon"><i class="ri-percent-line"></i></span>
+                                <span class="option-card-copy">
+                                    <strong>Percentage</strong>
+                                    <small>Use % of account equity for each position.</small>
+                                </span>
+                            </label>
+                            <label class="option-card">
+                                <input type="radio" name="position-sizing-mode" id="sizing-fixed" value="fixed" onchange="togglePositionSizingFields()">
+                                <span class="option-card-icon"><i class="ri-money-dollar-circle-line"></i></span>
+                                <span class="option-card-copy">
+                                    <strong>Fixed Amount</strong>
+                                    <small>Use a fixed USDT amount for each trade.</small>
+                                </span>
+                            </label>
+                            <label class="option-card">
+                                <input type="radio" name="position-sizing-mode" id="sizing-risk" value="risk_ratio" onchange="togglePositionSizingFields()">
+                                <span class="option-card-icon"><i class="ri-scales-3-line"></i></span>
+                                <span class="option-card-copy">
+                                    <strong>Risk Ratio</strong>
+                                    <small>Size based on risk per trade relative to stop loss.</small>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="sizing-percentage-fields" class="sizing-fields">
+                        <div class="form-row three-col">
+                            <div class="form-group">
+                                <label for="set-equity">Account Equity (USDT)</label>
+                                <input type="number" id="set-equity" class="text-input" value="10000" step="100">
+                                <p class="hint">Total account balance for percentage calculations</p>
+                            </div>
+                            <div class="form-group"></div>
+                            <div class="form-group"></div>
+                        </div>
+                    </div>
+                    <div id="sizing-fixed-fields" class="sizing-fields" style="display:none">
+                        <div class="form-row three-col">
+                            <div class="form-group">
+                                <label for="set-fixed-size">Fixed Position Size (USDT)</label>
+                                <input type="number" id="set-fixed-size" class="text-input" value="100" step="10" min="10">
+                                <p class="hint">Fixed USDT amount for each trade</p>
+                            </div>
+                            <div class="form-group"></div>
+                            <div class="form-group"></div>
+                        </div>
+                    </div>
+                    <div id="sizing-risk-fields" class="sizing-fields" style="display:none">
+                        <div class="form-row three-col">
+                            <div class="form-group">
+                                <label for="set-risk-per-trade">Risk Per Trade (%)</label>
+                                <input type="number" id="set-risk-per-trade" class="text-input" value="1" step="0.1" min="0.1" max="10">
+                                <p class="hint">% of account to risk on each trade</p>
+                            </div>
+                            <div class="form-group">
+                                <label for="set-equity-risk">Account Equity (USDT)</label>
+                                <input type="number" id="set-equity-risk" class="text-input" value="10000" step="100">
+                                <p class="hint">Used to calculate position size from risk %</p>
+                            </div>
+                            <div class="form-group"></div>
+                        </div>
+                    </div>
+                    <div class="form-group">
                         <label>Stop Loss / Take Profit Source</label>
                         <div class="option-card-grid">
                             <label class="option-card">
@@ -1506,8 +1572,17 @@
                                     <option value="average_up">Average Up</option>
                                 </select>
                             </div>
+                            <div class="form-group">
+                                <label for="dca-risk-level">AI Risk Level</label>
+                                <select id="dca-risk-level" class="select-input">
+                                    <option value="low">Low Risk</option>
+                                    <option value="medium" selected>Medium Risk</option>
+                                    <option value="high">High Risk</option>
+                                </select>
+                            </div>
                             <div class="form-group" style="display:flex;align-items:flex-end">
                                 <button class="btn btn-primary" onclick="createDCA()"><i class="ri-add-line"></i> Create DCA</button>
+                                <button class="btn btn-secondary" style="margin-left:8px" onclick="aiGenerateDCA()" title="AI Auto-generate optimal DCA config"><i class="ri-magic-line"></i> AI Generate</button>
                             </div>
                         </div>
                     </div>
@@ -1562,6 +1637,14 @@
                                     <option value="short">Short Bias</option>
                                 </select>
                             </div>
+                            <div class="form-group">
+                                <label for="grid-risk-level">AI Risk Level</label>
+                                <select id="grid-risk-level" class="select-input">
+                                    <option value="low">Low Risk</option>
+                                    <option value="medium" selected>Medium Risk</option>
+                                    <option value="high">High Risk</option>
+                                </select>
+                            </div>
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -1574,6 +1657,7 @@
                             </div>
                             <div class="form-group" style="display:flex;align-items:flex-end">
                                 <button class="btn btn-primary" onclick="createGrid()"><i class="ri-add-line"></i> Create Grid</button>
+                                <button class="btn btn-secondary" style="margin-left:8px" onclick="aiGenerateGrid()" title="AI Auto-generate optimal Grid config"><i class="ri-magic-line"></i> AI Generate</button>
                             </div>
                         </div>
                     </div>

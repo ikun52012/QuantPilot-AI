@@ -3,6 +3,12 @@ from alembic import op
 import sqlalchemy as sa
 from datetime import datetime, timezone
 
+
+def _utcnow():
+    """Get current UTC time as naive datetime for PostgreSQL compatibility."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 revision = "001_initial_schema"
 down_revision = None
 branch_labels = None
@@ -23,8 +29,8 @@ def upgrade():
         sa.Column("ai_config_encrypted", sa.Text, nullable=True),
         sa.Column("tp_config_json", sa.Text, default="[]"),
         sa.Column("risk_config_json", sa.Text, default="{}"),
-        sa.Column("created_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
-        sa.Column("updated_at", sa.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)),
+        sa.Column("created_at", sa.DateTime, default=_utcnow),
+        sa.Column("updated_at", sa.DateTime, default=_utcnow, onupdate=_utcnow),
     )
 
     op.create_table(
@@ -36,7 +42,7 @@ def upgrade():
         sa.Column("duration_days", sa.Integer, nullable=False),
         sa.Column("is_active", sa.Boolean, default=True),
         sa.Column("max_signals_per_day", sa.Integer, default=0),
-        sa.Column("created_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("created_at", sa.DateTime, default=_utcnow),
     )
 
     op.create_table(
@@ -47,7 +53,7 @@ def upgrade():
         sa.Column("status", sa.String(20), default="pending"),
         sa.Column("start_date", sa.DateTime, nullable=True),
         sa.Column("end_date", sa.DateTime, nullable=True),
-        sa.Column("created_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("created_at", sa.DateTime, default=_utcnow),
     )
 
     op.create_table(
@@ -61,7 +67,7 @@ def upgrade():
         sa.Column("tx_hash", sa.String(200), default=""),
         sa.Column("wallet_address", sa.String(128), default=""),
         sa.Column("status", sa.String(20), default="pending"),
-        sa.Column("created_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("created_at", sa.DateTime, default=_utcnow),
         sa.Column("confirmed_at", sa.DateTime, nullable=True),
         sa.Column("expires_at", sa.DateTime, nullable=True),
     )
@@ -118,7 +124,7 @@ def upgrade():
         sa.Column("fees_total_usdt", sa.Float, default=0.0),
         sa.Column("last_price", sa.Float, nullable=True),
         sa.Column("close_reason", sa.String(80), default=""),
-        sa.Column("updated_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("updated_at", sa.DateTime, default=_utcnow),
         sa.Column("exit_price", sa.Float, nullable=True),
         sa.Column("pnl_pct", sa.Float, default=0.0),
         sa.Column("closed_at", sa.DateTime, nullable=True),
@@ -137,14 +143,14 @@ def upgrade():
         sa.Column("reason", sa.Text, default=""),
         sa.Column("client_ip", sa.String(45), default=""),
         sa.Column("payload_json", sa.Text, default="{}"),
-        sa.Column("created_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("created_at", sa.DateTime, default=_utcnow),
     )
 
     op.create_table(
         "admin_settings",
         sa.Column("key", sa.String(100), primary_key=True),
         sa.Column("value", sa.Text, nullable=False),
-        sa.Column("updated_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("updated_at", sa.DateTime, default=_utcnow),
     )
 
     op.create_table(
@@ -157,7 +163,7 @@ def upgrade():
         sa.Column("target_id", sa.String(36), default=""),
         sa.Column("summary", sa.Text, default=""),
         sa.Column("client_ip", sa.String(45), default=""),
-        sa.Column("created_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("created_at", sa.DateTime, default=_utcnow),
     )
 
     op.create_table(
@@ -167,7 +173,7 @@ def upgrade():
         sa.Column("max_uses", sa.Integer, default=1),
         sa.Column("used_count", sa.Integer, default=0),
         sa.Column("is_active", sa.Boolean, default=True),
-        sa.Column("created_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("created_at", sa.DateTime, default=_utcnow),
     )
 
     op.create_table(
@@ -178,7 +184,7 @@ def upgrade():
         sa.Column("block_count", sa.Integer, default=0),
         sa.Column("last_block_at", sa.DateTime, nullable=True),
         sa.Column("total_weight_reduced", sa.Float, default=0.0),
-        sa.Column("created_at", sa.DateTime, default=lambda: datetime.now(timezone.utc)),
+        sa.Column("created_at", sa.DateTime, default=_utcnow),
     )
 
     op.create_index("ix_users_username", "users", ["username"])

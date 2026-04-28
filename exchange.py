@@ -62,20 +62,32 @@ def _get_or_create_exchange(
     live: bool = False,
     sandbox: bool | None = None,
 ) -> ccxt.Exchange:
-    """Return a cached CCXT instance or create a new one."""
+    """Return a cached CCXT instance or create a new one.
+    
+    Uses double-checked locking pattern to avoid race conditions
+    while minimizing lock contention.
+    """
     eid = (exchange_id or settings.exchange.name).lower().strip()
     cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:8]
     sb = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
     cache_key = f"{eid}:{sb}:{cred_hash}"
 
+    # First check without lock (fast path)
+    existing = _exchange_pool.get(cache_key)
+    if existing is not None:
+        return existing
+
+    # Second check with lock (creation path)
     with _exchange_pool_lock:
+        # Double-check: another thread might have created it while we waited
         existing = _exchange_pool.get(cache_key)
         if existing is not None:
             return existing
-
-    instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox)
-
-    with _exchange_pool_lock:
+        
+        # Create instance while holding lock to prevent duplicate creation
+        instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox)
+        
+        # Manage pool size
         if len(_exchange_pool) >= settings.exchange.pool_max_size:
             oldest_key = next(iter(_exchange_pool))
             evicted = _exchange_pool.pop(oldest_key, None)
@@ -86,9 +98,9 @@ def _get_or_create_exchange(
                         close()
                 except Exception:
                     pass
+        
         _exchange_pool[cache_key] = instance
-
-    return instance
+        return instance
 
 
 # ─────────────────────────────────────────────

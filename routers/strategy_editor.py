@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user
 from core.database import get_db, StrategyStateModel
+from core.utils.datetime import utcnow
 
 
 router = APIRouter(prefix="/api/strategy-editor", tags=["Strategy Editor"])
@@ -218,7 +219,7 @@ async def _save_strategy_row(
         "trailing_stop": payload.get("trailing_stop", {}),
     }, ensure_ascii=False, default=str)
     row.state_json = json.dumps(payload, ensure_ascii=False, default=str)
-    row.updated_at = datetime.now(timezone.utc)
+    row.updated_at = utcnow()
     await db.flush()
     return row
 
@@ -338,7 +339,7 @@ async def delete_strategy(
     """Delete a saved strategy."""
     row = await _get_strategy_row(db, strategy_id, _user_id(user))
     row.status = "deleted"
-    row.updated_at = datetime.now(timezone.utc)
+    row.updated_at = utcnow()
     _USER_STRATEGIES.pop(strategy_id, None)
 
     return {"status": "deleted", "strategy_id": strategy_id}

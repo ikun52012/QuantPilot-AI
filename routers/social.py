@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user
 from core.database import get_db, SharedSignalModel, SignalSubscriptionModel
+from core.utils.datetime import utcnow
 
 
 router = APIRouter(prefix="/api/social", tags=["Social Signals"])
@@ -207,7 +208,7 @@ async def get_shared_signal(
     stats = _loads_dict(signal.stats_json) or _stats_default()
     stats["views"] = int(stats.get("views") or 0) + 1
     signal.stats_json = json.dumps(stats, ensure_ascii=False)
-    signal.updated_at = datetime.now(timezone.utc)
+    signal.updated_at = utcnow()
 
     return {
         "signal": _signal_to_dict(signal),
@@ -248,7 +249,7 @@ async def subscribe_to_signal(
     stats["subscriptions"] = int(stats.get("subscriptions") or 0) + 1
     signal.stats_json = json.dumps(stats, ensure_ascii=False)
     signal.subscribers_count = int(signal.subscribers_count or 0) + 1
-    signal.updated_at = datetime.now(timezone.utc)
+    signal.updated_at = utcnow()
     db.add(SignalSubscriptionModel(
         id=sub_id,
         user_id=user_id,
@@ -294,7 +295,7 @@ async def unsubscribe_from_signal(
         stats = _loads_dict(signal.stats_json) or _stats_default()
         stats["subscriptions"] = max(0, int(stats.get("subscriptions") or 0) - 1)
         signal.stats_json = json.dumps(stats, ensure_ascii=False)
-        signal.updated_at = datetime.now(timezone.utc)
+        signal.updated_at = utcnow()
 
     return {"status": "unsubscribed", "signal_id": signal_id}
 
@@ -400,7 +401,7 @@ async def provide_signal_feedback(
     signal.executions_count = stats["executions"]
     signal.success_rate = round(stats["successful"] / max(stats["executions"], 1) * 100, 2)
     signal.stats_json = json.dumps(stats, ensure_ascii=False)
-    signal.updated_at = datetime.now(timezone.utc)
+    signal.updated_at = utcnow()
 
     return {
         "status": "recorded",

@@ -282,10 +282,25 @@ def generate_webhook_secret() -> str:
 
 
 def is_placeholder_webhook_secret(secret: str) -> bool:
-    """Return True for documentation/example webhook secrets that must not be accepted."""
-    normalized = str(secret or "").strip().lower()
+    """
+    Return True for weak/placeholder webhook secrets that must not be accepted.
+    
+    Checks:
+    - Known placeholder values from documentation
+    - Secrets shorter than 16 characters (too weak)
+    - Common weak patterns
+    """
+    normalized = str(secret or "").strip()
     if not normalized:
         return True
+    
+    # Check length - minimum 16 characters for security
+    if len(normalized) < 16:
+        logger.warning(f"[Security] Webhook secret too short ({len(normalized)} chars), minimum 16 required")
+        return True
+    
+    # Check known placeholders
+    lower = normalized.lower()
     placeholders = {
         "replace-with-a-long-random-webhook-secret",
         "replace-with-long-random-webhook-secret",
@@ -293,8 +308,24 @@ def is_placeholder_webhook_secret(secret: str) -> bool:
         "{{your-webhook-secret}}",
         "changeme",
         "change-me",
+        "secret",
+        "webhook-secret",
+        "my-secret",
+        "test-secret",
+        "dev-secret",
+        "12345678",
+        "abcdefgh",
     }
-    return normalized in placeholders or normalized.startswith("replace-with-")
+    
+    if lower in placeholders or lower.startswith("replace-with-"):
+        return True
+    
+    # Check for simple patterns (all same char, sequential, etc.)
+    if len(set(normalized)) < 4:
+        logger.warning("[Security] Webhook secret has too few unique characters")
+        return True
+    
+    return False
 
 
 def webhook_secret_hash(secret: str) -> str:

@@ -119,30 +119,38 @@ def verify_webhook_signature(request_body: bytes, signature: str) -> bool:
     """
     Verify webhook HMAC signature.
 
+    TradingView Compatibility:
+    TradingView does NOT support sending HMAC signature headers.
+    It only sends the 'secret' field in JSON payload.
+    
     Security policy:
-    - If WEBHOOK_HMAC_SECRET is configured: signature MUST be valid
-    - If not configured: allow but log warning (for development/testing)
-    - In production (LIVE_TRADING=true): signature is REQUIRED
+    - HMAC signature verification is OPTIONAL (extra security layer)
+    - Primary security is the JSON payload 'secret' field (validated in webhook.py)
+    - If HMAC secret configured AND signature present: must verify
+    - If HMAC secret configured BUT no signature: allow (TradingView compatibility)
+    - If no HMAC secret configured: allow (rely on payload secret)
+    
+    Returns True to allow request to proceed for payload secret validation.
+    Returns False ONLY when signature is present but invalid.
     """
     hmac_secret = settings.webhook_hmac_secret.strip()
 
-    # Production mode: always require HMAC
-    if settings.exchange.live_trading and not hmac_secret:
-        logger.error("[Security] LIVE_TRADING enabled but WEBHOOK_HMAC_SECRET not set!")
-        return False
-
-    # Development mode: allow without HMAC but warn
+    # No HMAC secret configured - rely on payload secret validation
     if not hmac_secret:
-        logger.warning(
-            "[Security] Webhook HMAC not configured. "
-            "Set WEBHOOK_HMAC_SECRET for production security."
+        logger.debug("[Webhook] HMAC secret not configured, relying on payload secret")
+        return True
+
+    # HMAC secret configured but no signature header
+    # This is normal for TradingView (it doesn't support HMAC headers)
+    # Allow request to proceed - payload secret will be validated in webhook.py
+    if not signature:
+        logger.info(
+            "[Webhook] HMAC secret configured but no signature header. "
+            "TradingView compatibility mode: proceeding with payload secret validation."
         )
         return True
 
-    if not signature:
-        logger.warning("[Security] Webhook request missing signature")
-        return False
-
+    # HMAC secret configured AND signature present - must verify
     import hmac as hmac_module
     digest = hmac_module.new(hmac_secret.encode("utf-8"), request_body, hashlib.sha256).hexdigest()
     expected = f"sha256={digest}"
@@ -153,9 +161,11 @@ def verify_webhook_signature(request_body: bytes, signature: str) -> bool:
     )
 
     if not valid:
-        logger.warning("[Security] Webhook signature verification failed")
+        logger.warning("[Security] Webhook HMAC signature verification failed")
+        return False
 
-    return valid
+    logger.info("[Webhook] HMAC signature verified successfully")
+    return True
 
 
 # ─────────────────────────────────────────────
@@ -628,17 +638,27 @@ class SignalProcessor:
             notional_value = fixed_amount * leverage * size_fraction
 
         elif sizing_mode == "risk_ratio":
-            # Risk X% of account per trade
+            # Risk X% of account per trade - requires valid stop loss
             risk_pct = settings.risk.risk_per_trade_pct
-            # Calculate stop loss distance from decision
             sl_distance_pct = 0.0
             if decision and decision.stop_loss and self._has_valid_sl(price, decision.stop_loss):
                 sl_distance_pct = self._sl_distance_pct(decision.direction, price, decision.stop_loss)
-            if not sl_distance_pct:
-                sl_distance_pct = 2.0  # Default 2% SL distance as fallback
-            # Position size = (account * risk_pct) / (sl_distance * leverage)
-            risk_amount = equity * (risk_pct / 100.0)
-            notional_value = (risk_amount / (sl_distance_pct / 100.0)) * leverage
+            
+            if not sl_distance_pct or sl_distance_pct <= 0:
+                # Risk ratio mode requires stop loss - fallback to percentage mode
+                logger.warning(
+                    f"[PositionSize] risk_ratio mode requires valid stop loss, "
+                    f"but SL distance is {sl_distance_pct}. Falling back to percentage mode."
+                )
+                size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
+                if size_pct and size_pct > 1:
+                    size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
+                margin_value = equity * (max_position / 100.0) * size_fraction
+                notional_value = margin_value * leverage
+            else:
+                # Valid SL distance - calculate position size
+                risk_amount = equity * (risk_pct / 100.0)
+                notional_value = (risk_amount / (sl_distance_pct / 100.0)) * leverage
         else:
             # Default: percentage mode
             size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))

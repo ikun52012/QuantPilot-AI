@@ -555,6 +555,17 @@ function toggleRiskProfileHint() {
     setText('ai-risk-profile-hint', `${hints[profile]} AI will include recommended_leverage in each analysis result.`);
 }
 
+function togglePositionSizingFields() {
+    const mode = document.querySelector('input[name="position-sizing-mode"]:checked')?.value || 'percentage';
+    const percentageFields = document.getElementById('sizing-percentage-fields');
+    const fixedFields = document.getElementById('sizing-fixed-fields');
+    const riskFields = document.getElementById('sizing-risk-fields');
+    
+    if (percentageFields) percentageFields.style.display = mode === 'percentage' ? 'block' : 'none';
+    if (fixedFields) fixedFields.style.display = mode === 'fixed' ? 'block' : 'none';
+    if (riskFields) riskFields.style.display = mode === 'risk_ratio' ? 'block' : 'none';
+}
+
 async function loadSettings() {
     try {
         const status = await fetchAPI('/api/status');
@@ -606,14 +617,22 @@ async function loadSettings() {
         setFieldValue('set-max-loss', risk.max_daily_loss_pct ?? 5);
         setFieldValue('set-custom-sl', risk.custom_stop_loss_pct ?? 1.5);
         setFieldValue('set-ai-exit-prompt', risk.ai_exit_system_prompt || '');
+        setFieldValue('set-equity', risk.account_equity_usdt ?? 10000);
+        setFieldValue('set-fixed-size', risk.fixed_position_size_usdt ?? 100);
+        setFieldValue('set-risk-per-trade', risk.risk_per_trade_pct ?? 1);
+        setFieldValue('set-equity-risk', risk.account_equity_usdt ?? 10000);
         const mode = risk.exit_management_mode === 'custom' ? 'custom' : 'ai';
         const modeEl = document.getElementById(`exit-mode-${mode}`);
         if (modeEl) modeEl.checked = true;
         const profile = ['conservative','balanced','aggressive'].includes(risk.ai_risk_profile) ? risk.ai_risk_profile : 'balanced';
         const profileEl = document.getElementById(`ai-risk-${profile}`);
         if (profileEl) profileEl.checked = true;
+        const sizingMode = ['percentage','fixed','risk_ratio'].includes(risk.position_sizing_mode) ? risk.position_sizing_mode : 'percentage';
+        const sizingEl = document.getElementById(`sizing-${sizingMode === 'risk_ratio' ? 'risk' : sizingMode}`);
+        if (sizingEl) sizingEl.checked = true;
         toggleExitModeFields();
         toggleRiskProfileHint();
+        togglePositionSizingFields();
         if (isAdmin()) {
             loadAdminWebhookConfig();
             loadVotingConfig();
@@ -669,16 +688,21 @@ async function saveExchangeSettings() { await saveSettings('/api/settings/exchan
 async function saveAISettings() { const provider = document.getElementById('set-ai-provider').value; await saveSettings('/api/settings/ai', { provider, api_key:document.getElementById('set-ai-key').value, temperature:parseFloat(document.getElementById('set-ai-temp').value)||0.3, max_tokens:parseInt(document.getElementById('set-ai-tokens').value)||1000, custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'', openrouter_enabled: provider === 'openrouter', openrouter_model: document.getElementById('set-openrouter-model')?.value || 'openai/gpt-4o-mini', mistral_model: document.getElementById('set-mistral-model')?.value || 'mistral-large-latest' }, 'btn-save-ai'); }
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
 async function saveRiskSettings() {
-    const mode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';
+    const exitMode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';
     const profile = document.querySelector('input[name="ai-risk-profile"]:checked')?.value || 'balanced';
+    const sizingMode = document.querySelector('input[name="position-sizing-mode"]:checked')?.value || 'percentage';
     await saveSettings('/api/settings/risk', {
         max_position_pct: parseFloat(document.getElementById('set-max-pos').value) || 10,
         max_daily_trades: parseInt(document.getElementById('set-max-trades').value) || 10,
         max_daily_loss_pct: parseFloat(document.getElementById('set-max-loss').value) || 5,
-        exit_management_mode: mode,
+        exit_management_mode: exitMode,
         ai_risk_profile: profile,
         custom_stop_loss_pct: parseFloat(document.getElementById('set-custom-sl').value) || 1.5,
         ai_exit_system_prompt: document.getElementById('set-ai-exit-prompt').value || '',
+        position_sizing_mode: sizingMode,
+        account_equity_usdt: parseFloat(document.getElementById('set-equity')?.value || document.getElementById('set-equity-risk')?.value) || 10000,
+        fixed_position_size_usdt: parseFloat(document.getElementById('set-fixed-size')?.value) || 100,
+        risk_per_trade_pct: parseFloat(document.getElementById('set-risk-per-trade')?.value) || 1,
     });
 }
 
@@ -2855,6 +2879,87 @@ async function createGrid() {
     } catch (err) {
         showToast(err.message, 'error', 'Grid Failed');
         if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-add-line"></i> Create Grid'; }
+    }
+}
+
+async function aiGenerateDCA() {
+    const btn = document.querySelector('button[onclick="aiGenerateDCA()"]');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line"></i> Generating...'; }
+
+    const ticker = document.getElementById('dca-ticker')?.value || 'BTCUSDT';
+    const riskLevel = document.getElementById('dca-risk-level')?.value || 'medium';
+
+    try {
+        const result = await fetchAPI('/api/strategies/ai/generate', {
+            method: 'POST',
+            body: JSON.stringify({
+                ticker: ticker,
+                strategy_type: 'dca',
+                risk_level: riskLevel
+            })
+        });
+
+        const config = result.config;
+        if (config.reasoning) {
+            showToast(config.reasoning, 'info', 'AI Analysis');
+        }
+
+        if (document.getElementById('dca-direction')) document.getElementById('dca-direction').value = config.direction || 'long';
+        if (document.getElementById('dca-initial-capital')) document.getElementById('dca-initial-capital').value = Math.round(config.initial_capital_usdt || 1000);
+        if (document.getElementById('dca-max-entries')) document.getElementById('dca-max-entries').value = config.max_entries || 5;
+        if (document.getElementById('dca-spacing')) document.getElementById('dca-spacing').value = config.entry_spacing_pct || 2;
+        if (document.getElementById('dca-sizing')) document.getElementById('dca-sizing').value = config.sizing_method || 'fixed';
+        if (document.getElementById('dca-sl')) document.getElementById('dca-sl').value = config.stop_loss_pct || 10;
+        if (document.getElementById('dca-tp')) document.getElementById('dca-tp').value = config.take_profit_pct || 5;
+        if (document.getElementById('dca-activation')) document.getElementById('dca-activation').value = config.activation_loss_pct || 1;
+        if (document.getElementById('dca-max-capital')) document.getElementById('dca-max-capital').value = Math.round(config.max_total_capital_usdt || 5000);
+        if (document.getElementById('dca-mode')) document.getElementById('dca-mode').value = config.mode || 'average_down';
+
+        showToast(`AI generated DCA config for ${ticker}`, 'success', 'Config Generated');
+        if (btn) { btn.innerHTML = '<i class="ri-check-line"></i> Done!'; }
+        setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-magic-line"></i> AI Generate'; } }, 2000);
+    } catch (err) {
+        showToast(err.message, 'error', 'AI Generate Failed');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-magic-line"></i> AI Generate'; }
+    }
+}
+
+async function aiGenerateGrid() {
+    const btn = document.querySelector('button[onclick="aiGenerateGrid()"]');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-4-line"></i> Generating...'; }
+
+    const ticker = document.getElementById('grid-ticker')?.value || 'BTCUSDT';
+    const riskLevel = document.getElementById('grid-risk-level')?.value || 'medium';
+
+    try {
+        const result = await fetchAPI('/api/strategies/ai/generate', {
+            method: 'POST',
+            body: JSON.stringify({
+                ticker: ticker,
+                strategy_type: 'grid',
+                risk_level: riskLevel
+            })
+        });
+
+        const config = result.config;
+        if (config.reasoning) {
+            showToast(config.reasoning, 'info', 'AI Analysis');
+        }
+
+        if (document.getElementById('grid-count')) document.getElementById('grid-count').value = config.grid_count || 15;
+        if (document.getElementById('grid-capital')) document.getElementById('grid-capital').value = Math.round(config.total_capital_usdt || 1000);
+        if (document.getElementById('grid-spacing')) document.getElementById('grid-spacing').value = config.grid_spacing_pct || 1;
+        if (document.getElementById('grid-spacing-mode')) document.getElementById('grid-spacing-mode').value = config.spacing_mode || 'arithmetic';
+        if (document.getElementById('grid-mode')) document.getElementById('grid-mode').value = config.mode || 'neutral';
+        if (document.getElementById('grid-upper')) document.getElementById('grid-upper').value = config.upper_price || 0;
+        if (document.getElementById('grid-lower')) document.getElementById('grid-lower').value = config.lower_price || 0;
+
+        showToast(`AI generated Grid config for ${ticker}`, 'success', 'Config Generated');
+        if (btn) { btn.innerHTML = '<i class="ri-check-line"></i> Done!'; }
+        setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-magic-line"></i> AI Generate'; } }, 2000);
+    } catch (err) {
+        showToast(err.message, 'error', 'AI Generate Failed');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-magic-line"></i> AI Generate'; }
     }
 }
 
