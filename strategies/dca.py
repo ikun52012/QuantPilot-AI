@@ -1,6 +1,7 @@
 """
 DCA (Dollar Cost Average) Strategy Engine.
 Manages position averaging down/up with configurable parameters.
+Enhanced with live exchange execution support.
 """
 import asyncio
 import json
@@ -12,6 +13,7 @@ from enum import Enum
 from loguru import logger
 
 from core.utils.datetime import utcnow
+from models import TradeDecision, SignalDirection, TakeProfitLevel, TrailingStopConfig, TrailingStopMode
 
 
 class DCAMode(Enum):
@@ -102,11 +104,12 @@ class DCAEngine:
         self.price_cache: dict[str, float] = {}
         self._monitor_task: Optional[asyncio.Task] = None
 
-    def create_position(self, config: DCAConfig, current_price: float) -> DCAPosition:
+    def _ensure_strategy_id(self, config: DCAConfig) -> None:
         if not config.strategy_id:
             config.strategy_id = f"dca_{config.ticker}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-        position = DCAPosition(
+    def _build_position(self, config: DCAConfig) -> DCAPosition:
+        return DCAPosition(
             config_id=config.strategy_id,
             ticker=config.ticker,
             direction=config.direction,
@@ -114,22 +117,17 @@ class DCAEngine:
             started_at=utcnow(),
         )
 
-        initial_qty = self._calculate_initial_quantity(config, current_price)
-        initial_capital = initial_qty * current_price
-
-        entry = DCAEntry(
-            entry_price=current_price,
-            quantity=initial_qty,
-            capital_usdt=initial_capital,
-            entry_time=utcnow(),
-            entry_idx=1,
-            reason="initial_entry",
-        )
-
+    def _finalize_position(
+        self,
+        position: DCAPosition,
+        config: DCAConfig,
+        entry: DCAEntry,
+        current_price: float,
+    ) -> DCAPosition:
         position.entries.append(entry)
-        position.total_quantity = initial_qty
-        position.total_capital_usdt = initial_capital
-        position.average_entry_price = current_price
+        position.total_quantity = entry.quantity
+        position.total_capital_usdt = entry.capital_usdt
+        position.average_entry_price = entry.entry_price
         position.current_price = current_price
         position.highest_price = current_price
         position.lowest_price = current_price
@@ -140,9 +138,99 @@ class DCAEngine:
         self.positions[config.strategy_id] = position
         self.configs[config.strategy_id] = config
 
-        logger.info(f"[DCA] Created position for {config.ticker}: entry={current_price}, qty={initial_qty}")
+        logger.info(f"[DCA] Created position for {config.ticker}: entry={entry.entry_price}, qty={entry.quantity}")
 
         return position
+
+    def _create_position_paper(self, config: DCAConfig, current_price: float) -> DCAPosition:
+        self._ensure_strategy_id(config)
+        position = self._build_position(config)
+        initial_qty = self._calculate_initial_quantity(config, current_price)
+        initial_capital = initial_qty * current_price
+        entry = DCAEntry(
+            entry_price=current_price,
+            quantity=initial_qty,
+            capital_usdt=initial_capital,
+            entry_time=utcnow(),
+            entry_idx=1,
+            reason="initial_entry_paper",
+            fees_usdt=initial_capital * config.fee_pct / 100,
+        )
+        logger.info(f"[DCA] Paper mode - simulated initial entry")
+        return self._finalize_position(position, config, entry, current_price)
+
+    def create_position(
+        self,
+        config: DCAConfig,
+        current_price: float,
+        exchange_config: dict | None = None,
+    ) -> DCAPosition:
+        if config.paper_mode:
+            return self._create_position_paper(config, current_price)
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.create_position_async(config, current_price, exchange_config))
+
+        raise RuntimeError("Use create_position_async() for live exchange execution")
+
+    async def create_position_async(
+        self,
+        config: DCAConfig,
+        current_price: float,
+        exchange_config: dict | None = None
+    ) -> DCAPosition:
+        if config.paper_mode:
+            return self._create_position_paper(config, current_price)
+
+        self._ensure_strategy_id(config)
+        position = self._build_position(config)
+
+        initial_qty = self._calculate_initial_quantity(config, current_price)
+        initial_capital = initial_qty * current_price
+
+        try:
+            from exchange import execute_trade
+
+            direction = SignalDirection.LONG if config.direction == "long" else SignalDirection.SHORT
+            decision = TradeDecision(
+                execute=True,
+                direction=direction,
+                ticker=config.ticker,
+                entry_price=current_price,
+                quantity=initial_qty,
+                stop_loss=self._calculate_stop_loss_price(config, current_price, direction),
+                take_profit=self._calculate_take_profit_price(config, current_price, direction),
+                reason="DCA initial entry",
+                order_type="market",
+            )
+
+            order_result = await execute_trade(decision, exchange_config)
+
+            if order_result.get("status") in ["filled", "simulated"]:
+                filled_price = float(order_result.get("entry_price") or current_price)
+                filled_capital = initial_qty * filled_price
+                entry = DCAEntry(
+                    entry_price=filled_price,
+                    quantity=initial_qty,
+                    capital_usdt=filled_capital,
+                    entry_time=utcnow(),
+                    entry_idx=1,
+                    reason="initial_entry",
+                    order_id=order_result.get("order_id", ""),
+                    fees_usdt=filled_capital * config.fee_pct / 100,
+                )
+                logger.info(f"[DCA] Placed initial order: {order_result.get('order_id')}")
+            else:
+                logger.error(f"[DCA] Failed to place initial order: {order_result}")
+                raise Exception(f"Failed to place initial order: {order_result.get('reason')}")
+
+        except Exception as e:
+            logger.error(f"[DCA] Exchange execution failed: {e}")
+            raise
+
+        return self._finalize_position(position, config, entry, current_price)
 
     def _calculate_initial_quantity(self, config: DCAConfig, price: float) -> float:
         if config.initial_capital_usdt > 0:
@@ -150,6 +238,22 @@ class DCAEngine:
         elif config.fixed_size_usdt > 0:
             return config.fixed_size_usdt / price
         return 0.0
+
+    def _calculate_stop_loss_price(self, config: DCAConfig, entry_price: float, direction: SignalDirection) -> Optional[float]:
+        if config.stop_loss_pct <= 0:
+            return None
+        if direction == SignalDirection.LONG:
+            return entry_price * (1 - config.stop_loss_pct / 100)
+        else:
+            return entry_price * (1 + config.stop_loss_pct / 100)
+
+    def _calculate_take_profit_price(self, config: DCAConfig, entry_price: float, direction: SignalDirection) -> Optional[float]:
+        if config.take_profit_pct <= 0:
+            return None
+        if direction == SignalDirection.LONG:
+            return entry_price * (1 + config.take_profit_pct / 100)
+        else:
+            return entry_price * (1 - config.take_profit_pct / 100)
 
     def _calculate_next_entry_quantity(self, config: DCAConfig, entry_idx: int, base_quantity: float) -> float:
         method = config.sizing_method
@@ -212,7 +316,7 @@ class DCAEngine:
             else:
                 position.take_profit_price = avg_entry * (1 - config.take_profit_pct / 100)
 
-    async def check_and_execute(self, position_id: str, current_price: float) -> dict:
+    async def check_and_execute(self, position_id: str, current_price: float, exchange_config: dict | None = None) -> dict:
         result = {"action": "none", "reason": ""}
 
         if position_id not in self.positions:
@@ -234,12 +338,12 @@ class DCAEngine:
             return {"action": "none", "reason": f"Position {position.status}"}
 
         if self._check_stop_loss(position, current_price):
-            await self._close_position(position_id, current_price, "stop_loss")
+            await self._close_position(position_id, current_price, "stop_loss", exchange_config)
             result = {"action": "close", "reason": "stop_loss_hit", "pnl_pct": position.unrealized_pnl_pct}
             return result
 
         if self._check_take_profit(position, current_price):
-            await self._close_position(position_id, current_price, "take_profit")
+            await self._close_position(position_id, current_price, "take_profit", exchange_config)
             result = {"action": "close", "reason": "take_profit_hit", "pnl_pct": position.unrealized_pnl_pct}
             return result
 
@@ -247,7 +351,7 @@ class DCAEngine:
             should_dca = self._should_add_entry(position, config, current_price)
 
             if should_dca:
-                entry_result = await self._add_entry(position_id, config, current_price)
+                entry_result = await self._add_entry(position_id, config, current_price, exchange_config)
                 result = {"action": "dca_entry", "reason": entry_result.get("reason", ""), "entry_idx": len(position.entries)}
 
         return result
@@ -296,7 +400,7 @@ class DCAEngine:
 
         return False
 
-    async def _add_entry(self, position_id: str, config: DCAConfig, current_price: float) -> dict:
+    async def _add_entry(self, position_id: str, config: DCAConfig, current_price: float, exchange_config: dict | None = None) -> dict:
         position = self.positions[position_id]
 
         base_qty = position.entries[0].quantity
@@ -326,6 +430,39 @@ class DCAEngine:
             fees_usdt=fees,
         )
 
+        if not config.paper_mode:
+            try:
+                from exchange import execute_trade
+
+                direction = SignalDirection.LONG if config.direction == "long" else SignalDirection.SHORT
+                decision = TradeDecision(
+                    execute=True,
+                    direction=direction,
+                    ticker=config.ticker,
+                    entry_price=current_price,
+                    quantity=new_quantity,
+                    stop_loss=self._calculate_stop_loss_price(config, position.average_entry_price, direction),
+                    take_profit=self._calculate_take_profit_price(config, position.average_entry_price, direction),
+                    reason=f"DCA entry #{new_entry_idx}",
+                    order_type="market",
+                )
+
+                order_result = await execute_trade(decision, exchange_config)
+
+                if order_result.get("status") in ["filled", "simulated"]:
+                    entry.order_id = order_result.get("order_id", "")
+                    logger.info(f"[DCA] Placed DCA entry #{new_entry_idx}: {order_result.get('order_id')}")
+                else:
+                    logger.error(f"[DCA] Failed to place DCA entry #{new_entry_idx}: {order_result}")
+                    raise Exception(f"Failed to place DCA entry: {order_result.get('reason')}")
+
+            except Exception as e:
+                logger.error(f"[DCA] Exchange execution failed for entry #{new_entry_idx}: {e}")
+                if not config.paper_mode:
+                    raise
+        else:
+            logger.info(f"[DCA] Paper mode - simulated DCA entry #{new_entry_idx}")
+
         position.entries.append(entry)
         position.total_quantity += new_quantity
         position.total_capital_usdt += new_capital
@@ -354,8 +491,36 @@ class DCAEngine:
             position.unrealized_pnl_usdt = (position.average_entry_price - position.current_price) * position.total_quantity
             position.unrealized_pnl_pct = (position.average_entry_price - position.current_price) / position.average_entry_price * 100
 
-    async def _close_position(self, position_id: str, exit_price: float, reason: str) -> None:
+    async def _close_position(self, position_id: str, exit_price: float, reason: str, exchange_config: dict | None = None) -> None:
         position = self.positions[position_id]
+        config = self.configs.get(position_id)
+
+        if config and not config.paper_mode:
+            try:
+                from exchange import execute_trade
+
+                direction = SignalDirection.LONG if config.direction == "long" else SignalDirection.SHORT
+                close_direction = SignalDirection.CLOSE_LONG if direction == SignalDirection.LONG else SignalDirection.CLOSE_SHORT
+
+                decision = TradeDecision(
+                    execute=True,
+                    direction=close_direction,
+                    ticker=position.ticker,
+                    entry_price=exit_price,
+                    quantity=position.total_quantity,
+                    reason=f"DCA close: {reason}",
+                    order_type="market",
+                )
+
+                order_result = await execute_trade(decision, exchange_config)
+
+                if order_result.get("status") in ["closed", "filled", "simulated"]:
+                    logger.info(f"[DCA] Closed position via exchange: {order_result.get('order_id')}")
+                else:
+                    logger.error(f"[DCA] Failed to close position: {order_result}")
+
+            except Exception as e:
+                logger.error(f"[DCA] Exchange close failed: {e}")
 
         if position.direction == "long":
             pnl_usdt = (exit_price - position.average_entry_price) * position.total_quantity

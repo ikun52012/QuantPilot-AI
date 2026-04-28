@@ -30,11 +30,11 @@ class AIConfig(BaseModel):
     """AI provider configuration."""
     provider: str = "deepseek"
     openai_api_key: str = ""
-    openai_model: str = "gpt-4o"
+    openai_model: str = "gpt-5.5"
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-20250514"
+    anthropic_model: str = "claude-opus-4-7"
     deepseek_api_key: str = ""
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-pro"
     custom_provider_enabled: bool = False
     custom_provider_name: str = "custom"
     custom_provider_api_key: str = ""
@@ -42,7 +42,7 @@ class AIConfig(BaseModel):
     custom_provider_api_url: str = ""
     openrouter_enabled: bool = False
     openrouter_api_key: str = ""
-    openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_model: str = "openai/gpt-5.5"
     openrouter_site_url: str = ""
     openrouter_app_name: str = "QuantPilot AI"
     mistral_api_key: str = ""
@@ -60,15 +60,15 @@ class AIConfig(BaseModel):
     voting_weights: dict[str, float] = Field(default_factory=dict)
     voting_strategy: str = "weighted"
     available_models: dict[str, list[str]] = Field(default_factory=lambda: {
-        "openai": ["gpt-4o", "gpt-4o-mini"],
-        "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
-        "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-        "mistral": ["mistral-large-latest", "mistral-small-latest", "codestral-latest", "mistral-embed"],
+        "openai": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
+        "anthropic": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
+        "deepseek": ["deepseek-v4-pro", "deepseek-v4-flash"],
+        "mistral": ["mistral-large-latest", "mistral-small-latest", "codestral-latest"],
         "openrouter": [
-            "openai/gpt-4o",
-            "openai/gpt-4o-mini",
-            "anthropic/claude-3.5-sonnet",
-            "deepseek/deepseek-chat",
+            "openai/gpt-5.5",
+            "openai/gpt-5.4-mini",
+            "anthropic/claude-opus-4-7",
+            "deepseek/deepseek-v4-pro",
             "google/gemini-pro-1.5",
             "meta-llama/llama-3.1-70b-instruct",
             "mistralai/mistral-large",
@@ -100,11 +100,9 @@ class AIConfig(BaseModel):
         return cls(
             provider=os.getenv("AI_PROVIDER", "deepseek"),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
-            anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
-            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
-            deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
+            anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"),
             custom_provider_enabled=os.getenv("CUSTOM_AI_PROVIDER_ENABLED", "false").lower() == "true",
             custom_provider_name=os.getenv("CUSTOM_AI_PROVIDER_NAME", "custom"),
             custom_provider_api_key=os.getenv("CUSTOM_AI_API_KEY", ""),
@@ -112,7 +110,7 @@ class AIConfig(BaseModel):
             custom_provider_api_url=os.getenv("CUSTOM_AI_API_URL", ""),
             openrouter_enabled=os.getenv("OPENROUTER_ENABLED", "false").lower() == "true",
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
-            openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
+            openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-5.5"),
             openrouter_site_url=os.getenv("OPENROUTER_SITE_URL", ""),
             openrouter_app_name=os.getenv("OPENROUTER_APP_NAME", "QuantPilot AI"),
             mistral_api_key=os.getenv("MISTRAL_API_KEY", ""),
@@ -140,6 +138,9 @@ class ExchangeConfig(BaseModel):
     password: str = ""
     live_trading: bool = False
     sandbox_mode: bool = False
+    market_type: str = "contract"
+    default_order_type: str = "limit"
+    stop_loss_order_type: str = "market"
     pool_max_size: int = 50
 
     @field_validator('name')
@@ -151,6 +152,30 @@ class ExchangeConfig(BaseModel):
             raise ValueError(f"Exchange must be one of: {allowed}")
         return normalized
 
+    @field_validator('market_type')
+    @classmethod
+    def validate_market_type(cls, v: str) -> str:
+        normalized = v.lower().strip()
+        if normalized not in {'spot', 'contract'}:
+            raise ValueError("market_type must be 'spot' or 'contract'")
+        return normalized
+
+    @field_validator('default_order_type')
+    @classmethod
+    def validate_default_order_type(cls, v: str) -> str:
+        normalized = v.lower().strip()
+        if normalized not in {'market', 'limit'}:
+            raise ValueError("default_order_type must be 'market' or 'limit'")
+        return normalized
+
+    @field_validator('stop_loss_order_type')
+    @classmethod
+    def validate_stop_loss_order_type(cls, v: str) -> str:
+        normalized = v.lower().strip()
+        if normalized not in {'market'}:
+            raise ValueError("stop_loss_order_type must be 'market'")
+        return normalized
+
     @classmethod
     def from_env(cls) -> "ExchangeConfig":
         return cls(
@@ -160,6 +185,9 @@ class ExchangeConfig(BaseModel):
             password=os.getenv("EXCHANGE_PASSWORD", ""),
             live_trading=os.getenv("LIVE_TRADING", "false").lower() == "true",
             sandbox_mode=os.getenv("EXCHANGE_SANDBOX_MODE", "false").lower() == "true",
+            market_type=os.getenv("EXCHANGE_MARKET_TYPE", "contract"),
+            default_order_type=os.getenv("EXCHANGE_DEFAULT_ORDER_TYPE", "limit"),
+            stop_loss_order_type=os.getenv("EXCHANGE_STOP_LOSS_ORDER_TYPE", "market"),
             pool_max_size=int(os.getenv("EXCHANGE_POOL_MAX_SIZE", "50")),
         )
 

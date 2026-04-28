@@ -72,11 +72,11 @@ class TestWebhookSignature:
 
     @patch("services.signal_processor.settings")
     def test_verify_signature_live_trading_no_secret(self, mock_settings):
-        """Should reject when live trading but no secret."""
+        """Should still allow payload-secret validation when no HMAC secret exists."""
         mock_settings.exchange.live_trading = True
         mock_settings.webhook_hmac_secret = ""
         with patch("os.getenv", return_value=""):
-            assert verify_webhook_signature(b"test", "") is False
+            assert verify_webhook_signature(b"test", "") is True
 
 
 class TestSignalProcessorBuildDecision:

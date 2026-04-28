@@ -40,6 +40,42 @@ class UserSettingsRequest(BaseModel):
     password: str = Field(default="", max_length=300)
     live_trading: bool = False
     sandbox_mode: bool = False
+    market_type: str = Field(default="contract", max_length=20)
+    default_order_type: str = Field(default="limit", max_length=20)
+    stop_loss_order_type: str = Field(default="market", max_length=20)
+
+    @field_validator("exchange")
+    @classmethod
+    def _validate_exchange(cls, v: str) -> str:
+        allowed = {"binance", "okx", "bybit", "bitget", "gate", "coinbase"}
+        normalized = v.lower().strip()
+        if normalized not in allowed:
+            raise ValueError(f"exchange must be one of: {', '.join(sorted(allowed))}")
+        return normalized
+
+    @field_validator("market_type")
+    @classmethod
+    def _validate_market_type(cls, v: str) -> str:
+        normalized = v.lower().strip()
+        if normalized not in {"spot", "contract"}:
+            raise ValueError("market_type must be 'spot' or 'contract'")
+        return normalized
+
+    @field_validator("default_order_type")
+    @classmethod
+    def _validate_default_order_type(cls, v: str) -> str:
+        normalized = v.lower().strip()
+        if normalized not in {"market", "limit"}:
+            raise ValueError("default_order_type must be 'market' or 'limit'")
+        return normalized
+
+    @field_validator("stop_loss_order_type")
+    @classmethod
+    def _validate_stop_loss_order_type(cls, v: str) -> str:
+        normalized = v.lower().strip()
+        if normalized != "market":
+            raise ValueError("stop_loss_order_type must be 'market'")
+        return normalized
 
 
 class AISettingsRequest(BaseModel):
@@ -56,6 +92,23 @@ class AISettingsRequest(BaseModel):
     custom_provider_name: str = Field(default="custom", max_length=80)
     custom_provider_model: str = Field(default="", max_length=160)
     custom_provider_api_url: str = Field(default="", max_length=500)
+    mistral_model: str = Field(default="mistral-large-latest", max_length=160)
+    mistral_api_key: str = Field(default="", max_length=500)
+    openai_model: str = Field(default="", max_length=160)
+    anthropic_model: str = Field(default="", max_length=160)
+    deepseek_model: str = Field(default="", max_length=160)
+    voting_enabled: bool = False
+    voting_models: list[str] = Field(default_factory=list)
+    voting_weights: dict[str, float] = Field(default_factory=dict)
+    voting_strategy: str = Field(default="weighted", max_length=40)
+
+    @field_validator("voting_strategy")
+    @classmethod
+    def _validate_voting_strategy(cls, v: str) -> str:
+        allowed = {"weighted", "consensus", "best_confidence"}
+        if v not in allowed:
+            raise ValueError(f"voting_strategy must be one of: {', '.join(sorted(allowed))}")
+        return v
 
 
 class TelegramSettingsRequest(BaseModel):
@@ -71,6 +124,34 @@ class RiskSettingsRequest(BaseModel):
     ai_risk_profile: str = Field(default="balanced", max_length=40)
     custom_stop_loss_pct: float = Field(default=1.5, ge=0.1, le=100.0)
     ai_exit_system_prompt: str = Field(default="", max_length=12000)
+    position_sizing_mode: str = Field(default="percentage", max_length=20)
+    fixed_position_size_usdt: float = Field(default=100.0, ge=1.0, le=1000000.0)
+    risk_per_trade_pct: float = Field(default=1.0, ge=0.1, le=100.0)
+    account_equity_usdt: float = Field(default=10000.0, ge=100.0, le=10000000.0)
+
+    @field_validator("position_sizing_mode")
+    @classmethod
+    def _validate_sizing_mode(cls, v: str) -> str:
+        allowed = {"percentage", "fixed", "risk_ratio"}
+        if v not in allowed:
+            raise ValueError(f"position_sizing_mode must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+    @field_validator("exit_management_mode")
+    @classmethod
+    def _validate_exit_mode(cls, v: str) -> str:
+        allowed = {"ai", "custom"}
+        if v not in allowed:
+            raise ValueError(f"exit_management_mode must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+    @field_validator("ai_risk_profile")
+    @classmethod
+    def _validate_risk_profile(cls, v: str) -> str:
+        allowed = {"conservative", "balanced", "aggressive"}
+        if v not in allowed:
+            raise ValueError(f"ai_risk_profile must be one of: {', '.join(sorted(allowed))}")
+        return v
 
 
 class TakeProfitSettingsRequest(BaseModel):
@@ -90,6 +171,14 @@ class TrailingStopSettingsRequest(BaseModel):
     trail_pct: float = Field(default=1.0, ge=0.1, le=100.0)
     activation_profit_pct: float = Field(default=1.0, ge=0.0, le=100.0)
     trailing_step_pct: float = Field(default=0.5, ge=0.0, le=100.0)
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v: str) -> str:
+        allowed = {"none", "moving", "breakeven_on_tp1", "step_trailing", "profit_pct_trailing"}
+        if v not in allowed:
+            raise ValueError(f"mode must be one of: {', '.join(sorted(allowed))}")
+        return v
 
 
 class OfflineTradeSyncRequest(BaseModel):
@@ -170,6 +259,9 @@ async def _save_user_exchange(db: AsyncSession, db_user, req: UserSettingsReques
         "password": req.password or current_exchange.get("password", ""),
         "live_trading": bool(req.live_trading),
         "sandbox_mode": bool(req.sandbox_mode),
+        "market_type": req.market_type,
+        "default_order_type": req.default_order_type,
+        "stop_loss_order_type": req.stop_loss_order_type,
     }
     await _save_user_settings(db, db_user, current)
 
@@ -182,6 +274,9 @@ def _global_exchange_config() -> dict:
         "password": settings.exchange.password,
         "live_trading": settings.exchange.live_trading,
         "sandbox_mode": settings.exchange.sandbox_mode,
+        "market_type": settings.exchange.market_type,
+        "default_order_type": settings.exchange.default_order_type,
+        "stop_loss_order_type": settings.exchange.stop_loss_order_type,
     }
 
 
@@ -201,6 +296,9 @@ async def _exchange_config_for_user(db: AsyncSession, user: dict) -> dict:
         "password": exchange.get("password") or "",
         "live_trading": bool(exchange.get("live_trading")),
         "sandbox_mode": bool(exchange.get("sandbox_mode")),
+        "market_type": exchange.get("market_type") or settings.exchange.market_type,
+        "default_order_type": exchange.get("default_order_type") or settings.exchange.default_order_type,
+        "stop_loss_order_type": exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
     }
 
 
@@ -242,7 +340,9 @@ async def get_positions(
     db: AsyncSession = Depends(get_db),
 ):
     """Get tracked open positions, scoped to the current user."""
-    filters = [PositionModel.status == "open"]
+    from exchange import get_open_positions
+
+    filters = [PositionModel.status.in_(["open", "pending"])]
     if not _is_admin(user):
         filters.append(PositionModel.user_id == user.get("sub"))
 
@@ -253,8 +353,7 @@ async def get_positions(
         .limit(200)
     )
     positions = result.scalars().all()
-
-    return [
+    db_items = [
         {
             "id": p.id,
             "symbol": p.ticker,
@@ -272,11 +371,56 @@ async def get_positions(
             "leverage": p.leverage,
             "mode": "exchange" if p.live_trading else "paper",
             "sandbox_mode": p.sandbox_mode,
+            "status": p.status,
             "opened_at": p.opened_at.isoformat() if p.opened_at else None,
             "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+            "source": "db",
         }
         for p in positions
     ]
+
+    exchange_items = []
+    exchange_config = await _exchange_config_for_user(db, user)
+    if exchange_config.get("live_trading"):
+        try:
+            exchange_positions = await get_open_positions(exchange_config)
+            db_keys = {
+                f"{str(item.get('symbol') or '').upper()}::{str(item.get('side') or '').lower()}"
+                for item in db_items
+                if str(item.get("status") or "").lower() == "open"
+            }
+            for p in exchange_positions:
+                symbol = str(p.get("symbol") or "")
+                side = str(p.get("side") or "")
+                key = f"{symbol.upper()}::{side.lower()}"
+                if key in db_keys:
+                    continue
+                exchange_items.append({
+                    "id": f"exchange::{symbol}::{side}",
+                    "symbol": symbol,
+                    "side": side,
+                    "contracts": p.get("contracts"),
+                    "entryPrice": p.get("entryPrice"),
+                    "entry_price": p.get("entry_price"),
+                    "markPrice": p.get("markPrice"),
+                    "mark_price": p.get("mark_price"),
+                    "liquidationPrice": p.get("liquidationPrice"),
+                    "liquidation_price": p.get("liquidation_price"),
+                    "unrealizedPnl": p.get("unrealizedPnl") or p.get("unrealized_pnl") or 0,
+                    "unrealized_pnl": p.get("unrealized_pnl") or p.get("unrealizedPnl") or 0,
+                    "percentage": p.get("percentage"),
+                    "leverage": p.get("leverage"),
+                    "mode": "exchange",
+                    "sandbox_mode": exchange_config.get("sandbox_mode"),
+                    "status": "open",
+                    "opened_at": None,
+                    "updated_at": None,
+                    "source": "exchange_live",
+                })
+        except Exception as exc:
+            logger.warning(f"[User] Failed to fetch exchange positions: {exc}")
+
+    return db_items + exchange_items
 
 
 @router.get("/balance")
@@ -365,7 +509,7 @@ async def get_history(
             "timestamp": t.timestamp.isoformat() if t.timestamp else None,
             "ticker": t.ticker,
             "direction": t.direction,
-            "entry_price": signal.get("price") or payload.get("entry_price") or order_details.get("entry_price"),
+            "entry_price": order_details.get("entry_price") or payload.get("entry_price") or signal.get("price"),
             "exit_price": payload.get("exit_price") or order_details.get("exit_price"),
             "stop_loss": analysis.get("suggested_stop_loss") or payload.get("stop_loss"),
             "take_profit": (
@@ -504,6 +648,9 @@ async def get_user_settings(
     exchange = response_data.setdefault("exchange", {})
     exchange.setdefault("name", exchange.get("exchange") or settings.exchange.name)
     exchange.setdefault("exchange", exchange.get("name") or settings.exchange.name)
+    exchange.setdefault("market_type", exchange.get("market_type") or settings.exchange.market_type)
+    exchange.setdefault("default_order_type", exchange.get("default_order_type") or settings.exchange.default_order_type)
+    exchange.setdefault("stop_loss_order_type", exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type)
     exchange["api_configured"] = bool(exchange.get("api_key") and exchange.get("api_secret"))
     exchange.pop("api_key", None)
     exchange.pop("api_secret", None)

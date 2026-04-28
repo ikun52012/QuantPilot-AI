@@ -11,14 +11,24 @@ from typing import Optional
 from loguru import logger
 
 
-# Approximate cost per 1M tokens (input/output) as of 2025
+# Approximate cost per 1M tokens (input/output) as of 2026
 _COST_PER_1M: dict[str, tuple[float, float]] = {
+    "gpt-5.5": (5.00, 30.00),
+    "gpt-5.4": (2.50, 15.00),
+    "gpt-5.4-mini": (0.75, 4.50),
+    "gpt-5.4-nano": (0.30, 1.50),
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
+    "claude-opus-4-7": (5.00, 25.00),
+    "claude-opus-4-6": (5.00, 25.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-sonnet-4-5": (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
     "claude-3-5-sonnet-latest": (3.00, 15.00),
-    "claude-sonnet-4-20250514": (3.00, 15.00),
     "claude-3-5-haiku-latest": (0.80, 4.00),
-    "deepseek-chat": (0.14, 0.28),
+    "deepseek-v4-pro": (12.00, 24.00),
+    "deepseek-v4-flash": (1.00, 2.00),
+    "deepseek-chat": (1.00, 2.00),
     "deepseek-reasoner": (0.55, 2.19),
     "mistral-large-latest": (2.00, 6.00),
     "mistral-small-latest": (0.20, 0.60),

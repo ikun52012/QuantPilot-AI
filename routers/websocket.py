@@ -432,7 +432,7 @@ async def _fetch_user_positions(user_id: str) -> list[dict]:
             result = await session.execute(
                 select(PositionModel)
                 .where(PositionModel.user_id == user_id)
-                .where(PositionModel.status == "open")
+                .where(PositionModel.status.in_(["open", "pending"]))
             )
             positions = result.scalars().all()
 
@@ -441,6 +441,7 @@ async def _fetch_user_positions(user_id: str) -> list[dict]:
                     "id": p.id,
                     "ticker": p.ticker,
                     "direction": p.direction,
+                    "status": p.status,
                     "entry_price": p.entry_price,
                     "quantity": p.quantity,
                     "remaining_quantity": p.remaining_quantity,
@@ -523,7 +524,7 @@ async def _fetch_system_stats() -> dict:
         async with db_manager.async_session_factory() as session:
             open_positions = await session.execute(
                 select(func.count(PositionModel.id))
-                .where(PositionModel.status == "open")
+                .where(PositionModel.status.in_(["open", "pending"]))
             )
             open_count = open_positions.scalar() or 0
 

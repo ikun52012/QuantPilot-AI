@@ -147,7 +147,7 @@ async def get_position_markers(
             select(PositionModel)
             .where(PositionModel.user_id == user_id)
             .where(PositionModel.ticker == ticker)
-            .where(PositionModel.status == "open")
+            .where(PositionModel.status.in_(["open", "pending"]))
         )
         positions = result.scalars().all()
 

@@ -97,6 +97,44 @@ class TestWebSocketPositions:
         assert len(result) == 2
         assert result[0]["ticker"] == "BTCUSDT"
 
+    @pytest.mark.asyncio
+    async def test_fetch_user_positions_includes_pending(self, db_session):
+        from core.database import PositionModel, UserModel
+        from core.security import hash_password
+        from core.utils.datetime import utcnow
+        from core.database import db_manager
+        from routers.websocket import _fetch_user_positions
+
+        user = UserModel(
+            id="user123",
+            username="pendinguser",
+            email="pending@example.com",
+            password_hash=hash_password("Str0ng!Pass123"),
+        )
+        db_session.add(user)
+        db_session.add(PositionModel(
+            user_id="user123",
+            ticker="BTCUSDT",
+            direction="long",
+            status="pending",
+            entry_price=50000.0,
+            quantity=0.1,
+            remaining_quantity=0.1,
+            order_type="limit",
+            opened_at=utcnow(),
+        ))
+        await db_session.commit()
+
+        db_manager.async_session_factory = lambda: db_session
+        try:
+            result = await _fetch_user_positions("user123")
+        finally:
+            db_manager.async_session_factory = None
+
+        assert len(result) == 1
+        assert result[0]["ticker"] == "BTCUSDT"
+        assert result[0]["status"] == "pending"
+
 
 class TestWebSocketPrices:
     @patch('market_data.fetch_market_context')

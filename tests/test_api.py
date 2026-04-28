@@ -156,6 +156,29 @@ class TestAuthEndpoints:
 
 class TestUserEndpoints:
     @pytest.mark.asyncio
+    async def test_exchange_settings_accept_market_and_order_type(self, client: AsyncClient, test_user_data):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        headers = _csrf_headers(login)
+
+        response = await client.post(
+            "/api/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "k",
+                "api_secret": "s",
+                "password": "p",
+                "live_trading": False,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+            },
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
     async def test_positions_returns_real_unrealized_pnl(self, client: AsyncClient, test_user_data, db_session):
         from core.utils.datetime import utcnow
         from core.database import PositionModel
@@ -183,6 +206,94 @@ class TestUserEndpoints:
         data = response.json()
         assert data[0]["unrealizedPnl"] == 12.34
         assert data[0]["unrealized_pnl"] == 12.34
+
+    @pytest.mark.asyncio
+    async def test_positions_include_pending_limit_orders(self, client: AsyncClient, test_user_data, db_session):
+        from core.utils.datetime import utcnow
+        from core.database import PositionModel
+
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        user_id = login.json()["user"]["id"]
+
+        db_session.add(PositionModel(
+            user_id=user_id,
+            ticker="BTCUSDT",
+            direction="long",
+            status="pending",
+            entry_price=50000,
+            quantity=0.01,
+            remaining_quantity=0.01,
+            order_type="limit",
+            opened_at=utcnow(),
+        ))
+        await db_session.commit()
+
+        response = await client.get("/api/positions")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["symbol"] == "BTCUSDT"
+        assert data[0]["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_user_settings_returns_exchange_market_and_order_fields(self, client: AsyncClient, test_user_data):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        headers = _csrf_headers(login)
+
+        response = await client.post(
+            "/api/user/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "k",
+                "api_secret": "s",
+                "password": "p",
+                "live_trading": True,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+            },
+        )
+        assert response.status_code == 200
+
+        settings_response = await client.get("/api/user/settings")
+        assert settings_response.status_code == 200
+        exchange = settings_response.json()["exchange"]
+        assert exchange["name"] == "okx"
+        assert exchange["market_type"] == "contract"
+        assert exchange["default_order_type"] == "limit"
+        assert exchange["stop_loss_order_type"] == "market"
+
+    @pytest.mark.asyncio
+    async def test_chart_position_markers_include_pending_positions(self, client: AsyncClient, test_user_data, db_session):
+        from core.utils.datetime import utcnow
+        from core.database import PositionModel
+
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        user_id = login.json()["user"]["id"]
+
+        db_session.add(PositionModel(
+            user_id=user_id,
+            ticker="BTCUSDT",
+            direction="long",
+            status="pending",
+            entry_price=50000,
+            quantity=0.01,
+            remaining_quantity=0.01,
+            order_type="limit",
+            opened_at=utcnow(),
+        ))
+        await db_session.commit()
+
+        response = await client.get("/api/chart/positions/BTCUSDT")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["count"] == 1
+        assert payload["markers"][0]["text"].startswith("LONG @ 50000.00")
 
 
 class TestSocialEndpoints:

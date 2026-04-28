@@ -121,6 +121,9 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.exchange.password = str(exchange.get("password") or "")
         settings.exchange.live_trading = _to_bool(exchange.get("live_trading"), settings.exchange.live_trading)
         settings.exchange.sandbox_mode = _to_bool(exchange.get("sandbox_mode"), settings.exchange.sandbox_mode)
+        settings.exchange.market_type = str(exchange.get("market_type") or settings.exchange.market_type).lower().strip()
+        settings.exchange.default_order_type = str(exchange.get("default_order_type") or settings.exchange.default_order_type).lower().strip()
+        settings.exchange.stop_loss_order_type = str(exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type).lower().strip()
 
     ai = runtime.get("ai") or {}
     if ai:
@@ -348,6 +351,9 @@ async def save_exchange_settings(session: AsyncSession, data: dict[str, Any]) ->
         "password": str(data.get("password") or current.get("password") or settings.exchange.password or ""),
         "live_trading": _to_bool(data.get("live_trading"), _to_bool(current.get("live_trading"), settings.exchange.live_trading)),
         "sandbox_mode": _to_bool(data.get("sandbox_mode"), _to_bool(current.get("sandbox_mode"), settings.exchange.sandbox_mode)),
+        "market_type": str(data.get("market_type") or current.get("market_type") or settings.exchange.market_type).lower().strip(),
+        "default_order_type": str(data.get("default_order_type") or current.get("default_order_type") or settings.exchange.default_order_type).lower().strip(),
+        "stop_loss_order_type": str(data.get("stop_loss_order_type") or current.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type).lower().strip(),
     }
     await _save_encrypted_dict(session, EXCHANGE_KEY, updated)
     apply_runtime_settings({"exchange": updated})
@@ -376,10 +382,10 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
         "openai_model": str(data.get("openai_model") or current.get("openai_model") or settings.ai.openai_model),
         "anthropic_model": str(data.get("anthropic_model") or current.get("anthropic_model") or settings.ai.anthropic_model),
         "deepseek_model": str(data.get("deepseek_model") or current.get("deepseek_model") or settings.ai.deepseek_model),
-        "voting_enabled": settings.ai.voting_enabled,
-        "voting_models": settings.ai.voting_models,
-        "voting_weights": settings.ai.voting_weights,
-        "voting_strategy": settings.ai.voting_strategy,
+        "voting_enabled": _to_bool(data.get("voting_enabled"), _to_bool(current.get("voting_enabled"), settings.ai.voting_enabled)),
+        "voting_models": list(data.get("voting_models") or current.get("voting_models") or settings.ai.voting_models),
+        "voting_weights": dict(data.get("voting_weights") or current.get("voting_weights") or settings.ai.voting_weights),
+        "voting_strategy": str(data.get("voting_strategy") or current.get("voting_strategy") or settings.ai.voting_strategy),
     }
     await _save_encrypted_dict(session, AI_KEY, updated)
     apply_runtime_settings({"ai": updated})
@@ -455,6 +461,9 @@ def runtime_status() -> dict[str, Any]:
         "exchange": settings.exchange.name,
         "live_trading": settings.exchange.live_trading,
         "exchange_sandbox_mode": settings.exchange.sandbox_mode,
+        "exchange_market_type": settings.exchange.market_type,
+        "exchange_default_order_type": settings.exchange.default_order_type,
+        "exchange_stop_loss_order_type": settings.exchange.stop_loss_order_type,
         "exchange_api_configured": _public_secret_configured(settings.exchange.api_key),
         "exchange_password_configured": _public_secret_configured(settings.exchange.password),
         "ai_provider": settings.ai.provider,
@@ -478,6 +487,9 @@ def runtime_status() -> dict[str, Any]:
         "openrouter_api_configured": _public_secret_configured(settings.ai.openrouter_api_key),
         "mistral_model": settings.ai.mistral_model,
         "mistral_api_configured": _public_secret_configured(settings.ai.mistral_api_key),
+        "openai_model": settings.ai.openai_model,
+        "anthropic_model": settings.ai.anthropic_model,
+        "deepseek_model": settings.ai.deepseek_model,
         "telegram": {
             "configured": bool(settings.telegram.bot_token and settings.telegram.chat_id),
             "bot_configured": _public_secret_configured(settings.telegram.bot_token),

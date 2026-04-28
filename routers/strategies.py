@@ -251,7 +251,16 @@ async def create_dca_strategy(
             user_id=_user_id(user),
         )
 
-        position = dca_engine.create_position(config, current_price)
+        exchange_config = {
+            "live_trading": not request.paper_mode,
+            "sandbox_mode": settings.exchange.sandbox_mode,
+            "exchange": settings.exchange.name,
+            "api_key": settings.exchange.api_key,
+            "api_secret": settings.exchange.api_secret,
+            "password": settings.exchange.password,
+        }
+
+        position = await dca_engine.create_position_async(config, current_price, exchange_config)
         await _persist_strategy_state(db, config.user_id, "dca", position.config_id, position.ticker, config, position)
 
         return {
@@ -264,6 +273,7 @@ async def create_dca_strategy(
             "stop_loss_price": round(position.stop_loss_price, 6),
             "take_profit_price": round(position.take_profit_price, 6),
             "paper_mode": request.paper_mode,
+            "exchange_executed": not request.paper_mode,
         }
 
     except Exception as e:
@@ -327,7 +337,19 @@ async def check_dca_strategy(
         context = await fetch_market_context(ticker)
         current_price = context.current_price
 
-        result = await dca_engine.check_and_execute(strategy_id, current_price)
+        config = dca_engine.configs.get(strategy_id)
+        exchange_config = None
+        if config and not config.paper_mode:
+            exchange_config = {
+                "live_trading": True,
+                "sandbox_mode": settings.exchange.sandbox_mode,
+                "exchange": settings.exchange.name,
+                "api_key": settings.exchange.api_key,
+                "api_secret": settings.exchange.api_secret,
+                "password": settings.exchange.password,
+            }
+
+        result = await dca_engine.check_and_execute(strategy_id, current_price, exchange_config)
         await _persist_strategy_state(
             db,
             _user_id(user),
@@ -433,7 +455,16 @@ async def create_grid_strategy(
             user_id=_user_id(user),
         )
 
-        position = grid_engine.create_grid(config, current_price)
+        exchange_config = {
+            "live_trading": not request.paper_mode,
+            "sandbox_mode": settings.exchange.sandbox_mode,
+            "exchange": settings.exchange.name,
+            "api_key": settings.exchange.api_key,
+            "api_secret": settings.exchange.api_secret,
+            "password": settings.exchange.password,
+        }
+
+        position = await grid_engine.create_grid_async(config, current_price, exchange_config)
         await _persist_strategy_state(db, config.user_id, "grid", position.config_id, position.ticker, config, position)
 
         return {
@@ -446,6 +477,7 @@ async def create_grid_strategy(
             "pending_orders": position.pending_orders,
             "current_price": round(current_price, 6),
             "paper_mode": request.paper_mode,
+            "exchange_executed": not request.paper_mode,
         }
 
     except Exception as e:
@@ -509,7 +541,19 @@ async def check_grid_strategy(
         context = await fetch_market_context(ticker)
         current_price = context.current_price
 
-        result = await grid_engine.check_and_execute(strategy_id, current_price)
+        config = grid_engine.configs.get(strategy_id)
+        exchange_config = None
+        if config and not config.paper_mode:
+            exchange_config = {
+                "live_trading": True,
+                "sandbox_mode": settings.exchange.sandbox_mode,
+                "exchange": settings.exchange.name,
+                "api_key": settings.exchange.api_key,
+                "api_secret": settings.exchange.api_secret,
+                "password": settings.exchange.password,
+            }
+
+        result = await grid_engine.check_and_execute(strategy_id, current_price, exchange_config)
         await _persist_strategy_state(
             db,
             _user_id(user),
@@ -742,23 +786,36 @@ async def start_strategy_monitor(
     async def _monitor_loop():
         while True:
             try:
+                exchange_config = {
+                    "live_trading": settings.exchange.live_trading,
+                    "sandbox_mode": settings.exchange.sandbox_mode,
+                    "exchange": settings.exchange.name,
+                    "api_key": settings.exchange.api_key,
+                    "api_secret": settings.exchange.api_secret,
+                    "password": settings.exchange.password,
+                }
+
                 for strategy_id in list(dca_engine.positions.keys()):
                     position = dca_engine.positions.get(strategy_id)
+                    config = dca_engine.configs.get(strategy_id)
                     if position and position.status == "active":
                         try:
                             from market_data import fetch_market_context
                             context = await fetch_market_context(position.ticker)
-                            await dca_engine.check_and_execute(strategy_id, context.current_price)
+                            strategy_exchange_config = exchange_config if (config and not config.paper_mode) else None
+                            await dca_engine.check_and_execute(strategy_id, context.current_price, strategy_exchange_config)
                         except Exception as e:
                             logger.debug(f"[Monitor/DCA] Check failed for {strategy_id}: {e}")
 
                 for strategy_id in list(grid_engine.positions.keys()):
                     position = grid_engine.positions.get(strategy_id)
+                    config = grid_engine.configs.get(strategy_id)
                     if position and position.status == "active":
                         try:
                             from market_data import fetch_market_context
                             context = await fetch_market_context(position.ticker)
-                            await grid_engine.check_and_execute(strategy_id, context.current_price)
+                            strategy_exchange_config = exchange_config if (config and not config.paper_mode) else None
+                            await grid_engine.check_and_execute(strategy_id, context.current_price, strategy_exchange_config)
                         except Exception as e:
                             logger.debug(f"[Monitor/Grid] Check failed for {strategy_id}: {e}")
 
@@ -781,6 +838,8 @@ async def start_strategy_monitor(
         "interval_seconds": interval_seconds,
         "dca_active": len(dca_engine.list_active_positions()),
         "grid_active": len(grid_engine.list_active_grids()),
+        "live_trading": settings.exchange.live_trading,
+        "sandbox_mode": settings.exchange.sandbox_mode,
     }
 
 

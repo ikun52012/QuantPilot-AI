@@ -29,6 +29,7 @@ from core.security import (
     hash_password, verify_password, validate_password_strength,
     encrypt_value, decrypt_value, generate_token, is_placeholder_webhook_secret,
 )
+from core.database import sync_position_from_trade_entry_async, PositionModel
 from core.utils.common import safe_float, safe_bool, safe_int, safe_str
 class TestTradingViewSignalValidation:
     """Test signal validation edge cases."""
@@ -125,6 +126,10 @@ class TestSymbolNormalization:
     def test_with_spaces(self):
         """Symbol with spaces."""
         assert _normalize_symbol("BTC USDT") == "BTCUSDT"
+
+    def test_tradingview_perp_suffix(self):
+        """TradingView perp suffix should normalize to base contract symbol."""
+        assert _normalize_symbol("BTCUSDT.P") == "BTCUSDT"
 
     def test_unknown_quote(self):
         """Unknown quote currency."""
@@ -417,11 +422,50 @@ class TestWebhookSecretValidation:
 
     def test_valid_secret_accepted(self):
         """Valid secrets not flagged."""
-        assert not is_placeholder_webhook_secret("abc123xyz789")
+        assert not is_placeholder_webhook_secret("abc123xyz789super")
 
     def test_empty_secret_rejected(self):
         """Empty secret is placeholder."""
         assert is_placeholder_webhook_secret("")
+
+
+class TestPositionLedgerEdgeCases:
+    """Test open/pending position ledger edge cases."""
+
+    @pytest.mark.asyncio
+    async def test_filled_limit_order_opens_position_immediately(self, db_session: AsyncSession):
+        entry = {
+            "id": "trade-filled-limit",
+            "user_id": "user123",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ticker": "BTCUSDT",
+            "direction": "long",
+            "execute": True,
+            "order_status": "filled",
+            "entry_price": 50000.0,
+            "quantity": 0.1,
+            "order_details": {
+                "entry_price": 50000.0,
+                "quantity": 0.1,
+                "order_type": "limit",
+                "order_id": "order-123",
+            },
+            "exchange_config": {
+                "exchange": "okx",
+                "live_trading": True,
+                "sandbox_mode": True,
+            },
+            "analysis": {},
+        }
+
+        result = await sync_position_from_trade_entry_async(db_session, entry)
+        await db_session.commit()
+
+        assert result["position_event"] == "opened"
+        position = await db_session.get(PositionModel, result["position_id"])
+        assert position is not None
+        assert position.status == "open"
+        assert position.order_type == "limit"
 
 
 class TestUtilityFunctions:

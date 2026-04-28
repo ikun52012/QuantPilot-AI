@@ -387,6 +387,12 @@ class SignalProcessor:
             direction=signal.direction,
             entry_price=signal.price,
         )
+        exchange_cfg = (user_settings or {}).get("exchange") or {}
+        decision.order_type = str(
+            exchange_cfg.get("default_order_type")
+            or settings.exchange.default_order_type
+            or "market"
+        ).lower().strip()
 
         # Check AI recommendation
         if analysis.recommendation == "reject":
@@ -702,6 +708,9 @@ class SignalProcessor:
             "password": settings.exchange.password,
             "live_trading": settings.exchange.live_trading,
             "sandbox_mode": settings.exchange.sandbox_mode,
+            "market_type": settings.exchange.market_type,
+            "default_order_type": settings.exchange.default_order_type,
+            "stop_loss_order_type": settings.exchange.stop_loss_order_type,
         }
         if user_id:
             user = await get_user_by_id(self.session, user_id)
@@ -717,6 +726,9 @@ class SignalProcessor:
                     "password": user_exchange.get("password") or settings.exchange.password,
                     "live_trading": bool(user_exchange.get("live_trading", False)),
                     "sandbox_mode": bool(user_exchange.get("sandbox_mode", False)),
+                    "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
+                    "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
+                    "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
                     "max_leverage": user.max_leverage or 20,
                     "max_position_pct": user.max_position_pct or settings.risk.max_position_pct,
                 })
@@ -844,7 +856,7 @@ class SignalProcessor:
 
         try:
             stmt = select(PositionModel).where(
-                PositionModel.status == "open",
+                PositionModel.status.in_(["open", "pending"]),
                 PositionModel.ticker == decision.ticker,
             )
             if user_id:

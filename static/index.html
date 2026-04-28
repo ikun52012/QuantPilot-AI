@@ -488,6 +488,31 @@
                             <p class="hint">When Exchange API Trading is enabled, route orders to the exchange testnet where supported.</p>
                         </div>
                     </div>
+                    <div class="form-row three-col">
+                        <div class="form-group">
+                            <label for="set-exchange-market-type">Trading Market</label>
+                            <select id="set-exchange-market-type" class="select-input">
+                                <option value="contract">Contract / Futures</option>
+                                <option value="spot">Spot</option>
+                            </select>
+                            <p class="hint">Choose whether TradingView signals should be routed to contract or spot markets.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="set-default-order-type">Entry Order Type</label>
+                            <select id="set-default-order-type" class="select-input">
+                                <option value="limit">Limit</option>
+                                <option value="market">Market</option>
+                            </select>
+                            <p class="hint">Limit uses TradingView entry price such as alerts at 0.64. Market enters immediately at current exchange price.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="set-stop-loss-order-type">Stop Loss Type</label>
+                            <select id="set-stop-loss-order-type" class="select-input">
+                                <option value="market">Stop Market</option>
+                            </select>
+                            <p class="hint">Stop loss is sent as market trigger order to reduce non-fill risk.</p>
+                        </div>
+                    </div>
                     <div class="form-row">
                         <button class="btn btn-primary" onclick="testConnection()" id="btn-test-conn">
                             <i class="ri-link"></i> Test Connection
@@ -522,23 +547,43 @@
                         <input type="password" id="set-ai-key" class="text-input" placeholder="Enter AI API Key">
                     </div>
 
+                    <div id="openai-ai-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="set-openai-model">OpenAI Model</label>
+                            <input type="text" id="set-openai-model" class="text-input" placeholder="gpt-5.5">
+                            <p class="hint">Latest: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.4-nano</p>
+                        </div>
+                    </div>
+
+                    <div id="anthropic-ai-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="set-anthropic-model">Anthropic Model</label>
+                            <input type="text" id="set-anthropic-model" class="text-input" placeholder="claude-opus-4-7">
+                            <p class="hint">Latest: claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5</p>
+                        </div>
+                    </div>
+
+                    <div id="deepseek-ai-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="set-deepseek-model">DeepSeek Model</label>
+                            <input type="text" id="set-deepseek-model" class="text-input" placeholder="deepseek-v4-pro">
+                            <p class="hint">Latest: deepseek-v4-pro, deepseek-v4-flash</p>
+                        </div>
+                    </div>
+
                     <div id="openrouter-ai-fields" style="display: none;">
                         <div class="form-group">
                             <label for="set-openrouter-model">OpenRouter Model</label>
                             <input type="text" id="set-openrouter-model" class="text-input" placeholder="openai/gpt-4o-mini">
-                            <p class="hint">Use OpenRouter model IDs such as openai/gpt-4o-mini or deepseek/deepseek-chat</p>
+                            <p class="hint">Use OpenRouter model IDs such as openai/gpt-5.5 or deepseek/deepseek-v4-pro</p>
                         </div>
                     </div>
 
                     <div id="mistral-ai-fields" style="display: none;">
                         <div class="form-group">
                             <label for="set-mistral-model">Mistral Model</label>
-                            <select id="set-mistral-model" class="select-input">
-                                <option value="mistral-large-latest">Mistral Large (Latest)</option>
-                                <option value="mistral-small-latest">Mistral Small (Latest)</option>
-                                <option value="codestral-latest">Codestral (Latest)</option>
-                            </select>
-                            <p class="hint">Select the Mistral model to use for AI analysis</p>
+                            <input type="text" id="set-mistral-model" class="text-input" placeholder="mistral-large-latest">
+                            <p class="hint">Latest: mistral-large-latest, mistral-small-latest, codestral-latest</p>
                         </div>
                     </div>
 
@@ -1127,6 +1172,11 @@
                         <div class="form-group"><label for="user-exchange">Exchange</label><select id="user-exchange" class="select-input"><option value="binance">Binance</option><option value="okx">OKX</option><option value="bybit">Bybit</option><option value="bitget">Bitget</option><option value="gate">Gate.io</option><option value="coinbase">Coinbase</option></select></div>
                         <div class="form-group"><label for="user-live-trading">Trading Mode</label><select id="user-live-trading" class="select-input"><option value="false">Paper Trading</option><option value="true">Live Trading</option></select></div>
                         <div class="form-group"><label>Saved Keys</label><div class="hint" id="user-api-configured">Not configured</div></div>
+                    </div>
+                    <div class="form-row three-col">
+                        <div class="form-group"><label for="user-market-type">Trading Market</label><select id="user-market-type" class="select-input"><option value="contract">Contract / Futures</option><option value="spot">Spot</option></select></div>
+                        <div class="form-group"><label for="user-default-order-type">Entry Order Type</label><select id="user-default-order-type" class="select-input"><option value="limit">Limit</option><option value="market">Market</option></select></div>
+                        <div class="form-group"><label for="user-stop-loss-order-type">Stop Loss Type</label><select id="user-stop-loss-order-type" class="select-input"><option value="market">Stop Market</option></select></div>
                     </div>
                     <div class="form-row">
                         <div class="form-group">

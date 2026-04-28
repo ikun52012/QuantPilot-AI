@@ -466,7 +466,9 @@ async function loadPositions() {
             const pnl = Number(firstDefined(p.unrealized_pnl, p.unrealizedPnl, 0));
             const pct = firstDefined(p.percentage, null);
             const pctText = pct == null ? '--' : `${Number(pct) >= 0 ? '+' : ''}${Number(pct).toFixed(2)}%`;
-            return `<tr><td><strong>${escapeHtml(p.symbol||'--')}</strong></td><td><span class="badge ${p.side==='long'?'badge-long':'badge-short'}">${escapeHtml(p.side||'--')}</span></td><td>${escapeHtml(p.contracts)}</td><td>$${formatNum(entry)}</td><td>$${formatNum(mark)}</td><td>${liq?'$'+formatNum(liq):'--'}</td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">$${formatNum(pnl)}</td><td class="${pct == null || Number(pct)>=0?'pnl-positive':'pnl-negative'}">${pctText}</td><td>${escapeHtml(p.leverage||'--')}x</td></tr>`;
+            const mode = p.source === 'exchange_live' ? 'Exchange' : (p.mode || 'paper');
+            const statusText = p.status ? `<div class="hint">${escapeHtml(String(p.status).toUpperCase())}</div>` : '';
+            return `<tr><td><strong>${escapeHtml(p.symbol||'--')}</strong><div class="hint">${escapeHtml(mode)}</div>${statusText}</td><td><span class="badge ${p.side==='long'?'badge-long':'badge-short'}">${escapeHtml(p.side||'--')}</span></td><td>${escapeHtml(p.contracts)}</td><td>$${formatNum(entry)}</td><td>$${formatNum(mark)}</td><td>${liq?'$'+formatNum(liq):'--'}</td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">$${formatNum(pnl)}</td><td class="${pct == null || Number(pct)>=0?'pnl-positive':'pnl-negative'}">${pctText}</td><td>${escapeHtml(p.leverage||'--')}x</td></tr>`;
         }).join(''); }
         document.getElementById('bal-total').textContent = `$${formatNum(balance.total_quote ?? pickBalance(balance.total, balance.quote))}`;
         document.getElementById('bal-free').textContent = `$${formatNum(balance.free_quote ?? pickBalance(balance.free, balance.quote))}`;
@@ -532,9 +534,15 @@ function toggleCustomAIFields() {
     const customFields = document.getElementById('custom-ai-fields');
     const openrouterFields = document.getElementById('openrouter-ai-fields');
     const mistralFields = document.getElementById('mistral-ai-fields');
+    const openaiFields = document.getElementById('openai-ai-fields');
+    const anthropicFields = document.getElementById('anthropic-ai-fields');
+    const deepseekFields = document.getElementById('deepseek-ai-fields');
     if (customFields) customFields.style.display = provider === 'custom' ? 'block' : 'none';
     if (openrouterFields) openrouterFields.style.display = provider === 'openrouter' ? 'block' : 'none';
     if (mistralFields) mistralFields.style.display = provider === 'mistral' ? 'block' : 'none';
+    if (openaiFields) openaiFields.style.display = provider === 'openai' ? 'block' : 'none';
+    if (anthropicFields) anthropicFields.style.display = provider === 'anthropic' ? 'block' : 'none';
+    if (deepseekFields) deepseekFields.style.display = provider === 'deepseek' ? 'block' : 'none';
 }
 
 function toggleExitModeFields() {
@@ -568,14 +576,24 @@ function togglePositionSizingFields() {
 
 async function loadSettings() {
     try {
-        const status = await fetchAPI('/api/status');
+        const [status, userSettings] = await Promise.all([
+            fetchAPI('/api/status'),
+            fetchAPI('/api/settings').catch(() => ({})),
+        ]);
+        const userExchange = userSettings.exchange || {};
         if (document.getElementById('set-exchange') && status.exchange) document.getElementById('set-exchange').value = status.exchange;
         setFieldValue('set-live-trading', String(Boolean(status.live_trading)));
         const sandbox = document.getElementById('set-exchange-sandbox');
         if (sandbox) sandbox.checked = Boolean(status.exchange_sandbox_mode);
+        if (document.getElementById('set-exchange') && userExchange.name) document.getElementById('set-exchange').value = userExchange.name;
+        setFieldValue('set-live-trading', String(Boolean(userExchange.live_trading ?? status.live_trading)));
+        if (sandbox) sandbox.checked = Boolean(userExchange.sandbox_mode ?? status.exchange_sandbox_mode);
+        setFieldValue('set-exchange-market-type', userExchange.market_type || status.exchange_market_type || 'contract');
+        setFieldValue('set-default-order-type', userExchange.default_order_type || status.exchange_default_order_type || 'limit');
+        setFieldValue('set-stop-loss-order-type', userExchange.stop_loss_order_type || status.exchange_stop_loss_order_type || 'market');
         toggleExchangePasswordField();
-        setSecretPlaceholder('set-api-key', status.exchange_api_configured, 'Enter API Key');
-        setSecretPlaceholder('set-api-secret', status.exchange_api_configured, 'Enter API Secret');
+        setSecretPlaceholder('set-api-key', Boolean(userExchange.api_configured) || status.exchange_api_configured, 'Enter API Key');
+        setSecretPlaceholder('set-api-secret', Boolean(userExchange.api_configured) || status.exchange_api_configured, 'Enter API Secret');
         setSecretPlaceholder('set-password', status.exchange_password_configured, 'Enter Passphrase');
         if (document.getElementById('set-ai-provider') && status.ai_provider) document.getElementById('set-ai-provider').value = status.ai_provider;
         const aiKeyConfigured = status.ai_provider === 'openrouter'
@@ -586,8 +604,11 @@ async function loadSettings() {
         if (document.getElementById('set-custom-provider-name')) document.getElementById('set-custom-provider-name').value = status.custom_provider_name || 'custom';
         if (document.getElementById('set-custom-provider-model')) document.getElementById('set-custom-provider-model').value = status.custom_provider_model || '';
         if (document.getElementById('set-custom-provider-url')) document.getElementById('set-custom-provider-url').value = status.custom_provider_url || '';
-        if (document.getElementById('set-openrouter-model')) document.getElementById('set-openrouter-model').value = status.openrouter_model || 'openai/gpt-4o-mini';
+        if (document.getElementById('set-openrouter-model')) document.getElementById('set-openrouter-model').value = status.openrouter_model || 'openai/gpt-5.5';
         if (document.getElementById('set-mistral-model')) document.getElementById('set-mistral-model').value = status.mistral_model || 'mistral-large-latest';
+        if (document.getElementById('set-openai-model')) document.getElementById('set-openai-model').value = status.openai_model || 'gpt-5.5';
+        if (document.getElementById('set-anthropic-model')) document.getElementById('set-anthropic-model').value = status.anthropic_model || 'claude-opus-4-7';
+        if (document.getElementById('set-deepseek-model')) document.getElementById('set-deepseek-model').value = status.deepseek_model || 'deepseek-v4-pro';
         setFieldValue('set-ai-temp', status.ai_temperature ?? 0.3);
         setFieldValue('set-ai-tokens', status.ai_max_tokens ?? 1000);
         setFieldValue('set-ai-prompt', status.ai_custom_system_prompt || '');
@@ -669,7 +690,10 @@ async function testConnection() {
             api_key: document.getElementById('set-api-key').value,
             api_secret: document.getElementById('set-api-secret').value,
             password: document.getElementById('set-password').value,
-            sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false
+            sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false,
+            market_type: document.getElementById('set-exchange-market-type')?.value || 'contract',
+            default_order_type: document.getElementById('set-default-order-type')?.value || 'limit',
+            stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market'
         })});
         result.className = `conn-result ${resp.success?'success':'error'}`;
         result.textContent = resp.message;
@@ -683,14 +707,25 @@ async function saveExchangeSettings() { await saveSettings('/api/settings/exchan
     api_secret: document.getElementById('set-api-secret').value,
     password: document.getElementById('set-password').value,
     live_trading: document.getElementById('set-live-trading')?.value === 'true',
-    sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false
+    sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false,
+    market_type: document.getElementById('set-exchange-market-type')?.value || 'contract',
+    default_order_type: document.getElementById('set-default-order-type')?.value || 'limit',
+    stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market'
 }, 'btn-save-exchange'); }
-async function saveAISettings() { const provider = document.getElementById('set-ai-provider').value; await saveSettings('/api/settings/ai', { provider, api_key:document.getElementById('set-ai-key').value, temperature:parseFloat(document.getElementById('set-ai-temp').value)||0.3, max_tokens:parseInt(document.getElementById('set-ai-tokens').value)||1000, custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'', openrouter_enabled: provider === 'openrouter', openrouter_model: document.getElementById('set-openrouter-model')?.value || 'openai/gpt-4o-mini', mistral_model: document.getElementById('set-mistral-model')?.value || 'mistral-large-latest' }, 'btn-save-ai'); }
+async function saveAISettings() { const provider = document.getElementById('set-ai-provider').value; await saveSettings('/api/settings/ai', { provider, api_key:document.getElementById('set-ai-key').value, temperature:parseFloat(document.getElementById('set-ai-temp').value)||0.3, max_tokens:parseInt(document.getElementById('set-ai-tokens').value)||1000, custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'', openrouter_enabled: provider === 'openrouter', openrouter_model: document.getElementById('set-openrouter-model')?.value || 'openai/gpt-5.5', mistral_model: document.getElementById('set-mistral-model')?.value || 'mistral-large-latest', openai_model: document.getElementById('set-openai-model')?.value || 'gpt-5.5', anthropic_model: document.getElementById('set-anthropic-model')?.value || 'claude-opus-4-7', deepseek_model: document.getElementById('set-deepseek-model')?.value || 'deepseek-v4-pro' }, 'btn-save-ai'); }
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
 async function saveRiskSettings() {
     const exitMode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';
     const profile = document.querySelector('input[name="ai-risk-profile"]:checked')?.value || 'balanced';
     const sizingMode = document.querySelector('input[name="position-sizing-mode"]:checked')?.value || 'percentage';
+    let accountEquity = 10000;
+    if (sizingMode === 'percentage') {
+        accountEquity = parseFloat(document.getElementById('set-equity')?.value) || 10000;
+    } else if (sizingMode === 'risk_ratio') {
+        accountEquity = parseFloat(document.getElementById('set-equity-risk')?.value) || 10000;
+    } else {
+        accountEquity = parseFloat(document.getElementById('set-equity')?.value) || 10000;
+    }
     await saveSettings('/api/settings/risk', {
         max_position_pct: parseFloat(document.getElementById('set-max-pos').value) || 10,
         max_daily_trades: parseInt(document.getElementById('set-max-trades').value) || 10,
@@ -700,7 +735,7 @@ async function saveRiskSettings() {
         custom_stop_loss_pct: parseFloat(document.getElementById('set-custom-sl').value) || 1.5,
         ai_exit_system_prompt: document.getElementById('set-ai-exit-prompt').value || '',
         position_sizing_mode: sizingMode,
-        account_equity_usdt: parseFloat(document.getElementById('set-equity')?.value || document.getElementById('set-equity-risk')?.value) || 10000,
+        account_equity_usdt: accountEquity,
         fixed_position_size_usdt: parseFloat(document.getElementById('set-fixed-size')?.value) || 100,
         risk_per_trade_pct: parseFloat(document.getElementById('set-risk-per-trade')?.value) || 1,
     });
@@ -888,6 +923,9 @@ function renderUserSettings(data) {
     const ex = data.exchange || {}, tp = data.take_profit || {}, wh = data.webhook || {}, controls = data.trade_controls || {};
     setFieldValue('user-exchange', ex.exchange || ex.name || 'binance');
     setFieldValue('user-live-trading', String(Boolean(ex.live_trading)));
+    setFieldValue('user-market-type', ex.market_type || 'contract');
+    setFieldValue('user-default-order-type', ex.default_order_type || 'limit');
+    setFieldValue('user-stop-loss-order-type', ex.stop_loss_order_type || 'market');
     const sandbox = document.getElementById('user-sandbox-mode');
     if (sandbox) sandbox.checked = Boolean(ex.sandbox_mode);
     const liveSelect = document.getElementById('user-live-trading');
@@ -960,6 +998,9 @@ async function saveUserExchangeSettings() {
         api_key: document.getElementById('user-api-key')?.value || '',
         api_secret: document.getElementById('user-api-secret')?.value || '',
         password: document.getElementById('user-api-password')?.value || '',
+        market_type: document.getElementById('user-market-type')?.value || 'contract',
+        default_order_type: document.getElementById('user-default-order-type')?.value || 'limit',
+        stop_loss_order_type: document.getElementById('user-stop-loss-order-type')?.value || 'market',
     };
     await fetchAPI('/api/user/settings/exchange', { method:'POST', body:JSON.stringify(data) });
     ['user-api-key','user-api-secret','user-api-password'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });

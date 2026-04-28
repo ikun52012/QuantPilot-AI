@@ -269,6 +269,10 @@ def _normalize_symbol(ticker: str) -> str:
     """Convert TradingView ticker to ccxt symbol format."""
     # BTCUSDT -> BTC/USDT
     ticker = ticker.upper().replace(" ", "")
+    for suffix in (".P", "PERP"):
+        if ticker.endswith(suffix):
+            ticker = ticker[:-len(suffix)]
+            break
     for quote in ["USDT", "BUSD", "USDC", "USD"]:
         if ticker.endswith(quote):
             base = ticker[: -len(quote)]

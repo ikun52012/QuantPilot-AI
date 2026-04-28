@@ -1,6 +1,7 @@
 """
 Grid Trading Strategy Engine.
 Manages automated buy/sell orders within a price range.
+Enhanced with live exchange execution support.
 """
 import asyncio
 import json
@@ -12,6 +13,7 @@ from enum import Enum
 from loguru import logger
 
 from core.utils.datetime import utcnow
+from models import TradeDecision, SignalDirection, TakeProfitLevel, TrailingStopConfig, TrailingStopMode
 
 
 class GridMode(Enum):
@@ -98,9 +100,12 @@ class GridEngine:
         self.price_cache: dict[str, float] = {}
         self._monitor_task: Optional[asyncio.Task] = None
 
-    def create_grid(self, config: GridConfig, current_price: float) -> GridPosition:
+    def _ensure_strategy_id(self, config: GridConfig) -> None:
         if not config.strategy_id:
             config.strategy_id = f"grid_{config.ticker}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    def _initialize_grid_position(self, config: GridConfig, current_price: float) -> GridPosition:
+        self._ensure_strategy_id(config)
 
         if config.upper_price <= 0 or config.lower_price <= 0:
             price_range_pct = config.grid_count * config.grid_spacing_pct
@@ -127,8 +132,71 @@ class GridEngine:
 
         self.positions[config.strategy_id] = position
         self.configs[config.strategy_id] = config
+        return position
 
-        logger.info(f"[Grid] Created grid for {config.ticker}: range={config.lower_price:.4f}-{config.upper_price:.4f}, levels={len(grid_levels)}")
+    def create_grid(
+        self,
+        config: GridConfig,
+        current_price: float,
+        exchange_config: dict | None = None,
+    ) -> GridPosition:
+        if config.paper_mode:
+            position = self._initialize_grid_position(config, current_price)
+            logger.info(f"[Grid] Paper mode - simulated grid creation with {len(position.grid_levels)} levels")
+            logger.info(f"[Grid] Created grid for {config.ticker}: range={config.lower_price:.4f}-{config.upper_price:.4f}, levels={len(position.grid_levels)}")
+            return position
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.create_grid_async(config, current_price, exchange_config))
+
+        raise RuntimeError("Use create_grid_async() for live exchange execution")
+
+    async def create_grid_async(
+        self,
+        config: GridConfig,
+        current_price: float,
+        exchange_config: dict | None = None
+    ) -> GridPosition:
+        if config.paper_mode:
+            return self.create_grid(config, current_price, exchange_config)
+
+        position = self._initialize_grid_position(config, current_price)
+
+        try:
+            from exchange import execute_trade
+
+            for level in position.grid_levels:
+                if level.status != "pending":
+                    continue
+
+                direction = SignalDirection.LONG if level.side == "buy" else SignalDirection.SHORT
+                decision = TradeDecision(
+                    execute=True,
+                    direction=direction,
+                    ticker=config.ticker,
+                    entry_price=level.price,
+                    quantity=level.quantity,
+                    stop_loss=self._calculate_grid_stop_loss(config, level.price, level.side),
+                    take_profit=self._calculate_grid_take_profit(config, level.price, level.side),
+                    reason=f"Grid {level.side} at {level.price}",
+                    order_type="limit",
+                )
+
+                order_result = await execute_trade(decision, exchange_config)
+
+                if order_result.get("status") in ["filled", "pending", "simulated"]:
+                    level.order_id = order_result.get("order_id", "")
+                    logger.info(f"[Grid] Placed grid order {level.side} @ {level.price}: {order_result.get('order_id')}")
+                else:
+                    logger.error(f"[Grid] Failed to place grid order: {order_result}")
+
+        except Exception as e:
+            logger.error(f"[Grid] Exchange execution failed: {e}")
+            raise
+
+        logger.info(f"[Grid] Created grid for {config.ticker}: range={config.lower_price:.4f}-{config.upper_price:.4f}, levels={len(position.grid_levels)}")
 
         return position
 
@@ -186,7 +254,23 @@ class GridEngine:
 
         return levels
 
-    async def check_and_execute(self, position_id: str, current_price: float) -> dict:
+    def _calculate_grid_stop_loss(self, config: GridConfig, price: float, side: str) -> Optional[float]:
+        if config.stop_loss_pct <= 0:
+            return None
+        if side == "buy":
+            return price * (1 - config.stop_loss_pct / 100)
+        else:
+            return price * (1 + config.stop_loss_pct / 100)
+
+    def _calculate_grid_take_profit(self, config: GridConfig, price: float, side: str) -> Optional[float]:
+        if config.take_profit_pct <= 0:
+            return None
+        if side == "buy":
+            return price * (1 + config.take_profit_pct / 100)
+        else:
+            return price * (1 - config.take_profit_pct / 100)
+
+    async def check_and_execute(self, position_id: str, current_price: float, exchange_config: dict | None = None) -> dict:
         result = {"action": "none", "trades": []}
 
         if position_id not in self.positions:
@@ -207,13 +291,13 @@ class GridEngine:
 
         if current_price < position.lower_price or current_price > position.upper_price:
             if config.stop_loss_pct > 0:
-                await self._close_grid(position_id, current_price, "out_of_range")
+                await self._close_grid(position_id, current_price, "out_of_range", exchange_config)
                 return {"action": "close", "reason": "price_out_of_range"}
 
         triggered_levels = self._find_triggered_levels(position, current_price)
 
         for level in triggered_levels:
-            trade_result = await self._execute_grid_level(position_id, level, current_price, config)
+            trade_result = await self._execute_grid_level(position_id, level, current_price, config, exchange_config)
             if trade_result.get("success"):
                 result["trades"].append(trade_result)
 
@@ -243,7 +327,14 @@ class GridEngine:
 
         return triggered
 
-    async def _execute_grid_level(self, position_id: str, level: GridLevel, fill_price: float, config: GridConfig) -> dict:
+    async def _execute_grid_level(
+        self,
+        position_id: str,
+        level: GridLevel,
+        fill_price: float,
+        config: GridConfig,
+        exchange_config: dict | None = None
+    ) -> dict:
         position = self.positions[position_id]
 
         fees = level.quantity * fill_price * config.fee_pct / 100
@@ -253,6 +344,32 @@ class GridEngine:
         level.status = "filled"
 
         pnl = 0.0
+
+        if not config.paper_mode:
+            try:
+                from exchange import execute_trade
+
+                direction = SignalDirection.LONG if level.side == "buy" else SignalDirection.SHORT
+                decision = TradeDecision(
+                    execute=True,
+                    direction=direction,
+                    ticker=config.ticker,
+                    entry_price=fill_price,
+                    quantity=level.quantity,
+                    reason=f"Grid {level.side} filled at {fill_price}",
+                    order_type="market",
+                )
+
+                order_result = await execute_trade(decision, exchange_config)
+
+                if order_result.get("status") in ["filled", "simulated"]:
+                    level.order_id = order_result.get("order_id", "")
+                    logger.info(f"[Grid] Executed grid trade: {order_result.get('order_id')}")
+                else:
+                    logger.error(f"[Grid] Failed to execute grid trade: {order_result}")
+
+            except Exception as e:
+                logger.error(f"[Grid] Exchange execution failed: {e}")
 
         pair_level = self._find_pair_level(position, level)
 
@@ -360,8 +477,33 @@ class GridEngine:
 
             logger.info(f"[Grid] Replenished grid: new upper={new_upper:.4f}")
 
-    async def _close_grid(self, position_id: str, exit_price: float, reason: str) -> None:
+    async def _close_grid(self, position_id: str, exit_price: float, reason: str, exchange_config: dict | None = None) -> None:
         position = self.positions[position_id]
+        config = self.configs.get(position_id)
+
+        if config and not config.paper_mode:
+            try:
+                from exchange import execute_trade
+
+                for level in position.grid_levels:
+                    if level.status == "pending" and level.order_id:
+                        try:
+                            direction = SignalDirection.LONG if level.side == "buy" else SignalDirection.SHORT
+                            close_dir = SignalDirection.CLOSE_LONG if direction == SignalDirection.LONG else SignalDirection.CLOSE_SHORT
+                            decision = TradeDecision(
+                                execute=True,
+                                direction=close_dir,
+                                ticker=position.ticker,
+                                quantity=level.quantity,
+                                reason=f"Grid close: {reason}",
+                                order_type="market",
+                            )
+                            await execute_trade(decision, exchange_config)
+                        except Exception as e:
+                            logger.warning(f"[Grid] Failed to cancel grid order {level.order_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"[Grid] Exchange close failed: {e}")
 
         final_pnl = position.realized_pnl_usdt + position.unrealized_pnl_usdt - position.total_fees_usdt
 

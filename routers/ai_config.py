@@ -128,14 +128,16 @@ async def update_voting_config(
     Update stored voting configuration.
 
     Model ID format (use slash separator):
-    - 'openai/gpt-4o' - OpenAI GPT-4o
-    - 'openai/gpt-4o-mini' - OpenAI GPT-4o-mini
-    - 'anthropic/claude-3-5-sonnet-latest' - Anthropic Claude 3.5 Sonnet
-    - 'anthropic/claude-3-5-haiku-latest' - Anthropic Claude 3.5 Haiku
-    - 'deepseek/deepseek-chat' - DeepSeek Chat
-    - 'deepseek/deepseek-reasoner' - DeepSeek Reasoner
-    - 'openrouter/openai/gpt-4o' - GPT-4o via OpenRouter
-    - 'openrouter/anthropic/claude-3.5-sonnet' - Claude via OpenRouter
+    - 'openai/gpt-5.5' - OpenAI GPT-5.5 (flagship)
+    - 'openai/gpt-5.4' - OpenAI GPT-5.4
+    - 'openai/gpt-5.4-mini' - OpenAI GPT-5.4 Mini
+    - 'anthropic/claude-opus-4-7' - Anthropic Claude Opus 4.7 (most capable)
+    - 'anthropic/claude-sonnet-4-6' - Anthropic Claude Sonnet 4.6
+    - 'anthropic/claude-haiku-4-5' - Anthropic Claude Haiku 4.5
+    - 'deepseek/deepseek-v4-pro' - DeepSeek V4 Pro
+    - 'deepseek/deepseek-v4-flash' - DeepSeek V4 Flash
+    - 'openrouter/openai/gpt-5.5' - GPT-5.5 via OpenRouter
+    - 'openrouter/anthropic/claude-opus-4-7' - Claude Opus 4.7 via OpenRouter
     - 'openrouter/google/gemini-pro-1.5' - Gemini via OpenRouter
     - 'openrouter/meta-llama/llama-3.1-70b-instruct' - Llama via OpenRouter
     - 'openrouter/mistralai/mistral-large' - Mistral via OpenRouter
@@ -150,7 +152,7 @@ async def update_voting_config(
     - **consensus**: Only proceed if majority (>50%) votes execute
     - **best_confidence**: Take result from highest confidence model
 
-    Example weights: {"openai/gpt-4o": 0.4, "deepseek/deepseek-chat": 0.3, "local": 0.3}
+    Example weights: {"openai/gpt-5.5": 0.4, "deepseek/deepseek-v4-pro": 0.3, "anthropic/claude-opus-4-7": 0.3}
     """
     valid_models = []
     for model_id in req.models:
@@ -277,12 +279,12 @@ async def update_provider_config(
     Update AI provider configuration.
 
     OpenRouter provider uses OpenAI-compatible model IDs through a single API:
-    - OpenAI: openai/gpt-4o, openai/gpt-4o-mini
-    - Anthropic: anthropic/claude-3.5-sonnet
+    - OpenAI: openai/gpt-5.5, openai/gpt-5.4-mini
+    - Anthropic: anthropic/claude-opus-4-7, anthropic/claude-sonnet-4-6
     - Google: google/gemini-pro-1.5
     - Meta: meta-llama/llama-3.1-70b-instruct
     - Mistral: mistralai/mistral-large
-    - DeepSeek: deepseek/deepseek-chat
+    - DeepSeek: deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash
     - Qwen: qwen/qwen-2.5-72b-instruct
 
     This endpoint configures provider routing; execution still follows the selected primary provider.
@@ -383,12 +385,14 @@ async def get_available_models(
     return {
         "providers": settings.ai.available_models,
         "openrouter_popular": [
-            {"id": "openai/gpt-4o", "name": "GPT-4o", "provider": "OpenAI", "pricing": "OpenRouter route"},
-            {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "Anthropic", "pricing": "OpenRouter route"},
+            {"id": "openai/gpt-5.5", "name": "GPT-5.5", "provider": "OpenAI", "pricing": "OpenRouter route"},
+            {"id": "openai/gpt-5.4-mini", "name": "GPT-5.4 Mini", "provider": "OpenAI", "pricing": "OpenRouter route"},
+            {"id": "anthropic/claude-opus-4-7", "name": "Claude Opus 4.7", "provider": "Anthropic", "pricing": "OpenRouter route"},
+            {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "provider": "Anthropic", "pricing": "OpenRouter route"},
             {"id": "google/gemini-pro-1.5", "name": "Gemini Pro 1.5", "provider": "Google", "pricing": "OpenRouter route"},
             {"id": "meta-llama/llama-3.1-70b-instruct", "name": "Llama 3.1 70B", "provider": "Meta", "pricing": "OpenRouter route"},
             {"id": "mistralai/mistral-large", "name": "Mistral Large", "provider": "Mistral", "pricing": "OpenRouter route"},
-            {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat", "provider": "DeepSeek", "pricing": "OpenRouter route"},
+            {"id": "deepseek/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "provider": "DeepSeek", "pricing": "OpenRouter route"},
             {"id": "qwen/qwen-2.5-72b-instruct", "name": "Qwen 2.5 72B", "provider": "Alibaba", "pricing": "OpenRouter route"},
         ],
         "description": """

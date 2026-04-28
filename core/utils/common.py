@@ -204,7 +204,20 @@ def normalize_symbol(symbol: str) -> str:
     """
     if not symbol:
         return ''
-    return symbol.upper().replace(' ', '').replace('-', '').replace('_', '').replace('/', '')
+    normalized = symbol.upper().strip()
+    for suffix in ('.P', 'PERP'):
+        if normalized.endswith(suffix):
+            normalized = normalized[:-len(suffix)]
+            break
+    return (
+        normalized
+        .replace(' ', '')
+        .replace('-', '')
+        .replace('_', '')
+        .replace('/', '')
+        .replace(':', '')
+        .replace('.', '')
+    )
 
 
 def symbol_key(symbol: str) -> str:

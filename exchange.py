@@ -61,6 +61,7 @@ def _get_or_create_exchange(
     password: str = "",
     live: bool = False,
     sandbox: bool | None = None,
+    market_type: str | None = None,
 ) -> ccxt.Exchange:
     """Return a cached CCXT instance or create a new one.
     
@@ -70,7 +71,8 @@ def _get_or_create_exchange(
     eid = (exchange_id or settings.exchange.name).lower().strip()
     cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:8]
     sb = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
-    cache_key = f"{eid}:{sb}:{cred_hash}"
+    market_key = str(market_type or settings.exchange.market_type or "contract").lower().strip()
+    cache_key = f"{eid}:{sb}:{market_key}:{cred_hash}"
 
     # First check without lock (fast path)
     existing = _exchange_pool.get(cache_key)
@@ -85,7 +87,7 @@ def _get_or_create_exchange(
             return existing
         
         # Create instance while holding lock to prevent duplicate creation
-        instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox)
+        instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox, market_type)
         
         # Manage pool size
         if len(_exchange_pool) >= settings.exchange.pool_max_size:
@@ -154,6 +156,7 @@ def _build_exchange(
     password: str = "",
     live: bool = False,
     sandbox: bool | None = None,
+    market_type: str | None = None,
 ) -> ccxt.Exchange:
     """Build CCXT exchange instance with proper configuration."""
     if not _CCXT_AVAILABLE:
@@ -168,13 +171,17 @@ def _build_exchange(
 
     config = SUPPORTED_EXCHANGES[exchange_id]
     exchange_class = config["class"]
+    selected_market_type = str(market_type or settings.exchange.market_type or "contract").lower().strip()
+    options = dict(config.get("futures_option", {}))
+    if selected_market_type == "spot":
+        options["defaultType"] = "spot"
 
     # Build exchange config
     exchange_config = {
         "apiKey": api_key if api_key else settings.exchange.api_key,
         "secret": api_secret if api_secret else settings.exchange.api_secret,
         "enableRateLimit": True,
-        "options": config.get("futures_option", {}),
+        "options": options,
     }
 
     # Add password for exchanges that require it
@@ -208,9 +215,13 @@ def _normalize_symbol(symbol: str) -> str:
     if not symbol:
         return ""
     symbol = symbol.upper().replace(" ", "")
+    for suffix in (".P", "PERP"):
+        if symbol.endswith(suffix):
+            symbol = symbol[:-len(suffix)]
+            break
     if "/" in symbol:
         return symbol
-    symbol = symbol.replace("-", "")
+    symbol = symbol.replace("-", "").replace("_", "").replace(":", "")
     # Add USDT suffix if missing and not already a pair
     if not symbol.endswith(("USDT", "USD", "BTC", "ETH", "BNB")):
         symbol = f"{symbol}USDT"
@@ -251,7 +262,7 @@ def _valid_take_profit(direction: SignalDirection, entry: float, price: float | 
 
 def _symbol_candidates(symbol: str) -> list[str]:
     """Return common CCXT symbol candidates for a TradingView-style ticker."""
-    cleaned = symbol.upper().replace(" ", "").replace("-", "").replace("_", "").replace("/", "")
+    cleaned = _normalize_symbol(symbol).replace("/", "")
     quotes = ["USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]
     candidates = [symbol.upper(), cleaned]
     for quote in quotes:
@@ -283,7 +294,7 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str) -> str:
         if candidate in markets:
             return candidate
 
-    cleaned = symbol.upper().replace(" ", "").replace("-", "").replace("_", "").replace("/", "")
+    cleaned = _normalize_symbol(symbol).replace("/", "")
     for market_symbol, market in markets.items():
         market_id = str(market.get("id", "")).upper().replace("-", "").replace("_", "").replace("/", "")
         compact_symbol = market_symbol.upper().replace("/", "").replace(":", "").replace("-", "").replace("_", "")
@@ -327,6 +338,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         password=exchange_config.get("password") or settings.exchange.password,
         live=live_trading,
         sandbox=sandbox_mode,
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     symbol = await asyncio.to_thread(_resolve_symbol, exchange, decision.ticker)
 
@@ -384,15 +396,17 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         order_status = order.get("status", "unknown")
         logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status})")
 
+        result_status = "pending" if order_type == "limit" and order_status in {"open", "new"} else "filled"
         result = {
-            "status": "filled",
+            "status": result_status,
             "order_id": order_id,
             "symbol": symbol,
             "side": side,
             "quantity": decision.quantity,
-            "entry_price": order.get("average", decision.entry_price),
+            "entry_price": order.get("average") or order.get("price") or decision.entry_price,
             "sandbox_mode": sandbox_mode,
             "order_type": order_type,
+            "exchange_order_status": order_status,
         }
         if leverage:
             result["recommended_leverage"] = leverage
@@ -596,6 +610,7 @@ async def place_protective_stop(
         password=exchange_config.get("password") or settings.exchange.password,
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
         symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
@@ -709,6 +724,7 @@ async def get_account_balance(exchange_config: dict | None = None) -> dict:
         password=exchange_config.get("password") or settings.exchange.password,
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
         balance = await asyncio.to_thread(exchange.fetch_balance)
@@ -773,6 +789,7 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
         password=exchange_config.get("password") or settings.exchange.password,
         live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
         resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
@@ -803,6 +820,7 @@ async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config:
         password=exchange_config.get("password") or settings.exchange.password,
         live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
         resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
@@ -838,6 +856,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         password=exchange_config.get("password") or settings.exchange.password,
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
         positions = await asyncio.to_thread(exchange.fetch_positions)
@@ -892,6 +911,7 @@ async def get_recent_orders(symbol: str = None, limit: int = 50, exchange_config
         password=exchange_config.get("password") or settings.exchange.password,
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
         if symbol:

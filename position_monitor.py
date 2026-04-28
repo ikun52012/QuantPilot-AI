@@ -41,7 +41,7 @@ def _effective_remaining_quantity(position: PositionModel, opened_qty: float) ->
     if remaining_qty > 0:
         return remaining_qty
     if (
-        position.status == "open"
+        position.status in {"open", "pending"}
         and safe_float(position.realized_pnl_pct) == 0
         and not _has_partial_position_fills(position)
     ):
@@ -98,7 +98,7 @@ async def run_position_monitor_once(user_configs: Optional[dict] = None) -> dict
         async with db_manager.async_session_factory() as session:
             result = await session.execute(
                 select(PositionModel)
-                .where(PositionModel.status == "open")
+                .where(PositionModel.status.in_(["open", "pending"]))
                 .order_by(PositionModel.opened_at.asc())
             )
             positions = list(result.scalars().all())
@@ -140,6 +140,7 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
         "password": settings.exchange.password,
         "live_trading": bool(position.live_trading),
         "sandbox_mode": bool(position.sandbox_mode),
+        "market_type": settings.exchange.market_type,
     }
     if position.user_id and position.user_id in user_configs:
         config.update(user_configs[position.user_id])
@@ -159,6 +160,7 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
                     "password": exchange.get("password") or "",
                     "live_trading": safe_bool(exchange.get("live_trading"), config["live_trading"]),
                     "sandbox_mode": safe_bool(exchange.get("sandbox_mode"), config["sandbox_mode"]),
+                    "market_type": exchange.get("market_type") or config["market_type"],
                 })
             except Exception as exc:
                 logger.warning(f"[PositionMonitor] Could not decrypt user exchange config: {exc}")
@@ -335,6 +337,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
             password=exchange_config.get("password", settings.exchange.password),
             live=bool(exchange_config.get("live_trading", False)),
             sandbox=bool(exchange_config.get("sandbox_mode", False)),
+            market_type=exchange_config.get("market_type", settings.exchange.market_type),
         )
 
         try:
@@ -346,6 +349,8 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
             if order_status in {"closed", "filled"}:
                 # Limit order filled - update position entry price
                 filled_price = safe_float(order.get("average") or order.get("price"))
+                position.status = "open"
+                position.updated_at = utcnow()
                 if filled_price > 0:
                     position.entry_price = filled_price
                     position.last_price = filled_price
@@ -373,6 +378,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                             position.status = "closed"
                             position.close_reason = "limit_order_timeout"
                             position.closed_at = utcnow()
+                            position.updated_at = utcnow()
                             logger.info(f"[PositionMonitor] Cancelled expired limit order for {position.ticker}")
                         except Exception as e:
                             logger.warning(f"[PositionMonitor] Failed to cancel limit order: {e}")
@@ -383,6 +389,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
         position.status = "closed"
         position.close_reason = "limit_order_not_found"
         position.closed_at = utcnow()
+        position.updated_at = utcnow()
         logger.warning(f"[PositionMonitor] Limit order not found on exchange for {position.ticker}")
     except Exception as e:
         logger.debug(f"[PositionMonitor] Error checking limit order for {position.ticker}: {e}")

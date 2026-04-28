@@ -999,7 +999,7 @@ def _effective_remaining_quantity(position: PositionModel, opened_qty: float) ->
     # remaining_quantity existed. Treat those as fully open only if no partial
     # TP has ever been recorded; otherwise zero really means fully settled.
     if (
-        position.status == "open"
+        position.status in {"open", "pending"}
         and _safe_float(position.realized_pnl_pct) == 0
         and not _has_partial_position_fills(position)
     ):
@@ -1176,7 +1176,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
         return entry
 
     status = str(entry.get("order_status") or "").lower()
-    if status not in {"filled", "simulated", "closed"}:
+    if status not in {"filled", "simulated", "closed", "pending"}:
         return entry
 
     direction = str(entry.get("direction") or "").lower()
@@ -1219,7 +1219,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
             live_trading = _safe_bool(exchange_config.get("live_trading"), status != "simulated")
             order_type = str(order_details.get("order_type") or "market").lower()
             limit_timeout_secs = _safe_float(order_details.get("limit_timeout_secs"), 300.0)
-            position_status = "pending" if order_type == "limit" else "open"
+            position_status = "pending" if status == "pending" else "open"
 
             trailing_stop_config = order_details.get("trailing_stop_config") or {}
             if not trailing_stop_config:
@@ -1270,7 +1270,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
 
     # Find the matching open position
     query = select(PositionModel).where(
-        PositionModel.status == "open",
+        PositionModel.status.in_(["open", "pending"]),
         PositionModel.direction == open_direction,
         PositionModel.ticker == ticker,
     )
