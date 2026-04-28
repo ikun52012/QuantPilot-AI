@@ -151,6 +151,9 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.ai.openrouter_app_name = str(ai.get("openrouter_app_name") or settings.ai.openrouter_app_name)
         settings.ai.mistral_api_key = str(ai.get("mistral_api_key") or settings.ai.mistral_api_key)
         settings.ai.mistral_model = str(ai.get("mistral_model") or settings.ai.mistral_model)
+        settings.ai.openai_model = str(ai.get("openai_model") or settings.ai.openai_model)
+        settings.ai.anthropic_model = str(ai.get("anthropic_model") or settings.ai.anthropic_model)
+        settings.ai.deepseek_model = str(ai.get("deepseek_model") or settings.ai.deepseek_model)
         if "voting_enabled" in ai:
             settings.ai.voting_enabled = _to_bool(ai.get("voting_enabled"), settings.ai.voting_enabled)
         if ai.get("voting_models"):
@@ -225,6 +228,55 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 
     try:
         from core.database import get_admin_setting
+
+        # Load AI provider from admin_settings (saved separately in ai_config.py)
+        ai_provider_raw = await get_admin_setting(session, "ai_provider", "")
+        if ai_provider_raw:
+            provider = _normalize_ai_provider(ai_provider_raw)
+            if provider:
+                settings.ai.provider = provider
+                logger.debug(f"[RuntimeSettings] Loaded AI provider from admin_settings: {provider}")
+
+        # Also load individual AI keys that may be saved separately
+        mistral_api_key = await get_admin_setting(session, "mistral_api_key", "")
+        if mistral_api_key:
+            settings.ai.mistral_api_key = mistral_api_key
+        
+        mistral_model = await get_admin_setting(session, "mistral_model", "")
+        if mistral_model:
+            settings.ai.mistral_model = mistral_model
+
+        openai_api_key = await get_admin_setting(session, "openai_api_key", "")
+        if openai_api_key:
+            settings.ai.openai_api_key = openai_api_key
+
+        openai_model = await get_admin_setting(session, "openai_model", "")
+        if openai_model:
+            settings.ai.openai_model = openai_model
+
+        anthropic_api_key = await get_admin_setting(session, "anthropic_api_key", "")
+        if anthropic_api_key:
+            settings.ai.anthropic_api_key = anthropic_api_key
+
+        anthropic_model = await get_admin_setting(session, "anthropic_model", "")
+        if anthropic_model:
+            settings.ai.anthropic_model = anthropic_model
+
+        deepseek_api_key = await get_admin_setting(session, "deepseek_api_key", "")
+        if deepseek_api_key:
+            settings.ai.deepseek_api_key = deepseek_api_key
+
+        deepseek_model = await get_admin_setting(session, "deepseek_model", "")
+        if deepseek_model:
+            settings.ai.deepseek_model = deepseek_model
+
+        openrouter_api_key = await get_admin_setting(session, "openrouter_api_key", "")
+        if openrouter_api_key:
+            settings.ai.openrouter_api_key = openrouter_api_key
+
+        openrouter_model = await get_admin_setting(session, "openrouter_model", "")
+        if openrouter_model:
+            settings.ai.openrouter_model = openrouter_model
 
         voting_enabled_raw = await get_admin_setting(session, "ai_voting_enabled", "")
         if voting_enabled_raw:
@@ -319,7 +371,11 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
         "openrouter_model": str(data.get("openrouter_model") or current.get("openrouter_model") or settings.ai.openrouter_model),
         "openrouter_site_url": str(data.get("openrouter_site_url") or current.get("openrouter_site_url") or settings.ai.openrouter_site_url),
         "openrouter_app_name": str(data.get("openrouter_app_name") or current.get("openrouter_app_name") or settings.ai.openrouter_app_name),
+        "mistral_api_key": str(data.get("mistral_api_key") or current.get("mistral_api_key") or settings.ai.mistral_api_key or ""),
         "mistral_model": str(data.get("mistral_model") or current.get("mistral_model") or settings.ai.mistral_model),
+        "openai_model": str(data.get("openai_model") or current.get("openai_model") or settings.ai.openai_model),
+        "anthropic_model": str(data.get("anthropic_model") or current.get("anthropic_model") or settings.ai.anthropic_model),
+        "deepseek_model": str(data.get("deepseek_model") or current.get("deepseek_model") or settings.ai.deepseek_model),
         "voting_enabled": settings.ai.voting_enabled,
         "voting_models": settings.ai.voting_models,
         "voting_weights": settings.ai.voting_weights,
