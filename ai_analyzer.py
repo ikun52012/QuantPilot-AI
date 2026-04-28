@@ -356,7 +356,10 @@ async def _call_openai(system: str, user: str, model: str = None) -> str:
             data = resp.json()
             pt, ct, tt = extract_usage_from_response(data)
             ai_costs.record("openai", model_name, pt, ct, tt)
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            if content is None:
+                raise ValueError(f"OpenAI API returned null content for model {model_name}")
+            return content
 
     return await _with_retry(_do, "openai")
 
@@ -385,7 +388,10 @@ async def _call_anthropic(system: str, user: str, model: str = None) -> str:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data["content"][0]["text"]
+            content = data["content"][0]["text"]
+            if content is None:
+                raise ValueError(f"Anthropic API returned null content for model {model_name}")
+            return content
 
     return await _with_retry(_do, "anthropic")
 
@@ -415,7 +421,10 @@ async def _call_deepseek(system: str, user: str, model: str = None) -> str:
             data = resp.json()
             pt, ct, tt = extract_usage_from_response(data)
             ai_costs.record("deepseek", model_name, pt, ct, tt)
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            if content is None:
+                raise ValueError(f"DeepSeek API returned null content for model {model_name}")
+            return content
 
     return await _with_retry(_do, "deepseek")
 
@@ -446,7 +455,10 @@ async def _call_mistral(system: str, user: str, model: str = None) -> str:
             data = resp.json()
             pt, ct, tt = extract_usage_from_response(data)
             ai_costs.record("mistral", model_name, pt, ct, tt)
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            if content is None:
+                raise ValueError(f"Mistral API returned null content for model {model_name}")
+            return content
 
     return await _with_retry(_do, "mistral")
 
@@ -485,7 +497,10 @@ async def _call_openrouter(system: str, user: str, model: str = None) -> str:
             data = resp.json()
             pt, ct, tt = extract_usage_from_response(data)
             ai_costs.record("openrouter", model_name, pt, ct, tt)
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            if content is None:
+                raise ValueError(f"OpenRouter API returned null content for model {model_name}")
+            return content
 
     return await _with_retry(_do, "openrouter")
 
@@ -522,9 +537,15 @@ async def _call_custom(system: str, user: str, model: str = None) -> str:
             data = resp.json()
 
             if "choices" in data and len(data["choices"]) > 0:
-                return data["choices"][0]["message"]["content"]
+                content = data["choices"][0]["message"]["content"]
+                if content is None:
+                    raise ValueError(f"Custom API returned null content for model {model_name}")
+                return content
             elif "content" in data and len(data["content"]) > 0:
-                return data["content"][0]["text"]
+                text = data["content"][0]["text"]
+                if text is None:
+                    raise ValueError(f"Custom API returned null text for model {model_name}")
+                return text
             else:
                 if "text" in data:
                     return data["text"]
