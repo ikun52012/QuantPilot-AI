@@ -975,6 +975,9 @@ Generate optimal Grid Trading parameters for this market condition."""
         else:
             raise HTTPException(400, f"AI provider '{provider}' is not configured or not supported")
 
+        if not ai_response:
+            raise HTTPException(500, f"AI provider '{provider}' returned empty response. Check API key and model configuration.")
+
         config_start = ai_response.find("{")
         config_end = ai_response.rfind("}") + 1
         if config_start == -1 or config_end == 0:
