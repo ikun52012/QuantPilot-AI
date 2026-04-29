@@ -3523,7 +3523,7 @@ async function loadChartPage() {
         const live = _chartRealtimeState && _chartRealtimeState.ticker === ticker ? _chartRealtimeState : realtime;
         const price = live?.price ?? lastBar?.close;
         setText('chart-price', price ? `$${formatNum(price)}` : '--');
-        const change = Number(live?.change_24h_pct ?? live?.change_1h_pct || 0);
+        const change = Number(live?.change_24h_pct ?? live?.change_1h_pct ?? 0);
         const changeEl = document.getElementById('chart-change');
         if (changeEl) {
             changeEl.textContent = `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;

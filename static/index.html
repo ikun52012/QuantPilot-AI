@@ -8,7 +8,7 @@
     <meta name="theme-color" content="#0f151f">
     <link rel="manifest" href="/static/manifest.json">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script data-cfasync="false" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -2079,10 +2079,10 @@
     <!-- Toast notifications -->
     <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
 
-    <script src="/static/js/qp-core.js"></script>
-    <script src="/static/js/charts.js"></script>
-    <script src="/static/app.js"></script>
-    <script>
+    <script data-cfasync="false" src="/static/js/qp-core.js"></script>
+    <script data-cfasync="false" src="/static/js/charts.js"></script>
+    <script data-cfasync="false" src="/static/app.js"></script>
+    <script data-cfasync="false">
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});

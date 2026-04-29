@@ -427,11 +427,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if "text/html" in response.headers.get("content-type", ""):
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
-                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
                 "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.bunny.net https://cdn.jsdelivr.net; "
                 "font-src 'self' https://fonts.gstatic.com https://fonts.bunny.net https://cdn.jsdelivr.net; "
                 "img-src 'self' data: https:; "
-                "connect-src 'self' https: wss:;"
+                "connect-src 'self' https: wss: https://cloudflareinsights.com;"
             )
 
         return response

@@ -1,6 +1,7 @@
 // QuantPilot AI Service Worker for PWA
-const CACHE_NAME = 'quantpilot-v4.5.3';
-const STATIC_CACHE = 'quantpilot-static-v4.5.3';
+const CACHE_VERSION = 'v4.5.4';
+const CACHE_NAME = `quantpilot-${CACHE_VERSION}`;
+const STATIC_CACHE = `quantpilot-static-${CACHE_VERSION}`;
 
 const STATIC_ASSETS = [
   '/',
@@ -25,7 +26,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
-        cacheNames.filter((name) => !name.includes('v4.5.3')).map((name) => caches.delete(name))
+        cacheNames.filter((name) => !name.includes(CACHE_VERSION)).map((name) => caches.delete(name))
       );
     }).then(() => self.clients.claim())
   );
@@ -38,38 +39,57 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  if (url.pathname.startsWith('/api/')) return;
-
-  if (event.request.method === 'GET') {
-    event.respondWith(handleStaticRequest(event.request));
+  if (event.request.method !== 'GET') {
+    event.respondWith(fetch(event.request));
     return;
   }
 
-  event.respondWith(fetch(event.request));
+  if (!shouldCacheRequest(event.request, url)) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+
+  event.respondWith(handleStaticRequest(event.request));
 });
+
+function shouldCacheRequest(request, url) {
+  if (request.method !== 'GET') return false;
+  if (request.mode === 'navigate') return false;
+  if (url.origin !== self.location.origin) return false;
+  if (url.pathname.startsWith('/api/')) return false;
+
+  return STATIC_ASSETS.includes(url.pathname) || url.pathname.startsWith('/static/');
+}
 
 async function handleStaticRequest(request) {
   const cachedResponse = await caches.match(request);
 
   if (cachedResponse) {
-    const networkResponse = fetch(request).then((response) => {
-      if (response.ok) {
-        caches.open(STATIC_CACHE).then((cache) => cache.put(request, response.clone()));
+    fetch(request).then((networkResponse) => {
+      if (networkResponse && networkResponse.ok) {
+        const responseForCache = networkResponse.clone();
+        caches.open(STATIC_CACHE).then((cache) => cache.put(request, responseForCache));
       }
-      return response;
-    }).catch(() => cachedResponse);
+    }).catch(() => {});
 
-    return Promise.race([networkResponse, cachedResponse]);
+    return cachedResponse;
   }
 
   return fetch(request).then((response) => {
     if (response.ok) {
-      caches.open(STATIC_CACHE).then((cache) => cache.put(request, response.clone()));
+      const responseForCache = response.clone();
+      eventWaitUntilSafe(
+        caches.open(STATIC_CACHE).then((cache) => cache.put(request, responseForCache))
+      );
     }
     return response;
   }).catch(() => {
     return caches.match(request) || caches.match('/');
   });
+}
+
+function eventWaitUntilSafe(promise) {
+  promise.catch(() => {});
 }
 
 self.addEventListener('sync', (event) => {
@@ -207,4 +227,4 @@ function openIndexedDB() {
   });
 }
 
-console.log('[ServiceWorker] QuantPilot AI v4.5.3 loaded');
+console.log(`[ServiceWorker] QuantPilot AI ${CACHE_VERSION} loaded`);
