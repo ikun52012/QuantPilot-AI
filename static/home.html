@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QuantPilot AI — AI-Powered Crypto Trading Platform</title>
-    <meta name="description" content="QuantPilot AI v4.4 — AI-assisted crypto trade automation with TradingView webhooks, pre-filtering, multi-TP exits, and multi-exchange execution.">
+    <meta name="description" content="QuantPilot AI v4.5.3 — AI-assisted crypto trade automation with TradingView webhooks, pre-filtering, multi-TP exits, strategy automation, and multi-exchange execution.">
     <meta name="keywords" content="crypto trading, AI trading, quantitative trading, GPT-4o, Claude, DeepSeek, OpenRouter, Binance, OKX, automated trading">
     <meta name="theme-color" content="#0f151f">
     <link rel="manifest" href="/static/manifest.json">
@@ -607,7 +607,7 @@
     <div class="container">
         <div class="hero-badge reveal">
             <span class="dot-container"><span class="dot"></span></span>
-            <span>v4.5 — AI Risk Review &middot; Multi-TP &middot; Exchange Automation</span>
+            <span>v4.5.3 &middot; AI Risk Review &middot; Strategy Automation &middot; Exchange Execution</span>
         </div>
         <h1 class="reveal delay-1">
             AI-Powered<br>
@@ -1004,7 +1004,7 @@
             <a href="/register">Register</a>
             <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank">GitHub</a>
         </div>
-        <p class="footer-copy">&copy; 2026 QuantPilot AI &middot; Built by @ikun52012 &middot; v4.5.2</p>
+        <p class="footer-copy">&copy; 2026 QuantPilot AI &middot; Built by @ikun52012 &middot; v4.5.3</p>
     </div>
 </footer>
 
@@ -1082,6 +1082,12 @@
             }
         });
     });
+
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+        });
+    }
 
 </script>
 

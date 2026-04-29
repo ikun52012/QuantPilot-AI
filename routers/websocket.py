@@ -13,7 +13,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from loguru import logger
 import inspect
 
-from core.auth import verify_token, require_admin
+from core.auth import verify_token, require_admin, AUTH_COOKIE_NAME
 from core.config import settings
 from core.database import db_manager, get_user_by_id
 
@@ -65,6 +65,14 @@ async def _authenticate_ws_user_or_none(token: str, require_admin_role: bool = F
         "role": user.role,
         "email": user.email,
     }
+
+
+def _extract_ws_token(websocket: WebSocket) -> str:
+    """Prefer explicit token param, but allow browser cookie auth for same-origin sockets."""
+    token = websocket.query_params.get("token")
+    if token:
+        return token
+    return websocket.cookies.get(AUTH_COOKIE_NAME, "")
 
 
 def _ws_message(msg_type: str, data: dict, ticker: Optional[str] = None) -> dict:
@@ -162,7 +170,7 @@ async def websocket_positions(websocket: WebSocket):
     user_id = None
 
     try:
-        token = websocket.query_params.get("token")
+        token = _extract_ws_token(websocket)
         if not token:
             await websocket.close(code=4001, reason="Missing authentication token")
             return
@@ -256,7 +264,7 @@ async def websocket_prices(websocket: WebSocket):
     user_id = None
 
     try:
-        token = websocket.query_params.get("token")
+        token = _extract_ws_token(websocket)
         if not token:
             await websocket.close(code=4001, reason="Missing authentication token")
             return
@@ -353,7 +361,7 @@ async def websocket_system(websocket: WebSocket):
     user_id = None
 
     try:
-        token = websocket.query_params.get("token")
+        token = _extract_ws_token(websocket)
         if not token:
             await websocket.close(code=4001, reason="Missing authentication token")
             return

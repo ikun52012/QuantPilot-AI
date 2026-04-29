@@ -15,6 +15,10 @@ const USDT_PAYMENT_NETWORKS = [
 
 let currentUserSettings = null;
 let _strategyTemplates = [];
+let _systemSocket = null;
+let _priceSocket = null;
+let _priceSocketTicker = '';
+let _chartRealtimeState = null;
 
 // ─── i18n / Multi-language Support ───
 let _i18nCache = {};
@@ -188,6 +192,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupExchangeToggle();
     detectWebhookUrl();
     updateUserUI();
+    setupRealtimeStatus();
     setupSpotlight();
     const hashPage = window.location.hash ? window.location.hash.slice(1) : '';
     const initialPage = document.getElementById(`page-${hashPage}`)
@@ -228,6 +233,145 @@ function updateUserUI() {
         const el = document.querySelector(`.nav-item[data-page="${page}"]`);
         if (el && !isAdmin()) el.style.display = 'none';
     });
+}
+
+function setServerStatus(label, state = 'offline') {
+    const status = document.getElementById('server-status');
+    if (!status) return;
+    status.dataset.state = state;
+    const labelEl = status.querySelector('span:last-child');
+    if (labelEl) labelEl.textContent = label;
+}
+
+function wsUrl(path) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}${path}`;
+}
+
+function closeSocket(socket) {
+    if (!socket) return;
+    try {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close();
+    } catch {}
+}
+
+function setupRealtimeStatus() {
+    setServerStatus(navigator.onLine ? 'Realtime standby' : 'Offline', navigator.onLine ? 'connecting' : 'offline');
+    window.addEventListener('online', () => {
+        setServerStatus('Realtime standby', 'connecting');
+        connectSystemSocket();
+    });
+    window.addEventListener('offline', () => {
+        setServerStatus('Offline', 'offline');
+        closeSocket(_systemSocket);
+        _systemSocket = null;
+    });
+    connectSystemSocket();
+}
+
+function connectSystemSocket() {
+    if (!navigator.onLine || _systemSocket) return;
+    setServerStatus('Connecting realtime...', 'connecting');
+    const socket = new WebSocket(wsUrl('/ws/positions'));
+    _systemSocket = socket;
+
+    socket.onopen = () => {
+        setServerStatus('Realtime connected', 'online');
+        try {
+            socket.send(JSON.stringify({ type: 'subscribe', channels: ['positions'] }));
+        } catch {}
+    };
+
+    socket.onmessage = (event) => {
+        let message = null;
+        try {
+            message = JSON.parse(event.data);
+        } catch {
+            return;
+        }
+        if (message?.type === 'connected' || message?.type === 'subscribed' || message?.type === 'pong') {
+            setServerStatus('Realtime connected', 'online');
+            return;
+        }
+        if (['position_update', 'position_closed', 'trade_executed'].includes(message?.type)) {
+            setServerStatus('Realtime live', 'online');
+            const page = document.querySelector('.page.active')?.id?.replace('page-', '');
+            if (page === 'positions') loadPositions();
+            if (page === 'dashboard') loadRecentSignals();
+        }
+    };
+
+    socket.onerror = () => {
+        setServerStatus('Realtime unavailable', 'offline');
+    };
+
+    socket.onclose = () => {
+        if (_systemSocket === socket) _systemSocket = null;
+        if (!navigator.onLine) {
+            setServerStatus('Offline', 'offline');
+            return;
+        }
+        setServerStatus('Realtime retrying...', 'connecting');
+        setTimeout(() => {
+            if (!_systemSocket && navigator.onLine) connectSystemSocket();
+        }, 5000);
+    };
+}
+
+function teardownPriceSocket() {
+    closeSocket(_priceSocket);
+    _priceSocket = null;
+    _priceSocketTicker = '';
+}
+
+function connectPriceSocket(ticker) {
+    if (!ticker || !navigator.onLine) return;
+    if (_priceSocket && _priceSocketTicker === ticker) return;
+    teardownPriceSocket();
+    _priceSocketTicker = ticker;
+    const socket = new WebSocket(wsUrl('/ws/prices'));
+    _priceSocket = socket;
+
+    socket.onopen = () => {
+        try {
+            socket.send(JSON.stringify({ type: 'subscribe_tickers', tickers: [ticker] }));
+        } catch {}
+    };
+
+    socket.onmessage = (event) => {
+        let message = null;
+        try {
+            message = JSON.parse(event.data);
+        } catch {
+            return;
+        }
+        if (message?.type !== 'price_update' || String(message.ticker || '').toUpperCase() !== _priceSocketTicker) return;
+
+        _chartRealtimeState = message;
+        setText('chart-price', message.price ? `$${formatNum(message.price)}` : '--');
+        const changeValue = Number(message.change_1h_pct || 0);
+        const changeEl = document.getElementById('chart-change');
+        if (changeEl) {
+            changeEl.textContent = `${changeValue >= 0 ? '+' : ''}${changeValue.toFixed(2)}%`;
+            changeEl.className = `kpi-value ${changeValue >= 0 ? 'pnl-positive' : 'pnl-negative'}`;
+        }
+        setText('chart-rsi', formatValue(message.rsi_1h));
+        setText('chart-volume', formatCompact(message.volume_24h));
+    };
+
+    socket.onclose = () => {
+        if (_priceSocket === socket) _priceSocket = null;
+        const activePage = document.querySelector('.page.active')?.id?.replace('page-', '');
+        if (activePage === 'charts' && navigator.onLine && _priceSocketTicker === ticker) {
+            setTimeout(() => {
+                if (!_priceSocket && _priceSocketTicker === ticker) connectPriceSocket(ticker);
+            }, 5000);
+        }
+    };
 }
 
 // ─── Toast ───
@@ -292,12 +436,16 @@ function closeSidebar() {
 }
 
 function switchPage(page) {
+    if (!isAdmin() && (page === 'backtest' || page === 'admin')) {
+        page = 'user';
+    }
     document.querySelectorAll('.nav-item').forEach(n => { n.classList.remove('active'); n.removeAttribute('aria-current'); });
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     const navEl = document.querySelector(`[data-page="${page}"]`);
     navEl?.classList.add('active');
     navEl?.setAttribute('aria-current','page');
     document.getElementById(`page-${page}`)?.classList.add('active');
+    if (page !== 'charts') teardownPriceSocket();
     const titles = {
         dashboard: t('nav.dashboard', 'Dashboard'),
         user: t('nav.my_trading', 'My Trading'),
@@ -3372,18 +3520,20 @@ async function loadChartPage() {
         ]);
         renderMarketChart(ohlcv.data || []);
         const lastBar = ohlcv.data?.length ? ohlcv.data[ohlcv.data.length - 1] : null;
-        const price = realtime?.price ?? lastBar?.close;
+        const live = _chartRealtimeState && _chartRealtimeState.ticker === ticker ? _chartRealtimeState : realtime;
+        const price = live?.price ?? lastBar?.close;
         setText('chart-price', price ? `$${formatNum(price)}` : '--');
-        const change = Number(realtime?.change_24h_pct || 0);
+        const change = Number(live?.change_24h_pct ?? live?.change_1h_pct || 0);
         const changeEl = document.getElementById('chart-change');
         if (changeEl) {
             changeEl.textContent = `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
             changeEl.className = `kpi-value ${change >= 0 ? 'pnl-positive' : 'pnl-negative'}`;
         }
-        setText('chart-rsi', formatValue(indicators?.indicators?.rsi_1h));
-        setText('chart-volume', formatCompact(indicators?.indicators?.volume_24h ?? realtime?.volume_24h));
+        setText('chart-rsi', formatValue(live?.rsi_1h ?? indicators?.indicators?.rsi_1h));
+        setText('chart-volume', formatCompact(live?.volume_24h ?? indicators?.indicators?.volume_24h ?? realtime?.volume_24h));
         renderMarkerList('chart-positions', positions.markers || [], t('pages.charts.no_positions', 'No open position markers'));
         renderMarkerList('chart-signals', signals.markers || [], t('pages.charts.no_signals', 'No executed signal markers'));
+        connectPriceSocket(ticker);
     } catch (err) {
         showToast(err.message, 'error', 'Chart Load Failed');
     }

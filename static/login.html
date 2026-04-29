@@ -212,6 +212,12 @@ form.addEventListener('submit', async (e) => {
         btn.innerHTML = '<i class="ri-login-box-line"></i> Sign In';
     }
 });
+
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+    });
+}
 </script>
 </body>
 </html>

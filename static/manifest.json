@@ -31,13 +31,6 @@
       "description": "View active positions",
       "url": "/dashboard#positions",
       "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
-    },
-    {
-      "name": "Backtest",
-      "short_name": "Backtest",
-      "description": "Run strategy backtest",
-      "url": "/dashboard#backtest",
-      "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
     }
   ],
   "related_applications": [],
@@ -45,22 +38,6 @@
   "edge_side_panel": {
     "preferred_width": 400
   },
-  "share_target": {
-    "action": "/share",
-    "method": "POST",
-    "enctype": "multipart/form-data",
-    "params": {
-      "title": "title",
-      "text": "text",
-      "url": "url"
-    }
-  },
-  "protocol_handlers": [
-    {
-      "protocol": "web+quantpilot",
-      "url": "/signal?data=%s"
-    }
-  ],
   "launch_handler": {
     "client_mode": ["focus-existing", "auto"]
   },

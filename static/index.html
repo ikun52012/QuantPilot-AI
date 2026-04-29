@@ -72,9 +72,9 @@
             </a>
         </nav>
         <div class="sidebar-footer">
-            <div class="server-status" id="server-status">
+            <div class="server-status" id="server-status" data-state="connecting">
                 <span class="status-dot"></span>
-                <span>Connected</span>
+                <span>Connecting realtime...</span>
             </div>
         </div>
     </aside>
@@ -2085,7 +2085,7 @@
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+                navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
             });
         }
     </script>

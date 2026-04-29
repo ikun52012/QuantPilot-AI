@@ -785,6 +785,20 @@ h1, h2, h3, h4, h5, h6 {
     color: var(--text-secondary);
 }
 
+.server-status[data-state="online"] {
+    color: var(--text-primary);
+}
+
+.server-status[data-state="connecting"] .status-dot {
+    background: var(--accent-orange);
+    box-shadow: 0 0 8px var(--accent-orange);
+}
+
+.server-status[data-state="offline"] .status-dot {
+    background: var(--accent-red);
+    box-shadow: 0 0 8px var(--accent-red);
+}
+
 .status-dot {
     width: 8px;
     height: 8px;

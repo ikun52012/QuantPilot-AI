@@ -190,6 +190,12 @@ form.addEventListener('submit', async (e) => {
         btn.innerHTML = '<i class="ri-user-add-line"></i> Create Account';
     }
 });
+
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+    });
+}
 </script>
 </body>
 </html>

@@ -1,29 +1,22 @@
 // QuantPilot AI Service Worker for PWA
-const CACHE_NAME = 'quantpilot-v4.5';
-const STATIC_CACHE = 'quantpilot-static-v4.5';
-const API_CACHE = 'quantpilot-api-v4.5';
+const CACHE_NAME = 'quantpilot-v4.5.3';
+const STATIC_CACHE = 'quantpilot-static-v4.5.3';
 
 const STATIC_ASSETS = [
   '/',
   '/dashboard',
   '/static/style.css',
   '/static/app.js',
+  '/static/js/qp-core.js',
+  '/static/js/charts.js',
   '/static/manifest.json',
   '/static/icon.svg',
-];
-
-const API_ENDPOINTS = [
-  '/health',
-  '/api/user/settings',
-  '/api/positions',
-  '/api/trades',
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     Promise.all([
       caches.open(STATIC_CACHE).then((cache) => cache.addAll(STATIC_ASSETS)),
-      caches.open(API_CACHE)
     ]).then(() => self.skipWaiting())
   );
 });
@@ -32,7 +25,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
-        cacheNames.filter((name) => !name.includes('v4.5')).map((name) => caches.delete(name))
+        cacheNames.filter((name) => !name.includes('v4.5.3')).map((name) => caches.delete(name))
       );
     }).then(() => self.clients.claim())
   );
@@ -45,10 +38,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(handleApiRequest(event.request));
-    return;
-  }
+  if (url.pathname.startsWith('/api/')) return;
 
   if (event.request.method === 'GET') {
     event.respondWith(handleStaticRequest(event.request));
@@ -79,52 +69,6 @@ async function handleStaticRequest(request) {
     return response;
   }).catch(() => {
     return caches.match(request) || caches.match('/');
-  });
-}
-
-async function handleApiRequest(request) {
-  const url = new URL(request.url);
-
-  if (request.method !== 'GET') {
-    return fetch(request);
-  }
-
-  if (url.pathname.includes('/realtime') || url.pathname.includes('/live')) {
-    return fetch(request);
-  }
-
-  const cachedResponse = await caches.match(request);
-
-  if (cachedResponse) {
-    const cacheTime = cachedResponse.headers.get('sw-cache-time');
-    const now = Date.now();
-    const maxAge = 30 * 1000;
-
-    if (cacheTime && now - parseInt(cacheTime) < maxAge) {
-      return cachedResponse;
-    }
-  }
-
-  return fetch(request).then((response) => {
-    if (response.ok) {
-      const headers = new Headers(response.headers);
-      headers.set('sw-cache-time', Date.now().toString());
-
-      const cachedResponse = response.clone();
-      const modifiedResponse = new Response(cachedResponse.body, {
-        status: cachedResponse.status,
-        statusText: cachedResponse.statusText,
-        headers: headers
-      });
-
-      caches.open(API_CACHE).then((cache) => cache.put(request, modifiedResponse));
-    }
-    return response;
-  }).catch(() => {
-    return cachedResponse || new Response(JSON.stringify({error: 'Network unavailable', cached: true}), {
-      status: 503,
-      headers: {'Content-Type': 'application/json'}
-    });
   });
 }
 
@@ -263,4 +207,4 @@ function openIndexedDB() {
   });
 }
 
-console.log('[ServiceWorker] QuantPilot AI v4.5 loaded');
+console.log('[ServiceWorker] QuantPilot AI v4.5.3 loaded');

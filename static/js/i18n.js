@@ -19,7 +19,7 @@
             'Explore Features': '查看功能',
             'AI-Powered': 'AI 驱动',
             'Crypto Trading': '加密货币交易',
-            'v4.4 — AI Risk Review · Multi-TP · Exchange Automation': 'v4.4 — AI 风险审核 · 多级止盈 · 交易所自动化',
+            'v4.5.3 · AI Risk Review · Strategy Automation · Exchange Execution': 'v4.5.3 · AI 风险审核 · 策略自动化 · 交易所执行',
             'Receive TradingView signals, filter weak setups with 15 fast checks, review them with OpenAI, Claude, DeepSeek, OpenRouter, or a custom provider, then execute across 6+ exchanges.': '接收 TradingView 信号，通过 15 项快速检查过滤弱信号，再使用 OpenAI、Claude、DeepSeek、OpenRouter 或自定义模型审核，并在 6+ 交易所执行。',
             'AI Providers': 'AI 提供商',
             'Filter Checks': '过滤检查',

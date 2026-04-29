@@ -5,7 +5,7 @@ Creates and configures the FastAPI application instance.
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core.config import settings
@@ -60,6 +60,14 @@ def _login_response(request: Request):
 
 def _redirect_no_store(url: str):
     return _apply_no_store_headers(RedirectResponse(url=url, status_code=303))
+
+
+def _redirect_dashboard_fragment(fragment: str, params: dict[str, str] | None = None):
+    from urllib.parse import urlencode
+
+    filtered_params = {key: value for key, value in (params or {}).items() if value}
+    query = f"?{urlencode(filtered_params)}" if filtered_params else ""
+    return _redirect_no_store(f"/dashboard{query}#{fragment}")
 
 
 def _mount_v1_aliases(app: FastAPI, source_router):
@@ -137,6 +145,56 @@ def _setup_page_routes(app: FastAPI):
             if user:
                 return _redirect_no_store("/dashboard")
         return _apply_no_store_headers(FileResponse(STATIC_DIR / "register.html"))
+
+    @app.get("/sw.js")
+    async def service_worker():
+        response = FileResponse(STATIC_DIR / "sw.js", media_type="text/javascript")
+        response.headers["Service-Worker-Allowed"] = "/"
+        # Always fetch the worker script fresh so updates are picked up reliably.
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
+
+    @app.api_route("/share", methods=["GET", "POST"])
+    async def share_target_handler(request: Request):
+        """Handle PWA share-target launches by redirecting into the dashboard."""
+        if request.method == "GET":
+            title = request.query_params.get("title", "")
+            text = request.query_params.get("text", "")
+            url = request.query_params.get("url", "")
+        else:
+            title = ""
+            text = ""
+            url = ""
+            content_type = request.headers.get("content-type", "").lower()
+            if "application/json" in content_type:
+                try:
+                    payload = await request.json()
+                except Exception:
+                    payload = {}
+                if isinstance(payload, dict):
+                    title = str(payload.get("title") or "")
+                    text = str(payload.get("text") or "")
+                    url = str(payload.get("url") or "")
+            elif "application/x-www-form-urlencoded" in content_type:
+                body = (await request.body()).decode("utf-8", errors="ignore")
+                from urllib.parse import parse_qs
+
+                parsed = parse_qs(body)
+                title = (parsed.get("title") or [""])[0]
+                text = (parsed.get("text") or [""])[0]
+                url = (parsed.get("url") or [""])[0]
+
+        return _redirect_dashboard_fragment("social", {
+            "title": title,
+            "text": text,
+            "url": url,
+        })
+
+    @app.get("/signal")
+    async def protocol_signal_handler(request: Request):
+        """Handle protocol-launch redirects by forwarding payload into the dashboard."""
+        data = request.query_params.get("data", "")
+        return _redirect_dashboard_fragment("dashboard", {"data": data})
 
 
 def _setup_utility_routes(app: FastAPI):
