@@ -76,7 +76,15 @@ jobs:
       - name: Test Docker image
         run: |
           docker run -d --name test-container -p 8000:8000 signal-server:test
-          sleep 5
-          curl -f http://localhost:8000/health || exit 1
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health; then
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              docker logs test-container || true
+              exit 1
+            fi
+            sleep 1
+          done
           docker stop test-container
           docker rm test-container

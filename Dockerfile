@@ -44,6 +44,7 @@ RUN groupadd -g 1000 appgroup && \
 COPY --chown=appuser:appgroup . .
 
 RUN mkdir -p data/backups logs trade_logs \
+    && chown -R appuser:appgroup data logs trade_logs \
     && chmod -R 775 data logs trade_logs \
     && chmod +x scripts/docker-entrypoint.sh
 
