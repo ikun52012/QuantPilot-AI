@@ -8,8 +8,8 @@ Usage:
   uvicorn app:app --host 0.0.0.0 --port 8000
 """
 import io
-import sys
 import re
+import sys
 from pathlib import Path
 
 from loguru import logger

@@ -14,7 +14,7 @@ original TradingView signal price is suboptimal.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any
 
 
 def _ohlcv_value(candle, index: int, key: str) -> float:
@@ -48,9 +48,15 @@ class CompatDictMixin:
 
     def __getitem__(self, key: str):
         if key == "high":
-            return max(getattr(self, "top"), getattr(self, "bottom"))
+            top = getattr(self, "top", None)
+            bottom = getattr(self, "bottom", None)
+            if top is not None and bottom is not None:
+                return max(float(top), float(bottom))
         if key == "low":
-            return min(getattr(self, "top"), getattr(self, "bottom"))
+            top = getattr(self, "top", None)
+            bottom = getattr(self, "bottom", None)
+            if top is not None and bottom is not None:
+                return min(float(top), float(bottom))
         return getattr(self, key)
 
 
@@ -95,8 +101,8 @@ class StructurePoint:
 class MarketStructure:
     """Break of Structure / Change of Character detection."""
     trend: str              # "bullish", "bearish", "ranging"
-    last_bos: Optional[str] = None   # "bullish_bos" or "bearish_bos"
-    last_choch: Optional[str] = None # "bullish_choch" or "bearish_choch"
+    last_bos: str | None = None   # "bullish_bos" or "bearish_bos"
+    last_choch: str | None = None # "bullish_choch" or "bearish_choch"
     swing_highs: list[StructurePoint] = field(default_factory=list)
     swing_lows: list[StructurePoint] = field(default_factory=list)
 
@@ -116,7 +122,7 @@ class SMCContext:
     timeframe: str
     fvgs: list[FVG] = field(default_factory=list)
     order_blocks: list[OrderBlock] = field(default_factory=list)
-    structure: Optional[MarketStructure] = None
+    structure: MarketStructure | None = None
     premium_zone: float = 0.0   # price above which is "premium"
     discount_zone: float = 0.0  # price below which is "discount"
     equilibrium: float = 0.0    # midpoint
@@ -125,9 +131,9 @@ class SMCContext:
 @dataclass
 class MultiTimeframeSMC:
     """SMC analysis across multiple timeframes."""
-    htf: Optional[SMCContext] = None   # Higher timeframe (4h)
-    mtf: Optional[SMCContext] = None   # Medium timeframe (1h)
-    ltf: Optional[SMCContext] = None   # Lower timeframe (15m)
+    htf: SMCContext | None = None   # Higher timeframe (4h)
+    mtf: SMCContext | None = None   # Medium timeframe (1h)
+    ltf: SMCContext | None = None   # Lower timeframe (15m)
     confluence_zones: list[dict] = field(default_factory=list)
 
 
@@ -186,7 +192,7 @@ def detect_market_structure(
                 structure.last_bos = "bearish_bos"
         return _structure_dict(structure)
 
-    swing_highs, swing_lows = detect_swing_points(ohlcv, lookback=3, timeframe=timeframe)
+    swing_highs, swing_lows = detect_swing_points(ohlcv, lookback=3, timeframe=str(timeframe))
 
     structure = MarketStructure(
         trend="ranging",
@@ -314,8 +320,6 @@ def detect_order_blocks(
         is_bullish_candle = close_i > open_i
 
         # Check the next 2 candles for impulse
-        next_close_1 = _ohlcv_value(ohlcv[i + 1], 4, "close")
-        next_close_2 = _ohlcv_value(ohlcv[i + 2], 4, "close")
         next_high = max(_ohlcv_value(ohlcv[i + 1], 2, "high"), _ohlcv_value(ohlcv[i + 2], 2, "high"))
         next_low = min(_ohlcv_value(ohlcv[i + 1], 3, "low"), _ohlcv_value(ohlcv[i + 2], 3, "low"))
 
@@ -408,7 +412,7 @@ def find_confluence_zones(
     These are the highest-probability entry zones.
     """
     if isinstance(htf, list) and isinstance(mtf, list) and ltf is None:
-        zones = []
+        compat_zones: list[dict[str, Any]] = []
         for a in htf:
             for b in mtf:
                 if a.get("type") != b.get("type"):
@@ -416,16 +420,16 @@ def find_confluence_zones(
                 overlap_top = min(float(a.get("high", 0.0)), float(b.get("high", 0.0)))
                 overlap_bottom = max(float(a.get("low", 0.0)), float(b.get("low", 0.0)))
                 if overlap_top > overlap_bottom:
-                    zones.append({
+                    compat_zones.append({
                         "confluence_top": round(overlap_top, 8),
                         "confluence_bottom": round(overlap_bottom, 8),
                         "confluence_midpoint": round((overlap_top + overlap_bottom) / 2, 8),
                         "strength": "medium",
                     })
-        return zones
+        return compat_zones
 
-    zones: list[dict] = []
-    all_levels: list[dict] = []
+    zones: list[dict[str, Any]] = []
+    all_levels: list[dict[str, Any]] = []
 
     for ctx, tf_label in [(htf, "HTF"), (mtf, "MTF"), (ltf, "LTF")]:
         if not ctx:
@@ -519,7 +523,7 @@ def find_confluence_zones(
                 })
 
     # Sort by proximity to current price
-    zones.sort(key=lambda z: abs(z["confluence_midpoint"] - current_price))
+    zones.sort(key=lambda z: abs(float(z["confluence_midpoint"]) - current_price))
     return zones[:5]
 
 
@@ -574,11 +578,11 @@ def format_smc_for_ai(mtf_smc: MultiTimeframeSMC, direction: str, current_price:
             lines.append(f"- Equilibrium: {ctx.equilibrium:.2f}")
             lines.append(f"- Discount Zone: below {ctx.discount_zone:.2f}")
             if current_price > ctx.premium_zone:
-                lines.append(f"- Current price is in PREMIUM (expensive for longs)")
+                lines.append("- Current price is in PREMIUM (expensive for longs)")
             elif current_price < ctx.discount_zone:
-                lines.append(f"- Current price is in DISCOUNT (cheap for longs)")
+                lines.append("- Current price is in DISCOUNT (cheap for longs)")
             else:
-                lines.append(f"- Current price is near EQUILIBRIUM")
+                lines.append("- Current price is near EQUILIBRIUM")
 
         if ctx.fvgs:
             lines.append(f"- Unfilled FVGs ({len(ctx.fvgs)}):")
@@ -591,7 +595,7 @@ def format_smc_for_ai(mtf_smc: MultiTimeframeSMC, direction: str, current_price:
                 lines.append(f"  • {ob.type.upper()} OB: {ob.low:.2f} - {ob.high:.2f} (strength: {ob.strength:.2f})")
 
     if mtf_smc.confluence_zones:
-        lines.append(f"\n### Confluence Zones (Multi-TF Overlap)")
+        lines.append("\n### Confluence Zones (Multi-TF Overlap)")
         for i, zone in enumerate(mtf_smc.confluence_zones[:3], 1):
             sources = " + ".join(f"{s['type']}({s['tf']})" for s in zone["sources"])
             lines.append(

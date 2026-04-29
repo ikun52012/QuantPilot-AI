@@ -2,18 +2,15 @@
 Backtest Engine for QuantPilot AI.
 Simulates trading strategies on historical data with realistic execution.
 """
-import asyncio
-import json
-from datetime import datetime, timezone, timedelta
-from decimal import Decimal
-from typing import Optional, Callable, Any
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from enum import Enum
+from typing import Any
 
 from loguru import logger
 
 from backtest.metrics import PerformanceMetrics
-from backtest.strategies import BaseStrategy, SignalType
+from backtest.strategies import BaseStrategy
 
 
 def _signal_get(signal: Any, key: str, default: Any = None) -> Any:
@@ -35,7 +32,7 @@ class BacktestPosition:
     entry_price: float
     entry_time: datetime
     quantity: float
-    stop_loss: Optional[float] = None
+    stop_loss: float | None = None
     take_profit_levels: list[dict] = field(default_factory=list)
     trailing_stop_config: dict = field(default_factory=dict)
     leverage: float = 1.0
@@ -84,8 +81,8 @@ class BacktestConfig:
     max_daily_loss_pct: float = 5.0
     max_drawdown_pct: float = 20.0
     strategy_name: str = "default"
-    start_date: Optional[datetime] = None
-    end_date: Optional[datetime] = None
+    start_date: datetime | None = None
+    end_date: datetime | None = None
     timeframe: str = "1h"
 
 
@@ -166,6 +163,7 @@ class BacktestEngine:
             self._record_equity(i, bar, ts)
 
         self._close_all_positions(len(self.data) - 1, self.data[-1], self.timestamps[-1])
+        self._sync_final_equity()
 
         metrics = PerformanceMetrics.calculate(self.trades, self.equity_curve, self.config)
 
@@ -181,7 +179,7 @@ class BacktestEngine:
             },
         }
 
-    def _should_execute_signal(self, signal: dict, bar: dict, ts: datetime) -> bool:
+    def _should_execute_signal(self, signal: Any, bar: dict, ts: datetime) -> bool:
         if self.capital <= 0:
             return False
 
@@ -197,7 +195,7 @@ class BacktestEngine:
 
         return True
 
-    def _execute_signal(self, signal: dict, bar: dict, ts: datetime, idx: int) -> None:
+    def _execute_signal(self, signal: Any, bar: dict, ts: datetime, idx: int) -> None:
         direction = _signal_get(signal, "action")
         if direction not in ["buy", "sell"]:
             return
@@ -228,13 +226,14 @@ class BacktestEngine:
 
         tp_levels = []
         if self.config.multi_tp_enabled:
-            for tp in self.config.tp_levels:
+            for idx, tp in enumerate(self.config.tp_levels, start=1):
                 price_pct = tp.get("price_pct", 3.0)
                 if side_adjusted:
                     tp_price = entry_price * (1 + price_pct / 100)
                 else:
                     tp_price = entry_price * (1 - price_pct / 100)
                 tp_levels.append({
+                    "level": idx,
                     "price": tp_price,
                     "qty_pct": tp.get("qty_pct", 100),
                     "status": "pending",
@@ -256,6 +255,8 @@ class BacktestEngine:
             leverage=self.config.leverage,
             entry_idx=idx,
             remaining_qty=quantity,
+            highest_price=entry_price,
+            lowest_price=entry_price,
         )
 
         self.positions.append(position)
@@ -266,23 +267,27 @@ class BacktestEngine:
     def _check_position_exits(self, idx: int, bar: dict, ts: datetime) -> None:
         positions_to_close = []
 
-        for pos in self.positions:
+        for pos in list(self.positions):
             pos.highest_price = max(pos.highest_price, bar["high"])
             pos.lowest_price = min(pos.lowest_price, bar["low"])
 
             exit_triggered = False
             exit_reason = ""
             exit_price = 0.0
+            close_qty = 0.0
+            available_qty = pos.remaining_qty if pos.remaining_qty > 0 else pos.quantity
 
             if pos.stop_loss and pos.stop_loss > 0:
                 if pos.direction == "buy" and bar["low"] <= pos.stop_loss:
                     exit_triggered = True
                     exit_reason = "stop_loss"
                     exit_price = pos.stop_loss
+                    close_qty = available_qty
                 elif pos.direction == "sell" and bar["high"] >= pos.stop_loss:
                     exit_triggered = True
                     exit_reason = "stop_loss"
                     exit_price = pos.stop_loss
+                    close_qty = available_qty
 
             if not exit_triggered and pos.take_profit_levels:
                 for level in pos.take_profit_levels:
@@ -298,20 +303,9 @@ class BacktestEngine:
                         exit_triggered = True
                         exit_reason = f"take_profit_level_{level.get('level', 1)}"
                         exit_price = tp_price
-
-                        qty_pct = level.get("qty_pct", 100) / 100
-                        close_qty = pos.remaining_qty * qty_pct
-                        pos.remaining_qty -= close_qty
-
-                        if pos.remaining_qty <= 0.0001:
-                            pos.remaining_qty = 0
+                        close_qty = self._take_profit_close_qty(pos, level)
 
                         self._adjust_trailing_on_tp(pos, level)
-
-                        if pos.remaining_qty > 0:
-                            exit_triggered = False
-                            exit_reason = ""
-                            exit_price = 0
 
                         break
 
@@ -320,31 +314,20 @@ class BacktestEngine:
                         exit_triggered = True
                         exit_reason = f"take_profit_level_{level.get('level', 1)}"
                         exit_price = tp_price
-
-                        qty_pct = level.get("qty_pct", 100) / 100
-                        close_qty = pos.remaining_qty * qty_pct
-                        pos.remaining_qty -= close_qty
-
-                        if pos.remaining_qty <= 0.0001:
-                            pos.remaining_qty = 0
+                        close_qty = self._take_profit_close_qty(pos, level)
 
                         self._adjust_trailing_on_tp(pos, level)
-
-                        if pos.remaining_qty > 0:
-                            exit_triggered = False
-                            exit_reason = ""
-                            exit_price = 0
 
                         break
 
             if not exit_triggered and self.config.use_trailing_stop:
                 self._adjust_trailing_stop(pos, bar)
 
-            if exit_triggered and exit_price > 0:
-                positions_to_close.append((pos, exit_reason, exit_price))
+            if exit_triggered and exit_price > 0 and close_qty > 0:
+                positions_to_close.append((pos, exit_reason, exit_price, close_qty))
 
-        for pos, reason, price in positions_to_close:
-            self._close_position(pos, idx, bar, ts, reason, price)
+        for pos, reason, price, close_qty in positions_to_close:
+            self._close_position(pos, idx, bar, ts, reason, price, close_qty=close_qty)
 
     def _adjust_trailing_stop(self, pos: BacktestPosition, bar: dict) -> None:
         trailing_config = pos.trailing_stop_config
@@ -388,12 +371,10 @@ class BacktestEngine:
 
         elif mode == "step_trailing":
             all_levels = pos.take_profit_levels
-            hit_levels = [l for l in all_levels if l.get("status") == "hit"]
+            hit_levels = [level for level in all_levels if level.get("status") == "hit"]
 
             if hit_levels:
-                last_hit_idx = max(
-                    all_levels.index(l) for l in hit_levels
-                )
+                last_hit_idx = max(all_levels.index(level) for level in hit_levels)
 
                 if last_hit_idx > 0:
                     prev_tp_price = all_levels[last_hit_idx - 1].get("price", 0)
@@ -411,7 +392,26 @@ class BacktestEngine:
 
                         logger.debug(f"[Backtest] Step trailing: SL moved to {pos.stop_loss:.4f}")
 
-    def _close_position(self, pos: BacktestPosition, idx: int, bar: dict, ts: datetime, reason: str, exit_price: float) -> None:
+    def _take_profit_close_qty(self, pos: BacktestPosition, level: dict) -> float:
+        available_qty = pos.remaining_qty if pos.remaining_qty > 0 else pos.quantity
+        try:
+            qty_pct = float(level.get("qty_pct", 100))
+        except (TypeError, ValueError):
+            qty_pct = 100.0
+        qty_pct = max(0.0, min(qty_pct, 100.0))
+        target_qty = pos.quantity * (qty_pct / 100.0)
+        return min(available_qty, target_qty)
+
+    def _close_position(
+        self,
+        pos: BacktestPosition,
+        idx: int,
+        bar: dict,
+        ts: datetime,
+        reason: str,
+        exit_price: float,
+        close_qty: float | None = None,
+    ) -> None:
         if exit_price <= 0:
             if reason == "stop_loss":
                 exit_price = bar["low"] if pos.direction == "buy" else bar["high"]
@@ -424,20 +424,31 @@ class BacktestEngine:
         else:
             exit_price += slippage
 
-        close_qty = pos.remaining_qty if pos.remaining_qty > 0 else pos.quantity
+        available_qty = pos.remaining_qty if pos.remaining_qty > 0 else pos.quantity
+        if close_qty is None:
+            close_qty = available_qty
+        close_qty = max(0.0, min(close_qty, available_qty))
+        if close_qty <= 0:
+            return
 
         if pos.direction == "buy":
-            pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100 * self.config.leverage
+            raw_pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100 * self.config.leverage
             pnl_usdt = (exit_price - pos.entry_price) * close_qty
         else:
-            pnl_pct = (pos.entry_price - exit_price) / pos.entry_price * 100 * self.config.leverage
+            raw_pnl_pct = (pos.entry_price - exit_price) / pos.entry_price * 100 * self.config.leverage
             pnl_usdt = (pos.entry_price - exit_price) * close_qty
+
+        close_fraction = close_qty / pos.quantity if pos.quantity > 0 else 1.0
+        pnl_pct = raw_pnl_pct * close_fraction
 
         fee = exit_price * close_qty * self.config.fee_pct / 100
         pnl_usdt -= fee
         self.total_fees += fee
 
         self.capital += pnl_usdt
+        pos.remaining_qty = max(0.0, available_qty - close_qty)
+        pos.realized_pnl_pct += pnl_pct
+        pos.fees_paid += fee
 
         trade = BacktestTrade(
             ticker=pos.ticker,
@@ -464,14 +475,32 @@ class BacktestEngine:
         if self.capital > self.max_equity:
             self.max_equity = self.capital
 
-        if pos in self.positions:
+        if pos.remaining_qty <= 0.0001:
+            pos.remaining_qty = 0.0
+
+        if pos.remaining_qty <= 0 and pos in self.positions:
             self.positions.remove(pos)
 
-        logger.debug(f"[Backtest] Closed {pos.direction} position for {pos.ticker}: pnl={pnl_pct:.2f}%, reason={reason}")
+        logger.debug(
+            f"[Backtest] Closed {pos.direction} position for {pos.ticker}: "
+            f"qty={close_qty:.4f}, pnl={pnl_pct:.2f}%, reason={reason}"
+        )
 
     def _close_all_positions(self, idx: int, bar: dict, ts: datetime) -> None:
-        for pos in self.positions:
+        for pos in list(self.positions):
             self._close_position(pos, idx, bar, ts, "end_of_backtest", bar["close"])
+
+    def _sync_final_equity(self) -> None:
+        if not self.equity_curve:
+            return
+        self.equity_curve[-1] = {
+            **self.equity_curve[-1],
+            "equity": round(self.capital, 2),
+            "capital": round(self.capital, 2),
+            "unrealized_pnl": 0.0,
+            "positions": len(self.positions),
+            "drawdown_pct": round((self.max_equity - self.capital) / self.max_equity * 100, 2) if self.max_equity > 0 else 0,
+        }
 
     def _record_equity(self, idx: int, bar: dict, ts: datetime) -> None:
         unrealized_pnl = 0.0

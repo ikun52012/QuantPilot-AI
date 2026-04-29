@@ -3,10 +3,10 @@
 Signal Server - 部署前环境检查工具
 运行方式: python scripts/check_env.py
 """
-import sys
-import os
-import subprocess
 import importlib.util
+import os
+import socket
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -85,13 +85,13 @@ for import_name, pkg_name in OPTIONAL_PACKAGES:
 # ──────────────────────────────────────────────
 print("\n[3/7] 环境配置检查")
 env_file = ROOT / ".env"
-check(".env 文件存在", env_file.exists(), f"文件不存在，请从 .env.example 复制并填写: cp .env.example .env")
+check(".env 文件存在", env_file.exists(), "文件不存在，请从 .env.example 复制并填写: cp .env.example .env")
 
 if env_file.exists():
     from dotenv import dotenv_values
     env_vals = dotenv_values(env_file)
 
-    jwt_secret = env_vals.get("JWT_SECRET", "")
+    jwt_secret = env_vals.get("JWT_SECRET", "") or ""
     check("JWT_SECRET 已设置", bool(jwt_secret), "未设置，建议生成: python -c \"import secrets; print(secrets.token_hex(32))\"", warn=True)
 
     admin_password = (env_vals.get("DEFAULT_ADMIN_PASSWORD", "") or "").strip()
@@ -106,7 +106,7 @@ if env_file.exists():
     else:
         print(f"  {INFO}  DEFAULT_ADMIN_PASSWORD 留空：首次建库会生成 data/bootstrap_admin_password.txt")
 
-    live_trading = env_vals.get("LIVE_TRADING", "false").lower() == "true"
+    live_trading = (env_vals.get("LIVE_TRADING", "false") or "false").lower() == "true"
     ccxt_available = importlib.util.find_spec("ccxt") is not None
     if live_trading:
         check("LIVE_TRADING=true 时 ccxt 已安装",
@@ -126,13 +126,13 @@ if env_file.exists():
         if not ccxt_available:
             print(f"  {INFO}  ccxt 未安装：纸交易/后台可启动，实盘交易和交易所实时行情不可用")
 
-    db_url = env_vals.get("DATABASE_URL", "sqlite+aiosqlite:///./data/server.db")
+    db_url = env_vals.get("DATABASE_URL", "sqlite+aiosqlite:///./data/server.db") or "sqlite+aiosqlite:///./data/server.db"
     check("DATABASE_URL 已配置", bool(db_url), "DATABASE_URL 未设置")
     print(f"  {INFO}  数据库: {db_url.split('@')[-1] if '@' in db_url else db_url}")
 
-    redis_enabled = env_vals.get("REDIS_ENABLED", "false").lower() == "true"
+    redis_enabled = (env_vals.get("REDIS_ENABLED", "false") or "false").lower() == "true"
     if redis_enabled:
-        redis_url = env_vals.get("REDIS_URL", "redis://localhost:6379/0")
+        redis_url = env_vals.get("REDIS_URL", "redis://localhost:6379/0") or "redis://localhost:6379/0"
         print(f"  {INFO}  Redis: {redis_url}")
     else:
         print(f"  {INFO}  Redis: 已禁用 (使用内存缓存)")
@@ -202,7 +202,6 @@ except Exception as e:
 # 7. 端口可用性
 # ──────────────────────────────────────────────
 print("\n[7/7] 端口检查")
-import socket
 port = 8000
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -210,7 +209,7 @@ try:
     result = s.connect_ex(("127.0.0.1", port))
     s.close()
     if result == 0:
-        check(f"端口 {port} 可用", False, f"端口已被占用，请停止占用进程或修改 PORT 环境变量", warn=True)
+        check(f"端口 {port} 可用", False, "端口已被占用，请停止占用进程或修改 PORT 环境变量", warn=True)
     else:
         check(f"端口 {port} 可用", True)
 except Exception:
@@ -222,12 +221,12 @@ except Exception:
 print("\n" + "=" * 55)
 if errors:
     print(f"[FAIL] 发现 {len(errors)} 个错误（必须修复才能启动）:")
-    for e in errors:
-        print(f"   - {e}")
+    for err_msg in errors:
+        print(f"   - {err_msg}")
 if warnings:
     print(f"[WARN] 发现 {len(warnings)} 个警告（建议修复）:")
-    for w in warnings:
-        print(f"   - {w}")
+    for warn_msg in warnings:
+        print(f"   - {warn_msg}")
 if not errors and not warnings:
     print("[PASS] 所有检查通过！可以启动服务器。")
     print("\n启动命令:")

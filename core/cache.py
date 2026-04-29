@@ -2,17 +2,17 @@
 Signal Server - Cache Layer
 Redis-based caching with fallback to in-memory cache.
 """
-import time
-import threading
 import json
+import threading
+import time
 from collections import OrderedDict
-from typing import Optional, Any, Callable
+from collections.abc import Callable
 from functools import wraps
+from typing import Any
 
 from loguru import logger
 
 from core.config import settings
-
 
 # ─────────────────────────────────────────────
 # In-Memory Cache (Fallback)
@@ -27,7 +27,7 @@ class InMemoryCache:
         self._max_size = max_size
         self._default_ttl = default_ttl
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
@@ -39,7 +39,7 @@ class InMemoryCache:
             self._cache.move_to_end(key)
             return value
 
-    def set(self, key: str, value: Any, ttl: Optional[int] = None):
+    def set(self, key: str, value: Any, ttl: int | None = None):
         with self._lock:
             effective_ttl = ttl if ttl is not None else self._default_ttl
             self._cache[key] = (time.monotonic(), effective_ttl, value)
@@ -89,14 +89,14 @@ class RedisCache:
                 # Test connection
                 await self._client.ping()
                 self._connected = True
-                logger.info(f"[Cache] Connected to Redis")
+                logger.info("[Cache] Connected to Redis")
             except Exception as e:
                 logger.warning(f"[Cache] Redis connection failed: {e}")
                 self._connected = False
                 return None
         return self._client
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         """Get a value from cache."""
         client = await self._get_client()
         if client is None:
@@ -110,7 +110,7 @@ class RedisCache:
             logger.debug(f"[Cache] Redis get error: {e}")
             return None
 
-    async def set(self, key: str, value: Any, ttl: Optional[int] = None):
+    async def set(self, key: str, value: Any, ttl: int | None = None):
         """Set a value in cache."""
         client = await self._get_client()
         if client is None:
@@ -157,7 +157,7 @@ class CacheManager:
     """Unified cache manager with Redis fallback."""
 
     def __init__(self):
-        self._redis: Optional[RedisCache] = None
+        self._redis: RedisCache | None = None
         self._memory: InMemoryCache = InMemoryCache()
         self._initialized = False
         self._init_lock = threading.Lock()
@@ -202,7 +202,7 @@ class CacheManager:
 
             self._initialized = True
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         """Get a value from cache."""
         if self._redis:
             value = await self._redis.get(key)
@@ -210,7 +210,7 @@ class CacheManager:
                 return value
         return self._memory.get(key)
 
-    async def set(self, key: str, value: Any, ttl: Optional[int] = None):
+    async def set(self, key: str, value: Any, ttl: int | None = None):
         """Set a value in cache."""
         if self._redis:
             await self._redis.set(key, value, ttl)

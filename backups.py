@@ -3,21 +3,18 @@ Signal Server - Backup Module
 Database backup and restore functionality.
 Supports both SQLite (file copy) and PostgreSQL (pg_dump).
 """
-import os
+import asyncio
 import json
+import os
 import shutil
 import zipfile
-import asyncio
-import subprocess
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlparse
+
 from loguru import logger
 
 from core.config import settings
-from core.utils.datetime import utcnow, utcnow_iso, utcnow_str
-
+from core.utils.datetime import utcnow
 
 # Backup directory
 backup_path = Path(__file__).parent / "data" / "backups"
@@ -231,12 +228,13 @@ async def restore_postgresql(backup_name: str) -> dict:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
+        return_code = proc.returncode if proc.returncode is not None else 1
 
         # pg_restore returns non-zero for warnings too, check stderr
-        if proc.returncode != 0:
+        if return_code != 0:
             error_msg = stderr.decode().strip() if stderr else ""
             # pg_restore often returns 1 for non-fatal warnings
-            if proc.returncode > 1:
+            if return_code > 1:
                 return {"status": "error", "reason": f"pg_restore failed: {error_msg}"}
             logger.warning(f"[Backup] pg_restore completed with warnings: {error_msg[:200]}")
 

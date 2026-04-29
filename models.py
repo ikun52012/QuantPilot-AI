@@ -3,8 +3,9 @@ QuantPilot AI - Data Models
 """
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+
 from pydantic import BaseModel, Field, field_validator
+
 from core.utils.datetime import utcnow
 
 
@@ -141,15 +142,15 @@ class MarketContext(BaseModel):
     high_24h: float = 0.0
     low_24h: float = 0.0
     bid_ask_spread: float = 0.0
-    funding_rate: Optional[float] = None
-    open_interest: Optional[float] = None
-    open_interest_change_pct: Optional[float] = None
-    rsi_1h: Optional[float] = None
-    atr_pct: Optional[float] = None
-    ema_fast: Optional[float] = None
-    ema_slow: Optional[float] = None
-    orderbook_imbalance: Optional[float] = None
-    long_short_ratio: Optional[float] = None
+    funding_rate: float | None = None
+    open_interest: float | None = None
+    open_interest_change_pct: float | None = None
+    rsi_1h: float | None = None
+    atr_pct: float | None = None
+    ema_fast: float | None = None
+    ema_slow: float | None = None
+    orderbook_imbalance: float | None = None
+    long_short_ratio: float | None = None
 
     model_config = {"extra": "allow"}
 
@@ -171,15 +172,15 @@ class MarketContext(BaseModel):
         return self.price_change_24h
 
     @property
-    def atr_1h(self) -> Optional[float]:
+    def atr_1h(self) -> float | None:
         return self.atr_pct
 
     @property
-    def ema_20(self) -> Optional[float]:
+    def ema_20(self) -> float | None:
         return self.ema_fast
 
     @property
-    def ema_50(self) -> Optional[float]:
+    def ema_50(self) -> float | None:
         return self.ema_slow
 
 
@@ -190,14 +191,14 @@ class AIAnalysis(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0, description="0-1 confidence score")
     recommendation: str = "hold"        # execute / modify / reject / hold
     reasoning: str = ""                 # AI's explanation
-    suggested_direction: Optional[SignalDirection] = None
-    suggested_entry: Optional[float] = None
-    suggested_stop_loss: Optional[float] = None
-    suggested_take_profit: Optional[float] = None      # Legacy single TP
-    suggested_tp1: Optional[float] = None
-    suggested_tp2: Optional[float] = None
-    suggested_tp3: Optional[float] = None
-    suggested_tp4: Optional[float] = None
+    suggested_direction: SignalDirection | None = None
+    suggested_entry: float | None = None
+    suggested_stop_loss: float | None = None
+    suggested_take_profit: float | None = None      # Legacy single TP
+    suggested_tp1: float | None = None
+    suggested_tp2: float | None = None
+    suggested_tp3: float | None = None
+    suggested_tp4: float | None = None
     tp1_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)   # % of position to close at TP1
     tp2_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)
     tp3_qty_pct: float = Field(default=25.0, ge=0.0, le=100.0)
@@ -215,17 +216,17 @@ class AIAnalysis(BaseModel):
 # ─────────────────────────────────────────────
 class TradeDecision(BaseModel):
     execute: bool = False
-    direction: Optional[SignalDirection] = None
+    direction: SignalDirection | None = None
     ticker: str = ""
-    entry_price: Optional[float] = None
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None              # Legacy single TP
+    entry_price: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None              # Legacy single TP
     take_profit_levels: list[TakeProfitLevel] = Field(default_factory=list)
     trailing_stop: TrailingStopConfig = Field(default_factory=TrailingStopConfig)
-    quantity: Optional[float] = None
+    quantity: float | None = None
     reason: str = ""
-    signal: Optional[TradingViewSignal] = None
-    ai_analysis: Optional[AIAnalysis] = None
+    signal: TradingViewSignal | None = None
+    ai_analysis: AIAnalysis | None = None
     timestamp: datetime = Field(default_factory=lambda: utcnow())
     # Order type: market or limit
     order_type: str = Field(default="market", description="market or limit")
@@ -242,18 +243,18 @@ class TradeLog(BaseModel):
     ticker: str
     direction: str
     entry_price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    tp1: Optional[float] = None
-    tp2: Optional[float] = None
-    tp3: Optional[float] = None
-    tp4: Optional[float] = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    tp1: float | None = None
+    tp2: float | None = None
+    tp3: float | None = None
+    tp4: float | None = None
     trailing_stop_mode: str = "none"
     quantity: float = 0.0
     status: str = "open"                # open / closed / cancelled
-    exit_price: Optional[float] = None
-    pnl: Optional[float] = None
-    pnl_pct: Optional[float] = None
+    exit_price: float | None = None
+    pnl: float | None = None
+    pnl_pct: float | None = None
     ai_confidence: float = 0.0
     ai_reasoning: str = ""
     signal_source: str = "tradingview"

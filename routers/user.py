@@ -2,29 +2,30 @@
 Signal Server - User Router
 User-facing routes for dashboard, settings, and trading.
 """
-import json
 import copy
+import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional
 
-from fastapi import APIRouter, Request, Response, HTTPException, Depends, Query
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
 
-from core.database import (
-    get_db, get_user_by_id, get_user_active_subscription,
-    TradeModel, PositionModel, PaymentModel, SubscriptionModel,
-)
+from core import runtime_settings
 from core.auth import get_current_user
 from core.config import settings
-from core.security import encrypt_settings_payload, decrypt_settings_payload
-from core import runtime_settings
-from core.utils.datetime import utcnow
+from core.database import (
+    PositionModel,
+    TradeModel,
+    get_db,
+    get_user_active_subscription,
+    get_user_by_id,
+)
 from core.request_utils import public_base_url
-
+from core.security import decrypt_settings_payload, encrypt_settings_payload
+from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/api", tags=["user"])
 
@@ -185,9 +186,9 @@ class OfflineTradeSyncRequest(BaseModel):
     id: str = Field(default="", max_length=80)
     ticker: str = Field(min_length=1, max_length=40)
     direction: str = Field(default="manual", max_length=20)
-    timestamp: Optional[datetime] = None
-    entry_price: Optional[float] = Field(default=None, ge=0)
-    exit_price: Optional[float] = Field(default=None, ge=0)
+    timestamp: datetime | None = None
+    entry_price: float | None = Field(default=None, ge=0)
+    exit_price: float | None = Field(default=None, ge=0)
     quantity: float = Field(default=0.0, ge=0)
     pnl_pct: float = Field(default=0.0, ge=-1000, le=1000)
     execute: bool = False

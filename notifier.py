@@ -4,8 +4,9 @@ Sends trading notifications to Telegram with i18n support.
 """
 import httpx
 from loguru import logger
+
 from core.config import settings
-from models import TradeDecision, AIAnalysis
+from models import AIAnalysis, TradeDecision
 
 
 def _lang() -> str:

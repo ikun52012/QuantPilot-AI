@@ -3,13 +3,12 @@ Signal Server - Analytics Module (Enhanced)
 Performance analytics and trade statistics.
 """
 import json
-from datetime import datetime, timedelta
-from typing import Optional
 from collections import defaultdict
+from datetime import timedelta
+from typing import Any
 
-from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 
 from core.database import TradeModel
 from core.utils.datetime import utcnow
@@ -18,8 +17,8 @@ from core.utils.datetime import utcnow
 async def calculate_performance(
     session: AsyncSession,
     days: int = 30,
-    user_id: Optional[str] = None,
-) -> dict:
+    user_id: str | None = None,
+) -> dict[str, Any]:
     """
     Calculate comprehensive performance metrics.
     """
@@ -31,19 +30,19 @@ async def calculate_performance(
         query = query.where(TradeModel.user_id == user_id)
 
     result = await session.execute(query.order_by(TradeModel.timestamp))
-    trades = result.scalars().all()
+    trades: list[Any] = list(result.scalars().all())
 
     if not trades:
         return _empty_performance()
 
     # Calculate metrics
     total_trades = len(trades)
-    executed_trades = [t for t in trades if t.execute]
+    executed_trades = [t for t in trades if bool(getattr(t, "execute", False))]
     closed_trades = [t for t in executed_trades if _is_closed_trade(t)]
     open_trades = len(executed_trades) - len(closed_trades)
 
     # PnL calculations
-    pnls = [t.pnl_pct for t in closed_trades if t.pnl_pct is not None]
+    pnls = [float(getattr(t, "pnl_pct", 0.0)) for t in closed_trades if getattr(t, "pnl_pct", None) is not None]
     total_pnl = sum(pnls) if pnls else 0
 
     # Win/Loss
@@ -127,8 +126,8 @@ async def calculate_performance(
 async def get_daily_pnl(
     session: AsyncSession,
     days: int = 30,
-    user_id: Optional[str] = None,
-) -> list[dict]:
+    user_id: str | None = None,
+) -> list[dict[str, float | str]]:
     """Get daily PnL breakdown."""
     cutoff = utcnow() - timedelta(days=days)
 
@@ -137,14 +136,16 @@ async def get_daily_pnl(
         query = query.where(TradeModel.user_id == user_id)
 
     result = await session.execute(query)
-    trades = result.scalars().all()
+    trades: list[Any] = list(result.scalars().all())
 
     # Group by day
-    daily_pnl = defaultdict(float)
+    daily_pnl: dict[str, float] = defaultdict(float)
     for trade in trades:
-        if trade.pnl_pct is not None and _is_closed_trade(trade):
-            day = trade.timestamp.strftime("%Y-%m-%d")
-            daily_pnl[day] += trade.pnl_pct
+        pnl_pct = getattr(trade, "pnl_pct", None)
+        timestamp = getattr(trade, "timestamp", None)
+        if pnl_pct is not None and timestamp is not None and _is_closed_trade(trade):
+            day = timestamp.strftime("%Y-%m-%d")
+            daily_pnl[day] += float(pnl_pct)
 
     # Fill missing days
     all_days = []
@@ -160,26 +161,31 @@ async def get_daily_pnl(
 
 async def get_trade_distribution(
     session: AsyncSession,
-    user_id: Optional[str] = None,
-) -> dict:
+    user_id: str | None = None,
+) -> dict[str, Any]:
     """Get trade distribution by ticker and direction."""
     query = select(TradeModel)
     if user_id:
         query = query.where(TradeModel.user_id == user_id)
 
     result = await session.execute(query)
-    trades = result.scalars().all()
+    trades: list[Any] = list(result.scalars().all())
 
-    by_ticker = defaultdict(lambda: {"long": 0, "short": 0, "pnl": 0})
-    by_direction = {"long": 0, "short": 0}
+    by_ticker: dict[str, dict[str, float | int]] = {}
+    by_direction: dict[str, int] = {"long": 0, "short": 0}
 
     for trade in trades:
-        if trade.ticker and trade.direction:
-            direction = "long" if "long" in trade.direction.lower() else "short"
-            by_ticker[trade.ticker][direction] += 1
+        ticker = getattr(trade, "ticker", None)
+        direction_value = getattr(trade, "direction", None)
+        if ticker and direction_value:
+            ticker_key = str(ticker)
+            direction = "long" if "long" in str(direction_value).lower() else "short"
+            by_ticker.setdefault(ticker_key, {"long": 0, "short": 0, "pnl": 0.0})
+            by_ticker[ticker_key][direction] += 1
             by_direction[direction] += 1
-            if trade.pnl_pct and _is_closed_trade(trade):
-                by_ticker[trade.ticker]["pnl"] += trade.pnl_pct
+            pnl_pct = getattr(trade, "pnl_pct", None)
+            if pnl_pct and _is_closed_trade(trade):
+                by_ticker[ticker_key]["pnl"] += float(pnl_pct)
 
     return {
         "by_ticker": dict(by_ticker),
@@ -187,7 +193,7 @@ async def get_trade_distribution(
     }
 
 
-def _empty_performance() -> dict:
+def _empty_performance() -> dict[str, Any]:
     """Return empty performance metrics."""
     return {
         "total_trades": 0,
@@ -215,7 +221,7 @@ def _empty_performance() -> dict:
     }
 
 
-def _is_closed_trade(trade) -> bool:
+def _is_closed_trade(trade: Any) -> bool:
     status = str(getattr(trade, "order_status", "") or "").lower()
     direction = str(getattr(trade, "direction", "") or "").lower()
     if direction.startswith("close_"):
@@ -229,10 +235,10 @@ def _is_closed_trade(trade) -> bool:
         return False
 
 
-def _calculate_equity_curve(pnls: list[float]) -> list[dict]:
+def _calculate_equity_curve(pnls: list[float]) -> list[dict[str, float | int]]:
     """Calculate cumulative equity curve."""
-    curve = []
-    cumulative = 0
+    curve: list[dict[str, float | int]] = []
+    cumulative = 0.0
     for i, pnl in enumerate(pnls):
         cumulative += pnl
         curve.append({
@@ -243,13 +249,13 @@ def _calculate_equity_curve(pnls: list[float]) -> list[dict]:
     return curve
 
 
-def _calculate_max_drawdown(equity_curve: list[dict]) -> float:
+def _calculate_max_drawdown(equity_curve: list[dict[str, float | int]]) -> float:
     """Calculate maximum drawdown percentage."""
     if not equity_curve:
         return 0
 
-    peak = 0
-    max_dd = 0
+    peak = 0.0
+    max_dd = 0.0
 
     for point in equity_curve:
         cum_pnl = point["cumulative_pnl"]
@@ -288,33 +294,39 @@ def _calculate_consecutive(pnls: list[float]) -> tuple[int, int]:
     return max_wins, max_losses
 
 
-async def _calculate_ai_stats(trades: list) -> dict:
+async def _calculate_ai_stats(trades: list[Any]) -> dict[str, float | int]:
     """Calculate AI performance statistics."""
-    high_conf_trades = []
-    low_conf_trades = []
-    all_confidences = []
+    high_conf_trades: list[float] = []
+    low_conf_trades: list[float] = []
+    all_confidences: list[float] = []
 
     for trade in trades:
         if not _is_closed_trade(trade):
             continue
         try:
-            payload = json.loads(trade.payload_json) if trade.payload_json else {}
-            analysis = payload.get("analysis", {})
+            payload_raw = json.loads(getattr(trade, "payload_json", "")) if getattr(trade, "payload_json", "") else {}
+            if not isinstance(payload_raw, dict):
+                continue
+            analysis = payload_raw.get("analysis", {})
+            if not isinstance(analysis, dict):
+                continue
             confidence = analysis.get("confidence")
 
             if confidence is not None:
-                all_confidences.append(confidence)
+                confidence_value = float(confidence)
+                all_confidences.append(confidence_value)
 
-                if confidence >= 0.7:
-                    high_conf_trades.append(trade.pnl_pct or 0)
-                elif confidence < 0.5:
-                    low_conf_trades.append(trade.pnl_pct or 0)
+                pnl_value = float(getattr(trade, "pnl_pct", 0.0) or 0.0)
+                if confidence_value >= 0.7:
+                    high_conf_trades.append(pnl_value)
+                elif confidence_value < 0.5:
+                    low_conf_trades.append(pnl_value)
         except (TypeError, json.JSONDecodeError, ValueError):
             pass
 
-    def win_rate(trade_list):
+    def win_rate(trade_list: list[float]) -> float:
         if not trade_list:
-            return 0
+            return 0.0
         wins = sum(1 for p in trade_list if p > 0)
         return (wins / len(trade_list)) * 100
 
@@ -328,11 +340,11 @@ async def _calculate_ai_stats(trades: list) -> dict:
 
 
 # Cache invalidation
-_performance_cache = {}
-_cache_time = {}
+_performance_cache: dict[str, object] = {}
+_cache_time: dict[str, float] = {}
 
 
-def invalidate_performance_cache(user_id: Optional[str] = None):
+def invalidate_performance_cache(user_id: str | None = None):
     """Invalidate performance cache."""
     global _performance_cache, _cache_time
     key = user_id or "global"

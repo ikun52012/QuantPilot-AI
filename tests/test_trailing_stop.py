@@ -1,11 +1,12 @@
 """Tests for trailing stop functionality."""
 import pytest
+
 from position_monitor import (
-    _safe_float,
-    _loads_list,
-    _loads_dict,
-    _price_pnl_pct,
     _hit_take_profit_levels,
+    _loads_dict,
+    _loads_list,
+    _price_pnl_pct,
+    _safe_float,
 )
 
 
@@ -202,7 +203,6 @@ class TestTrailingStopLogic:
         assert profit_pct >= activation_pct
 
     def test_trailing_stop_moves_correctly_for_long(self):
-        entry_price = 100.0
         mark_price = 105.0
         trail_pct = 1.0
 
@@ -211,7 +211,6 @@ class TestTrailingStopLogic:
         assert new_stop == pytest.approx(103.95)
 
     def test_trailing_stop_moves_correctly_for_short(self):
-        entry_price = 100.0
         mark_price = 95.0
         trail_pct = 1.0
 

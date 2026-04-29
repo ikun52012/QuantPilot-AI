@@ -2,13 +2,10 @@
 Signal Server - Prometheus Metrics
 Comprehensive metrics for monitoring and observability.
 """
-import time
-from typing import Optional
-from prometheus_client import Counter, Histogram, Gauge, Info, CollectorRegistry, generate_latest
 from fastapi import Response
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Info, generate_latest
 
 from core.config import settings
-
 
 # ─────────────────────────────────────────────
 # Metrics Registry
@@ -352,7 +349,7 @@ except Exception:
 # Helper Functions
 # ─────────────────────────────────────────────
 
-def record_signal_received(ticker: str, direction: str, user_id: Optional[str] = None):
+def record_signal_received(ticker: str, direction: str, user_id: str | None = None):
     """Record a received signal."""
     SIGNALS_RECEIVED.labels(
         ticker=ticker,
@@ -380,7 +377,7 @@ def record_ai_analysis(provider: str, recommendation: str, confidence: float, la
     AI_CONFIDENCE.labels(provider=provider).observe(confidence)
 
 
-def record_trade(ticker: str, direction: str, status: str, pnl: Optional[float] = None):
+def record_trade(ticker: str, direction: str, status: str, pnl: float | None = None):
     """Record a trade execution."""
     TRADES_EXECUTED.labels(ticker=ticker, direction=direction, status=status).inc()
     if pnl is not None:
@@ -425,7 +422,7 @@ def record_ai_cost(provider: str, cost_usd: float):
 def update_trading_control_mode(mode: str):
     """Update trading control mode metric."""
     mode_values = {"enabled": 0, "read_only": 1, "paused": 2, "emergency_stop": 3}
-    for m, v in mode_values.items():
+    for m in mode_values:
         TRADING_CONTROL_MODE.labels(mode=m).set(1 if m == mode else 0)
 
 
@@ -437,7 +434,7 @@ def record_filter_performance(check_name: str, latency: float):
 def update_exchange_pool_metrics():
     """Update exchange connection pool size metrics."""
     try:
-        from exchange import _exchange_pool, SUPPORTED_EXCHANGES
+        from exchange import _exchange_pool
         exchange_counts = {}
         for key in _exchange_pool:
             exchange_id = key.split(":")[0]

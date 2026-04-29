@@ -3,20 +3,18 @@ WebSocket Router for Real-time Data Streaming.
 Provides live position updates, price alerts, and system status.
 """
 import asyncio
+import inspect
 import json
 import time
-from datetime import datetime, timezone
-from typing import Optional
 from collections import defaultdict
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from loguru import logger
-import inspect
 
-from core.auth import verify_token, require_admin, AUTH_COOKIE_NAME
+from core.auth import AUTH_COOKIE_NAME, require_admin, verify_token
 from core.config import settings
 from core.database import db_manager, get_user_by_id
-
 
 router = APIRouter(tags=["WebSocket"])
 verify_jwt_token = verify_token
@@ -27,7 +25,7 @@ _WS_CONNECTION_COOLDOWN = 60  # 60 seconds cooldown between connections
 _ws_connection_times: dict[str, list[float]] = defaultdict(list)
 
 
-def _verify_ws_token_or_none(token: str) -> Optional[dict]:
+def _verify_ws_token_or_none(token: str) -> dict | None:
     """Reject expired, invalid, or still-pending-2FA tokens for WebSockets."""
     payload = verify_token(token)
     if not payload or payload.get("2fa_pending"):
@@ -35,7 +33,7 @@ def _verify_ws_token_or_none(token: str) -> Optional[dict]:
     return payload
 
 
-async def _authenticate_ws_user_or_none(token: str, require_admin_role: bool = False) -> Optional[dict]:
+async def _authenticate_ws_user_or_none(token: str, require_admin_role: bool = False) -> dict | None:
     """Validate the token and current user state before opening a socket."""
     payload = _verify_ws_token_or_none(token)
     if not payload:
@@ -75,7 +73,7 @@ def _extract_ws_token(websocket: WebSocket) -> str:
     return websocket.cookies.get(AUTH_COOKIE_NAME, "")
 
 
-def _ws_message(msg_type: str, data: dict, ticker: Optional[str] = None) -> dict:
+def _ws_message(msg_type: str, data: dict, ticker: str | None = None) -> dict:
     """Create standardized WebSocket message format."""
     message = {
         "type": msg_type,
@@ -140,7 +138,7 @@ class ConnectionManager:
                 pass
 
     async def broadcast_all(self, message: dict):
-        for user_id, connections in self.active_connections.items():
+        for _user_id, connections in self.active_connections.items():
             for connection in connections:
                 try:
                     await connection.send_json(message)
@@ -433,8 +431,9 @@ async def websocket_status(admin: dict = Depends(require_admin)):
 async def _fetch_user_positions(user_id: str) -> list[dict]:
     """Fetch user's open positions from database."""
     try:
-        from core.database import db_manager, PositionModel
         from sqlalchemy import select
+
+        from core.database import PositionModel, db_manager
 
         async with db_manager.async_session_factory() as session:
             result = await session.execute(
@@ -526,8 +525,9 @@ async def _stream_system_status(websocket: WebSocket):
 async def _fetch_system_stats() -> dict:
     """Fetch system statistics."""
     try:
-        from core.database import db_manager, PositionModel, TradeModel, UserModel
-        from sqlalchemy import select, func
+        from sqlalchemy import func, select
+
+        from core.database import PositionModel, TradeModel, UserModel, db_manager
 
         async with db_manager.async_session_factory() as session:
             open_positions = await session.execute(
@@ -543,7 +543,7 @@ async def _fetch_system_stats() -> dict:
 
             active_users = await session.execute(
                 select(func.count(UserModel.id))
-                .where(UserModel.is_active == True)
+                .where(UserModel.is_active)
             )
             users_count = active_users.scalar() or 0
 

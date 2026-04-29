@@ -2,20 +2,17 @@
 QuantPilot AI - TOTP Two-Factor Authentication
 Provides TOTP setup, verification, and recovery code management.
 """
-import io
-import secrets
 import hashlib
 import hmac
-from typing import Optional
+import io
+import secrets
 
 import pyotp
 import qrcode
 import qrcode.constants
-from loguru import logger
 
 from core.config import settings
-from core.security import encrypt_value, decrypt_value
-
+from core.security import decrypt_value, encrypt_value
 
 # ─────────────────────────────────────────────
 # TOTP Secret Management
@@ -100,7 +97,7 @@ def hash_recovery_code(code: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
-def verify_recovery_code(code: str, hashed_codes: list[str]) -> Optional[int]:
+def verify_recovery_code(code: str, hashed_codes: list[str]) -> int | None:
     """
     Verify a recovery code against stored hashes.
     Returns the index of the matched code, or None.

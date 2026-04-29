@@ -1,6 +1,7 @@
 """Tests for AI voting functionality."""
 import pytest
-from ai_analyzer import _parse_model_id, _aggregate_voting_results, TrailingStopMode
+
+from ai_analyzer import TrailingStopMode, _aggregate_voting_results, _parse_model_id
 
 
 class TestParseModelId:

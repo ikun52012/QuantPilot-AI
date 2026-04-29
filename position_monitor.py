@@ -5,8 +5,7 @@ and keeps realised PnL in the database.
 """
 import asyncio
 import json
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import timezone
 
 from loguru import logger
 from sqlalchemy import select
@@ -19,13 +18,13 @@ from core.database import (
     record_position_close_trade_async,
 )
 from core.security import decrypt_settings_payload
-from core.utils.datetime import utcnow, utcnow_iso
-from core.utils.common import safe_float, safe_bool, loads_list, loads_dict, symbol_key, price_pnl_pct
+from core.utils.common import loads_dict, loads_list, price_pnl_pct, safe_bool, safe_float, symbol_key
+from core.utils.datetime import utcnow
 
+# Backward-compatible aliases used by older tests and imports.
 _safe_float = safe_float
 _loads_list = loads_list
 _loads_dict = loads_dict
-_price_pnl_pct = price_pnl_pct
 
 
 def _has_partial_position_fills(position: PositionModel) -> bool:
@@ -57,7 +56,7 @@ def _price_pnl_pct(direction: str, entry_price: float, exit_price: float, levera
     return price_pnl_pct(direction, entry_price, exit_price, leverage)
 
 
-def _get_exchange_config_for_position(position: PositionModel) -> Optional[dict]:
+def _get_exchange_config_for_position(position: PositionModel) -> dict | None:
     if not position.user_id:
         return None
     exchange_name = str(position.exchange or "").lower()
@@ -82,7 +81,7 @@ async def get_monitor_state() -> dict:
     }
 
 
-async def run_position_monitor_once(user_configs: Optional[dict] = None) -> dict:
+async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
     """Run one full tracking cycle and persist TP/SL/PnL updates."""
     stats = {
         "tracked": 0,
@@ -122,7 +121,6 @@ async def run_position_monitor_once(user_configs: Optional[dict] = None) -> dict
 
 
 async def _reconcile_position(session, position: PositionModel, user_configs: dict) -> dict:
-    stats = {"updated": 0, "partials": 0, "closed": 0, "adjusted": 0}
     exchange_config = await _exchange_config_for_position(session, position, user_configs)
 
     if not bool(position.live_trading):
@@ -327,8 +325,9 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
         return
 
     try:
-        from exchange import _get_or_create_exchange, _resolve_symbol, _close_exchange
         import ccxt
+
+        from exchange import _close_exchange, _get_or_create_exchange, _resolve_symbol
 
         exchange = _get_or_create_exchange(
             exchange_id=exchange_config.get("exchange", settings.exchange.name),
@@ -490,7 +489,7 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
     return hit_levels
 
 
-def _find_exchange_position(position: PositionModel, exchange_positions: list[dict]) -> Optional[dict]:
+def _find_exchange_position(position: PositionModel, exchange_positions: list[dict]) -> dict | None:
     target = _symbol_key(position.ticker)
     direction = str(position.direction or "").lower()
     for item in exchange_positions:
@@ -504,7 +503,7 @@ def _find_exchange_position(position: PositionModel, exchange_positions: list[di
     return None
 
 
-async def _find_recent_close_order(position: PositionModel, exchange_config: dict, get_recent_orders) -> Optional[dict]:
+async def _find_recent_close_order(position: PositionModel, exchange_config: dict, get_recent_orders) -> dict | None:
     orders = await get_recent_orders(position.ticker, 50, exchange_config)
     order_ids = set(loads_list(position.take_profit_order_ids_json))
     if position.stop_loss_order_id:
@@ -556,7 +555,7 @@ def _symbols_match(left: str, right: str) -> bool:
     return bool(left_key and right_key and (left_key in right_key or right_key in left_key))
 
 
-def _close_reason_for_order(position: PositionModel, order: Optional[dict]) -> str:
+def _close_reason_for_order(position: PositionModel, order: dict | None) -> str:
     if not order:
         return "exchange_closed_unmatched"
     order_id = str(order.get("id") or "")
@@ -667,13 +666,20 @@ async def _adjust_trailing_stop_on_tp_hit(
     tp_note = ""
 
     if trailing_mode == "breakeven_on_tp1":
-        tp1_hit = any(l.get("level") == 1 or (not l.get("level") and i == 0) for i, l in enumerate(hit_levels))
+        tp1_hit = any(
+            level.get("level") == 1 or (not level.get("level") and i == 0)
+            for i, level in enumerate(hit_levels)
+        )
         if tp1_hit:
             new_stop = entry_price
             tp_note = "TP1 hit — SL moved to breakeven"
 
     elif trailing_mode == "step_trailing":
-        all_levels = sorted(tp_levels, key=lambda x: safe_float(x.get("price")))
+        # BUG FIX: Sort TP levels by distance from entry, not raw price.
+        # For LONG: ascending price (TP1 < TP2 < TP3)
+        # For SHORT: descending price (TP1 > TP2 > TP3)
+        reverse_sort = direction == "short"
+        all_levels = sorted(tp_levels, key=lambda x: safe_float(x.get("price")), reverse=reverse_sort)
         hit_level_numbers = []
         for i, level in enumerate(all_levels):
             if str(level.get("status") or "pending").lower() in {"hit", "filled", "closed"}:
@@ -686,10 +692,13 @@ async def _adjust_trailing_stop_on_tp_hit(
                 if prev_level_idx >= 0 and prev_level_idx < len(all_levels):
                     prev_tp_price = safe_float(all_levels[prev_level_idx].get("price"))
                     if prev_tp_price > 0:
+                        # BUG FIX: For LONG, SL should be at least at the previous TP
+                        # level (use max, not min). For SHORT, SL should be at most
+                        # at the previous TP level (use min, not max).
                         if direction == "long":
-                            new_stop = min(prev_tp_price, entry_price * 1.002)
+                            new_stop = max(prev_tp_price, entry_price * 1.002)
                         else:
-                            new_stop = max(prev_tp_price, entry_price * 0.998)
+                            new_stop = min(prev_tp_price, entry_price * 0.998)
                         tp_note = f"TP{highest_hit} hit — SL moved to TP{highest_hit - 1} level"
             elif highest_hit == 1:
                 new_stop = entry_price

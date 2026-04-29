@@ -2,12 +2,10 @@
 Login brute-force protection.
 Tracks failed login attempts per IP and locks out after threshold.
 """
-import time
 import threading
-from typing import Optional
+import time
 
 from loguru import logger
-
 
 _MAX_ATTEMPTS = 5
 _LOCKOUT_SECONDS = 900  # 15 minutes
@@ -56,7 +54,7 @@ def remaining_lockout_seconds(ip: str) -> int:
         return max(0, int(remaining))
 
 
-def record_failed_attempt(ip: str) -> Optional[int]:
+def record_failed_attempt(ip: str) -> int | None:
     """
     Record a failed login attempt.
     Returns the number of remaining attempts, or None if now locked out.

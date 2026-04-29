@@ -3,24 +3,23 @@ Signal Server - Subscription Router
 Subscription and payment management.
 """
 import json
-import uuid
 from datetime import timedelta
-from typing import Optional
 
-from fastapi import APIRouter, Request, HTTPException, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
 
-from core.database import (
-    get_db, get_user_by_id, get_user_active_subscription,
-    SubscriptionPlanModel, SubscriptionModel, PaymentModel, UserModel,
-)
 from core.auth import get_current_user
-from core.config import settings
-from core.utils.datetime import utcnow, to_utc
-
+from core.database import (
+    PaymentModel,
+    SubscriptionModel,
+    SubscriptionPlanModel,
+    get_db,
+    get_user_active_subscription,
+    get_user_by_id,
+)
+from core.utils.datetime import to_utc, utcnow
 
 router = APIRouter(prefix="/api", tags=["subscription"])
 
@@ -62,7 +61,7 @@ async def list_plans(
 ):
     """List active subscription plans (public)."""
     result = await db.execute(
-        select(SubscriptionPlanModel).where(SubscriptionPlanModel.is_active == True)
+        select(SubscriptionPlanModel).where(SubscriptionPlanModel.is_active)
     )
     plans = result.scalars().all()
 

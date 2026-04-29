@@ -8,6 +8,7 @@ without rebuilding the container.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from loguru import logger
@@ -16,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.database import get_admin_setting, set_admin_setting
 from core.security import decrypt_settings_payload, encrypt_settings_payload
-
 
 EXCHANGE_KEY = "runtime_exchange"
 AI_KEY = "runtime_ai"
@@ -65,19 +65,21 @@ def _public_secret_configured(value: str) -> bool:
 def _current_ai_key(provider: str) -> str:
     provider = (provider or settings.ai.provider).lower().strip()
     if provider == "openai":
-        return settings.ai.openai_api_key
+        return str(settings.ai.openai_api_key or "")
     if provider == "anthropic":
-        return settings.ai.anthropic_api_key
+        return str(settings.ai.anthropic_api_key or "")
     if provider == "deepseek":
-        return settings.ai.deepseek_api_key
+        return str(settings.ai.deepseek_api_key or "")
+    if provider == "mistral":
+        return str(settings.ai.mistral_api_key or "")
     if provider == "openrouter":
-        return settings.ai.openrouter_api_key
-    return settings.ai.custom_provider_api_key
+        return str(settings.ai.openrouter_api_key or "")
+    return str(settings.ai.custom_provider_api_key or "")
 
 
 def _normalize_ai_provider(provider: Any, default: str | None = None) -> str:
     value = str(provider or default or settings.ai.provider).lower().strip()
-    allowed = {"openai", "anthropic", "deepseek", "openrouter", "custom"}
+    allowed = {"openai", "anthropic", "deepseek", "mistral", "openrouter", "custom"}
     return value if value in allowed else settings.ai.provider
 
 
@@ -244,7 +246,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
         mistral_api_key = await get_admin_setting(session, "mistral_api_key", "")
         if mistral_api_key:
             settings.ai.mistral_api_key = mistral_api_key
-        
+
         mistral_model = await get_admin_setting(session, "mistral_model", "")
         if mistral_model:
             settings.ai.mistral_model = mistral_model

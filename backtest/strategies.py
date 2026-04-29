@@ -3,9 +3,9 @@ Base Strategy Classes for Backtest Engine.
 Provides strategy interface and common implementations.
 """
 from abc import ABC, abstractmethod
-from enum import Enum
-from typing import Optional, Any
 from dataclasses import dataclass
+from enum import Enum
+from typing import Any
 
 
 class SignalType(Enum):
@@ -21,18 +21,18 @@ class TradingSignal:
     confidence: float = 0.0
     ticker: str = ""
     reason: str = ""
-    suggested_stop_loss: Optional[float] = None
-    suggested_take_profit: Optional[float] = None
-    suggested_quantity_pct: Optional[float] = None
+    suggested_stop_loss: float | None = None
+    suggested_take_profit: float | None = None
+    suggested_quantity_pct: float | None = None
 
 
 class BaseStrategy(ABC):
-    def __init__(self, params: Optional[dict] = None):
+    def __init__(self, params: dict | None = None):
         self.params = params or {}
         self.name = self.params.get("name", self.__class__.__name__)
 
     @abstractmethod
-    def generate_signal(self, data: list[dict], current_idx: int) -> Optional[TradingSignal]:
+    def generate_signal(self, data: list[dict], current_idx: int) -> TradingSignal | None:
         pass
 
     def get_param(self, key: str, default: Any = None) -> Any:
@@ -58,7 +58,7 @@ class BaseStrategy(ABC):
 
 
 class SMCTrendStrategy(BaseStrategy):
-    def __init__(self, params: Optional[dict] = None):
+    def __init__(self, params: dict | None = None):
         default_params = {
             "name": "smc_trend",
             "fvg_lookback": 5,
@@ -70,7 +70,7 @@ class SMCTrendStrategy(BaseStrategy):
         merged = {**default_params, **(params or {})}
         super().__init__(merged)
 
-    def generate_signal(self, data: list[dict], current_idx: int) -> Optional[TradingSignal]:
+    def generate_signal(self, data: list[dict], current_idx: int) -> TradingSignal | None:
         if current_idx < 10:
             return None
 
@@ -132,13 +132,12 @@ class SMCTrendStrategy(BaseStrategy):
             suggested_take_profit=current_price * (1 + tp_pct / 100) if action == "buy" else current_price * (1 - tp_pct / 100),
         )
 
-    def _detect_fvg(self, data: list[dict], idx: int, lookback: int) -> Optional[str]:
+    def _detect_fvg(self, data: list[dict], idx: int, lookback: int) -> str | None:
         if idx < lookback + 2:
             return None
 
         for i in range(idx - lookback, idx - 1):
             bar1 = data[i]
-            bar2 = data[i + 1]
             bar3 = data[i + 2] if i + 2 <= idx else None
 
             if not bar3:
@@ -146,8 +145,6 @@ class SMCTrendStrategy(BaseStrategy):
 
             bar1_low = float(bar1.get("low", 0))
             bar1_high = float(bar1.get("high", 0))
-            bar2_high = float(bar2.get("high", 0))
-            bar2_low = float(bar2.get("low", 0))
             bar3_low = float(bar3.get("low", 0))
             bar3_high = float(bar3.get("high", 0))
 
@@ -159,21 +156,20 @@ class SMCTrendStrategy(BaseStrategy):
 
         return None
 
-    def _detect_order_block(self, data: list[dict], idx: int, threshold: float) -> Optional[str]:
+    def _detect_order_block(self, data: list[dict], idx: int, threshold: float) -> str | None:
         if idx < 5:
             return None
 
         recent = data[idx - 5:idx + 1]
 
-        max_impulse_up = 0
-        max_impulse_down = 0
+        max_impulse_up = 0.0
+        max_impulse_down = 0.0
 
         for i in range(1, len(recent)):
             prev = recent[i - 1]
             curr = recent[i]
 
             prev_close = float(prev.get("close", 0))
-            curr_close = float(curr.get("close", 0))
             curr_high = float(curr.get("high", 0))
             curr_low = float(curr.get("low", 0))
 
@@ -219,7 +215,7 @@ class SMCTrendStrategy(BaseStrategy):
 
 
 class AIAssistantStrategy(BaseStrategy):
-    def __init__(self, params: Optional[dict] = None):
+    def __init__(self, params: dict | None = None):
         default_params = {
             "name": "ai_assistant",
             "confidence_threshold_buy": 0.75,
@@ -232,7 +228,7 @@ class AIAssistantStrategy(BaseStrategy):
         super().__init__(merged)
         self.last_signal_bar = -100
 
-    def generate_signal(self, data: list[dict], current_idx: int) -> Optional[TradingSignal]:
+    def generate_signal(self, data: list[dict], current_idx: int) -> TradingSignal | None:
         cooldown = self.get_param("cooldown_bars", 10)
         if current_idx - self.last_signal_bar < cooldown:
             return None
@@ -343,8 +339,8 @@ class AIAssistantStrategy(BaseStrategy):
         if idx < period + 1:
             return 50.0
 
-        gains = []
-        losses = []
+        gains: list[float] = []
+        losses: list[float] = []
 
         for i in range(idx - period, idx):
             curr_close = float(data[i + 1].get("close", 0))
@@ -353,13 +349,13 @@ class AIAssistantStrategy(BaseStrategy):
             change = curr_close - prev_close
             if change > 0:
                 gains.append(change)
-                losses.append(0)
+                losses.append(0.0)
             else:
-                gains.append(0)
+                gains.append(0.0)
                 losses.append(abs(change))
 
-        avg_gain = sum(gains) / period if gains else 0
-        avg_loss = sum(losses) / period if losses else 0
+        avg_gain = sum(gains) / period if gains else 0.0
+        avg_loss = sum(losses) / period if losses else 0.0
 
         if avg_loss == 0:
             return 100.0
@@ -384,7 +380,7 @@ class AIAssistantStrategy(BaseStrategy):
 
 
 class SimpleTrendFollowStrategy(BaseStrategy):
-    def __init__(self, params: Optional[dict] = None):
+    def __init__(self, params: dict | None = None):
         default_params = {
             "name": "simple_trend",
             "ema_period": 20,
@@ -395,7 +391,7 @@ class SimpleTrendFollowStrategy(BaseStrategy):
         merged = {**default_params, **(params or {})}
         super().__init__(merged)
 
-    def generate_signal(self, data: list[dict], current_idx: int) -> Optional[TradingSignal]:
+    def generate_signal(self, data: list[dict], current_idx: int) -> TradingSignal | None:
         period = self.get_param("ema_period", 20)
 
         if current_idx < period + 2:

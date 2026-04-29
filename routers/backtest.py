@@ -3,20 +3,16 @@ Backtest API Router.
 Provides endpoints for running backtests and retrieving results.
 """
 import asyncio
-import json
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from loguru import logger
 from pydantic import BaseModel, Field
 
-from loguru import logger
-
-from backtest.engine import BacktestEngine, BacktestConfig
-from backtest.strategies import SMCTrendStrategy, AIAssistantStrategy, SimpleTrendFollowStrategy
+from backtest.engine import BacktestConfig, BacktestEngine
+from backtest.strategies import AIAssistantStrategy, BaseStrategy, SimpleTrendFollowStrategy, SMCTrendStrategy
 from core.auth import require_admin as get_current_admin
 from market_data import fetch_ohlcv_history
-
 
 router = APIRouter(prefix="/api/backtest", tags=["Backtest"])
 
@@ -150,9 +146,9 @@ async def run_backtest(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"[Backtest] Failed: {e}")
-        raise HTTPException(500, f"Backtest failed: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Backtest] Failed: {err}")
+        raise HTTPException(500, f"Backtest failed: {err}") from err
 
 
 @router.post("/run-async/{task_id}")
@@ -316,19 +312,14 @@ async def compare_strategies(
 
     for strategy_name in strategies:
         try:
-            request = BacktestRequest(
-                ticker=ticker,
-                timeframe=timeframe,
-                days=days,
-                strategy=strategy_name,
-            )
-
             ohlcv_data = await fetch_ohlcv_history(ticker=ticker, timeframe=timeframe, days=days)
 
             if not ohlcv_data:
                 continue
 
             strategy = _get_strategy(strategy_name, {"ticker": ticker})
+            if not strategy:
+                continue
             config = BacktestConfig(
                 initial_capital=10000.0,
                 strategy_name=strategy_name,
@@ -356,8 +347,8 @@ async def compare_strategies(
     }
 
 
-def _get_strategy(name: str, params: dict) -> Optional[object]:
-    strategies = {
+def _get_strategy(name: str, params: dict) -> BaseStrategy | None:
+    strategies: dict[str, type[BaseStrategy]] = {
         "simple_trend": SimpleTrendFollowStrategy,
         "smc_trend": SMCTrendStrategy,
         "ai_assistant": AIAssistantStrategy,

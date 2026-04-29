@@ -2,17 +2,29 @@
 Performance Metrics Calculator for Backtest Results.
 Calculates comprehensive trading performance metrics.
 """
-from datetime import datetime
-from typing import Optional
-from dataclasses import dataclass
-
 import math
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 
-def _config_get(config, key: str, default=None):
+def _config_get(config: object, key: str, default: Any = None) -> Any:
     if isinstance(config, dict):
         return config.get(key, default)
     return getattr(config, key, default)
+
+
+def _as_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
 
 
 @dataclass
@@ -58,7 +70,7 @@ class PerformanceResult:
 
 class PerformanceMetrics:
     @staticmethod
-    def calculate(trades: list, equity_curve: list, config: dict) -> dict:
+    def calculate(trades: list[Any], equity_curve: list[dict[str, object]], config: object) -> dict:
         if not trades:
             return PerformanceMetrics._empty_result(config)
 
@@ -98,8 +110,8 @@ class PerformanceMetrics:
 
         if equity_curve:
             result.max_drawdown_pct, result.max_drawdown_duration_bars = PerformanceMetrics._calculate_drawdown(equity_curve)
-            result.peak_capital = max(e.get("equity", 0) for e in equity_curve)
-            result.final_capital = equity_curve[-1].get("equity", result.initial_capital)
+            result.peak_capital = max(_as_float(e.get("equity", 0), 0.0) for e in equity_curve)
+            result.final_capital = _as_float(equity_curve[-1].get("equity", result.initial_capital), result.initial_capital)
 
         result.total_return_pct = (result.final_capital - result.initial_capital) / result.initial_capital * 100
 
@@ -115,8 +127,8 @@ class PerformanceMetrics:
         result.max_consecutive_wins, result.max_consecutive_losses = PerformanceMetrics._calculate_consecutive(trades)
 
         if equity_curve and len(equity_curve) > 1:
-            start_ts = datetime.fromisoformat(equity_curve[0]["timestamp"].replace("Z", "+00:00"))
-            end_ts = datetime.fromisoformat(equity_curve[-1]["timestamp"].replace("Z", "+00:00"))
+            start_ts = datetime.fromisoformat(str(equity_curve[0].get("timestamp", "")).replace("Z", "+00:00"))
+            end_ts = datetime.fromisoformat(str(equity_curve[-1].get("timestamp", "")).replace("Z", "+00:00"))
             days = (end_ts - start_ts).days or 1
 
             result.annualized_return_pct = result.total_return_pct * (365 / days)
@@ -129,8 +141,8 @@ class PerformanceMetrics:
         if result.win_rate > 0 and result.avg_win_pct > 0 and result.avg_loss_pct < 0:
             p = result.win_rate / 100
             w = result.avg_win_pct
-            l = abs(result.avg_loss_pct)
-            result.kelly_fraction = (p * w - (1 - p) * l) / w if w > 0 else 0
+            loss_abs = abs(result.avg_loss_pct)
+            result.kelly_fraction = (p * w - (1 - p) * loss_abs) / w if w > 0 else 0
 
         sl_trades = [t for t in trades if "stop_loss" in t.exit_reason]
         tp_trades = [t for t in trades if "take_profit" in t.exit_reason]
@@ -141,14 +153,14 @@ class PerformanceMetrics:
         return PerformanceMetrics._to_dict(result)
 
     @staticmethod
-    def _calculate_drawdown(equity_curve: list) -> tuple[float, int]:
+    def _calculate_drawdown(equity_curve: list[dict[str, object]]) -> tuple[float, int]:
         peak = 0.0
         max_dd = 0.0
         dd_duration = 0
         current_dd_start = 0
 
         for i, e in enumerate(equity_curve):
-            equity = e.get("equity", 0)
+            equity = _as_float(e.get("equity", 0), 0.0)
 
             if equity > peak:
                 peak = equity
@@ -163,11 +175,11 @@ class PerformanceMetrics:
         return max_dd, dd_duration
 
     @staticmethod
-    def _calculate_sharpe(equity_curve: list, risk_free_rate: float = 0.0) -> float:
-        returns = []
+    def _calculate_sharpe(equity_curve: list[dict[str, object]], risk_free_rate: float = 0.0) -> float:
+        returns: list[float] = []
         for i in range(1, len(equity_curve)):
-            prev_equity = equity_curve[i-1].get("equity", 0)
-            curr_equity = equity_curve[i].get("equity", 0)
+            prev_equity = _as_float(equity_curve[i - 1].get("equity", 0), 0.0)
+            curr_equity = _as_float(equity_curve[i].get("equity", 0), 0.0)
             if prev_equity > 0:
                 ret = (curr_equity - prev_equity) / prev_equity
                 returns.append(ret)
@@ -182,14 +194,14 @@ class PerformanceMetrics:
         if std_dev == 0:
             return 0.0
 
-        return (avg_return - risk_free_rate) / std_dev * math.sqrt(365 * 24)  # Annualized for hourly
+        return float((avg_return - risk_free_rate) / std_dev * math.sqrt(365 * 24))  # Annualized for hourly
 
     @staticmethod
-    def _calculate_sortino(equity_curve: list, risk_free_rate: float = 0.0) -> float:
-        returns = []
+    def _calculate_sortino(equity_curve: list[dict[str, object]], risk_free_rate: float = 0.0) -> float:
+        returns: list[float] = []
         for i in range(1, len(equity_curve)):
-            prev_equity = equity_curve[i-1].get("equity", 0)
-            curr_equity = equity_curve[i].get("equity", 0)
+            prev_equity = _as_float(equity_curve[i - 1].get("equity", 0), 0.0)
+            curr_equity = _as_float(equity_curve[i].get("equity", 0), 0.0)
             if prev_equity > 0:
                 ret = (curr_equity - prev_equity) / prev_equity
                 returns.append(ret)
@@ -209,14 +221,14 @@ class PerformanceMetrics:
         if downside_dev == 0:
             return 0.0
 
-        return (avg_return - risk_free_rate) / downside_dev * math.sqrt(365 * 24)
+        return float((avg_return - risk_free_rate) / downside_dev * math.sqrt(365 * 24))
 
     @staticmethod
-    def _calculate_volatility(equity_curve: list) -> float:
-        returns = []
+    def _calculate_volatility(equity_curve: list[dict[str, object]]) -> float:
+        returns: list[float] = []
         for i in range(1, len(equity_curve)):
-            prev_equity = equity_curve[i-1].get("equity", 0)
-            curr_equity = equity_curve[i].get("equity", 0)
+            prev_equity = _as_float(equity_curve[i - 1].get("equity", 0), 0.0)
+            curr_equity = _as_float(equity_curve[i].get("equity", 0), 0.0)
             if prev_equity > 0:
                 ret = (curr_equity - prev_equity) / prev_equity * 100
                 returns.append(ret)
@@ -227,10 +239,10 @@ class PerformanceMetrics:
         avg_return = sum(returns) / len(returns)
         variance = sum((r - avg_return) ** 2 for r in returns) / len(returns)
 
-        return math.sqrt(variance) * math.sqrt(365 * 24)  # Annualized
+        return float(math.sqrt(variance) * math.sqrt(365 * 24))  # Annualized
 
     @staticmethod
-    def _calculate_consecutive(trades: list) -> tuple[int, int]:
+    def _calculate_consecutive(trades: list[Any]) -> tuple[int, int]:
         max_wins = 0
         max_losses = 0
         current_wins = 0
@@ -258,10 +270,10 @@ class PerformanceMetrics:
             return 0.0
 
         cagr = ((final / initial) ** (1 / years) - 1) * 100
-        return cagr
+        return float(cagr)
 
     @staticmethod
-    def _empty_result(config: dict) -> dict:
+    def _empty_result(config: object) -> dict:
         return {
             "total_trades": 0,
             "winning_trades": 0,

@@ -2,22 +2,17 @@
 Signal Server - Authentication Module (Enhanced)
 JWT-based auth with PyJWT, TOTP 2FA support.
 """
-import os
-import time
 import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+import time
 
 import jwt
-from fastapi import Request, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.security import verify_password
 from core.database import get_db, get_user_by_id
-
 
 # ─────────────────────────────────────────────
 # JWT Configuration
@@ -74,7 +69,7 @@ def create_token(
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def verify_token(token: str) -> Optional[dict]:
+def verify_token(token: str) -> dict | None:
     """Verify and decode a JWT token using PyJWT."""
     try:
         payload = jwt.decode(
@@ -103,7 +98,7 @@ def create_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _request_is_https(request: Optional[Request] = None) -> bool:
+def _request_is_https(request: Request | None = None) -> bool:
     """Check if request is HTTPS."""
     if not request:
         return False
@@ -116,7 +111,7 @@ def _request_is_https(request: Optional[Request] = None) -> bool:
     )
 
 
-def _cookie_secure(request: Optional[Request] = None) -> bool:
+def _cookie_secure(request: Request | None = None) -> bool:
     """Determine if cookies should be secure."""
     mode = settings.cookie_secure.lower().strip()
     if mode in {"force", "always"}:
@@ -132,7 +127,7 @@ def _cookie_secure(request: Optional[Request] = None) -> bool:
 # Cookie Management
 # ─────────────────────────────────────────────
 
-def set_auth_cookie(response, token: str, request: Optional[Request] = None):
+def set_auth_cookie(response, token: str, request: Request | None = None):
     """Set authentication cookies."""
     max_age = settings.jwt_expiry_hours * 3600
     csrf_token = create_csrf_token()
@@ -158,7 +153,7 @@ def set_auth_cookie(response, token: str, request: Optional[Request] = None):
     )
 
 
-def clear_auth_cookie(response, request: Optional[Request] = None):
+def clear_auth_cookie(response, request: Request | None = None):
     """Clear authentication cookies."""
     for secure in (False, True):
         response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="lax")
@@ -172,7 +167,7 @@ def clear_auth_cookie(response, request: Optional[Request] = None):
 async def get_current_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict:
     """
     FastAPI dependency to extract and verify user from JWT.
@@ -217,7 +212,7 @@ async def get_current_user(
 async def get_pending_2fa_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict:
     """
     FastAPI dependency for 2FA verification endpoint.
@@ -263,7 +258,7 @@ async def require_admin(
 async def get_optional_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
-) -> Optional[dict]:
+) -> dict | None:
     """Returns user payload if authenticated, None otherwise."""
     token = request.cookies.get(AUTH_COOKIE_NAME, "")
     if not token:

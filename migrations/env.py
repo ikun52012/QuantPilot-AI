@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from core.config import settings
 from core.database import Base
 
-
 config = context.config
 
 if config.config_file_name is not None:

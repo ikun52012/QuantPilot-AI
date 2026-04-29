@@ -4,9 +4,8 @@ Revision ID: 002_align_runtime_schema
 Revises: 001_initial_schema
 Create Date: 2026-04-27
 """
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision = "002_align_runtime_schema"
 down_revision = "001_initial_schema"

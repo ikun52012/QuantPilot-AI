@@ -1,13 +1,12 @@
 """
 API endpoint tests.
 """
-import json
 
 import pytest
 from httpx import AsyncClient
 
-from core.security import hash_password
 from core.database import UserModel
+from core.security import hash_password
 
 
 def _csrf_headers(response) -> dict[str, str]:
@@ -115,8 +114,8 @@ class TestAuthEndpoints:
 
     @pytest.mark.asyncio
     async def test_2fa_verify_failed_attempts_are_limited(self, client: AsyncClient, test_user_data, db_session):
-        from core.totp import encrypt_totp_secret
         from core.login_guard import _attempts, _lockouts
+        from core.totp import encrypt_totp_secret
 
         _attempts.clear()
         _lockouts.clear()
@@ -180,8 +179,8 @@ class TestUserEndpoints:
 
     @pytest.mark.asyncio
     async def test_positions_returns_real_unrealized_pnl(self, client: AsyncClient, test_user_data, db_session):
-        from core.utils.datetime import utcnow
         from core.database import PositionModel
+        from core.utils.datetime import utcnow
 
         login = await client.post("/api/auth/register", json=test_user_data)
         assert login.status_code == 200
@@ -209,8 +208,8 @@ class TestUserEndpoints:
 
     @pytest.mark.asyncio
     async def test_positions_include_pending_limit_orders(self, client: AsyncClient, test_user_data, db_session):
-        from core.utils.datetime import utcnow
         from core.database import PositionModel
+        from core.utils.datetime import utcnow
 
         login = await client.post("/api/auth/register", json=test_user_data)
         assert login.status_code == 200
@@ -269,8 +268,8 @@ class TestUserEndpoints:
 
     @pytest.mark.asyncio
     async def test_chart_position_markers_include_pending_positions(self, client: AsyncClient, test_user_data, db_session):
-        from core.utils.datetime import utcnow
         from core.database import PositionModel
+        from core.utils.datetime import utcnow
 
         login = await client.post("/api/auth/register", json=test_user_data)
         assert login.status_code == 200

@@ -2,28 +2,38 @@
 Signal Server - Database Layer (Enhanced)
 Async SQLAlchemy with PostgreSQL/SQLite support.
 """
+import hashlib
 import json
 import re
-import uuid
-import os
 import secrets
-import hashlib
 import string
+import uuid
 from datetime import datetime, timedelta
-from typing import Optional, Any
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import (
-    create_engine, Column, String, Integer, Float, Boolean, DateTime, Text, ForeignKey, Index, inspect, text
-)
-from sqlalchemy.dialects.sqlite import JSON as SQLiteJSON
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase, relationship, selectinload
-from sqlalchemy import select, update, delete, and_, or_, event
 from loguru import logger
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    event,
+    inspect,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, relationship
 
 from core.config import settings
-from core.utils.datetime import utcnow, parse_datetime_utc_naive
+from core.utils.datetime import parse_datetime_utc_naive, utcnow
 
 
 class Base(DeclarativeBase):
@@ -739,7 +749,7 @@ async def create_user(
     return user
 
 
-async def get_user_by_username(session: AsyncSession, username: str) -> Optional[UserModel]:
+async def get_user_by_username(session: AsyncSession, username: str) -> UserModel | None:
     """Get user by username."""
     result = await session.execute(
         select(UserModel).where(UserModel.username == username.lower().strip())
@@ -747,7 +757,7 @@ async def get_user_by_username(session: AsyncSession, username: str) -> Optional
     return result.scalar_one_or_none()
 
 
-async def get_user_by_id(session: AsyncSession, user_id: str) -> Optional[UserModel]:
+async def get_user_by_id(session: AsyncSession, user_id: str) -> UserModel | None:
     """Get user by ID."""
     result = await session.execute(
         select(UserModel).where(UserModel.id == user_id)
@@ -755,7 +765,7 @@ async def get_user_by_id(session: AsyncSession, user_id: str) -> Optional[UserMo
     return result.scalar_one_or_none()
 
 
-async def get_user_by_email(session: AsyncSession, email: str) -> Optional[UserModel]:
+async def get_user_by_email(session: AsyncSession, email: str) -> UserModel | None:
     """Get user by email."""
     result = await session.execute(
         select(UserModel).where(UserModel.email == email.lower().strip())
@@ -826,12 +836,12 @@ async def get_subscription_plans(session: AsyncSession, active_only: bool = True
     """Get all subscription plans."""
     query = select(SubscriptionPlanModel)
     if active_only:
-        query = query.where(SubscriptionPlanModel.is_active == True)
+        query = query.where(SubscriptionPlanModel.is_active)
     result = await session.execute(query)
     return list(result.scalars().all())
 
 
-async def get_user_active_subscription(session: AsyncSession, user_id: str) -> Optional[SubscriptionModel]:
+async def get_user_active_subscription(session: AsyncSession, user_id: str) -> SubscriptionModel | None:
     """Get user's active subscription."""
     now = utcnow()
     result = await session.execute(
@@ -852,7 +862,7 @@ async def get_user_active_subscription(session: AsyncSession, user_id: str) -> O
 
 async def log_trade_db(
     session: AsyncSession,
-    user_id: Optional[str],
+    user_id: str | None,
     ticker: str,
     direction: str,
     execute: bool,
@@ -905,12 +915,12 @@ async def log_trade_db(
     return trade
 
 
-async def count_today_executed_trades(session: AsyncSession, user_id: Optional[str] = None) -> int:
+async def count_today_executed_trades(session: AsyncSession, user_id: str | None = None) -> int:
     """Count today's executed trades."""
     today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     query = select(TradeModel).where(
         TradeModel.timestamp >= today_start,
-        TradeModel.execute == True,
+        TradeModel.execute,
     )
     if user_id:
         query = query.where(TradeModel.user_id == user_id)
@@ -1060,8 +1070,8 @@ async def close_position_async(
     position: PositionModel,
     exit_price: float,
     close_reason: str,
-    close_trade_id: Optional[str] = None,
-    closed_at: Optional[datetime] = None,
+    close_trade_id: str | None = None,
+    closed_at: datetime | None = None,
 ) -> float:
     """Close a tracked position and return realised leveraged PnL percentage."""
     exit_price = _safe_float(exit_price)
@@ -1109,7 +1119,6 @@ async def close_position_async(
 
 async def update_user_balance(session: AsyncSession, user_id: str, delta_usdt: float) -> float:
     """Update user balance by adding delta (positive for profit, negative for loss)."""
-    from sqlalchemy import select
     user = await session.get(UserModel, user_id)
     if user:
         current_balance = _safe_float(user.balance_usdt, 0.0)
@@ -1125,7 +1134,7 @@ async def record_position_close_trade_async(
     exit_price: float,
     close_reason: str,
     order_status: str = "closed",
-    order_details: Optional[dict] = None,
+    order_details: dict | None = None,
 ) -> TradeModel:
     """Create a synthetic close trade for TP/SL fills detected by the monitor."""
     trade_id = str(uuid.uuid4())
@@ -1311,7 +1320,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
     return entry
 
 
-async def get_trade_logs_async(session: AsyncSession, days: int = 30, user_id: Optional[str] = None) -> list[dict]:
+async def get_trade_logs_async(session: AsyncSession, days: int = 30, user_id: str | None = None) -> list[dict]:
     """Get trade logs for the last N days."""
     since = utcnow() - timedelta(days=max(1, min(int(days), 365)))
 
@@ -1351,7 +1360,7 @@ async def get_trade_logs_async(session: AsyncSession, days: int = 30, user_id: O
 
 async def record_webhook_event(
     session: AsyncSession,
-    user_id: Optional[str],
+    user_id: str | None,
     fingerprint: str,
     ticker: str,
     direction: str,

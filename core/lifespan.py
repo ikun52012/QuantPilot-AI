@@ -7,9 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from loguru import logger
 
+from core.cache import cache
 from core.config import settings
 from core.database import db_manager, seed_defaults
-from core.cache import cache
 
 # Module-level scheduler reference for shutdown cleanup
 _scheduler = None
@@ -44,10 +44,15 @@ async def _init_database():
     """Initialize database and seed defaults."""
     await db_manager.init()
     async with db_manager.async_session_factory() as session:
-        await seed_defaults(session)
-        from core.runtime_settings import apply_persisted_admin_settings
-        await apply_persisted_admin_settings(session)
-        await session.commit()
+        try:
+            await seed_defaults(session)
+            from core.runtime_settings import apply_persisted_admin_settings
+            await apply_persisted_admin_settings(session)
+            await session.commit()
+        except Exception:
+            # BUG FIX: Rollback on failure so partial state changes are not committed.
+            await session.rollback()
+            raise
     logger.info("[Database] Initialized and seeded")
 
 
@@ -115,10 +120,9 @@ async def _init_scheduler():
 async def _restore_strategies():
     """Restore active DCA/Grid strategies from database."""
     try:
-        from strategies.dca import DCAEngine
-        from strategies.grid import GridEngine
-        from core.database import StrategyStateModel
         from sqlalchemy import select
+
+        from core.database import StrategyStateModel
 
         async with db_manager.async_session_factory() as session:
             result = await session.execute(

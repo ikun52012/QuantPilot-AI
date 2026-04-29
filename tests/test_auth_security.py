@@ -1,10 +1,10 @@
 import unittest
 
 try:
-    import loguru  # noqa: F401
     import fastapi  # noqa: F401
+    import loguru  # noqa: F401
 except ModuleNotFoundError as exc:
-    raise unittest.SkipTest(f"runtime dependency not installed: {exc.name}")
+    raise unittest.SkipTest(f"runtime dependency not installed: {exc.name}") from exc
 
 from core.auth import create_token, verify_token
 from core.security import validate_password_strength

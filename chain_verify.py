@@ -3,13 +3,9 @@ Signal Server - Chain Verification
 Verify blockchain transactions for payment confirmation.
 """
 import os
+
 import httpx
-from datetime import datetime, timezone
-from typing import Optional
 from loguru import logger
-
-from core.config import settings
-
 
 # Block explorer APIs
 EXPLORER_APIS = {
@@ -49,8 +45,8 @@ EVM_USDT_CONTRACTS = {
 async def verify_payment_tx(
     tx_hash: str,
     network: str,
-    expected_amount: Optional[float] = None,
-    expected_address: Optional[str] = None,
+    expected_amount: float | None = None,
+    expected_address: str | None = None,
 ) -> dict:
     """
     Verify a blockchain transaction.
@@ -96,8 +92,8 @@ async def verify_payment_tx(
 
 async def _verify_trc20(
     tx_hash: str,
-    expected_amount: Optional[float],
-    expected_address: Optional[str],
+    expected_amount: float | None,
+    expected_address: str | None,
 ) -> dict:
     """Verify TRC20 transaction."""
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -158,13 +154,15 @@ async def _verify_trc20(
 async def _verify_evm(
     tx_hash: str,
     network: str,
-    expected_amount: Optional[float],
-    expected_address: Optional[str],
+    expected_amount: float | None,
+    expected_address: str | None,
 ) -> dict:
     """Verify EVM USDT token transfer details, not just transaction success."""
     config = EXPLORER_APIS.get(network, {})
-    base_url = config.get("url", "")
-    key_env = config.get("key_env", "")
+    if not isinstance(config, dict):
+        config = {}
+    base_url = str(config.get("url", ""))
+    key_env = str(config.get("key_env", ""))
     api_key = os.getenv(key_env, "")
 
     if not expected_address or not expected_amount:
@@ -255,8 +253,8 @@ async def _verify_evm(
 
 async def _verify_solana(
     tx_hash: str,
-    expected_amount: Optional[float],
-    expected_address: Optional[str],
+    expected_amount: float | None,
+    expected_address: str | None,
 ) -> dict:
     """Verify Solana transaction."""
     async with httpx.AsyncClient(timeout=30.0) as client:

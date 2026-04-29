@@ -5,10 +5,10 @@ Typed utility functions for safer operations.
 from __future__ import annotations
 
 import json
+import math
 import re
-from datetime import datetime
-from typing import Any, Optional, Union, Dict, List, Tuple, TypeVar, Callable, overload
-
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 T = TypeVar('T')
 
@@ -16,11 +16,11 @@ T = TypeVar('T')
 def safe_float(value: Any, default: float = 0.0) -> float:
     """
     Safely convert value to float with fallback.
-    
+
     Args:
         value: Any value to convert
         default: Default value if conversion fails
-    
+
     Returns:
         Float value or default
     """
@@ -33,19 +33,14 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return result
     except (TypeError, ValueError, OverflowError):
         return default
-
-
-import math
-
-
 def safe_int(value: Any, default: int = 0) -> int:
     """
     Safely convert value to int with fallback.
-    
+
     Args:
         value: Any value to convert
         default: Default value if conversion fails
-    
+
     Returns:
         Integer value or default
     """
@@ -60,11 +55,11 @@ def safe_int(value: Any, default: int = 0) -> int:
 def safe_bool(value: Any, default: bool = False) -> bool:
     """
     Safely convert value to bool with fallback.
-    
+
     Args:
         value: Any value to convert
         default: Default value if conversion fails
-    
+
     Returns:
         Boolean value or default
     """
@@ -80,15 +75,15 @@ def safe_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
-def safe_str(value: Any, default: str = '', max_length: Optional[int] = None) -> str:
+def safe_str(value: Any, default: str = '', max_length: int | None = None) -> str:
     """
     Safely convert value to string with fallback and optional truncation.
-    
+
     Args:
         value: Any value to convert
         default: Default value if conversion fails
         max_length: Optional maximum length (truncates if exceeded)
-    
+
     Returns:
         String value or default
     """
@@ -103,14 +98,14 @@ def safe_str(value: Any, default: str = '', max_length: Optional[int] = None) ->
         return default
 
 
-def safe_dict(value: Any, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def safe_dict(value: Any, default: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     Safely convert value to dict with fallback.
-    
+
     Args:
         value: Any value to convert
         default: Default dict if conversion fails
-    
+
     Returns:
         Dictionary value or default empty dict
     """
@@ -127,14 +122,14 @@ def safe_dict(value: Any, default: Optional[Dict[str, Any]] = None) -> Dict[str,
         return default
 
 
-def safe_list(value: Any, default: Optional[List[Any]] = None) -> List[Any]:
+def safe_list(value: Any, default: list[Any] | None = None) -> list[Any]:
     """
     Safely convert value to list with fallback.
-    
+
     Args:
         value: Any value to convert
         default: Default list if conversion fails
-    
+
     Returns:
         List value or default empty list
     """
@@ -151,12 +146,12 @@ def safe_list(value: Any, default: Optional[List[Any]] = None) -> List[Any]:
         return default
 
 
-def loads_list(value: Any) -> List[Any]:
+def loads_list(value: Any) -> list[Any]:
     """Backward-compatible JSON list loader used across older modules."""
     return safe_list(value, [])
 
 
-def loads_dict(value: Any) -> Dict[str, Any]:
+def loads_dict(value: Any) -> dict[str, Any]:
     """Backward-compatible JSON dict loader used across older modules."""
     return safe_dict(value, {})
 
@@ -164,10 +159,10 @@ def loads_dict(value: Any) -> Dict[str, Any]:
 def first_valid(*values: Any) -> Any:
     """
     Return first non-None value from arguments.
-    
+
     Args:
         *values: Values to check
-    
+
     Returns:
         First valid value or None
     """
@@ -180,12 +175,12 @@ def first_valid(*values: Any) -> Any:
 def clamp(value: float, min_val: float, max_val: float) -> float:
     """
     Clamp a value to a range.
-    
+
     Args:
         value: Value to clamp
         min_val: Minimum allowed value
         max_val: Maximum allowed value
-    
+
     Returns:
         Clamped value
     """
@@ -195,10 +190,10 @@ def clamp(value: float, min_val: float, max_val: float) -> float:
 def normalize_symbol(symbol: str) -> str:
     """
     Normalize trading symbol to standard format.
-    
+
     Args:
         symbol: Raw symbol string
-    
+
     Returns:
         Normalized symbol (uppercase, no special chars)
     """
@@ -223,10 +218,10 @@ def normalize_symbol(symbol: str) -> str:
 def symbol_key(symbol: str) -> str:
     """
     Get canonical key for symbol matching.
-    
+
     Args:
         symbol: Symbol string
-    
+
     Returns:
         Lowercase compact symbol key
     """
@@ -241,13 +236,13 @@ def price_pnl_pct(
 ) -> float:
     """
     Calculate leveraged PnL percentage.
-    
+
     Args:
         direction: Trade direction ('long' or 'short')
         entry_price: Entry price
         exit_price: Exit price
         leverage: Position leverage
-    
+
     Returns:
         PnL percentage
     """
@@ -264,10 +259,10 @@ def price_pnl_pct(
 def is_valid_email(email: str) -> bool:
     """
     Validate email format.
-    
+
     Args:
         email: Email string
-    
+
     Returns:
         True if valid email format
     """
@@ -280,12 +275,12 @@ def is_valid_email(email: str) -> bool:
 def truncate_text(text: str, max_length: int = 100, suffix: str = '...') -> str:
     """
     Truncate text to max length with suffix.
-    
+
     Args:
         text: Text to truncate
         max_length: Maximum length
         suffix: Suffix to append when truncated
-    
+
     Returns:
         Truncated text
     """
@@ -294,14 +289,14 @@ def truncate_text(text: str, max_length: int = 100, suffix: str = '...') -> str:
     return text[:max_length - len(suffix)] + suffix
 
 
-def merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+def merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """
     Merge two dictionaries, override takes precedence.
-    
+
     Args:
         base: Base dictionary
         override: Override dictionary
-    
+
     Returns:
         Merged dictionary
     """
@@ -314,14 +309,14 @@ def merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return result
 
 
-def chunks(lst: List[T], n: int) -> List[List[T]]:
+def chunks(lst: list[T], n: int) -> list[list[T]]:
     """
     Split list into chunks of size n.
-    
+
     Args:
         lst: List to split
         n: Chunk size
-    
+
     Returns:
         List of chunks
     """
@@ -331,24 +326,24 @@ def chunks(lst: List[T], n: int) -> List[List[T]]:
 def debounce_async(func: Callable[..., Any], delay: float) -> Callable[..., Any]:
     """
     Create async debounced version of function.
-    
+
     Args:
         func: Function to debounce
         delay: Delay in seconds
-    
+
     Returns:
         Debounced function
     """
     import asyncio
-    task: Optional[asyncio.Task] = None
-    
+    task: asyncio.Task | None = None
+
     async def debounced(*args: Any, **kwargs: Any) -> Any:
         nonlocal task
         if task:
             task.cancel()
         await asyncio.sleep(delay)
         return await func(*args, **kwargs)
-    
+
     return debounced
 
 
@@ -357,26 +352,26 @@ def retry_async(
     max_attempts: int = 3,
     delay: float = 1.0,
     backoff: float = 2.0,
-    exceptions: Tuple[Type[Exception], ...] = (Exception,)
+    exceptions: tuple[type[Exception], ...] = (Exception,)
 ) -> Callable[..., Any]:
     """
     Create retry wrapper for async function.
-    
+
     Args:
         func: Function to wrap
         max_attempts: Maximum retry attempts
         delay: Initial delay
         backoff: Backoff multiplier
         exceptions: Exceptions to retry on
-    
+
     Returns:
         Wrapped function with retry logic
     """
     import asyncio
-    
+
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         current_delay = delay
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(max_attempts):
             try:
                 return await func(*args, **kwargs)
@@ -388,5 +383,5 @@ def retry_async(
         if last_exc:
             raise last_exc
         raise RuntimeError("Retry failed without exception")
-    
+
     return wrapper

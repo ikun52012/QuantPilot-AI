@@ -1,13 +1,11 @@
 """Global trading control state and kill-switch helpers."""
 import json
-from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_admin_setting, set_admin_setting
 from core.utils.datetime import utcnow
-
 
 TRADING_CONTROL_MODE_KEY = "trading_control_mode"
 TRADING_CONTROL_REASON_KEY = "trading_control_reason"
@@ -78,7 +76,7 @@ async def set_trading_control_state(
 
 async def trading_allowed(
     session: AsyncSession,
-    user_id: Optional[str] = None,
+    user_id: str | None = None,
     live_trading: bool = False,
 ) -> dict:
     """Return whether a new trade may be placed right now."""
@@ -104,7 +102,7 @@ async def trading_allowed(
 
 async def assert_trading_allowed(
     session: AsyncSession,
-    user_id: Optional[str] = None,
+    user_id: str | None = None,
     live_trading: bool = False,
 ) -> dict:
     """Raise 423 when trading is globally blocked."""

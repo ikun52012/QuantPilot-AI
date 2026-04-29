@@ -2,14 +2,14 @@
 import json
 import uuid
 from datetime import timedelta
-from typing import Optional, Any
+from typing import Any
 
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import OrderEventModel
 from core.utils.datetime import utcnow
-
 
 CONFIRMED_STATUSES = {"filled", "closed", "simulated", "confirmed"}
 FAILED_STATUSES = {"error", "failed", "rejected", "cancelled"}
@@ -58,9 +58,9 @@ async def record_order_event(
     session: AsyncSession,
     decision,
     result: dict,
-    user_id: Optional[str] = None,
-    trade_id: Optional[str] = None,
-    position_id: Optional[str] = None,
+    user_id: str | None = None,
+    trade_id: str | None = None,
+    position_id: str | None = None,
 ) -> OrderEventModel:
     """Record one order execution attempt for audit and reconciliation."""
     result = dict(result or {})
@@ -100,7 +100,7 @@ async def record_order_event(
 
 async def list_order_events(
     session: AsyncSession,
-    status: Optional[str] = None,
+    status: str | None = None,
     limit: int = 100,
 ) -> list[OrderEventModel]:
     """Return recent order events for the admin console."""
@@ -140,6 +140,16 @@ async def run_order_reconciliation(session: AsyncSession) -> dict:
             event.last_error = "retry window reached; manual reconciliation required"
 
     await session.flush()
+    # BUG FIX: Notify admin when orders are promoted to manual review
+    if events:
+        try:
+            from notifier import notify_error
+            await notify_error(
+                f"[OrderReconciler] {len(events)} order(s) promoted to manual_review. "
+                f"Check admin console for details."
+            )
+        except Exception as notify_err:
+            logger.warning(f"[OrderReconciler] Failed to send admin notification: {notify_err}")
     return {
         "checked": len(events),
         "manual_review": len(events),

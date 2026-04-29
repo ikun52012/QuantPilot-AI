@@ -4,18 +4,16 @@ Provides template, JSON editing, activation, export, and import endpoints.
 """
 import json
 from datetime import datetime, timezone
-from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user
-from core.database import get_db, StrategyStateModel
+from core.database import StrategyStateModel, get_db
 from core.utils.datetime import utcnow
-
 
 router = APIRouter(prefix="/api/strategy-editor", tags=["Strategy Editor"])
 
@@ -159,7 +157,7 @@ def _loads_dict(raw: str) -> dict:
         return {}
 
 
-def _strategy_payload(strategy_id: str, config: StrategyConfig, user_id: str, existing: Optional[dict] = None) -> dict:
+def _strategy_payload(strategy_id: str, config: StrategyConfig, user_id: str, existing: dict | None = None) -> dict:
     existing = existing or {}
     return {
         "strategy_id": strategy_id,
@@ -226,7 +224,7 @@ async def _save_strategy_row(
 
 @router.get("/templates")
 async def list_strategy_templates(
-    category: Optional[str] = None,
+    category: str | None = None,
     user: dict = Depends(get_current_user),
 ):
     """List available strategy templates."""
@@ -455,5 +453,5 @@ async def import_strategy(
             "name": strategy.get("name"),
         }
 
-    except json.JSONDecodeError:
-        raise HTTPException(400, "Invalid JSON format")
+    except json.JSONDecodeError as err:
+        raise HTTPException(400, "Invalid JSON format") from err

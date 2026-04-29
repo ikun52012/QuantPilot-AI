@@ -2,24 +2,33 @@
 Signal Server - Authentication Router
 User registration, login, session management, and 2FA (TOTP).
 """
-from datetime import datetime, timezone
+from datetime import timezone
 
-from fastapi import APIRouter, Request, Response, HTTPException, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
-from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import get_db, create_user, get_user_by_username, get_user_by_email, update_user_login, InviteCodeModel
-from core.security import hash_password, verify_password, validate_password_strength
 from core.auth import (
-    create_token, set_auth_cookie, clear_auth_cookie,
-    get_current_user, get_pending_2fa_user,
+    clear_auth_cookie,
+    create_token,
+    get_current_user,
+    get_pending_2fa_user,
+    set_auth_cookie,
 )
-from core.request_utils import client_ip
+from core.database import (
+    InviteCodeModel,
+    create_user,
+    get_db,
+    get_user_by_email,
+    get_user_by_username,
+    update_user_login,
+)
 from core.login_guard import is_locked_out, record_failed_attempt, record_successful_login, remaining_lockout_seconds
-from core.utils.datetime import utcnow, make_naive
-
+from core.request_utils import client_ip
+from core.security import hash_password, validate_password_strength, verify_password
+from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -84,8 +93,7 @@ async def register(
 ):
     """Register a new user account."""
     from core.database import (
-        AdminSettingModel, InviteCodeModel, UserModel,
-        set_admin_setting, get_admin_setting,
+        get_admin_setting,
     )
 
     username = req.username.lower().strip()
@@ -113,7 +121,7 @@ async def register(
         result = await db.execute(
             select(InviteCodeModel).where(
                 InviteCodeModel.code == invite_code,
-                InviteCodeModel.is_active == True,
+                InviteCodeModel.is_active,
             )
         )
         invite = result.scalar_one_or_none()
@@ -130,8 +138,8 @@ async def register(
     pw_hash = hash_password(req.password)
     try:
         user = await create_user(db, username, email, pw_hash)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    except ValueError as err:
+        raise HTTPException(400, str(err)) from err
 
     if invite_required.lower() == "true" and invite_code:
         result = await db.execute(
@@ -191,8 +199,9 @@ async def login(
     if getattr(user, "totp_enabled", False) and getattr(user, "totp_secret", ""):
         # If TOTP code provided inline, verify it now
         if req.totp_code:
-            from core.totp import verify_totp_code, decrypt_totp_secret, verify_recovery_code
             import json
+
+            from core.totp import decrypt_totp_secret, verify_recovery_code, verify_totp_code
 
             secret = decrypt_totp_secret(user.totp_secret)
             if verify_totp_code(secret, req.totp_code):
@@ -280,8 +289,9 @@ async def verify_2fa(
 ):
     """Verify 2FA code during login to get a full access token."""
     import json
-    from core.totp import verify_totp_code, decrypt_totp_secret, verify_recovery_code
+
     from core.database import get_user_by_id
+    from core.totp import decrypt_totp_secret, verify_recovery_code, verify_totp_code
 
     ip = client_ip(request)
     if is_locked_out(ip):
@@ -347,7 +357,7 @@ async def setup_2fa(
 ):
     """Begin 2FA setup — returns QR code and secret. Does NOT enable 2FA yet."""
     from core.database import get_user_by_id
-    from core.totp import generate_totp_secret, encrypt_totp_secret, get_totp_uri, generate_qr_code_base64
+    from core.totp import encrypt_totp_secret, generate_qr_code_base64, generate_totp_secret, get_totp_uri
 
     db_user = await get_user_by_id(db, user["sub"])
     if not db_user:
@@ -380,10 +390,13 @@ async def enable_2fa(
 ):
     """Confirm 2FA setup by verifying a TOTP code. Generates recovery codes."""
     import json
+
     from core.database import get_user_by_id
     from core.totp import (
-        decrypt_totp_secret, verify_totp_code,
-        generate_recovery_codes, hash_recovery_code,
+        decrypt_totp_secret,
+        generate_recovery_codes,
+        hash_recovery_code,
+        verify_totp_code,
     )
 
     db_user = await get_user_by_id(db, user["sub"])
@@ -448,6 +461,7 @@ async def get_2fa_status(
 ):
     """Check if 2FA is enabled for the current user."""
     import json
+
     from core.database import get_user_by_id
 
     db_user = await get_user_by_id(db, user["sub"])
@@ -479,7 +493,7 @@ async def get_me(
     db: AsyncSession = Depends(get_db),
 ):
     """Get current user profile."""
-    from core.database import SubscriptionPlanModel, get_user_by_id, get_user_active_subscription
+    from core.database import SubscriptionPlanModel, get_user_active_subscription, get_user_by_id
 
     db_user = await get_user_by_id(db, user["sub"])
     if not db_user:

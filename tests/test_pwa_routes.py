@@ -14,8 +14,8 @@ async def _noop_lifespan(app):
 
 @pytest.fixture
 def sync_client(db_session):
+    from core.database import db_manager, get_db
     from core.factory import create_app
-    from core.database import get_db, db_manager
 
     app = create_app()
     app.router.lifespan_context = _noop_lifespan

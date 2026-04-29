@@ -7,11 +7,14 @@ import os
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, cast
+
 from loguru import logger
+
 from core.config import settings
+from core.security import get_secure_api_key
+from exchange import _CCXT_AVAILABLE, _get_or_create_exchange, _resolve_symbol, ccxt
 from models import MarketContext
-from exchange import _CCXT_AVAILABLE, ccxt, _get_or_create_exchange, _resolve_symbol
 
 _MARKET_CACHE_TTL = 30
 _MARKET_CACHE_MAX_SIZE = 500
@@ -19,6 +22,34 @@ _PUBLIC_MARKET_DATA_FALLBACKS = ("okx", "bitget", "gate", "coinbase")
 _market_cache: OrderedDict[str, tuple[float, MarketContext]] = OrderedDict()
 _market_cache_locks: dict[str, asyncio.Lock] = {}
 _market_cache_locks_guard = asyncio.Lock()
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _to_optional_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _get_exchange() -> ccxt.Exchange:
@@ -56,8 +87,8 @@ def _get_market_data_exchange(exchange_id: str) -> ccxt.Exchange:
     return _get_public_market_exchange(exchange_id)
 
 
-def _candles_to_ohlcv_dicts(candles: list) -> list[dict]:
-    ohlcv_data = []
+def _candles_to_ohlcv_dicts(candles: list[list[float]]) -> list[dict[str, float | str]]:
+    ohlcv_data: list[dict[str, float | str]] = []
     for candle in candles:
         timestamp_ms = candle[0]
         timestamp_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
@@ -70,7 +101,7 @@ def _candles_to_ohlcv_dicts(candles: list) -> list[dict]:
             "close": float(candle[4]),
             "volume": float(candle[5]),
         })
-    ohlcv_data.sort(key=lambda x: x.get("timestamp", ""))
+    ohlcv_data.sort(key=lambda row: str(row["timestamp"]))
     return ohlcv_data
 
 
@@ -144,16 +175,47 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             exchange = _get_market_data_exchange(exchange_id)
             symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
 
-            ticker_data, ohlcv_1h, ohlcv_4h, orderbook = await asyncio.gather(
+            fetch_results = cast(
+                tuple[object, object, object, object],
+                await asyncio.gather(
                 asyncio.to_thread(exchange.fetch_ticker, symbol),
                 asyncio.to_thread(exchange.fetch_ohlcv, symbol, "1h", None, 30),
                 asyncio.to_thread(exchange.fetch_ohlcv, symbol, "4h", None, 10),
                 asyncio.to_thread(exchange.fetch_order_book, symbol, 20),
+                return_exceptions=True,
+                ),
             )
+            ticker_result, ohlcv_1h_result, ohlcv_4h_result, orderbook_result = fetch_results
 
-            current_price = ticker_data.get("last", 0.0)
-            price_1h_ago = ohlcv_1h[-2][4] if len(ohlcv_1h) >= 2 else current_price
-            price_4h_ago = ohlcv_4h[-2][4] if len(ohlcv_4h) >= 2 else current_price
+            # BUG FIX: Handle individual fetch failures gracefully instead of
+            # crashing the entire pipeline when one exchange call fails.
+            if isinstance(ticker_result, Exception):
+                logger.warning(f"[MarketData] {exchange_id} ticker fetch failed for {ticker}: {ticker_result}")
+                raise ticker_result  # fall through to next exchange
+
+            ticker_data = cast(dict[str, Any], ticker_result)
+
+            if isinstance(ohlcv_1h_result, Exception):
+                logger.warning(f"[MarketData] {exchange_id} 1h OHLCV fetch failed for {ticker}: {ohlcv_1h_result}")
+                ohlcv_1h: list[list[float]] = []
+            else:
+                ohlcv_1h = cast(list[list[float]], ohlcv_1h_result)
+
+            if isinstance(ohlcv_4h_result, Exception):
+                logger.warning(f"[MarketData] {exchange_id} 4h OHLCV fetch failed for {ticker}: {ohlcv_4h_result}")
+                ohlcv_4h: list[list[float]] = []
+            else:
+                ohlcv_4h = cast(list[list[float]], ohlcv_4h_result)
+
+            if isinstance(orderbook_result, Exception):
+                logger.warning(f"[MarketData] {exchange_id} orderbook fetch failed for {ticker}: {orderbook_result}")
+                orderbook: dict[str, list[list[float]]] = {"bids": [], "asks": []}
+            else:
+                orderbook = cast(dict[str, list[list[float]]], orderbook_result)
+
+            current_price = _to_float(ticker_data.get("last"), 0.0)
+            price_1h_ago = float(ohlcv_1h[-2][4]) if len(ohlcv_1h) >= 2 else current_price
+            price_4h_ago = float(ohlcv_4h[-2][4]) if len(ohlcv_4h) >= 2 else current_price
 
             price_change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0.0
             price_change_4h = ((current_price - price_4h_ago) / price_4h_ago * 100) if price_4h_ago else 0.0
@@ -173,7 +235,7 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
 
             rsi = _calculate_rsi([c[4] for c in ohlcv_1h], 14)
             atr = _calculate_atr(ohlcv_1h, 14)
-            atr_pct = (atr / current_price * 100) if current_price else 0.0
+            atr_pct = (atr / current_price * 100) if current_price and atr is not None else 0.0
 
             closes = [c[4] for c in ohlcv_1h]
             ema_fast = _calculate_ema(closes, 8)
@@ -191,11 +253,11 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
                 current_price=current_price,
                 price_change_1h=round(price_change_1h, 4),
                 price_change_4h=round(price_change_4h, 4),
-                price_change_24h=ticker_data.get("percentage", 0.0) or 0.0,
-                volume_24h=ticker_data.get("quoteVolume", 0.0) or 0.0,
+                price_change_24h=_to_float(ticker_data.get("percentage"), 0.0),
+                volume_24h=_to_float(ticker_data.get("quoteVolume"), 0.0),
                 volume_change_pct=round(volume_change_pct, 2),
-                high_24h=ticker_data.get("high", 0.0) or 0.0,
-                low_24h=ticker_data.get("low", 0.0) or 0.0,
+                high_24h=_to_float(ticker_data.get("high"), 0.0),
+                low_24h=_to_float(ticker_data.get("low"), 0.0),
                 bid_ask_spread=round(spread, 6),
                 funding_rate=funding_rate,
                 open_interest=open_interest,
@@ -209,10 +271,11 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             )
 
             ohlcv_15m = await _safe_fetch_ohlcv(exchange, symbol, "15m", 50)
-            context._ohlcv_15m = ohlcv_15m
-            context._ohlcv_1h = ohlcv_1h
-            context._ohlcv_4h = ohlcv_4h
-            context._market_data_source = exchange_id
+            context_any = cast(Any, context)
+            context_any._ohlcv_15m = ohlcv_15m
+            context_any._ohlcv_1h = ohlcv_1h
+            context_any._ohlcv_4h = ohlcv_4h
+            context_any._market_data_source = exchange_id
 
             logger.info(f"[MarketData] Fetched context for {ticker} via {exchange_id}: price={current_price}, RSI={rsi}, ATR%={atr_pct}")
             return context
@@ -225,21 +288,27 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
     return MarketContext(ticker=ticker, current_price=0.0)
 
 
-async def _safe_fetch_funding_rate(exchange, symbol) -> Optional[float]:
+async def _safe_fetch_funding_rate(exchange: Any, symbol: str) -> float | None:
     try:
         funding = await asyncio.to_thread(exchange.fetch_funding_rate, symbol)
-        return funding.get("fundingRate")
+        if isinstance(funding, dict):
+            return _to_optional_float(funding.get("fundingRate"))
     except Exception:
         return None
+    return None
 
 
-async def _safe_fetch_open_interest(exchange, symbol) -> tuple[Optional[float], Optional[float]]:
+async def _safe_fetch_open_interest(exchange: Any, symbol: str) -> tuple[float | None, float | None]:
     try:
         oi_data = await asyncio.to_thread(exchange.fetch_open_interest_history, symbol, "1h", None, 2)
         if oi_data and len(oi_data) >= 2:
-            oi = oi_data[-1].get("openInterestAmount", 0)
-            prev_oi = oi_data[-2].get("openInterestAmount", 0)
-            if prev_oi > 0:
+            latest = cast(dict[str, Any], oi_data[-1])
+            previous = cast(dict[str, Any], oi_data[-2])
+            oi = _to_optional_float(latest.get("openInterestAmount"))
+            prev_oi = _to_optional_float(previous.get("openInterestAmount"))
+            if oi is None:
+                return None, None
+            if prev_oi is not None and prev_oi > 0:
                 oi_change = ((oi - prev_oi) / prev_oi) * 100
                 return oi, oi_change
             return oi, None
@@ -248,19 +317,20 @@ async def _safe_fetch_open_interest(exchange, symbol) -> tuple[Optional[float], 
     return None, None
 
 
-async def _safe_fetch_long_short_ratio(exchange, symbol) -> Optional[float]:
+async def _safe_fetch_long_short_ratio(exchange: Any, symbol: str) -> float | None:
     try:
         if hasattr(exchange, 'fetch_long_short_ratio'):
             ratio_data = await asyncio.to_thread(exchange.fetch_long_short_ratio, symbol)
-            return ratio_data.get("longShortRatio")
+            if isinstance(ratio_data, dict):
+                return _to_optional_float(ratio_data.get("longShortRatio"))
     except Exception:
         pass
     return None
 
 
-async def _safe_fetch_ohlcv(exchange, symbol, timeframe, limit) -> list:
+async def _safe_fetch_ohlcv(exchange: Any, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
     try:
-        return await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
+        return cast(list[list[float]], await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit))
     except Exception:
         return []
 
@@ -301,11 +371,11 @@ def _calculate_rsi(closes: list[float], period: int = 14) -> float | None:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
-def _calculate_atr(ohlcv: list, period: int = 14) -> float | None:
+def _calculate_atr(ohlcv: list[list[float]], period: int = 14) -> float | None:
     """Calculate ATR from OHLCV data."""
     if len(ohlcv) < period + 1:
         return None
-    trs = []
+    trs: list[float] = []
     for i in range(1, len(ohlcv)):
         high, low, prev_close = ohlcv[i][2], ohlcv[i][3], ohlcv[i - 1][4]
         tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
@@ -334,28 +404,36 @@ async def fetch_correlated_assets_context() -> dict:
     Fetch market context for correlated assets (BTC, ETH).
     Used by pre-filter Check 18 (Correlated Assets).
     """
-    correlated = {}
+    correlated: dict[str, float] = {}
 
     try:
         exchange = _get_exchange()
 
-        btc_ticker, btc_ohlcv, eth_ticker, eth_ohlcv = await asyncio.gather(
+        correlated_results = cast(
+            tuple[object, object, object, object],
+            await asyncio.gather(
             asyncio.to_thread(exchange.fetch_ticker, "BTC/USDT"),
             asyncio.to_thread(exchange.fetch_ohlcv, "BTC/USDT", "1h", None, 2),
             asyncio.to_thread(exchange.fetch_ticker, "ETH/USDT"),
             asyncio.to_thread(exchange.fetch_ohlcv, "ETH/USDT", "1h", None, 2),
             return_exceptions=True,
+            ),
         )
+        btc_ticker, btc_ohlcv, eth_ticker, eth_ohlcv = correlated_results
 
         if not isinstance(btc_ticker, Exception) and not isinstance(btc_ohlcv, Exception):
-            btc_price = btc_ticker.get("last", 0.0)
-            btc_1h_ago = btc_ohlcv[-2][4] if isinstance(btc_ohlcv, list) and len(btc_ohlcv) >= 2 else btc_price
+            btc_ticker_data = cast(dict[str, Any], btc_ticker)
+            btc_ohlcv_data = cast(list[list[float]], btc_ohlcv)
+            btc_price = _to_float(btc_ticker_data.get("last"), 0.0)
+            btc_1h_ago = float(btc_ohlcv_data[-2][4]) if len(btc_ohlcv_data) >= 2 else btc_price
             btc_change = ((btc_price - btc_1h_ago) / btc_1h_ago * 100) if btc_1h_ago else 0.0
             correlated["BTC_change_1h"] = round(btc_change, 2)
 
         if not isinstance(eth_ticker, Exception) and not isinstance(eth_ohlcv, Exception):
-            eth_price = eth_ticker.get("last", 0.0)
-            eth_1h_ago = eth_ohlcv[-2][4] if isinstance(eth_ohlcv, list) and len(eth_ohlcv) >= 2 else eth_price
+            eth_ticker_data = cast(dict[str, Any], eth_ticker)
+            eth_ohlcv_data = cast(list[list[float]], eth_ohlcv)
+            eth_price = _to_float(eth_ticker_data.get("last"), 0.0)
+            eth_1h_ago = float(eth_ohlcv_data[-2][4]) if len(eth_ohlcv_data) >= 2 else eth_price
             eth_change = ((eth_price - eth_1h_ago) / eth_1h_ago * 100) if eth_1h_ago else 0.0
             correlated["ETH_change_1h"] = round(eth_change, 2)
 
@@ -365,7 +443,7 @@ async def fetch_correlated_assets_context() -> dict:
     return correlated
 
 
-async def fetch_whale_activity(ticker: str) -> dict:
+async def fetch_whale_activity(ticker: str) -> dict[str, Any]:
     """
     Fetch whale activity data from multiple FREE sources.
 
@@ -376,13 +454,9 @@ async def fetch_whale_activity(ticker: str) -> dict:
 
     Returns large transfer counts and net flow estimates.
     """
-    whale_data = {}
+    whale_data: dict[str, Any] = {}
 
     symbol = ticker.upper().replace("USDT", "").replace("USD", "")
-
-    # Get configurable threshold from admin settings
-    from core.security import get_secure_api_key
-    whale_threshold_usd = float(get_secure_api_key("whale_threshold_usd") or os.getenv("WHALE_THRESHOLD_USD", "1000000"))  # $1M default
 
     # ── Source 1: Exchange Public Data (via CCXT) ──
     try:
@@ -464,13 +538,13 @@ async def fetch_whale_activity(ticker: str) -> dict:
     return whale_data
 
 
-async def _fetch_blockchain_whale_data(symbol: str) -> dict:
+async def _fetch_blockchain_whale_data(symbol: str) -> dict[str, Any]:
     """
     Fetch large transaction data from blockchain explorers (FREE).
 
     Supported: BTC (Blockchain.com), ETH/USDT (Etherscan)
     """
-    data = {}
+    data: dict[str, Any] = {}
     threshold_usd = 1_000_000  # $1M threshold for "whale"
 
     try:
@@ -588,13 +662,13 @@ async def _fetch_blockchain_whale_data(symbol: str) -> dict:
     return data
 
 
-async def _fetch_whale_alert_api(api_key: str, symbol: str) -> dict:
+async def _fetch_whale_alert_api(api_key: str, symbol: str) -> dict[str, Any]:
     """
     Fetch whale data from Whale Alert API (FREE: 500 requests/day).
 
     Requires: WHALE_ALERT_API_KEY in env
     """
-    data = {}
+    data: dict[str, Any] = {}
 
     whale_threshold_usd = float(os.getenv("WHALE_THRESHOLD_USD", "1000000"))
     min_value = int(whale_threshold_usd * 0.5)  # Use half threshold for API
@@ -615,22 +689,30 @@ async def _fetch_whale_alert_api(api_key: str, symbol: str) -> dict:
 
             if resp.status_code == 200:
                 api_data = resp.json()
+                if not isinstance(api_data, dict):
+                    return data
                 transactions = api_data.get('transactions', [])
+                if not isinstance(transactions, list):
+                    return data
 
                 large_transfers_1h = 0
                 net_flow_24h = 0.0
 
                 for tx in transactions:
+                    if not isinstance(tx, dict):
+                        continue
                     tx_time = tx.get('timestamp', 0)
-                    tx_age_hours = (time.time() - tx_time) / 3600
+                    tx_age_hours = (time.time() - _to_float(tx_time, 0.0)) / 3600
 
                     if tx_age_hours < 1:
                         large_transfers_1h += 1
 
                     if tx_age_hours < 24:
-                        amount_usd = tx.get('amount_usd', 0)
-                        from_type = tx.get('from', {}).get('owner_type', '')
-                        to_type = tx.get('to', {}).get('owner_type', '')
+                        amount_usd = _to_float(tx.get('amount_usd'), 0.0)
+                        from_info = tx.get('from', {})
+                        to_info = tx.get('to', {})
+                        from_type = from_info.get('owner_type', '') if isinstance(from_info, dict) else ''
+                        to_type = to_info.get('owner_type', '') if isinstance(to_info, dict) else ''
 
                         # Exchange inflow/outflow tracking
                         if from_type == 'unknown' and to_type == 'exchange':
@@ -651,16 +733,21 @@ async def fetch_enhanced_market_context(ticker: str) -> MarketContext:
     """
     Fetch comprehensive market context including correlated assets and whale activity.
     """
-    context, correlated, whale = await asyncio.gather(
-        fetch_market_context(ticker),
-        fetch_correlated_assets_context(),
-        fetch_whale_activity(ticker),
+    gathered = cast(
+        tuple[MarketContext, dict[str, float], dict[str, Any]],
+        await asyncio.gather(
+            fetch_market_context(ticker),
+            fetch_correlated_assets_context(),
+            fetch_whale_activity(ticker),
+        ),
     )
+    context, correlated, whale = gathered
 
+    context_any = cast(Any, context)
     if correlated:
-        context._correlated_assets = correlated
+        context_any._correlated_assets = correlated
     if whale:
-        context._whale_activity = whale
+        context_any._whale_activity = whale
 
     return context
 
@@ -669,7 +756,7 @@ async def fetch_ohlcv_history(
     ticker: str,
     timeframe: str = "1h",
     days: int = 30,
-    exchange_config: Optional[dict] = None,
+    exchange_config: dict | None = None,
 ) -> list[dict]:
     """
     Fetch historical OHLCV data for backtesting.

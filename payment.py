@@ -2,14 +2,12 @@
 Signal Server - Payment Module (Enhanced)
 Crypto payment handling with multi-chain support.
 """
-import json
-from typing import Optional
-from loguru import logger
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any, cast
+
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import AdminSettingModel
-
 
 # Supported payment networks
 SUPPORTED_NETWORKS = {
@@ -22,11 +20,16 @@ SUPPORTED_NETWORKS = {
 }
 
 
+def _setting_value_text(setting: AdminSettingModel | None) -> str | None:
+    value = cast(Any, getattr(setting, "value", None))
+    return str(value) if value else None
+
+
 async def get_payment_address(
     session: AsyncSession,
     currency: str,
     network: str,
-) -> Optional[str]:
+) -> str | None:
     """Get payment wallet address for a currency/network."""
     key = f"payment_address_{currency}_{network}".upper()
 
@@ -36,7 +39,7 @@ async def get_payment_address(
     setting = result.scalar_one_or_none()
 
     if setting:
-        return setting.value
+        return _setting_value_text(setting)
 
     # Fallback to legacy key format
     legacy_key = f"payment_address_{network}".lower()
@@ -45,7 +48,7 @@ async def get_payment_address(
     )
     setting = result.scalar_one_or_none()
 
-    return setting.value if setting else None
+    return _setting_value_text(setting)
 
 
 async def set_payment_address(
@@ -63,7 +66,7 @@ async def set_payment_address(
     setting = result.scalar_one_or_none()
 
     if setting:
-        setting.value = address
+        cast(Any, setting).value = address
     else:
         setting = AdminSettingModel(key=key, value=address)
         session.add(setting)
@@ -72,24 +75,25 @@ async def set_payment_address(
     return True
 
 
-async def get_all_payment_addresses(session: AsyncSession) -> dict:
+async def get_all_payment_addresses(session: AsyncSession) -> dict[str, dict[str, str | None]]:
     """Get all configured payment addresses."""
     result = await session.execute(
         select(AdminSettingModel).where(AdminSettingModel.key.like("payment_address_%"))
     )
     settings = result.scalars().all()
 
-    addresses = {}
+    addresses: dict[str, dict[str, str | None]] = {}
     for setting in settings:
         # Parse key: payment_address_CURRENCY_NETWORK
-        parts = setting.key.replace("payment_address_", "").split("_")
+        key_text = str(cast(Any, getattr(setting, "key", "")))
+        parts = key_text.replace("payment_address_", "").split("_")
         if len(parts) >= 2:
             network = parts[-1]
             currency = "_".join(parts[:-1])
             addresses[f"{currency}_{network}"] = {
                 "currency": currency,
                 "network": network,
-                "address": setting.value,
+                "address": _setting_value_text(setting),
             }
 
     return addresses
@@ -114,13 +118,14 @@ async def create_payment_request(
     currency: str,
     network: str,
     user_id: str,
-    subscription_id: Optional[str] = None,
+    subscription_id: str | None = None,
 ) -> dict:
     """Create a payment request."""
+    import uuid
     from datetime import timedelta
+
     from core.database import PaymentModel
     from core.utils.datetime import utcnow
-    import uuid
 
     address = await get_payment_address(session, currency, network)
     if not address:

@@ -2,51 +2,53 @@
 Signal Server - Signal Processing Service
 Handles the complete signal processing pipeline.
 """
-import json
-import hashlib
-import os
-from typing import Optional
 import asyncio
+import hashlib
+import json
+import os
+from collections.abc import Sequence
 
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ai_analyzer import analyze_signal
 from core.config import settings
 from core.database import (
-    record_webhook_event,
-    has_recent_webhook_event,
-    get_user_by_id,
+    PositionModel,
     get_user_active_subscription,
+    get_user_by_id,
+    has_recent_webhook_event,
     log_trade_db,
+    record_webhook_event,
 )
-from core.security import decrypt_settings_payload
 from core.metrics import (
-    record_signal_received,
-    record_prefilter_result,
     record_ai_analysis,
+    record_prefilter_result,
+    record_signal_received,
     record_trade,
 )
+from core.security import decrypt_settings_payload
 from core.trading_control import trading_allowed
-from services.order_reconciler import record_order_event
+from exchange import execute_trade
+from market_data import fetch_enhanced_market_context, fetch_market_context
 from models import (
-    TradingViewSignal,
-    TradeDecision,
-    SignalDirection,
     AIAnalysis,
     MarketContext,
+    PreFilterResult,
+    SignalDirection,
+    TradeDecision,
+    TradingViewSignal,
+)
+from notifier import (
+    notify_ai_analysis,
+    notify_error,
+    notify_pre_filter_blocked,
+    notify_signal_received,
+    notify_trade_executed,
 )
 from pre_filter import run_pre_filter_async
-from ai_analyzer import analyze_signal
-from market_data import fetch_market_context, fetch_enhanced_market_context
-from exchange import execute_trade
-from notifier import (
-    notify_signal_received,
-    notify_pre_filter_blocked,
-    notify_ai_analysis,
-    notify_trade_executed,
-    notify_error,
-)
-
+from services.order_reconciler import record_order_event
 
 _WEBHOOK_LOCKS: dict[str, asyncio.Lock] = {}
 _WEBHOOK_LOCKS_GUARD = asyncio.Lock()
@@ -88,7 +90,7 @@ def _safe_event_payload(value):
 # Webhook Fingerprint
 # ─────────────────────────────────────────────
 
-def compute_webhook_fingerprint(body: dict, user_id: Optional[str] = None) -> str:
+def compute_webhook_fingerprint(body: dict, user_id: str | None = None) -> str:
     """Compute a unique fingerprint for webhook deduplication."""
     scope = user_id or "admin"
     alert_id = str(body.get("alert_id") or body.get("order_id") or body.get("id") or "").strip()
@@ -122,14 +124,14 @@ def verify_webhook_signature(request_body: bytes, signature: str) -> bool:
     TradingView Compatibility:
     TradingView does NOT support sending HMAC signature headers.
     It only sends the 'secret' field in JSON payload.
-    
+
     Security policy:
     - HMAC signature verification is OPTIONAL (extra security layer)
     - Primary security is the JSON payload 'secret' field (validated in webhook.py)
     - If HMAC secret configured AND signature present: must verify
     - If HMAC secret configured BUT no signature: allow (TradingView compatibility)
     - If no HMAC secret configured: allow (rely on payload secret)
-    
+
     Returns True to allow request to proceed for payload secret validation.
     Returns False ONLY when signature is present but invalid.
     """
@@ -181,9 +183,9 @@ class SignalProcessor:
     async def process_webhook(
         self,
         signal: TradingViewSignal,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
         client_ip: str = "",
-        raw_body: dict = None,
+        raw_body: dict | None = None,
     ) -> dict:
         """
         Process a webhook signal through the complete pipeline.
@@ -280,7 +282,7 @@ class SignalProcessor:
         self,
         fingerprint: str,
         signal: TradingViewSignal,
-        user_id: Optional[str],
+        user_id: str | None,
         client_ip: str,
         payload: dict,
     ):
@@ -318,18 +320,31 @@ class SignalProcessor:
         self,
         signal: TradingViewSignal,
         market: MarketContext,
-        user_id: Optional[str],
-        user_settings: Optional[dict] = None,
-    ) -> "PreFilterResult":
+        user_id: str | None,
+        user_settings: dict | None = None,
+    ) -> PreFilterResult:
         """Run pre-filter checks."""
         # Get user settings for limits
-        max_daily_trades = settings.risk.max_daily_trades
-        max_daily_loss = settings.risk.max_daily_loss_pct
+        max_daily_trades = int(getattr(settings.risk, "max_daily_trades", 0) or 0)
+        max_daily_loss = float(getattr(settings.risk, "max_daily_loss_pct", 0.0) or 0.0)
 
         user_risk = (user_settings or {}).get("risk") or {}
         if user_risk:
-            max_daily_trades = int(user_risk.get("max_daily_trades") or max_daily_trades)
-            max_daily_loss = float(user_risk.get("max_daily_loss_pct") or max_daily_loss)
+            # BUG FIX: Validate user risk settings to prevent bypass of risk controls.
+            # Negative or extreme values could disable safety limits entirely.
+            raw_daily_trades = user_risk.get("max_daily_trades")
+            if raw_daily_trades is not None:
+                try:
+                    max_daily_trades = max(1, min(int(float(raw_daily_trades)), 200))
+                except (TypeError, ValueError):
+                    pass
+
+            raw_daily_loss = user_risk.get("max_daily_loss_pct")
+            if raw_daily_loss is not None:
+                try:
+                    max_daily_loss = max(0.1, min(float(raw_daily_loss), 100.0))
+                except (TypeError, ValueError):
+                    pass
 
         result = await run_pre_filter_async(
             signal=signal,
@@ -376,8 +391,8 @@ class SignalProcessor:
         signal: TradingViewSignal,
         analysis: AIAnalysis,
         market: MarketContext,
-        user_id: Optional[str],
-        user_settings: Optional[dict] = None,
+        user_id: str | None,
+        user_settings: dict | None = None,
     ) -> TradeDecision:
         """Build trade decision from signal and analysis."""
         decision = TradeDecision(
@@ -471,6 +486,7 @@ class SignalProcessor:
             analysis.position_size_pct,
             analysis.recommended_leverage,
             decision=decision,
+            user_settings=user_settings,
         )
 
         decision.reason = analysis.reasoning
@@ -554,7 +570,7 @@ class SignalProcessor:
         self,
         direction: SignalDirection,
         entry: float,
-        raw_levels: list[tuple[Optional[float], float]],
+        raw_levels: Sequence[tuple[float | None, float]],
         max_levels: int,
     ) -> list:
         """Validate TP direction and cap cumulative close quantity to 100%."""
@@ -574,6 +590,15 @@ class SignalProcessor:
             if remaining_pct <= 0:
                 break
 
+        # BUG FIX: Sort TP levels by distance from entry (closest first).
+        # For LONG: ascending price; for SHORT: descending price.
+        # This ensures TP1 is always the nearest target.
+        if levels:
+            if direction == SignalDirection.LONG:
+                levels.sort(key=lambda tp: tp.price)
+            elif direction == SignalDirection.SHORT:
+                levels.sort(key=lambda tp: tp.price, reverse=True)
+
         if not levels and raw_levels:
             fallback = self._valid_take_profit(direction, entry, raw_levels[0][0])
             if fallback:
@@ -586,13 +611,17 @@ class SignalProcessor:
         return max(1, min(int(tp_cfg.get("num_levels") or settings.take_profit.num_levels or 1), 4))
 
     @staticmethod
-    def _valid_stop_loss(direction: SignalDirection, entry: float, price: Optional[float]) -> Optional[float]:
+    def _valid_stop_loss(direction: SignalDirection, entry: float, price: float | None) -> float | None:
         try:
             value = float(price or 0)
             entry = float(entry or 0)
         except (TypeError, ValueError):
             return None
         if value <= 0 or entry <= 0:
+            return None
+        # BUG FIX: Reject stop loss that equals entry price — it would trigger
+        # immediately and cause instant liquidation.
+        if value == entry:
             return None
         if direction == SignalDirection.LONG and value < entry:
             return value
@@ -601,7 +630,7 @@ class SignalProcessor:
         return None
 
     @staticmethod
-    def _valid_take_profit(direction: SignalDirection, entry: float, price: Optional[float]) -> Optional[float]:
+    def _valid_take_profit(direction: SignalDirection, entry: float, price: float | None) -> float | None:
         try:
             value = float(price or 0)
             entry = float(entry or 0)
@@ -615,12 +644,82 @@ class SignalProcessor:
             return value
         return None
 
+    @staticmethod
+    def _normalize_size_pct(size_pct: float) -> float:
+        """Normalize AI-returned size_pct to a 0-1 fraction.
+
+        AI models may return either a 0-1 fraction or a 1-100 percentage.
+        We detect which format was used and always return a 0-1 fraction.
+        """
+        value = float(size_pct or 0.0)
+        if value <= 0:
+            return 0.0
+        # Values > 1 are treated as percentages (e.g. 50 means 50%)
+        if value > 1.0:
+            value = value / 100.0
+        return max(0.0, min(value, 1.0))
+
+    @staticmethod
+    def _coerce_risk_float(value, default: float, min_value: float, max_value: float) -> float:
+        if isinstance(value, bool):
+            parsed = default
+        elif isinstance(value, (int, float)):
+            parsed = float(value)
+        elif isinstance(value, str) and value.strip():
+            try:
+                parsed = float(value)
+            except ValueError:
+                parsed = default
+        else:
+            parsed = default
+        return max(min_value, min(parsed, max_value))
+
+    @classmethod
+    def _resolved_risk_settings(cls, user_settings: dict | None = None) -> dict[str, float | str]:
+        risk_cfg = (user_settings or {}).get("risk") or {}
+        default_mode = str(getattr(settings.risk, "position_sizing_mode", "percentage") or "percentage").lower().strip()
+        if default_mode not in {"percentage", "fixed", "risk_ratio"}:
+            default_mode = "percentage"
+
+        sizing_mode = str(risk_cfg.get("position_sizing_mode") or default_mode).lower().strip()
+        if sizing_mode not in {"percentage", "fixed", "risk_ratio"}:
+            sizing_mode = default_mode
+
+        return {
+            "account_equity_usdt": cls._coerce_risk_float(
+                risk_cfg.get("account_equity_usdt"),
+                cls._coerce_risk_float(getattr(settings.risk, "account_equity_usdt", 10000.0), 10000.0, 100.0, 10_000_000.0),
+                100.0,
+                10_000_000.0,
+            ),
+            "max_position_pct": cls._coerce_risk_float(
+                risk_cfg.get("max_position_pct"),
+                cls._coerce_risk_float(getattr(settings.risk, "max_position_pct", 10.0), 10.0, 0.1, 100.0),
+                0.1,
+                100.0,
+            ),
+            "fixed_position_size_usdt": cls._coerce_risk_float(
+                risk_cfg.get("fixed_position_size_usdt"),
+                cls._coerce_risk_float(getattr(settings.risk, "fixed_position_size_usdt", 100.0), 100.0, 1.0, 1_000_000.0),
+                1.0,
+                1_000_000.0,
+            ),
+            "risk_per_trade_pct": cls._coerce_risk_float(
+                risk_cfg.get("risk_per_trade_pct"),
+                cls._coerce_risk_float(getattr(settings.risk, "risk_per_trade_pct", 1.0), 1.0, 0.1, 100.0),
+                0.1,
+                100.0,
+            ),
+            "position_sizing_mode": sizing_mode,
+        }
+
     def _calculate_position_size(
         self,
         price: float,
         size_pct: float,
         leverage: float,
-        decision: Optional[TradeDecision] = None,
+        decision: TradeDecision | None = None,
+        user_settings: dict | None = None,
     ) -> float:
         """Calculate position size based on account equity and risk.
 
@@ -629,36 +728,35 @@ class SignalProcessor:
         - fixed: Fixed USDT amount per trade
         - risk_ratio: Risk X% of account per trade (accounts for SL distance)
         """
-        equity = settings.risk.account_equity_usdt
-        max_position = settings.risk.max_position_pct
-        sizing_mode = settings.risk.position_sizing_mode
+        risk_settings = self._resolved_risk_settings(user_settings)
+        equity = float(risk_settings["account_equity_usdt"])
+        max_position = float(risk_settings["max_position_pct"])
+        sizing_mode = risk_settings["position_sizing_mode"]
         leverage = max(1.0, float(leverage or 1.0))
+
+        # BUG FIX: Normalize size_pct FIRST, before any clamping.
+        # Previously, values like 50 (meaning 50%) were clamped to 1.0 (100%)
+        # before the >1 check could convert them.
+        size_fraction = self._normalize_size_pct(size_pct)
 
         if sizing_mode == "fixed":
             # Fixed USDT amount per trade
-            fixed_amount = settings.risk.fixed_position_size_usdt
-            # Apply AI size_pct as a multiplier (0-1 or percentage)
-            size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
-            if size_pct and size_pct > 1:
-                size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
+            fixed_amount = float(risk_settings["fixed_position_size_usdt"])
             notional_value = fixed_amount * leverage * size_fraction
 
         elif sizing_mode == "risk_ratio":
             # Risk X% of account per trade - requires valid stop loss
-            risk_pct = settings.risk.risk_per_trade_pct
+            risk_pct = float(risk_settings["risk_per_trade_pct"])
             sl_distance_pct = 0.0
             if decision and decision.stop_loss and self._has_valid_sl(price, decision.stop_loss):
                 sl_distance_pct = self._sl_distance_pct(decision.direction, price, decision.stop_loss)
-            
+
             if not sl_distance_pct or sl_distance_pct <= 0:
                 # Risk ratio mode requires stop loss - fallback to percentage mode
                 logger.warning(
                     f"[PositionSize] risk_ratio mode requires valid stop loss, "
                     f"but SL distance is {sl_distance_pct}. Falling back to percentage mode."
                 )
-                size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
-                if size_pct and size_pct > 1:
-                    size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
                 margin_value = equity * (max_position / 100.0) * size_fraction
                 notional_value = margin_value * leverage
             else:
@@ -667,20 +765,17 @@ class SignalProcessor:
                 notional_value = (risk_amount / (sl_distance_pct / 100.0)) * leverage
         else:
             # Default: percentage mode
-            size_fraction = max(0.0, min(float(size_pct or 0.0), 1.0))
-            if size_pct and size_pct > 1:
-                size_fraction = max(0.0, min(float(size_pct) / 100.0, 1.0))
             margin_value = equity * (max_position / 100.0) * size_fraction
             notional_value = margin_value * leverage
 
         # Calculate quantity
         if price > 0:
             quantity = notional_value / price
-            return round(quantity, 6)
+            return float(round(quantity, 6))
 
         return 0.0
 
-    def _has_valid_sl(self, entry_price: float, stop_loss: Optional[float] = None) -> bool:
+    def _has_valid_sl(self, entry_price: float, stop_loss: float | None = None) -> bool:
         """Check if we have valid stop loss info for risk-based sizing."""
         if not stop_loss or stop_loss <= 0 or entry_price <= 0:
             return False
@@ -690,15 +785,17 @@ class SignalProcessor:
         """Calculate stop loss distance as percentage of entry price."""
         if entry_price <= 0 or stop_loss <= 0:
             return 0.0
+        # BUG FIX: Use abs() to ensure we always return a positive distance.
+        # A negative distance would invert position sizing calculations.
         if direction and str(direction).lower() == "short":
-            return ((stop_loss - entry_price) / entry_price) * 100.0
-        return ((entry_price - stop_loss) / entry_price) * 100.0
+            return abs((stop_loss - entry_price) / entry_price) * 100.0
+        return abs((entry_price - stop_loss) / entry_price) * 100.0
 
     async def _execute_trade(
         self,
         decision: TradeDecision,
-        user_id: Optional[str],
-        user_settings: Optional[dict] = None,
+        user_id: str | None,
+        user_settings: dict | None = None,
     ) -> dict:
         """Execute the trade on the exchange."""
         exchange_config = {
@@ -740,7 +837,7 @@ class SignalProcessor:
                     )
                     exchange_config["live_trading"] = False
 
-        self._apply_position_limits(decision, exchange_config)
+        self._apply_position_limits(decision, exchange_config, user_settings)
         control_state = await trading_allowed(
             self.session,
             user_id=user_id,
@@ -755,7 +852,9 @@ class SignalProcessor:
                 "trading_control": control_state,
             }
 
-        result = await execute_trade(decision, exchange_config)
+        raw_result = await execute_trade(decision, exchange_config)
+        result: dict[str, object] = dict(raw_result) if isinstance(raw_result, dict) else {}
+        order_status = str(result.get("status", "unknown"))
 
 # Record trade
         signal_data = decision.signal.model_dump() if decision.signal else {}
@@ -768,7 +867,7 @@ class SignalProcessor:
             ticker=decision.ticker,
             direction=decision.direction.value if decision.direction else "unknown",
             execute=decision.execute,
-            order_status=result.get("status", "unknown"),
+            order_status=order_status,
             pnl_pct=0.0,  # Will be updated on close
             payload={
                 "signal": signal_data,
@@ -784,17 +883,21 @@ class SignalProcessor:
             },
         )
         try:
-            trade_payload = json.loads(trade.payload_json or "{}")
+            trade_payload = json.loads(str(trade.payload_json or "{}"))
         except (TypeError, json.JSONDecodeError):
             trade_payload = {}
+
+        position_id = trade_payload.get("position_id")
+        if position_id is not None:
+            position_id = str(position_id)
 
         order_event = await record_order_event(
             session=self.session,
             decision=decision,
             result=result,
             user_id=user_id,
-            trade_id=trade.id,
-            position_id=trade_payload.get("position_id"),
+            trade_id=str(trade.id) if trade.id is not None else None,
+            position_id=position_id,
         )
         result["order_event_id"] = order_event.id
 
@@ -802,7 +905,7 @@ class SignalProcessor:
         record_trade(
             decision.ticker,
             decision.direction.value if decision.direction else "unknown",
-            result.get("status", "unknown"),
+            order_status,
         )
 
         # Notify
@@ -810,7 +913,7 @@ class SignalProcessor:
 
         return result
 
-    async def _load_user_settings(self, user_id: Optional[str]) -> dict:
+    async def _load_user_settings(self, user_id: str | None) -> dict:
         """Load decrypted per-user settings once for this webhook."""
         if not user_id:
             return {}
@@ -818,23 +921,36 @@ class SignalProcessor:
         if not user:
             return {}
         try:
-            raw_settings = json.loads(user.settings_json or "{}")
+            raw_settings = json.loads(str(user.settings_json or "{}"))
             settings_data = decrypt_settings_payload(raw_settings)
-            return settings_data if isinstance(settings_data, dict) else {}
+            return dict(settings_data) if isinstance(settings_data, dict) else {}
         except Exception as exc:
             logger.warning(f"[Signal] Could not load user settings: {exc}")
             return {}
 
-    def _apply_position_limits(self, decision: TradeDecision, exchange_config: dict) -> None:
+    def _apply_position_limits(
+        self,
+        decision: TradeDecision,
+        exchange_config: dict,
+        user_settings: dict | None = None,
+    ) -> None:
         """Cap final quantity by the account and user max-position limits."""
         if not decision.entry_price or not decision.quantity or decision.quantity <= 0:
             return
-        max_position_pct = float(exchange_config.get("max_position_pct") or settings.risk.max_position_pct)
+        risk_settings = self._resolved_risk_settings(user_settings)
+        account_equity = float(risk_settings["account_equity_usdt"])
+        exchange_cap = self._coerce_risk_float(
+            exchange_config.get("max_position_pct"),
+            float(risk_settings["max_position_pct"]),
+            0.1,
+            100.0,
+        )
+        max_position_pct = min(exchange_cap, float(risk_settings["max_position_pct"]))
         max_leverage = max(1.0, min(float(exchange_config.get("max_leverage") or 125.0), 125.0))
         leverage = 1.0
         if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
             leverage = max(1.0, min(float(decision.ai_analysis.recommended_leverage), max_leverage))
-        max_notional = settings.risk.account_equity_usdt * (max_position_pct / 100.0) * leverage
+        max_notional = account_equity * (max_position_pct / 100.0) * leverage
         max_quantity = max_notional / float(decision.entry_price)
         if max_quantity > 0 and decision.quantity > max_quantity:
             logger.warning(
@@ -845,15 +961,12 @@ class SignalProcessor:
     async def _check_position_conflict(
         self,
         decision: TradeDecision,
-        user_id: Optional[str],
-    ) -> Optional[str]:
+        user_id: str | None,
+    ) -> str | None:
         """
         Check for conflicting open positions on the same ticker.
         Returns a rejection reason string, or None if no conflict.
         """
-        from sqlalchemy import select
-        from core.database import PositionModel
-
         try:
             stmt = select(PositionModel).where(
                 PositionModel.status.in_(["open", "pending"]),
@@ -892,10 +1005,10 @@ class SignalProcessor:
         reservation,
         signal: TradingViewSignal,
         fingerprint: str,
-        user_id: Optional[str],
+        user_id: str | None,
         client_ip: str,
         reason: str,
-        raw_body: Optional[dict] = None,
+        raw_body: dict | None = None,
     ):
         """Record and notify about blocked signal."""
         await notify_pre_filter_blocked(signal.ticker, signal.direction.value, reason)

@@ -2,35 +2,42 @@
 QuantPilot AI - Edge Cases and Boundary Condition Tests
 Tests for edge cases, boundary conditions, and error handling.
 """
-import pytest
-import pytest_asyncio
-import json
 import math
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
 
-from httpx import AsyncClient, ASGITransport
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import (
-    TradingViewSignal, SignalDirection, MarketContext,
-    AIAnalysis, TradeDecision, TrailingStopMode,
-    TakeProfitLevel, TakeProfitConfig, TrailingStopConfig,
-)
-from pre_filter import run_pre_filter_async, FilterThresholds, calculate_filter_score
-from services.signal_processor import SignalProcessor
-from exchange import _normalize_symbol, _symbol_candidates, _valid_stop_loss, _valid_take_profit
-from smc_analyzer import (
-    detect_fvgs, detect_order_blocks, detect_market_structure,
-    calculate_premium_discount, FVG, OrderBlock,
-)
-from ai_analyzer import _parse_response, _fallback_analysis, _price_to_bucket
+from ai_analyzer import _parse_response, _price_to_bucket
+from core.database import PositionModel, sync_position_from_trade_entry_async
 from core.security import (
-    hash_password, verify_password, validate_password_strength,
-    encrypt_value, decrypt_value, generate_token, is_placeholder_webhook_secret,
+    decrypt_value,
+    encrypt_value,
+    hash_password,
+    is_placeholder_webhook_secret,
+    validate_password_strength,
+    verify_password,
 )
-from core.database import sync_position_from_trade_entry_async, PositionModel
-from core.utils.common import safe_float, safe_bool, safe_int, safe_str
+from core.utils.common import safe_bool, safe_float, safe_int, safe_str
+from exchange import _normalize_symbol, _valid_stop_loss, _valid_take_profit
+from models import (
+    MarketContext,
+    SignalDirection,
+    TakeProfitConfig,
+    TakeProfitLevel,
+    TradeDecision,
+    TradingViewSignal,
+    TrailingStopConfig,
+    TrailingStopMode,
+)
+from pre_filter import FilterThresholds, calculate_filter_score
+from smc_analyzer import (
+    calculate_premium_discount,
+    detect_fvgs,
+    detect_order_blocks,
+)
+
+
 class TestTradingViewSignalValidation:
     """Test signal validation edge cases."""
 
@@ -493,13 +500,13 @@ class TestUtilityFunctions:
 
     def test_safe_bool_none(self):
         """None to bool."""
-        assert safe_bool(None) == False
+        assert not safe_bool(None)
 
     def test_safe_bool_string(self):
         """String to bool."""
-        assert safe_bool("true") == True
-        assert safe_bool("1") == True
-        assert safe_bool("false") == False
+        assert safe_bool("true")
+        assert safe_bool("1")
+        assert not safe_bool("false")
 
     def test_safe_int_none(self):
         """None to int."""

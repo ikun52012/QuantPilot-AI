@@ -6,10 +6,8 @@ Thread-safe, in-memory with periodic summary logging.
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 from loguru import logger
-
 
 # Approximate cost per 1M tokens (input/output) as of 2026
 _COST_PER_1M: dict[str, tuple[float, float]] = {

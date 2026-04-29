@@ -1,7 +1,8 @@
 """Alembic migration script template."""
-from alembic import op
-import sqlalchemy as sa
 from datetime import datetime, timezone
+
+import sqlalchemy as sa
+from alembic import op
 
 
 def _utcnow():

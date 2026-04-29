@@ -9,13 +9,14 @@ import os
 import threading
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
-from loguru import logger
-from models import TradingViewSignal, MarketContext, PreFilterResult, SignalDirection
-from trade_logger import get_today_pnl, get_recent_trade_results, get_today_pnl_async, get_recent_trade_results_async
-from core.utils.datetime import utcnow
 
+from loguru import logger
+
+from core.utils.datetime import utcnow
+from models import MarketContext, PreFilterResult, SignalDirection, TradingViewSignal
+from trade_logger import get_recent_trade_results_async, get_today_pnl_async
 
 _filter_stats_lock = threading.Lock()
 _filter_stats: dict[str, dict[str, int]] = {}
@@ -31,8 +32,24 @@ def _load_filter_stats() -> dict[str, dict[str, int]]:
     try:
         import os
         if os.path.exists(_STATS_FILE):
-            with open(_STATS_FILE, "r") as f:
-                return json.load(f)
+            with open(_STATS_FILE) as f:
+                raw = json.load(f)
+                if not isinstance(raw, dict):
+                    return {}
+                loaded: dict[str, dict[str, int]] = {}
+                for check_name, ticker_counts in raw.items():
+                    if not isinstance(check_name, str) or not isinstance(ticker_counts, dict):
+                        continue
+                    normalized_counts: dict[str, int] = {}
+                    for ticker, count in ticker_counts.items():
+                        if not isinstance(ticker, str):
+                            continue
+                        try:
+                            normalized_counts[ticker] = int(count)
+                        except (TypeError, ValueError):
+                            continue
+                    loaded[check_name] = normalized_counts
+                return loaded
     except Exception:
         pass
     return {}
@@ -261,7 +278,7 @@ def calculate_filter_score(checks: dict[str, dict]) -> float:
 
 
 _state_lock = threading.Lock()
-_recent_signals: deque = deque(maxlen=_MAX_RECENT_SIGNALS)
+_recent_signals: deque[dict[str, Any]] = deque(maxlen=_MAX_RECENT_SIGNALS)
 _daily_trade_count: int = 0
 _daily_trade_date: str = ""
 _daily_pnl: float = 0.0
@@ -302,7 +319,7 @@ def update_daily_pnl(pnl: float):
 
 async def count_today_executed_trades_async(user_id: str | None = None) -> int:
     """Count today's executed trades from the async database."""
-    from core.database import db_manager, count_today_executed_trades
+    from core.database import count_today_executed_trades, db_manager
 
     try:
         async with db_manager.async_session_factory() as session:
@@ -338,9 +355,9 @@ async def run_pre_filter_async(
     global _daily_trade_count, _daily_trade_date
 
     thresholds = get_thresholds()
-    checks = {}
-    reasons = []
-    soft_fail_reasons = []
+    checks: dict[str, dict[str, Any]] = {}
+    reasons: list[str] = []
+    soft_fail_reasons: list[str] = []
     ticker = signal.ticker.upper()
 
     # ── Check 1: Daily trade limit ──
@@ -553,7 +570,7 @@ async def run_pre_filter_async(
         "day": now_utc.strftime("%A"),
     }
     if not time_ok:
-        soft_fail_reasons.append(f"Low liquidity period (soft fail)")
+        soft_fail_reasons.append("Low liquidity period (soft fail)")
         checks["market_hours"]["soft_fail"] = True
 
     # ── Check 13: Consecutive Loss Protection ──
@@ -619,7 +636,7 @@ async def run_pre_filter_async(
             "threshold": ema_diff_min,
         }
         if not ema_ok:
-            soft_fail_reasons.append(f"EMA trend conflict (soft fail)")
+            soft_fail_reasons.append("EMA trend conflict (soft fail)")
             checks["ema_alignment"]["soft_fail"] = True
 
     # ── Check 16: Market Structure (SMC) Validation ──
@@ -695,7 +712,7 @@ async def run_pre_filter_async(
             "note": "Correlated market movement against signal direction",
         }
         if not correlated_ok:
-            soft_fail_reasons.append(f"Correlated assets moving opposite (soft fail)")
+            soft_fail_reasons.append("Correlated assets moving opposite (soft fail)")
             checks["correlated_assets"]["soft_fail"] = True
 
     # ── Check 19: Whale Activity / Large Transactions (NEW) ──

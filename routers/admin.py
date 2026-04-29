@@ -9,28 +9,45 @@ import secrets
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, cast
 
-from fastapi import APIRouter, Request, Response, HTTPException, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
 from loguru import logger
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete, func
 
-from core.database import (
-    get_db, get_all_users, get_user_by_id, update_user_status,
-    get_user_by_username, get_user_by_email, update_user_password_hash, set_admin_setting, get_admin_setting,
-    AdminAuditLogModel, AdminSettingModel, UserModel, SubscriptionPlanModel, SubscriptionModel, PaymentModel,
-    WebhookEventModel, TradeModel, PositionModel, InviteCodeModel, RedeemCodeModel,
-    seed_defaults,
-)
-from core.security import hash_password, validate_password_strength, generate_webhook_secret, webhook_secret_hash, is_placeholder_webhook_secret
 from core.auth import require_admin
 from core.config import settings
-from core.utils.datetime import utcnow, to_utc
-from core.request_utils import client_ip as get_client_ip, public_base_url
-
+from core.database import (
+    AdminAuditLogModel,
+    AdminSettingModel,
+    InviteCodeModel,
+    PaymentModel,
+    RedeemCodeModel,
+    SubscriptionModel,
+    SubscriptionPlanModel,
+    UserModel,
+    WebhookEventModel,
+    get_admin_setting,
+    get_all_users,
+    get_db,
+    get_user_by_email,
+    get_user_by_id,
+    get_user_by_username,
+    set_admin_setting,
+    update_user_password_hash,
+)
+from core.request_utils import client_ip as get_client_ip
+from core.request_utils import public_base_url
+from core.security import (
+    generate_webhook_secret,
+    hash_password,
+    is_placeholder_webhook_secret,
+    validate_password_strength,
+)
+from core.utils.datetime import to_utc, utcnow
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -80,7 +97,7 @@ class CreateInviteCodeRequest(BaseModel):
 
 class CreateRedeemCodeRequest(BaseModel):
     code: str = Field(default="", max_length=80)
-    plan_id: Optional[str] = None
+    plan_id: str | None = None
     duration_days: int = Field(default=0)
     balance_usdt: float = Field(default=0)
     note: str = Field(default="")
@@ -105,10 +122,10 @@ class PaymentAddressRequest(BaseModel):
 
 
 class ExternalAPIKeysRequest(BaseModel):
-    whale_alert_api_key: Optional[str] = Field(default="", max_length=100, description="Whale Alert API Key (free tier: 500/day)")
-    etherscan_api_key: Optional[str] = Field(default="", max_length=100, description="Etherscan API Key (free tier: 5 calls/sec)")
-    glassnode_api_key: Optional[str] = Field(default="", max_length=100, description="Glassnode API Key (paid)")
-    cryptoquant_api_key: Optional[str] = Field(default="", max_length=100, description="CryptoQuant API Key (paid)")
+    whale_alert_api_key: str | None = Field(default="", max_length=100, description="Whale Alert API Key (free tier: 500/day)")
+    etherscan_api_key: str | None = Field(default="", max_length=100, description="Etherscan API Key (free tier: 5 calls/sec)")
+    glassnode_api_key: str | None = Field(default="", max_length=100, description="Glassnode API Key (paid)")
+    cryptoquant_api_key: str | None = Field(default="", max_length=100, description="CryptoQuant API Key (paid)")
 
 
 class EnhancedFiltersRequest(BaseModel):
@@ -132,15 +149,17 @@ def _generate_code(prefix: str) -> str:
     return f"{prefix}-{token[:12]}"
 
 
-def _parse_expiry(expires_at: str = "", expires_days: int = 30) -> Optional[datetime]:
+def _parse_expiry(expires_at: str = "", expires_days: int = 30) -> datetime | None:
     if expires_at:
         try:
             parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            return to_utc(parsed)
-        except ValueError:
-            raise HTTPException(400, "Invalid expires_at date")
+            normalized = cast(datetime, to_utc(parsed))
+            return normalized
+        except ValueError as err:
+            raise HTTPException(400, "Invalid expires_at date") from err
     if expires_days:
-        return utcnow() + timedelta(days=expires_days)
+        now = cast(datetime, utcnow())
+        return now + timedelta(days=expires_days)
     return None
 
 
@@ -175,7 +194,6 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
 ):
     """List all users with subscriptions (optimized batch query)."""
-    from sqlalchemy.orm import selectinload
 
     users = await get_all_users(db)
 
@@ -225,12 +243,13 @@ async def list_users(
 @router.post("/users")
 async def create_user(
     req: CreateUserRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Create a new user from admin panel."""
-    from core.database import create_user as db_create_user, get_user_by_username, get_user_by_email
+    from core.database import create_user as db_create_user
+    from core.database import get_user_by_email, get_user_by_username
 
     # Check for existing
     if await get_user_by_username(db, req.username):
@@ -271,9 +290,9 @@ async def create_user(
 async def update_user(
     user_id: str,
     req: UpdateUserRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Update a user."""
     user = await get_user_by_id(db, user_id)
@@ -341,9 +360,9 @@ async def update_user(
 @router.delete("/user/{user_id}")
 async def delete_user(
     user_id: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Soft delete a user (preserves historical data)."""
     user = await get_user_by_id(db, user_id)
@@ -382,12 +401,12 @@ async def delete_user(
 @router.post("/user/{user_id}/restore")
 async def restore_user(
     user_id: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Restore a soft-deleted user."""
-    from core.database import soft_delete_user, restore_user as db_restore_user
+    from core.database import restore_user as db_restore_user
 
     user = await get_user_by_id(db, user_id)
     if not user:
@@ -408,9 +427,9 @@ async def restore_user(
 @router.post("/user/{user_id}/toggle")
 async def toggle_user(
     user_id: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Toggle a user's active state."""
     user = await get_user_by_id(db, user_id)
@@ -429,9 +448,9 @@ async def toggle_user(
 async def set_user_password(
     user_id: str,
     req: SetPasswordRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Set a user's password from the admin panel."""
     user = await get_user_by_id(db, user_id)
@@ -450,9 +469,9 @@ async def set_user_password(
 async def grant_user_subscription(
     user_id: str,
     req: GrantSubscriptionRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Grant or create a subscription for a user."""
     user = await get_user_by_id(db, user_id)
@@ -481,14 +500,14 @@ async def grant_user_subscription(
 @router.post("/users/{user_id}/reset-password")
 async def reset_user_password(
     user_id: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Reset a user's password to a random value.
 
-    The new password is NOT returned in the response for security reasons.
-    It should be communicated to the user via a secure channel (email, etc).
+    The new password is returned once in the response so the admin can
+    deliver it over a secure channel.
     """
     user = await get_user_by_id(db, user_id)
     if not user:
@@ -501,12 +520,12 @@ async def reset_user_password(
 
     await _add_audit_log(db, admin, "reset_password", "user", user_id, f"Reset password for {user.username}", request)
 
-    logger.info(f"[Admin] Password reset for user {user.username} by {admin['username']} - new password generated")
+    logger.info(f"[Admin] Password reset for user {user.username} by {admin['username']}")
 
     return {
         "status": "success",
-        "message": "Password has been reset. The new password has been logged for secure delivery.",
-        "password_hint": f"Check server logs or use secure channel to deliver to user",
+        "message": "Password has been reset. Deliver the temporary password to the user over a secure channel.",
+        "temporary_password": new_password,
     }
 
 
@@ -628,9 +647,9 @@ async def get_settings(
 @router.put("/settings")
 async def update_settings(
     settings_data: dict,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Update admin settings."""
     for key, value in settings_data.items():
@@ -646,9 +665,9 @@ async def update_settings(
 
 @router.get("/webhook-config")
 async def get_webhook_config(
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Get webhook configuration."""
     secret = await get_admin_setting(db, "webhook_secret", "")
@@ -734,17 +753,17 @@ async def list_audit_logs(
     logs = result.scalars().all()
     return [
         {
-            "id": l.id,
-            "admin_id": l.admin_id,
-            "admin_username": l.admin_username,
-            "action": l.action,
-            "target_type": l.target_type,
-            "target_id": l.target_id,
-            "summary": l.summary,
-            "client_ip": l.client_ip,
-            "created_at": l.created_at.isoformat() if l.created_at else None,
+            "id": log_entry.id,
+            "admin_id": log_entry.admin_id,
+            "admin_username": log_entry.admin_username,
+            "action": log_entry.action,
+            "target_type": log_entry.target_type,
+            "target_id": log_entry.target_id,
+            "summary": log_entry.summary,
+            "client_ip": log_entry.client_ip,
+            "created_at": log_entry.created_at.isoformat() if log_entry.created_at else None,
         }
-        for l in logs
+        for log_entry in logs
     ]
 
 
@@ -808,9 +827,9 @@ async def get_registration_settings(
 @router.post("/registration")
 async def save_registration_settings(
     req: RegistrationSettingsRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     await set_admin_setting(db, "registration_invite_required", "true" if req.invite_required else "false")
     await db.commit()
@@ -893,9 +912,9 @@ async def list_payment_addresses(
 @router.post("/payment-addresses")
 async def save_payment_address(
     req: PaymentAddressRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     from payment import set_payment_address
 
@@ -939,9 +958,9 @@ async def list_admin_payments(
 @router.post("/payment/{payment_id}/confirm")
 async def confirm_payment(
     payment_id: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     payment = await db.get(PaymentModel, payment_id)
     if not payment:
@@ -959,9 +978,9 @@ async def confirm_payment(
 @router.post("/payment/{payment_id}/reject")
 async def reject_payment(
     payment_id: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     payment = await db.get(PaymentModel, payment_id)
     if not payment:
@@ -977,9 +996,9 @@ async def reject_payment(
 @router.post("/payment/{payment_id}/verify")
 async def verify_payment(
     payment_id: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     payment = await db.get(PaymentModel, payment_id)
     if not payment:
@@ -1054,9 +1073,9 @@ async def get_trading_controls(
 @router.post("/trading-controls")
 async def update_trading_controls(
     req: TradingControlRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Update global trading mode."""
     from core.trading_control import set_trading_control_state
@@ -1082,9 +1101,9 @@ async def update_trading_controls(
 
 @router.post("/trading-controls/emergency-stop")
 async def emergency_stop_trading(
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Immediately block all new trade execution."""
     from core.trading_control import set_trading_control_state
@@ -1102,9 +1121,9 @@ async def emergency_stop_trading(
 
 @router.post("/trading-controls/resume")
 async def resume_trading(
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Resume new trade execution."""
     from core.trading_control import set_trading_control_state
@@ -1122,7 +1141,7 @@ async def resume_trading(
 
 @router.get("/order-events")
 async def get_order_events(
-    status: Optional[str] = None,
+    status: str | None = None,
     limit: int = Query(100, ge=1, le=500),
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
@@ -1158,9 +1177,9 @@ async def get_order_events(
 
 @router.post("/order-events/reconcile")
 async def reconcile_order_events(
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Promote stale retryable order events into manual review."""
     from services.order_reconciler import run_order_reconciliation
@@ -1200,9 +1219,9 @@ async def get_backups(
 
 @router.post("/backups")
 async def create_admin_backup(
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     from backups import create_backup
 
@@ -1228,9 +1247,9 @@ async def download_backup(
 @router.post("/backups/{filename}/restore")
 async def stage_backup_restore(
     filename: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     from backups import stage_restore
 
@@ -1245,9 +1264,9 @@ async def stage_backup_restore(
 @router.post("/backups/{filename}/restore-pg")
 async def restore_postgresql_backup(
     filename: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Restore a PostgreSQL backup using pg_restore. Only works with PostgreSQL databases."""
     from backups import restore_postgresql
@@ -1310,7 +1329,7 @@ async def _add_audit_log(
     target_type: str,
     target_id: str,
     summary: str,
-    request: Optional[Request],
+    request: Request | None,
 ):
     """Add an audit log entry."""
     admin_client_ip = ""
@@ -1334,23 +1353,23 @@ async def _add_audit_log(
 # ─────────────────────────────────────────────
 
 class FilterThresholdsRequest(BaseModel):
-    atr_pct_max: Optional[float] = None
-    spread_pct_max: Optional[float] = None
-    volume_24h_min: Optional[float] = None
-    price_change_1h_max: Optional[float] = None
-    rsi_long_max: Optional[float] = None
-    rsi_short_min: Optional[float] = None
-    funding_rate_threshold: Optional[float] = None
-    orderbook_long_min: Optional[float] = None
-    orderbook_short_max: Optional[float] = None
-    signal_saturation_max: Optional[int] = None
-    ema_diff_pct_min: Optional[float] = None
-    consecutive_loss_max: Optional[int] = None
-    cooldown_seconds: Optional[int] = None
-    price_deviation_pct_max: Optional[float] = None
-    oi_change_pct_max: Optional[float] = None
-    correlated_asset_change_max: Optional[float] = None
-    min_pass_score: Optional[float] = None
+    atr_pct_max: float | None = None
+    spread_pct_max: float | None = None
+    volume_24h_min: float | None = None
+    price_change_1h_max: float | None = None
+    rsi_long_max: float | None = None
+    rsi_short_min: float | None = None
+    funding_rate_threshold: float | None = None
+    orderbook_long_min: float | None = None
+    orderbook_short_max: float | None = None
+    signal_saturation_max: int | None = None
+    ema_diff_pct_min: float | None = None
+    consecutive_loss_max: int | None = None
+    cooldown_seconds: int | None = None
+    price_deviation_pct_max: float | None = None
+    oi_change_pct_max: float | None = None
+    correlated_asset_change_max: float | None = None
+    min_pass_score: float | None = None
 
 
 @router.get("/filter-thresholds")
@@ -1370,9 +1389,9 @@ async def get_filter_thresholds(
 @router.post("/filter-thresholds")
 async def update_filter_thresholds(
     req: FilterThresholdsRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Update pre-filter thresholds."""
     from pre_filter import get_thresholds
@@ -1412,9 +1431,9 @@ async def get_filter_statistics(
 
 @router.post("/filter-stats/reset")
 async def reset_filter_statistics(
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Reset pre-filter blocking statistics."""
     from pre_filter import reset_filter_stats
@@ -1480,9 +1499,9 @@ async def get_external_api_keys(
 @router.post("/external-api-keys")
 async def update_external_api_keys(
     req: ExternalAPIKeysRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Update external API key configurations."""
     from core.database import get_admin_setting, set_admin_setting
@@ -1529,13 +1548,13 @@ async def update_external_api_keys(
 @router.delete("/external-api-keys/{key_name}")
 async def delete_external_api_key(
     key_name: str,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Delete a specific external API key."""
     from core.database import get_admin_setting, set_admin_setting
-    from core.security import decrypt_settings_payload, encrypt_settings_payload, clear_secure_api_key
+    from core.security import clear_secure_api_key, decrypt_settings_payload, encrypt_settings_payload
 
     valid_keys = {"whale_alert_api_key", "etherscan_api_key", "glassnode_api_key", "cryptoquant_api_key"}
     if key_name not in valid_keys:
@@ -1611,9 +1630,9 @@ async def get_enhanced_filters_settings(
 @router.post("/enhanced-filters")
 async def update_enhanced_filters_settings(
     req: EnhancedFiltersRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Update enhanced filter settings."""
     from core.database import set_admin_setting
@@ -1669,29 +1688,32 @@ def _update_control_enabled() -> bool:
     return os.getenv("AUTO_UPDATE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _parse_iso_timestamp(value: str) -> Optional[datetime]:
+def _parse_iso_timestamp(value: str) -> datetime | None:
     if not value:
         return None
     try:
-        return to_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        normalized = cast(datetime, to_utc(datetime.fromisoformat(value.replace("Z", "+00:00"))))
+        return normalized
     except ValueError:
         return None
 
 
 def _now_iso() -> str:
-    return utcnow().isoformat().replace("+00:00", "Z")
+    now = cast(datetime, utcnow())
+    return now.isoformat().replace("+00:00", "Z")
 
 
-def _read_update_payload(path: Path) -> Optional[dict]:
+def _read_update_payload(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def _write_update_payload(path: Path, payload: dict) -> None:
+def _write_update_payload(path: Path, payload: dict[str, Any]) -> None:
     _ensure_update_dirs()
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -1708,7 +1730,7 @@ def _version_tuple(value: str) -> tuple[int, int, int]:
     parts = [int(part) for part in re.findall(r"\d+", value or "")[:3]]
     while len(parts) < 3:
         parts.append(0)
-    return tuple(parts[:3])
+    return (parts[0], parts[1], parts[2])
 
 
 def _next_update_task_id() -> str:
@@ -1732,7 +1754,7 @@ def _update_supported() -> bool:
     return _update_control_enabled() and bool(health.get("healthy"))
 
 
-def _latest_update_task() -> Optional[dict]:
+def _latest_update_task() -> dict | None:
     _ensure_update_dirs()
     status_files = sorted(UPDATE_STATUS_DIR.glob("upd_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     for path in status_files:
@@ -1742,7 +1764,7 @@ def _latest_update_task() -> Optional[dict]:
     return None
 
 
-def _active_update_task() -> Optional[dict]:
+def _active_update_task() -> dict | None:
     _ensure_update_dirs()
     status_files = sorted(UPDATE_STATUS_DIR.glob("upd_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     for path in status_files:
@@ -1852,9 +1874,9 @@ async def check_for_update(
 @router.post("/perform-update")
 async def perform_update(
     req: UpdateRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """Queue a one-click Docker update handled by the updater sidecar."""
 
@@ -1907,8 +1929,8 @@ async def perform_update(
     try:
         _write_update_payload(_status_file(task_id), task_payload)
         _write_update_payload(_request_file(task_id), task_payload)
-    except OSError as e:
-        raise HTTPException(500, f"Failed to queue update task: {e}")
+    except OSError as err:
+        raise HTTPException(500, f"Failed to queue update task: {err}") from err
 
     await _add_audit_log(
         db,

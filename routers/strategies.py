@@ -5,22 +5,21 @@ Provides endpoints for managing automated trading strategies.
 import asyncio
 import json
 from dataclasses import asdict
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.auth import get_current_user, require_admin as get_current_admin
+from core.auth import get_current_user
+from core.auth import require_admin as get_current_admin
 from core.config import settings
-from core.database import get_db, StrategyStateModel
+from core.database import StrategyStateModel, get_db
 from core.utils.datetime import utcnow
-from strategies.dca import DCAEngine, DCAConfig, DCAEntry, DCAPosition
-from strategies.grid import GridEngine, GridConfig, GridLevel, GridPosition
-
+from strategies.dca import DCAConfig, DCAEngine, DCAEntry, DCAPosition
+from strategies.grid import GridConfig, GridEngine, GridLevel, GridPosition
 
 router = APIRouter(prefix="/api/strategies", tags=["Strategies"])
 
@@ -169,7 +168,7 @@ async def _load_strategy_state(
     user_id: str,
     strategy_type: str,
     strategy_id: str,
-) -> Optional[StrategyStateModel]:
+) -> StrategyStateModel | None:
     row = await db.get(StrategyStateModel, strategy_id)
     if not row or row.strategy_type != strategy_type or row.user_id != user_id:
         return None
@@ -276,9 +275,9 @@ async def create_dca_strategy(
             "exchange_executed": not request.paper_mode,
         }
 
-    except Exception as e:
-        logger.error(f"[DCA/Create] Failed: {e}")
-        raise HTTPException(500, f"Failed to create DCA strategy: {str(e)}")
+    except Exception as err:
+        logger.error(f"[DCA/Create] Failed: {err}")
+        raise HTTPException(500, f"Failed to create DCA strategy: {err}") from err
 
 
 @router.get("/dca/status/{strategy_id}")
@@ -367,9 +366,9 @@ async def check_dca_strategy(
             "updated_status": dca_engine.get_position_status(strategy_id),
         }
 
-    except Exception as e:
-        logger.error(f"[DCA/Check] Failed: {e}")
-        raise HTTPException(500, f"Failed to check DCA: {str(e)}")
+    except Exception as err:
+        logger.error(f"[DCA/Check] Failed: {err}")
+        raise HTTPException(500, f"Failed to check DCA: {err}") from err
 
 
 @router.delete("/dca/close/{strategy_id}")
@@ -417,9 +416,9 @@ async def close_dca_strategy(
             "entries_count": final_status.get("entries_count", 0),
         }
 
-    except Exception as e:
-        logger.error(f"[DCA/Close] Failed: {e}")
-        raise HTTPException(500, f"Failed to close DCA: {str(e)}")
+    except Exception as err:
+        logger.error(f"[DCA/Close] Failed: {err}")
+        raise HTTPException(500, f"Failed to close DCA: {err}") from err
 
 
 @router.post("/grid/create")
@@ -480,9 +479,9 @@ async def create_grid_strategy(
             "exchange_executed": not request.paper_mode,
         }
 
-    except Exception as e:
-        logger.error(f"[Grid/Create] Failed: {e}")
-        raise HTTPException(500, f"Failed to create grid strategy: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Grid/Create] Failed: {err}")
+        raise HTTPException(500, f"Failed to create grid strategy: {err}") from err
 
 
 @router.get("/grid/status/{strategy_id}")
@@ -571,9 +570,9 @@ async def check_grid_strategy(
             "updated_status": grid_engine.get_grid_status(strategy_id),
         }
 
-    except Exception as e:
-        logger.error(f"[Grid/Check] Failed: {e}")
-        raise HTTPException(500, f"Failed to check grid: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Grid/Check] Failed: {err}")
+        raise HTTPException(500, f"Failed to check grid: {err}") from err
 
 
 @router.delete("/grid/close/{strategy_id}")
@@ -621,9 +620,9 @@ async def close_grid_strategy(
             "total_trades": final_status.get("total_trades", 0),
         }
 
-    except Exception as e:
-        logger.error(f"[Grid/Close] Failed: {e}")
-        raise HTTPException(500, f"Failed to close grid: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Grid/Close] Failed: {err}")
+        raise HTTPException(500, f"Failed to close grid: {err}") from err
 
 
 @router.get("/overview")
@@ -830,8 +829,25 @@ async def start_strategy_monitor(
     if dca_engine._monitor_task or grid_engine._monitor_task:
         return {"status": "already_running"}
 
-    dca_engine._monitor_task = asyncio.create_task(_monitor_loop())
-    grid_engine._monitor_task = dca_engine._monitor_task
+    task = asyncio.create_task(_monitor_loop())
+
+    # BUG FIX: Add error callback so unhandled exceptions in the monitor loop
+    # are logged instead of silently swallowed.
+    def _on_monitor_done(t: asyncio.Task):
+        try:
+            exc = t.exception()
+        except asyncio.CancelledError:
+            logger.info("[Monitor] Strategy monitor task cancelled")
+            return
+        if exc:
+            logger.error(f"[Monitor] Strategy monitor task crashed: {exc}")
+            # Clear references so the monitor can be restarted
+            dca_engine._monitor_task = None
+            grid_engine._monitor_task = None
+
+    task.add_done_callback(_on_monitor_done)
+    dca_engine._monitor_task = task
+    grid_engine._monitor_task = task
 
     return {
         "status": "started",
@@ -952,11 +968,15 @@ async def ai_generate_strategy_config(
 ):
     """AI generates optimal DCA or Grid configuration based on current market conditions."""
     try:
-        from market_data import fetch_market_context
         from ai_analyzer import (
-            _call_openai, _call_anthropic, _call_deepseek, 
-            _call_openrouter, _call_custom, _call_mistral,
+            _call_anthropic,
+            _call_custom,
+            _call_deepseek,
+            _call_mistral,
+            _call_openai,
+            _call_openrouter,
         )
+        from market_data import fetch_market_context
 
         context = await fetch_market_context(request.ticker)
         current_price = context.current_price
@@ -1078,9 +1098,9 @@ Generate optimal Grid Trading parameters for this market condition."""
             },
         }
 
-    except json.JSONDecodeError as e:
-        logger.error(f"[AI/Generate] JSON parse error: {e}")
-        raise HTTPException(500, f"AI response parsing failed: {str(e)}")
-    except Exception as e:
-        logger.error(f"[AI/Generate] Failed: {e}")
-        raise HTTPException(500, f"Failed to generate strategy config: {str(e)}")
+    except json.JSONDecodeError as err:
+        logger.error(f"[AI/Generate] JSON parse error: {err}")
+        raise HTTPException(500, f"AI response parsing failed: {err}") from err
+    except Exception as err:
+        logger.error(f"[AI/Generate] Failed: {err}")
+        raise HTTPException(500, f"Failed to generate strategy config: {err}") from err

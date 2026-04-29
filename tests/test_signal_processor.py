@@ -1,11 +1,10 @@
-"""
-Tests for signal processing pipeline.
-"""
-import pytest
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+"""Tests for signal processing pipeline."""
 
-from models import TradingViewSignal, SignalDirection, AIAnalysis, MarketContext, TradeDecision, TakeProfitLevel
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from models import AIAnalysis, MarketContext, SignalDirection, TradeDecision, TradingViewSignal
 from services.signal_processor import SignalProcessor, compute_webhook_fingerprint, verify_webhook_signature
 
 
@@ -259,6 +258,36 @@ class TestPositionSizeCalculation:
             mock_settings.risk.position_sizing_mode = "percentage"
             qty = processor._calculate_position_size(price=0, size_pct=1.0, leverage=1)
             assert qty == 0.0
+
+    def test_position_size_uses_user_risk_settings(self, processor):
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.risk_per_trade_pct = 1.0
+            mock_settings.risk.position_sizing_mode = "percentage"
+            qty = processor._calculate_position_size(
+                price=100,
+                size_pct=1.0,
+                leverage=1,
+                user_settings={"risk": {"account_equity_usdt": 20000, "max_position_pct": 20.0}},
+            )
+            assert qty == 40.0
+
+    def test_apply_position_limits_uses_user_account_equity(self, processor):
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.risk_per_trade_pct = 1.0
+            mock_settings.risk.position_sizing_mode = "percentage"
+            decision = TradeDecision(entry_price=100.0, quantity=50.0)
+            processor._apply_position_limits(
+                decision,
+                {"max_position_pct": 50.0, "max_leverage": 20},
+                user_settings={"risk": {"account_equity_usdt": 1000.0, "max_position_pct": 10.0}},
+            )
+            assert decision.quantity == 1.0
 
 
 class TestValidStopLoss:

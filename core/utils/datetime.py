@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 def utcnow() -> datetime:
     """
     Get current UTC time as naive datetime (without timezone info).
-    
+
     PostgreSQL TIMESTAMP WITHOUT TIME ZONE column requires naive datetime objects.
     Using datetime.now(timezone.utc) creates a timezone-aware datetime which
     causes compatibility issues with PostgreSQL.
-    
+
     This function returns the UTC time but strips timezone info for DB compatibility.
-    
+
     Returns:
         datetime: Current UTC time as naive datetime object
     """
@@ -24,7 +24,7 @@ def utcnow() -> datetime:
 def utcnow_iso() -> str:
     """
     Get current UTC time as ISO format string.
-    
+
     Returns:
         str: ISO formatted UTC datetime string
     """
@@ -34,10 +34,10 @@ def utcnow_iso() -> str:
 def utcnow_str(fmt: str = "%Y-%m-%d") -> str:
     """
     Get current UTC time as formatted string.
-    
+
     Args:
         fmt: Format string (default: "%Y-%m-%d")
-    
+
     Returns:
         str: Formatted UTC datetime string
     """
@@ -47,10 +47,10 @@ def utcnow_str(fmt: str = "%Y-%m-%d") -> str:
 def make_naive(dt: datetime) -> datetime:
     """
     Convert datetime to UTC and strip timezone info.
-    
+
     Args:
         dt: datetime object (may be timezone-aware or naive)
-    
+
     Returns:
         datetime: Naive datetime object
     """
@@ -60,10 +60,10 @@ def make_naive(dt: datetime) -> datetime:
 def to_utc(dt: datetime) -> datetime:
     """
     Convert datetime to UTC and strip timezone info.
-    
+
     Args:
         dt: datetime object
-    
+
     Returns:
         datetime: UTC naive datetime object
     """

@@ -10,7 +10,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-
+from typing import Any
 
 BASE_DIR = Path(os.getenv("UPDATER_BASE_DIR", "/workspace")).resolve()
 DATA_DIR = BASE_DIR / "data" / "updater"
@@ -33,18 +33,19 @@ def ensure_dirs() -> None:
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def read_json(path: Path) -> dict | None:
+def read_json(path: Path) -> dict[str, Any] | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def write_json(path: Path, payload: dict) -> None:
+def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def append_log(payload: dict, message: str) -> None:
+def append_log(payload: dict[str, Any], message: str) -> None:
     payload.setdefault("log", []).append(message)
     payload["updated_at"] = now_iso()
 

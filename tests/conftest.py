@@ -4,19 +4,16 @@ Pytest configuration and fixtures.
 import asyncio
 import os
 import sys
-from typing import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Generator
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy import text
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.database import Base, db_manager
-from core.config import settings
-
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -48,9 +45,10 @@ async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
 
 @pytest_asyncio.fixture(scope="function")
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    from core.factory import create_app
-    from core.database import get_db, db_manager
     from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from core.database import get_db
+    from core.factory import create_app
 
     app = create_app()
 

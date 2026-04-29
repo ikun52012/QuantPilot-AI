@@ -4,11 +4,11 @@ Pydantic Settings with validation and type safety.
 """
 import json
 import os
-import secrets
 from pathlib import Path
-from typing import Optional, Any
-from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any
+
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field, field_validator
 
 ENV_PATH = Path(__file__).parent.parent / ".env"
 load_dotenv(ENV_PATH, override=False)
@@ -100,8 +100,10 @@ class AIConfig(BaseModel):
         return cls(
             provider=os.getenv("AI_PROVIDER", "deepseek"),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
+            openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"),
             custom_provider_enabled=os.getenv("CUSTOM_AI_PROVIDER_ENABLED", "false").lower() == "true",
             custom_provider_name=os.getenv("CUSTOM_AI_PROVIDER_NAME", "custom"),
@@ -489,7 +491,7 @@ class Settings(BaseModel):
 
         for warning in warnings:
             import warnings as warn_module
-            warn_module.warn(warning, UserWarning)
+            warn_module.warn(warning, UserWarning, stacklevel=2)
 
         if errors:
             raise RuntimeError("\n".join(errors))

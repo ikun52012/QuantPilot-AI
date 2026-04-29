@@ -3,14 +3,12 @@ Internationalization Router - Multi-language support.
 Provides translation management for multiple languages.
 """
 import json
-from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from core.auth import get_current_user
-
 
 router = APIRouter(prefix="/api/i18n", tags=["Internationalization"])
 
@@ -1196,7 +1194,7 @@ async def get_public_translations(language: str):
 @router.get("/translations/{language}")
 async def get_translations(
     language: str,
-    section: Optional[str] = None,
+    section: str | None = None,
     user: dict = Depends(get_current_user),
 ):
     """Get translations for a specific language."""
@@ -1284,7 +1282,7 @@ async def translate_single_key(
         language = "en"
 
     parts = key.split(".")
-    current = _TRANSLATIONS[language]
+    current: object = _TRANSLATIONS[language]
 
     for part in parts:
         if isinstance(current, dict) and part in current:
@@ -1306,11 +1304,11 @@ async def translate_bulk_keys(
         language = "en"
 
     key_list = keys.split(",")
-    results = {}
+    results: dict[str, object] = {}
 
     for key in key_list:
         parts = key.strip().split(".")
-        current = _TRANSLATIONS[language]
+        current: object = _TRANSLATIONS[language]
 
         for part in parts:
             if isinstance(current, dict) and part in current:

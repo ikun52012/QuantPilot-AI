@@ -4,18 +4,16 @@ Encryption, password hashing, and security utilities.
 """
 import base64
 import hashlib
-import os
-import secrets
-import re
 import hmac
-import json
+import os
+import re
+import secrets
 import threading
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from loguru import logger
-
-from pathlib import Path
 
 # Data directory for encryption key
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -69,7 +67,7 @@ def set_secure_api_key(key_name: str, key_value: str) -> None:
         _secure_keys[key_name] = key_value
 
 
-def get_secure_api_key(key_name: str) -> Optional[str]:
+def get_secure_api_key(key_name: str) -> str | None:
     """
     Retrieve an API key from secure in-memory storage.
 
@@ -99,7 +97,7 @@ def clear_secure_api_key(key_name: str) -> None:
 def has_secure_api_key(key_name: str) -> bool:
     """Check if an API key exists in secure storage."""
     with _secure_keys_lock:
-        return key_name in _secure_keys or os.getenv(key_name.upper(), "")
+        return key_name in _secure_keys or bool(os.getenv(key_name.upper(), ""))
 
 
 # ─────────────────────────────────────────────
@@ -128,17 +126,21 @@ def _load_or_create_key() -> bytes:
     if KEY_FILE.exists():
         try:
             return KEY_FILE.read_text(encoding="utf-8").strip().encode()
-        except PermissionError:
+        except PermissionError as err:
             logger.error(f"[Security] Permission denied reading {KEY_FILE}. Check file permissions.")
-            raise RuntimeError(f"Cannot read encryption key file: {KEY_FILE}. Ensure proper permissions (chmod 600).")
+            raise RuntimeError(
+                f"Cannot read encryption key file: {KEY_FILE}. Ensure proper permissions (chmod 600)."
+            ) from err
 
     key = Fernet.generate_key()
 
     try:
         KEY_FILE.write_text(key.decode(), encoding="utf-8")
-    except PermissionError:
+    except PermissionError as err:
         logger.error(f"[Security] Permission denied writing to {KEY_FILE}. Check directory permissions.")
-        raise RuntimeError(f"Cannot write encryption key file: {KEY_FILE}. Ensure directory is writable.")
+        raise RuntimeError(
+            f"Cannot write encryption key file: {KEY_FILE}. Ensure directory is writable."
+        ) from err
 
     try:
         KEY_FILE.chmod(0o600)
@@ -284,7 +286,7 @@ def generate_webhook_secret() -> str:
 def is_placeholder_webhook_secret(secret: str) -> bool:
     """
     Return True for weak/placeholder webhook secrets that must not be accepted.
-    
+
     Checks:
     - Known placeholder values from documentation
     - Secrets shorter than 16 characters (too weak)
@@ -293,12 +295,12 @@ def is_placeholder_webhook_secret(secret: str) -> bool:
     normalized = str(secret or "").strip()
     if not normalized:
         return True
-    
+
     # Check length - minimum 16 characters for security
     if len(normalized) < 16:
         logger.warning(f"[Security] Webhook secret too short ({len(normalized)} chars), minimum 16 required")
         return True
-    
+
     # Check known placeholders
     lower = normalized.lower()
     placeholders = {
@@ -316,15 +318,15 @@ def is_placeholder_webhook_secret(secret: str) -> bool:
         "12345678",
         "abcdefgh",
     }
-    
+
     if lower in placeholders or lower.startswith("replace-with-"):
         return True
-    
+
     # Check for simple patterns (all same char, sequential, etc.)
     if len(set(normalized)) < 4:
         logger.warning("[Security] Webhook secret has too few unique characters")
         return True
-    
+
     return False
 
 

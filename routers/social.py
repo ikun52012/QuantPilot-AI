@@ -4,18 +4,16 @@ Allows users to share and subscribe to trading signals.
 """
 import json
 from datetime import datetime, timezone
-from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
-from sqlalchemy import select, func
+from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user
-from core.database import get_db, SharedSignalModel, SignalSubscriptionModel
+from core.database import SharedSignalModel, SignalSubscriptionModel, get_db
 from core.utils.datetime import utcnow
-
 
 router = APIRouter(prefix="/api/social", tags=["Social Signals"])
 
@@ -24,8 +22,8 @@ class SharedSignal(BaseModel):
     ticker: str
     direction: str
     entry_price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
     reason: str = ""
     confidence: float = 0.0
     strategy_name: str = ""
@@ -39,7 +37,7 @@ class SignalSubscription(BaseModel):
 
 _SHARED_SIGNALS = {}
 _SIGNAL_SUBSCRIPTIONS = {}
-_USER_FOLLOWERS = {}
+_USER_FOLLOWERS: dict[str, list[str]] = {}
 _SIGNAL_STATS = {}
 
 
@@ -173,8 +171,8 @@ async def share_signal(
 
 @router.get("/list")
 async def list_shared_signals(
-    ticker: Optional[str] = None,
-    direction: Optional[str] = None,
+    ticker: str | None = None,
+    direction: str | None = None,
     limit: int = 50,
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -284,7 +282,7 @@ async def unsubscribe_from_signal(
 
     subscription = await db.get(SignalSubscriptionModel, sub_id)
     if not subscription:
-        raise HTTPException(404, f"Subscription not found")
+        raise HTTPException(404, "Subscription not found")
 
     _SIGNAL_SUBSCRIPTIONS.pop(sub_id, None)
     await db.delete(subscription)
@@ -371,12 +369,13 @@ async def get_user_shared_signals(
     )
     rows = result.scalars().all()
     user_signals = [_signal_to_dict(row) for row in rows]
+    author_id = str(user_signals[0].get("user_id") or "") if user_signals else ""
 
     return {
         "username": username,
         "signals": user_signals,
         "count": len(user_signals),
-        "followers": len(_USER_FOLLOWERS.get(user_signals[0].get("user_id") if user_signals else "", [])),
+        "followers": len(_USER_FOLLOWERS.get(author_id, [])),
     }
 
 

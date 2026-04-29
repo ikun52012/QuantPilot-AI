@@ -1,9 +1,9 @@
 """Tests for WebSocket functionality."""
-import pytest
 import asyncio
-import json
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 
 class TestConnectionManager:
@@ -99,10 +99,9 @@ class TestWebSocketPositions:
 
     @pytest.mark.asyncio
     async def test_fetch_user_positions_includes_pending(self, db_session):
-        from core.database import PositionModel, UserModel
+        from core.database import PositionModel, UserModel, db_manager
         from core.security import hash_password
         from core.utils.datetime import utcnow
-        from core.database import db_manager
         from routers.websocket import _fetch_user_positions
 
         user = UserModel(
@@ -175,8 +174,7 @@ class TestWebSocketPrices:
     @patch('routers.websocket.get_user_by_id')
     @patch('routers.websocket._verify_ws_token_or_none')
     async def test_db_disabled_user_rejected(self, mock_verify, mock_get_user, db_session):
-        from routers.websocket import _authenticate_ws_user_or_none
-        from routers.websocket import db_manager
+        from routers.websocket import _authenticate_ws_user_or_none, db_manager
 
         mock_verify.return_value = {"sub": "user123", "ver": 0}
         mock_get_user.return_value = Mock(id="user123", username="alice", role="user", email="a@example.com", is_active=False, token_version=0)
@@ -191,8 +189,7 @@ class TestWebSocketPrices:
     @patch('routers.websocket.get_user_by_id')
     @patch('routers.websocket._verify_ws_token_or_none')
     async def test_revoked_token_rejected(self, mock_verify, mock_get_user, db_session):
-        from routers.websocket import _authenticate_ws_user_or_none
-        from routers.websocket import db_manager
+        from routers.websocket import _authenticate_ws_user_or_none, db_manager
 
         mock_verify.return_value = {"sub": "user123", "ver": 1}
         mock_get_user.return_value = Mock(id="user123", username="alice", role="user", email="a@example.com", is_active=True, token_version=2)
@@ -268,7 +265,6 @@ class TestBroadcastFunctions:
 class TestWebSocketMessages:
     def test_ping_pong_message(self):
         ping = {"type": "ping"}
-        expected_pong = {"type": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}
 
         assert ping["type"] == "ping"
 

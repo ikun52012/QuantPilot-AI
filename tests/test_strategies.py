@@ -1,8 +1,11 @@
 """Tests for DCA and Grid Strategies."""
-import pytest
+
 from datetime import datetime, timezone
-from strategies.dca import DCAEngine, DCAConfig, DCAPosition, DCAEntry
-from strategies.grid import GridEngine, GridConfig, GridPosition, GridLevel
+
+import pytest
+
+from strategies.dca import DCAConfig, DCAEngine, DCAEntry
+from strategies.grid import GridConfig, GridEngine, GridLevel
 
 
 class TestDCAConfig:
@@ -104,10 +107,16 @@ class TestDCAEngine:
     def test_dca_trigger_on_loss(self, engine, config):
         position = engine.create_position(config, 50000.0)
 
+        result = engine._should_add_entry(position, config, 49000.0)
+
+        assert result is True
+
+    def test_dca_respects_next_entry_spacing(self, engine, config):
+        position = engine.create_position(config, 50000.0)
+
         result = engine._should_add_entry(position, config, 49400.0)
 
-        loss_pct = (50000.0 - 49400.0) / 50000.0 * 100
-        assert loss_pct >= config.activation_loss_pct
+        assert result is False
 
     @pytest.mark.asyncio
     async def test_max_entries_limit(self, engine):
@@ -182,12 +191,12 @@ class TestGridEngine:
         config.spacing_mode = "arithmetic"
         grid = engine.create_grid(config, 50000.0)
 
-        prices = [l.price for l in grid.grid_levels]
+        prices = [level.price for level in grid.grid_levels]
 
-        diffs = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
+        diffs = [prices[i + 1] - prices[i] for i in range(len(prices) - 1)]
 
         for diff in diffs:
-            assert abs(diff - (52000-48000)/10) < 1
+            assert abs(diff - (52000 - 48000) / 10) < 1
 
     def test_geometric_spacing(self, engine):
         config = GridConfig(
@@ -204,8 +213,8 @@ class TestGridEngine:
     def test_buy_sell_distribution(self, engine, config):
         grid = engine.create_grid(config, 50000.0)
 
-        buy_levels = [l for l in grid.grid_levels if l.side == "buy"]
-        sell_levels = [l for l in grid.grid_levels if l.side == "sell"]
+        buy_levels = [level for level in grid.grid_levels if level.side == "buy"]
+        sell_levels = [level for level in grid.grid_levels if level.side == "sell"]
 
         for level in buy_levels:
             assert level.price < 50000.0
@@ -218,7 +227,7 @@ class TestGridEngine:
 
         triggered = engine._find_triggered_levels(grid, 48500.0)
 
-        buy_triggered = [l for l in triggered if l.side == "buy"]
+        buy_triggered = [level for level in triggered if level.side == "buy"]
         assert len(buy_triggered) > 0
 
     @pytest.mark.asyncio
@@ -230,7 +239,54 @@ class TestGridEngine:
 
         result = await engine._execute_grid_level(grid.config_id, grid.grid_levels[0], 49000.0, config)
 
-        assert result["success"] == True
+        assert result["success"]
+
+    @pytest.mark.asyncio
+    async def test_grid_pairs_opposite_fills_once(self, engine):
+        config = GridConfig(
+            ticker="BTCUSDT",
+            upper_price=110.0,
+            lower_price=90.0,
+            grid_count=2,
+            total_capital_usdt=1000.0,
+        )
+        grid = engine.create_grid(config, 100.0)
+
+        buy_level = next(level for level in grid.grid_levels if level.side == "buy")
+        sell_level = next(level for level in grid.grid_levels if level.side == "sell")
+
+        await engine._execute_grid_level(grid.config_id, buy_level, 95.0, config)
+        await engine._execute_grid_level(grid.config_id, sell_level, 105.0, config)
+
+        assert buy_level.status == "paired"
+        assert sell_level.status == "paired"
+        assert grid.total_trades == 1
+        assert grid.realized_pnl_usdt > 0
+
+        engine._update_pnl(grid, 100.0)
+        assert grid.unrealized_pnl_usdt == 0.0
+
+    @pytest.mark.asyncio
+    async def test_close_grid_keeps_realized_pnl_without_double_counting_fees(self, engine):
+        config = GridConfig(
+            ticker="BTCUSDT",
+            upper_price=110.0,
+            lower_price=90.0,
+            grid_count=2,
+            total_capital_usdt=1000.0,
+        )
+        grid = engine.create_grid(config, 100.0)
+
+        buy_level = next(level for level in grid.grid_levels if level.side == "buy")
+        sell_level = next(level for level in grid.grid_levels if level.side == "sell")
+
+        await engine._execute_grid_level(grid.config_id, buy_level, 95.0, config)
+        await engine._execute_grid_level(grid.config_id, sell_level, 105.0, config)
+        realized_before_close = grid.realized_pnl_usdt
+
+        await engine._close_grid(grid.config_id, 100.0, "manual_close")
+
+        assert grid.realized_pnl_usdt == pytest.approx(realized_before_close)
 
     def test_pnl_calculation(self, engine, config):
         grid = engine.create_grid(config, 50000.0)

@@ -1,10 +1,11 @@
 """Tests for SMC (Smart Money Concepts) analyzer."""
 import pytest
+
 from smc_analyzer import (
-    detect_fvgs,
-    detect_order_blocks,
-    detect_market_structure,
     calculate_premium_discount,
+    detect_fvgs,
+    detect_market_structure,
+    detect_order_blocks,
     find_confluence_zones,
 )
 

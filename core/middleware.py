@@ -2,25 +2,21 @@
 QuantPilot AI - Middleware
 Request processing middleware including rate limiting, logging, and security.
 """
-import time
-import json
-import re
 import hmac
-import hashlib
+import re
+import time
 import uuid
-from typing import Callable, Optional
-from datetime import datetime
+from collections.abc import Awaitable, Callable
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
+from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from loguru import logger
 
 from core.config import settings
 from core.request_utils import client_ip
-
 
 # ─────────────────────────────────────────────
 # Request ID Middleware
@@ -29,7 +25,7 @@ from core.request_utils import client_ip
 class RequestIDMiddleware(BaseHTTPMiddleware):
     """Inject a unique X-Request-ID into every request/response for tracing."""
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         request_id = request.headers.get("x-request-id", "") or str(uuid.uuid4())[:12]
         request.state.request_id = request_id
 
@@ -55,7 +51,7 @@ def _sanitize_log_message(message: str) -> str:
 class LoggingMiddleware(BaseHTTPMiddleware):
     """Middleware for request/response logging."""
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         # Skip logging for health checks
         if request.url.path in {"/health", "/metrics"}:
             return await call_next(request)
@@ -94,7 +90,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
     def _get_client_ip(self, request: Request) -> str:
         """Extract client IP from request."""
-        return client_ip(request)
+        return str(client_ip(request))
 
 
 # ─────────────────────────────────────────────
@@ -208,7 +204,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             store[key] = attempts
             return True
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         if not self.enabled:
             return await call_next(request)
 
@@ -299,7 +295,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     def _get_client_ip(self, request: Request) -> str:
         """Extract client IP from request."""
-        return client_ip(request)
+        return str(client_ip(request))
 
 
 # ─────────────────────────────────────────────
@@ -321,7 +317,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     }
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         # Skip for safe methods
         if request.method in self.SAFE_METHODS:
             return await call_next(request)
@@ -371,7 +367,7 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
 
     MAX_SIZE = 100_000  # 100KB
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         if request.method in {"POST", "PUT", "PATCH"}:
             content_length = request.headers.get("content-length")
             if content_length:
@@ -393,7 +389,7 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
                     content={"detail": "Request body too large"}
                 )
 
-            async def receive():
+            async def receive() -> dict[str, object]:
                 return {"type": "http.request", "body": body, "more_body": False}
 
             request._receive = receive  # type: ignore[attr-defined]
@@ -408,7 +404,7 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security headers to responses."""
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         response = await call_next(request)
 
         # Core security headers
@@ -441,9 +437,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 # Middleware Setup
 # ─────────────────────────────────────────────
 
-def setup_middleware(app):
+def setup_middleware(app) -> None:
     """Setup all middleware for the FastAPI app."""
-    from fastapi import FastAPI
 
     # CORS
     app.add_middleware(

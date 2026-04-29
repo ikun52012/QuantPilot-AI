@@ -8,21 +8,19 @@ import sys
 import unittest
 
 try:
-    import loguru
-    import cryptography
+    import cryptography  # noqa: F401
+    import loguru  # noqa: F401
 except ModuleNotFoundError as exc:
-    raise unittest.SkipTest(f"runtime dependency not installed: {exc.name}")
+    raise unittest.SkipTest(f"runtime dependency not installed: {exc.name}") from exc
 
 os.environ.setdefault("APP_ENCRYPTION_KEY", "test-only-fernet-key-do-not-use")
 
-import asyncio
 import pytest
-import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.database import insert_trade_log_async, sync_position_from_trade_entry_async
+from core.database import insert_trade_log_async
 
 
 @pytest.mark.asyncio

@@ -1,8 +1,17 @@
 """Tests for Backtest Engine."""
-import pytest
+
 from datetime import datetime, timezone
-from backtest.engine import BacktestEngine, BacktestConfig, BacktestPosition, BacktestTrade
-from backtest.strategies import SimpleTrendFollowStrategy, SMCTrendStrategy, AIAssistantStrategy, BaseStrategy, TradingSignal
+
+import pytest
+
+from backtest.engine import BacktestConfig, BacktestEngine, BacktestPosition, BacktestTrade
+from backtest.strategies import (
+    AIAssistantStrategy,
+    BaseStrategy,
+    SimpleTrendFollowStrategy,
+    SMCTrendStrategy,
+    TradingSignal,
+)
 
 
 class OneShotLongStrategy(BaseStrategy):
@@ -257,22 +266,34 @@ class TestMultiTPExecution:
             ],
         )
 
-        assert config.multi_tp_enabled == True
+        assert config.multi_tp_enabled
         assert len(config.tp_levels) == 2
 
     def test_partial_close(self):
         engine = BacktestEngine(
-            BacktestConfig(multi_tp_enabled=True, tp_levels=[{"price_pct": 3.0, "qty_pct": 50}]),
-            SimpleTrendFollowStrategy(),
+            BacktestConfig(
+                multi_tp_enabled=True,
+                tp_levels=[
+                    {"price_pct": 3.0, "qty_pct": 50},
+                    {"price_pct": 6.0, "qty_pct": 50},
+                ],
+                trailing_mode="none",
+            ),
+            OneShotLongStrategy(),
         )
 
         data = [
             {"open": 100, "high": 102, "low": 99, "close": 101, "volume": 1000},
             {"open": 101, "high": 105, "low": 100, "close": 103, "volume": 1500},
-            {"open": 103, "high": 106, "low": 102, "close": 104, "volume": 1200},
+            {"open": 103, "high": 108, "low": 102, "close": 106, "volume": 1200},
         ]
 
         engine.load_data(data)
         result = engine.run()
 
-        assert result["signals"]["executed"] >= 0
+        assert result["signals"]["executed"] == 1
+        assert len(result["trades"]) == 2
+        assert result["trades"][0]["exit_reason"] == "take_profit_level_1"
+        assert result["trades"][1]["exit_reason"] == "take_profit_level_2"
+        assert result["trades"][0]["quantity"] == pytest.approx(result["trades"][1]["quantity"], rel=1e-3)
+        assert result["equity_curve"][-1]["positions"] == 0

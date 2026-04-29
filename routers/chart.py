@@ -2,20 +2,17 @@
 Chart Router - dashboard chart data endpoints.
 Provides OHLCV, realtime price, indicators, and marker data for the frontend.
 """
-import json
 from datetime import datetime, timezone
-from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user
-from core.database import get_db, PositionModel, WebhookEventModel
+from core.database import PositionModel, WebhookEventModel, get_db
 from market_data import fetch_ohlcv_history
-
 
 router = APIRouter(prefix="/api/chart", tags=["Chart"])
 
@@ -73,9 +70,9 @@ async def get_chart_ohlcv(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"[Chart] Failed to get OHLCV: {e}")
-        raise HTTPException(500, f"Chart data error: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Chart] Failed to get OHLCV: {err}")
+        raise HTTPException(500, f"Chart data error: {err}") from err
 
 
 @router.get("/realtime/{ticker}")
@@ -97,9 +94,9 @@ async def get_realtime_price(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"[Chart] Failed to get realtime price: {e}")
-        raise HTTPException(500, f"Realtime error: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Chart] Failed to get realtime price: {err}")
+        raise HTTPException(500, f"Realtime error: {err}") from err
 
 
 @router.get("/indicators/{ticker}")
@@ -128,9 +125,9 @@ async def get_chart_indicators(
             "indicators": indicators,
         }
 
-    except Exception as e:
-        logger.error(f"[Chart] Failed to get indicators: {e}")
-        raise HTTPException(500, f"Indicators error: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Chart] Failed to get indicators: {err}")
+        raise HTTPException(500, f"Indicators error: {err}") from err
 
 
 @router.get("/positions/{ticker}")
@@ -168,9 +165,9 @@ async def get_position_markers(
             "count": len(markers),
         }
 
-    except Exception as e:
-        logger.error(f"[Chart] Failed to get position markers: {e}")
-        raise HTTPException(500, f"Markers error: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Chart] Failed to get position markers: {err}")
+        raise HTTPException(500, f"Markers error: {err}") from err
 
 
 @router.get("/signals/{ticker}")
@@ -183,6 +180,7 @@ async def get_signal_markers(
     """Get historical signal markers for chart."""
     try:
         from datetime import timedelta
+
         from core.utils.datetime import utcnow
 
         user_id = user.get("sub") or user.get("id")
@@ -201,12 +199,6 @@ async def get_signal_markers(
 
         markers = []
         for event in events:
-            try:
-                payload = json.loads(event.payload_json or "{}")
-            except (TypeError, json.JSONDecodeError):
-                payload = {}
-            price = payload.get("price", 0)
-
             markers.append({
                 "time": int(event.created_at.replace(tzinfo=timezone.utc).timestamp()),
                 "position": "belowBar" if event.direction == "long" else "aboveBar",
@@ -222,9 +214,9 @@ async def get_signal_markers(
             "count": len(markers),
         }
 
-    except Exception as e:
-        logger.error(f"[Chart] Failed to get signal markers: {e}")
-        raise HTTPException(500, f"Signal markers error: {str(e)}")
+    except Exception as err:
+        logger.error(f"[Chart] Failed to get signal markers: {err}")
+        raise HTTPException(500, f"Signal markers error: {err}") from err
 
 
 @router.get("/config")

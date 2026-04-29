@@ -8,18 +8,18 @@ Security layers:
 """
 import hmac
 import json
-from fastapi import APIRouter, Request, HTTPException, Depends
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import get_admin_setting, get_db
 from core.config import settings
+from core.database import get_admin_setting, get_db
+from core.request_utils import client_ip as get_client_ip
+from core.security import is_placeholder_webhook_secret
 from models import TradingViewSignal
 from services.signal_processor import SignalProcessor, verify_webhook_signature
-from core.security import is_placeholder_webhook_secret
-from core.request_utils import client_ip as get_client_ip
-
 
 router = APIRouter(prefix="", tags=["webhook"])
 
@@ -33,11 +33,11 @@ async def webhook(
     Receive and process TradingView webhook signals.
 
     Supports both admin webhook secret and per-user secrets.
-    
+
     TradingView Compatibility:
     TradingView does NOT support HMAC signature headers.
     It only sends the 'secret' field in JSON payload.
-    
+
     Security:
     - HMAC signature is optional (extra security layer for other integrations)
     - Payload secret is REQUIRED (primary security for TradingView)
@@ -47,9 +47,9 @@ async def webhook(
     try:
         raw_body = await request.body()
         body = json.loads(raw_body)
-    except json.JSONDecodeError as e:
-        logger.error(f"[Webhook] Invalid JSON: {e}")
-        raise HTTPException(400, "Invalid JSON payload")
+    except json.JSONDecodeError as err:
+        logger.error(f"[Webhook] Invalid JSON: {err}")
+        raise HTTPException(400, "Invalid JSON payload") from err
 
     # Verify HMAC signature if present (optional, extra security)
     signature = (
@@ -79,9 +79,9 @@ async def webhook(
     # Validate signal
     try:
         signal = TradingViewSignal(**body)
-    except Exception as e:
-        logger.error(f"[Webhook] Invalid signal: {e}")
-        raise HTTPException(400, f"Invalid signal: {e}")
+    except Exception as err:
+        logger.error(f"[Webhook] Invalid signal: {err}")
+        raise HTTPException(400, f"Invalid signal: {err}") from err
 
     # Determine user by secret
     user = await _find_user_by_secret(db, secret)
@@ -91,7 +91,7 @@ async def webhook(
     if not user_id:
         # Check admin secret
         admin_secret = await get_admin_setting(db, "webhook_secret", settings.server.webhook_secret)
-        
+
         # Live trading mode security check
         if settings.exchange.live_trading:
             if is_placeholder_webhook_secret(admin_secret):
@@ -100,7 +100,7 @@ async def webhook(
                     "Please set a strong WEBHOOK_SECRET in environment."
                 )
                 raise HTTPException(401, "Webhook secret not configured for live trading")
-        
+
         if not hmac.compare_digest(secret, admin_secret):
             logger.warning(f"[Webhook] Invalid secret from {client_ip}")
             raise HTTPException(401, "Invalid webhook secret")
@@ -119,15 +119,16 @@ async def webhook(
 
 async def _find_user_by_secret(db: AsyncSession, secret: str):
     """Find user by webhook secret."""
-    from core.security import webhook_secret_hash
-    from core.database import UserModel
     from sqlalchemy import select
+
+    from core.database import UserModel
+    from core.security import webhook_secret_hash
 
     secret_hash = webhook_secret_hash(secret)
     result = await db.execute(
         select(UserModel).where(
             UserModel.webhook_secret_hash == secret_hash,
-            UserModel.is_active == True,
+            UserModel.is_active,
             UserModel.deleted_at.is_(None),
         )
     )

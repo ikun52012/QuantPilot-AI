@@ -3,18 +3,15 @@ QuantPilot AI - AI Configuration Router
 Admin endpoints for AI provider catalog and experimental voting settings.
 """
 import json
-from fastapi import APIRouter, HTTPException, Depends, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
-
-from core.auth import require_admin, get_current_user
-from core.config import settings
-from core.database import db_manager, set_admin_setting, get_admin_setting
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from core.database import get_db
 
+from core.auth import require_admin
+from core.config import settings
+from core.database import get_db, set_admin_setting
 
 router = APIRouter(prefix="/api/admin/ai", tags=["ai-config"])
 
@@ -41,18 +38,18 @@ def _parse_model_id(model_id: str) -> tuple[str, str]:
 class VotingConfigRequest(BaseModel):
     """Request to update voting configuration."""
     enabled: bool = Field(description="Enable/disable stored voting configuration")
-    models: List[str] = Field(default_factory=list, description="List of models in format provider/model_name")
-    weights: Dict[str, float] = Field(default_factory=dict, description="Weight for each model (should sum to ~1.0)")
+    models: list[str] = Field(default_factory=list, description="List of models in format provider/model_name")
+    weights: dict[str, float] = Field(default_factory=dict, description="Weight for each model (should sum to ~1.0)")
     strategy: str = Field(default="weighted", description="Voting strategy: weighted/consensus/best_confidence")
 
 
 class VotingConfigResponse(BaseModel):
     """Current voting configuration."""
     enabled: bool
-    models: List[str]
-    weights: Dict[str, float]
+    models: list[str]
+    weights: dict[str, float]
     strategy: str
-    available_providers: Dict[str, List[str]]
+    available_providers: dict[str, list[str]]
     current_provider: str
     openrouter_enabled: bool
     openrouter_model: str
@@ -62,24 +59,24 @@ class VotingConfigResponse(BaseModel):
 class ProviderConfigRequest(BaseModel):
     """Request to update provider configuration."""
     provider: str = Field(description="Primary AI provider")
-    openai_api_key: Optional[str] = None
-    openai_model: Optional[str] = None
-    anthropic_api_key: Optional[str] = None
-    anthropic_model: Optional[str] = None
-    deepseek_api_key: Optional[str] = None
-    deepseek_model: Optional[str] = None
-    mistral_api_key: Optional[str] = None
-    mistral_model: Optional[str] = None
-    openrouter_enabled: Optional[bool] = None
-    openrouter_api_key: Optional[str] = None
-    openrouter_model: Optional[str] = None
-    custom_provider_enabled: Optional[bool] = None
-    custom_provider_name: Optional[str] = None
-    custom_provider_api_key: Optional[str] = None
-    custom_provider_model: Optional[str] = None
-    custom_provider_api_url: Optional[str] = None
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
+    openai_api_key: str | None = None
+    openai_model: str | None = None
+    anthropic_api_key: str | None = None
+    anthropic_model: str | None = None
+    deepseek_api_key: str | None = None
+    deepseek_model: str | None = None
+    mistral_api_key: str | None = None
+    mistral_model: str | None = None
+    openrouter_enabled: bool | None = None
+    openrouter_api_key: str | None = None
+    openrouter_model: str | None = None
+    custom_provider_enabled: bool | None = None
+    custom_provider_name: str | None = None
+    custom_provider_api_key: str | None = None
+    custom_provider_model: str | None = None
+    custom_provider_api_url: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
 
 
 @router.get("/voting-config")
@@ -122,7 +119,6 @@ async def update_voting_config(
     req: VotingConfigRequest,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    request: Request = None,
 ):
     """
     Update stored voting configuration.

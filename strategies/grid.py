@@ -4,16 +4,14 @@ Manages automated buy/sell orders within a price range.
 Enhanced with live exchange execution support.
 """
 import asyncio
-import json
-from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Optional
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+
 from loguru import logger
 
 from core.utils.datetime import utcnow
-from models import TradeDecision, SignalDirection, TakeProfitLevel, TrailingStopConfig, TrailingStopMode
+from models import SignalDirection, TradeDecision
 
 
 class GridMode(Enum):
@@ -57,11 +55,12 @@ class GridLevel:
     side: str
     order_id: str = ""
     status: str = "pending"
-    filled_at: Optional[datetime] = None
+    filled_at: datetime | None = None
     filled_price: float = 0.0
     pnl_usdt: float = 0.0
     fees_usdt: float = 0.0
-    pair_level: Optional[int] = None
+    grid_index: int | None = None
+    pair_level: float | None = None
 
 
 @dataclass
@@ -87,7 +86,7 @@ class GridPosition:
     lowest_price: float = 0.0
     started_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
-    closed_at: Optional[datetime] = None
+    closed_at: datetime | None = None
     close_reason: str = ""
     pending_orders: int = 0
     open_pairs: list[dict] = field(default_factory=list)
@@ -98,7 +97,7 @@ class GridEngine:
         self.positions: dict[str, GridPosition] = {}
         self.configs: dict[str, GridConfig] = {}
         self.price_cache: dict[str, float] = {}
-        self._monitor_task: Optional[asyncio.Task] = None
+        self._monitor_task: asyncio.Task | None = None
 
     def _ensure_strategy_id(self, config: GridConfig) -> None:
         if not config.strategy_id:
@@ -128,7 +127,7 @@ class GridEngine:
             started_at=utcnow(),
         )
 
-        position.pending_orders = len([l for l in grid_levels if l.status == "pending"])
+        position.pending_orders = len([level for level in grid_levels if level.status == "pending"])
 
         self.positions[config.strategy_id] = position
         self.configs[config.strategy_id] = config
@@ -247,14 +246,14 @@ class GridEngine:
                     side=side,
                 ))
 
-        levels.sort(key=lambda l: l.price)
+        levels.sort(key=lambda level: level.price)
 
         for i, level in enumerate(levels):
-            level.pair_level = i
+            level.grid_index = i
 
         return levels
 
-    def _calculate_grid_stop_loss(self, config: GridConfig, price: float, side: str) -> Optional[float]:
+    def _calculate_grid_stop_loss(self, config: GridConfig, price: float, side: str) -> float | None:
         if config.stop_loss_pct <= 0:
             return None
         if side == "buy":
@@ -262,7 +261,7 @@ class GridEngine:
         else:
             return price * (1 + config.stop_loss_pct / 100)
 
-    def _calculate_grid_take_profit(self, config: GridConfig, price: float, side: str) -> Optional[float]:
+    def _calculate_grid_take_profit(self, config: GridConfig, price: float, side: str) -> float | None:
         if config.take_profit_pct <= 0:
             return None
         if side == "buy":
@@ -271,7 +270,8 @@ class GridEngine:
             return price * (1 - config.take_profit_pct / 100)
 
     async def check_and_execute(self, position_id: str, current_price: float, exchange_config: dict | None = None) -> dict:
-        result = {"action": "none", "trades": []}
+        action = "none"
+        trades: list[dict] = []
 
         if position_id not in self.positions:
             return {"action": "error", "reason": "Position not found"}
@@ -299,10 +299,10 @@ class GridEngine:
         for level in triggered_levels:
             trade_result = await self._execute_grid_level(position_id, level, current_price, config, exchange_config)
             if trade_result.get("success"):
-                result["trades"].append(trade_result)
+                trades.append(trade_result)
 
-        if result["trades"]:
-            result["action"] = "grid_trade"
+        if trades:
+            action = "grid_trade"
 
         self._update_pnl(position, current_price)
 
@@ -311,7 +311,7 @@ class GridEngine:
 
         position.updated_at = utcnow()
 
-        return result
+        return {"action": action, "trades": trades}
 
     def _find_triggered_levels(self, position: GridPosition, current_price: float) -> list[GridLevel]:
         triggered = []
@@ -381,8 +381,20 @@ class GridEngine:
 
             pnl -= fees + pair_level.fees_usdt
 
+            level.status = "paired"
+            pair_level.status = "paired"
+            level.pair_level = pair_level.filled_price
+            pair_level.pair_level = level.filled_price
+            level.pnl_usdt = pnl
+            pair_level.pnl_usdt = pnl
             position.realized_pnl_usdt += pnl
             position.total_trades += 1
+            position.open_pairs.append({
+                "buy_price": fill_price if level.side == "buy" else pair_level.filled_price,
+                "sell_price": fill_price if level.side == "sell" else pair_level.filled_price,
+                "quantity": min(level.quantity, pair_level.quantity),
+                "pnl_usdt": pnl,
+            })
 
         if level.side == "buy":
             position.filled_buy_count += 1
@@ -405,8 +417,10 @@ class GridEngine:
             "level_price": level.price,
         }
 
-    def _find_pair_level(self, position: GridPosition, filled_level: GridLevel) -> Optional[GridLevel]:
+    def _find_pair_level(self, position: GridPosition, filled_level: GridLevel) -> GridLevel | None:
         if filled_level.filled_at is None:
+            return None
+        if filled_level.pair_level is not None:
             return None
 
         filled_price = filled_level.filled_price
@@ -450,13 +464,17 @@ class GridEngine:
         unrealized = 0.0
 
         for level in position.grid_levels:
-            if level.status == "filled" and level.side == "buy":
+            if level.status != "filled" or level.filled_price <= 0:
+                continue
+            if level.side == "buy":
                 unrealized += (current_price - level.filled_price) * level.quantity
+            else:
+                unrealized += (level.filled_price - current_price) * level.quantity
 
         position.unrealized_pnl_usdt = unrealized
 
     def _replenish_grid(self, position: GridPosition, config: GridConfig, current_price: float) -> None:
-        pending_buys = [l for l in position.grid_levels if l.status == "pending" and l.side == "buy"]
+        pending_buys = [level for level in position.grid_levels if level.status == "pending" and level.side == "buy"]
 
         if len(pending_buys) < config.grid_count // 4:
             new_upper = position.upper_price * (1 + config.grid_spacing_pct / 100)
@@ -473,7 +491,7 @@ class GridEngine:
                     position.grid_levels.append(level)
 
             position.upper_price = new_upper
-            position.grid_levels.sort(key=lambda l: l.price)
+            position.grid_levels.sort(key=lambda level: level.price)
 
             logger.info(f"[Grid] Replenished grid: new upper={new_upper:.4f}")
 
@@ -505,7 +523,18 @@ class GridEngine:
             except Exception as e:
                 logger.error(f"[Grid] Exchange close failed: {e}")
 
-        final_pnl = position.realized_pnl_usdt + position.unrealized_pnl_usdt - position.total_fees_usdt
+        open_fees = 0.0
+        for level in position.grid_levels:
+            if level.status != "filled":
+                continue
+            open_fees += level.fees_usdt
+            if level.side == "buy":
+                level.pnl_usdt = (exit_price - level.filled_price) * level.quantity - level.fees_usdt
+            else:
+                level.pnl_usdt = (level.filled_price - exit_price) * level.quantity - level.fees_usdt
+            level.status = "closed"
+
+        final_pnl = position.realized_pnl_usdt + position.unrealized_pnl_usdt - open_fees
 
         position.status = "closed"
         position.closed_at = utcnow()
@@ -530,7 +559,7 @@ class GridEngine:
             "grid_count": len(position.grid_levels),
             "filled_buy_count": position.filled_buy_count,
             "filled_sell_count": position.filled_sell_count,
-            "pending_orders": len([l for l in position.grid_levels if l.status == "pending"]),
+            "pending_orders": len([level for level in position.grid_levels if level.status == "pending"]),
             "total_trades": position.total_trades,
             "realized_pnl_usdt": round(position.realized_pnl_usdt, 2),
             "unrealized_pnl_usdt": round(position.unrealized_pnl_usdt, 2),
@@ -539,14 +568,14 @@ class GridEngine:
             "started_at": position.started_at.isoformat(),
             "grid_levels": [
                 {
-                    "price": round(l.price, 6),
-                    "quantity": round(l.quantity, 6),
-                    "side": l.side,
-                    "status": l.status,
-                    "filled_price": round(l.filled_price, 6) if l.filled_price else None,
-                    "pnl_usdt": round(l.pnl_usdt, 2),
+                    "price": round(level.price, 6),
+                    "quantity": round(level.quantity, 6),
+                    "side": level.side,
+                    "status": level.status,
+                    "filled_price": round(level.filled_price, 6) if level.filled_price else None,
+                    "pnl_usdt": round(level.pnl_usdt, 2),
                 }
-                for l in position.grid_levels[:20]
+                for level in position.grid_levels[:20]
             ],
         }
 

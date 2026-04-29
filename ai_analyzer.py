@@ -5,12 +5,19 @@ This is the brain of the system.
 """
 import asyncio
 import json
+import time as _time
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any
+
 import httpx
-import os
 from loguru import logger
-from core.config import settings
+
 from core.ai_cost_tracker import ai_costs, extract_usage_from_response
-from models import TradingViewSignal, MarketContext, AIAnalysis, TrailingStopMode
+from core.config import settings
+from models import AIAnalysis, MarketContext, SignalDirection, TradingViewSignal
+from models import TrailingStopMode as _TrailingStopMode
+
+TrailingStopMode = _TrailingStopMode
 
 # Retry configuration for AI API calls
 _AI_MAX_RETRIES = 3
@@ -26,8 +33,6 @@ _AI_TIMEOUT = httpx.Timeout(
 # ─────────────────────────────────────────────
 # AI analysis result cache (#18)
 # ─────────────────────────────────────────────
-import time as _time
-
 _AI_CACHE_TTL = 30
 _AI_CACHE_MAX_SIZE = 500
 _AI_CACHE: dict[str, tuple[float, "AIAnalysis"]] = {}
@@ -60,7 +65,12 @@ def _price_to_bucket(price: float, bucket_pct: float = 1.0) -> str:
     return f"{bucket:.2f}"
 
 
-async def _get_cached_analysis(ticker: str, direction: str, price_bucket: str = "", timeframe: str = ""):
+async def _get_cached_analysis(
+    ticker: str,
+    direction: str,
+    price_bucket: str = "",
+    timeframe: str = "",
+) -> AIAnalysis | None:
     key = _ai_cache_key(ticker, direction, price_bucket, timeframe)
     async with _AI_CACHE_LOCK:
         entry = _AI_CACHE.get(key)
@@ -69,7 +79,13 @@ async def _get_cached_analysis(ticker: str, direction: str, price_bucket: str = 
     return None
 
 
-async def _set_cached_analysis(ticker: str, direction: str, analysis, price_bucket: str = "", timeframe: str = ""):
+async def _set_cached_analysis(
+    ticker: str,
+    direction: str,
+    analysis: AIAnalysis,
+    price_bucket: str = "",
+    timeframe: str = "",
+) -> None:
     key = _ai_cache_key(ticker, direction, price_bucket, timeframe)
     async with _AI_CACHE_LOCK:
         _AI_CACHE[key] = (_time.monotonic(), analysis)
@@ -292,7 +308,7 @@ Should this signal be executed, modified, or rejected? If the entry price is sub
 # Retry helper
 # ─────────────────────────────────────────────
 
-async def _with_retry(coro_factory, label: str) -> str:
+async def _with_retry(coro_factory: Callable[[], Awaitable[str]], label: str) -> str:
     """
     Execute an async coroutine factory with exponential-backoff retry.
     Retries on rate-limit, server errors, and transient network failures.
@@ -330,10 +346,10 @@ async def _with_retry(coro_factory, label: str) -> str:
 # Provider implementations
 # ─────────────────────────────────────────────
 
-async def _call_openai(system: str, user: str, model: str = None) -> str:
+async def _call_openai(system: str, user: str, model: str | None = None) -> str:
     """Call OpenAI/compatible API with automatic retry."""
     model_name = model or settings.ai.openai_model
-    async def _do():
+    async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
@@ -359,15 +375,15 @@ async def _call_openai(system: str, user: str, model: str = None) -> str:
             content = data["choices"][0]["message"]["content"]
             if content is None:
                 raise ValueError(f"OpenAI API returned null content for model {model_name}")
-            return content
+            return str(content)
 
     return await _with_retry(_do, "openai")
 
 
-async def _call_anthropic(system: str, user: str, model: str = None) -> str:
+async def _call_anthropic(system: str, user: str, model: str | None = None) -> str:
     """Call Anthropic Claude API with automatic retry."""
     model_name = model or settings.ai.anthropic_model
-    async def _do():
+    async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -391,15 +407,15 @@ async def _call_anthropic(system: str, user: str, model: str = None) -> str:
             content = data["content"][0]["text"]
             if content is None:
                 raise ValueError(f"Anthropic API returned null content for model {model_name}")
-            return content
+            return str(content)
 
     return await _with_retry(_do, "anthropic")
 
 
-async def _call_deepseek(system: str, user: str, model: str = None) -> str:
+async def _call_deepseek(system: str, user: str, model: str | None = None) -> str:
     """Call DeepSeek API (OpenAI-compatible) with automatic retry."""
     model_name = model or settings.ai.deepseek_model
-    async def _do():
+    async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.deepseek.com/v1/chat/completions",
@@ -424,15 +440,15 @@ async def _call_deepseek(system: str, user: str, model: str = None) -> str:
             content = data["choices"][0]["message"]["content"]
             if content is None:
                 raise ValueError(f"DeepSeek API returned null content for model {model_name}")
-            return content
+            return str(content)
 
     return await _with_retry(_do, "deepseek")
 
 
-async def _call_mistral(system: str, user: str, model: str = None) -> str:
+async def _call_mistral(system: str, user: str, model: str | None = None) -> str:
     """Call Mistral API (OpenAI-compatible) with automatic retry."""
     model_name = model or settings.ai.mistral_model
-    async def _do():
+    async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.mistral.ai/v1/chat/completions",
@@ -458,15 +474,15 @@ async def _call_mistral(system: str, user: str, model: str = None) -> str:
             content = data["choices"][0]["message"]["content"]
             if content is None:
                 raise ValueError(f"Mistral API returned null content for model {model_name}")
-            return content
+            return str(content)
 
     return await _with_retry(_do, "mistral")
 
 
-async def _call_openrouter(system: str, user: str, model: str = None) -> str:
+async def _call_openrouter(system: str, user: str, model: str | None = None) -> str:
     """Call OpenRouter's OpenAI-compatible chat completions API."""
     model_name = model or settings.ai.openrouter_model
-    async def _do():
+    async def _do() -> str:
         if not settings.ai.openrouter_api_key:
             raise ValueError("OpenRouter API key is not configured")
 
@@ -500,15 +516,15 @@ async def _call_openrouter(system: str, user: str, model: str = None) -> str:
             content = data["choices"][0]["message"]["content"]
             if content is None:
                 raise ValueError(f"OpenRouter API returned null content for model {model_name}")
-            return content
+            return str(content)
 
     return await _with_retry(_do, "openrouter")
 
 
-async def _call_custom(system: str, user: str, model: str = None) -> str:
+async def _call_custom(system: str, user: str, model: str | None = None) -> str:
     """Call custom AI provider API with automatic retry."""
     model_name = model or settings.ai.custom_provider_model or "gpt-3.5-turbo"
-    async def _do():
+    async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             if not settings.ai.custom_provider_api_url:
                 raise ValueError("Custom AI provider API URL is not configured")
@@ -540,19 +556,19 @@ async def _call_custom(system: str, user: str, model: str = None) -> str:
                 content = data["choices"][0]["message"]["content"]
                 if content is None:
                     raise ValueError(f"Custom API returned null content for model {model_name}")
-                return content
+                return str(content)
             elif "content" in data and len(data["content"]) > 0:
                 text = data["content"][0]["text"]
                 if text is None:
                     raise ValueError(f"Custom API returned null text for model {model_name}")
-                return text
+                return str(text)
             else:
                 if "text" in data:
-                    return data["text"]
+                    return str(data["text"])
                 elif "response" in data:
-                    return data["response"]
+                    return str(data["response"])
                 elif "message" in data:
-                    return data["message"]
+                    return str(data["message"])
                 else:
                     raise ValueError(f"Unexpected response format: {data}")
 
@@ -650,11 +666,23 @@ def _local_rule_analysis(system: str, user: str) -> str:
 
 
 def _aggregate_legacy_voting_results(
-    results: list[dict],
+    results: list[dict[str, object]],
     weights: dict[str, float],
     strategy: str,
-) -> dict:
+) -> dict[str, object]:
     """Compatibility adapter for older dict-based voting tests/tools."""
+    def _legacy_confidence(value: object) -> float:
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return 0.0
+        return 0.0
+
     if not results:
         return {"action": "hold", "confidence": 0.0, "reason": "No voting results available"}
 
@@ -663,32 +691,41 @@ def _aggregate_legacy_voting_results(
     total_weight = sum(ordered_weights) or float(len(results))
 
     if strategy == "best_confidence":
-        return max(results, key=lambda item: float(item.get("confidence") or 0.0))
+        return max(results, key=lambda item: _legacy_confidence(item.get("confidence")))
 
     if strategy == "consensus":
-        counts = {}
+        counts: dict[str, int] = {}
         for result in results:
             action = result.get("action", "hold")
-            counts[action] = counts.get(action, 0) + 1
-        action = max(counts, key=counts.get)
+            action_key = str(action)
+            counts[action_key] = counts.get(action_key, 0) + 1
+        action = max(counts, key=lambda action_key: counts[action_key])
         if counts[action] <= len(results) / 2:
             return {"action": "hold", "confidence": 0.0, "reason": "Consensus not reached"}
-        confidence = sum(float(r.get("confidence") or 0.0) for r in results if r.get("action") == action) / counts[action]
+        confidence_total = 0.0
+        for result in results:
+            if str(result.get("action", "hold")) == action:
+                confidence_total += _legacy_confidence(result.get("confidence"))
+        confidence = confidence_total / counts[action]
         return {"action": action, "confidence": confidence, "reason": "Consensus reached"}
 
-    action_weights = {}
+    action_weights: dict[str, float] = {}
     weighted_confidence = 0.0
-    for result, weight in zip(results, ordered_weights):
+    for result, weight in zip(results, ordered_weights, strict=False):
         normalized = weight / total_weight
-        action = result.get("action", "hold")
+        action = str(result.get("action", "hold"))
         action_weights[action] = action_weights.get(action, 0.0) + normalized
-        weighted_confidence += float(result.get("confidence") or 0.0) * normalized
+        weighted_confidence += _legacy_confidence(result.get("confidence")) * normalized
 
-    action = max(action_weights, key=action_weights.get)
+    action = max(action_weights, key=lambda action_key: action_weights[action_key])
     return {"action": action, "confidence": weighted_confidence, "reason": "Weighted voting aggregate"}
 
 
-def _aggregate_voting_results(results, strategy, weights=None):
+def _aggregate_voting_results(
+    results: Any,
+    strategy: Any,
+    weights: Any = None,
+) -> Coroutine[Any, Any, AIAnalysis] | dict[str, object]:
     """Aggregate voting results, supporting current async and legacy sync callers."""
     if isinstance(strategy, dict) and isinstance(weights, str):
         return _aggregate_legacy_voting_results(results, strategy, weights)
@@ -760,8 +797,8 @@ async def _aggregate_voting_results_async(
         weighted_position_pct = 0.0
         weighted_leverage = 0.0
 
-        recommendation_votes = {}
-        direction_votes = {}
+        recommendation_votes: dict[str, float] = {}
+        direction_votes: dict[str, float] = {}
 
         for analysis, model_id in results:
             w = weights.get(model_id, 1.0) / total_weight
@@ -778,7 +815,7 @@ async def _aggregate_voting_results_async(
                 dir_key = analysis.suggested_direction.value if hasattr(analysis.suggested_direction, 'value') else str(analysis.suggested_direction)
                 direction_votes[dir_key] = direction_votes.get(dir_key, 0) + w
 
-        final_recommendation = max(recommendation_votes.keys(), key=lambda k: recommendation_votes[k])
+        final_recommendation = max(recommendation_votes, key=lambda key: recommendation_votes[key])
 
         best_idx = max(range(len(analyses)), key=lambda i: analyses[i].confidence)
         best_analysis = analyses[best_idx]
@@ -850,8 +887,10 @@ async def analyze_signal(
     smc_text = ""
     try:
         from smc_analyzer import (
-            analyze_smc_single_tf, find_confluence_zones,
-            format_smc_for_ai, MultiTimeframeSMC,
+            MultiTimeframeSMC,
+            analyze_smc_single_tf,
+            find_confluence_zones,
+            format_smc_for_ai,
         )
 
         ohlcv_4h = getattr(market, "_ohlcv_4h", None) or []
@@ -886,7 +925,7 @@ async def analyze_signal(
             f"{settings.ai.voting_models}"
         )
 
-        voting_tasks = []
+        voting_tasks: list[Awaitable[tuple[str, str]]] = []
         for model_id in settings.ai.voting_models:
             voting_tasks.append(_call_model_by_id(model_id, system_prompt, user_prompt))
 
@@ -898,14 +937,15 @@ async def analyze_signal(
                 timeout=_voting_timeout,
             )
 
-            valid_results = []
+            valid_results: list[tuple[AIAnalysis, str]] = []
             for i, result in enumerate(raw_results):
                 model_id = settings.ai.voting_models[i]
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     logger.warning(f"[AI/Voting] Model {model_id} failed: {result}")
                     continue
                 try:
-                    analysis = _parse_response(result[0])
+                    raw_response, _returned_model_id = result
+                    analysis = _parse_response(raw_response)
                     valid_results.append((analysis, model_id))
                 except Exception as e:
                     logger.warning(f"[AI/Voting] Failed to parse {model_id} response: {e}")
@@ -914,7 +954,7 @@ async def analyze_signal(
                 logger.error("[AI/Voting] All voting models failed")
                 return _fallback_analysis("All voting models failed")
 
-            final_analysis = await _aggregate_voting_results(
+            final_analysis = await _aggregate_voting_results_async(
                 valid_results,
                 settings.ai.voting_strategy,
                 settings.ai.voting_weights,
@@ -971,7 +1011,7 @@ async def analyze_signal(
 def _parse_response(raw: str) -> AIAnalysis:
     """Parse raw LLM response into structured AIAnalysis."""
     try:
-        def _float_or_default(value, default: float) -> float:
+        def _float_or_default(value: Any, default: float) -> float:
             try:
                 return float(value)
             except (TypeError, ValueError):
@@ -979,6 +1019,14 @@ def _parse_response(raw: str) -> AIAnalysis:
 
         def _clamp(value: float, low: float, high: float) -> float:
             return max(low, min(high, value))
+
+        def _optional_float(value: Any) -> float | None:
+            if value is None or value == "":
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
 
         # Try to extract JSON from the response
         raw_clean = raw.strip()
@@ -1004,19 +1052,31 @@ def _parse_response(raw: str) -> AIAnalysis:
             if start != -1 and end != -1 and end > start:
                 raw_clean = raw_clean[start:end + 1]
 
-        data = json.loads(raw_clean)
+        parsed = json.loads(raw_clean)
+        if not isinstance(parsed, dict):
+            raise ValueError("AI response was not a JSON object")
+        data: dict[str, object] = parsed
         recommendation = str(data.get("recommendation", "hold")).lower().strip()
         if recommendation not in {"execute", "modify", "reject", "hold"}:
             recommendation = "hold"
 
-        warnings = data.get("warnings", [])
-        if isinstance(warnings, str):
-            warnings = [warnings]
-        elif not isinstance(warnings, list):
+        warnings_raw = data.get("warnings", [])
+        if isinstance(warnings_raw, str):
+            warnings = [warnings_raw]
+        elif isinstance(warnings_raw, list):
+            warnings = [str(item) for item in warnings_raw if item is not None]
+        else:
             warnings = []
-        suggested_direction = data.get("suggested_direction")
-        if isinstance(suggested_direction, str):
-            suggested_direction = suggested_direction.lower().strip() or None
+
+        suggested_direction: SignalDirection | None = None
+        suggested_direction_raw = data.get("suggested_direction")
+        if isinstance(suggested_direction_raw, str):
+            normalized_direction = suggested_direction_raw.lower().strip()
+            if normalized_direction:
+                try:
+                    suggested_direction = SignalDirection(normalized_direction)
+                except ValueError:
+                    suggested_direction = None
 
         confidence = _clamp(_float_or_default(data.get("confidence", 0.5), 0.5), 0.0, 1.0)
         risk_score = _clamp(_float_or_default(data.get("risk_score", 0.5), 0.5), 0.0, 1.0)
@@ -1026,15 +1086,15 @@ def _parse_response(raw: str) -> AIAnalysis:
         return AIAnalysis(
             confidence=confidence,
             recommendation=recommendation,
-            reasoning=data.get("reasoning", ""),
+            reasoning=str(data.get("reasoning", "")),
             suggested_direction=suggested_direction,
-            suggested_entry=data.get("suggested_entry"),
-            suggested_stop_loss=data.get("suggested_stop_loss"),
-            suggested_take_profit=data.get("suggested_take_profit"),
-            suggested_tp1=data.get("suggested_tp1"),
-            suggested_tp2=data.get("suggested_tp2"),
-            suggested_tp3=data.get("suggested_tp3"),
-            suggested_tp4=data.get("suggested_tp4"),
+            suggested_entry=_optional_float(data.get("suggested_entry")),
+            suggested_stop_loss=_optional_float(data.get("suggested_stop_loss")),
+            suggested_take_profit=_optional_float(data.get("suggested_take_profit")),
+            suggested_tp1=_optional_float(data.get("suggested_tp1")),
+            suggested_tp2=_optional_float(data.get("suggested_tp2")),
+            suggested_tp3=_optional_float(data.get("suggested_tp3")),
+            suggested_tp4=_optional_float(data.get("suggested_tp4")),
             tp1_qty_pct=_clamp(_float_or_default(data.get("tp1_qty_pct", 25.0), 25.0), 0.0, 100.0),
             tp2_qty_pct=_clamp(_float_or_default(data.get("tp2_qty_pct", 25.0), 25.0), 0.0, 100.0),
             tp3_qty_pct=_clamp(_float_or_default(data.get("tp3_qty_pct", 25.0), 25.0), 0.0, 100.0),
@@ -1042,7 +1102,7 @@ def _parse_response(raw: str) -> AIAnalysis:
             position_size_pct=position_size_pct,
             recommended_leverage=recommended_leverage,
             risk_score=risk_score,
-            market_condition=data.get("market_condition", ""),
+            market_condition=str(data.get("market_condition", "")),
             warnings=warnings,
             raw_response=raw,
         )

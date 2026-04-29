@@ -3,33 +3,33 @@ QuantPilot AI - Application Factory
 Creates and configures the FastAPI application instance.
 """
 from pathlib import Path
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from core.cache import cache
 from core.config import settings
 from core.database import db_manager
-from core.middleware import setup_middleware
-from core.metrics import metrics_endpoint
 from core.lifespan import lifespan
-from core.cache import cache
+from core.metrics import metrics_endpoint
+from core.middleware import setup_middleware
+from routers.admin import router as admin_router
+from routers.ai_config import router as ai_config_router
+from routers.auth import router as auth_router
+from routers.backtest import router as backtest_router
+from routers.chart import router as chart_router
+from routers.i18n import router as i18n_router
+from routers.social import router as social_router
+from routers.strategies import router as strategies_router
+from routers.strategy_editor import router as strategy_editor_router
+from routers.subscription import router as subscription_router
+from routers.user import router as user_router
 
 # Import routers
 from routers.webhook import router as webhook_router
-from routers.auth import router as auth_router
-from routers.admin import router as admin_router
-from routers.user import router as user_router
-from routers.subscription import router as subscription_router
-from routers.ai_config import router as ai_config_router
-from routers.backtest import router as backtest_router
 from routers.websocket import router as websocket_router
-from routers.strategies import router as strategies_router
-from routers.chart import router as chart_router
-from routers.strategy_editor import router as strategy_editor_router
-from routers.social import router as social_router
-from routers.i18n import router as i18n_router
-
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 
@@ -89,7 +89,7 @@ def _mount_v1_aliases(app: FastAPI, source_router):
         else:
             continue
 
-        route_kwargs = {
+        route_kwargs: dict[str, Any] = {
             "methods": list(route.methods or []),
             "name": f"v1_{route.name}",
             "response_model": getattr(route, "response_model", None),
@@ -103,7 +103,7 @@ def _mount_v1_aliases(app: FastAPI, source_router):
         if response_class is not None:
             route_kwargs["response_class"] = response_class
 
-        v1_router.add_api_route(alias_path, route.endpoint, **route_kwargs)
+        v1_router.add_api_route(alias_path, route.endpoint, **cast(dict[str, Any], route_kwargs))
 
     app.include_router(v1_router)
 
@@ -227,6 +227,7 @@ def _setup_utility_routes(app: FastAPI):
     @app.get("/stats")
     async def get_stats():
         from sqlalchemy import select
+
         from core.database import TradeModel, WebhookEventModel
         from core.utils.datetime import utcnow
 

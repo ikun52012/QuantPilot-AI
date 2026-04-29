@@ -4,10 +4,15 @@ Supports: Binance, OKX, Bybit, Bitget, Gate.io, Coinbase
 Enhanced with multi-TP and trailing-stop execution
 """
 import asyncio
+import hashlib as _hashlib
 import inspect
+import threading as _threading
+from typing import Any
+
 from loguru import logger
+
 from core.config import settings
-from models import TradeDecision, SignalDirection, TrailingStopMode
+from models import SignalDirection, TradeDecision, TrailingStopMode
 
 try:
     import ccxt
@@ -47,24 +52,21 @@ async def _close_exchange(exchange):
 # Reuse CCXT instances for the same exchange+sandbox+credentials config
 # to avoid repeated connection setup overhead.
 # ─────────────────────────────────────────────
-import threading as _threading
-import hashlib as _hashlib
-
 _exchange_pool: dict[str, ccxt.Exchange] = {}
 _exchange_pool_lock = _threading.Lock()
 
 
 def _get_or_create_exchange(
-    exchange_id: str = None,
-    api_key: str = None,
-    api_secret: str = None,
+    exchange_id: str | None = None,
+    api_key: str | None = None,
+    api_secret: str | None = None,
     password: str = "",
     live: bool = False,
     sandbox: bool | None = None,
     market_type: str | None = None,
 ) -> ccxt.Exchange:
     """Return a cached CCXT instance or create a new one.
-    
+
     Uses double-checked locking pattern to avoid race conditions
     while minimizing lock contention.
     """
@@ -85,10 +87,10 @@ def _get_or_create_exchange(
         existing = _exchange_pool.get(cache_key)
         if existing is not None:
             return existing
-        
+
         # Create instance while holding lock to prevent duplicate creation
         instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox, market_type)
-        
+
         # Manage pool size
         if len(_exchange_pool) >= settings.exchange.pool_max_size:
             oldest_key = next(iter(_exchange_pool))
@@ -100,7 +102,7 @@ def _get_or_create_exchange(
                         close()
                 except Exception:
                     pass
-        
+
         _exchange_pool[cache_key] = instance
         return instance
 
@@ -150,9 +152,9 @@ def get_supported_exchanges() -> list[str]:
 
 
 def _build_exchange(
-    exchange_id: str = None,
-    api_key: str = None,
-    api_secret: str = None,
+    exchange_id: str | None = None,
+    api_key: str | None = None,
+    api_secret: str | None = None,
     password: str = "",
     live: bool = False,
     sandbox: bool | None = None,
@@ -172,12 +174,12 @@ def _build_exchange(
     config = SUPPORTED_EXCHANGES[exchange_id]
     exchange_class = config["class"]
     selected_market_type = str(market_type or settings.exchange.market_type or "contract").lower().strip()
-    options = dict(config.get("futures_option", {}))
+    options: dict[str, object] = dict(config.get("futures_option", {}))
     if selected_market_type == "spot":
         options["defaultType"] = "spot"
 
     # Build exchange config
-    exchange_config = {
+    exchange_config: dict[str, object] = {
         "apiKey": api_key if api_key else settings.exchange.api_key,
         "secret": api_secret if api_secret else settings.exchange.api_secret,
         "enableRateLimit": True,
@@ -204,8 +206,8 @@ def _build_exchange(
             raise ValueError(f"Sandbox mode unavailable for {exchange_id}: {e}") from e
 
     # Set default market type
-    if "defaultType" in exchange_config["options"]:
-        exchange.options["defaultType"] = exchange_config["options"]["defaultType"]
+    if "defaultType" in options:
+        exchange.options["defaultType"] = options["defaultType"]
 
     return exchange
 
@@ -236,6 +238,9 @@ def _valid_stop_loss(direction: SignalDirection, entry: float, price: float | No
     except (TypeError, ValueError):
         return None
     if value <= 0 or entry <= 0:
+        return None
+    # BUG FIX: Reject stop loss that equals entry price
+    if value == entry:
         return None
     if direction == SignalDirection.LONG and value < entry:
         return value
@@ -295,7 +300,10 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str) -> str:
             return candidate
 
     cleaned = _normalize_symbol(symbol).replace("/", "")
-    for market_symbol, market in markets.items():
+    for market_symbol_raw, market in markets.items():
+        market_symbol = str(market_symbol_raw)
+        if not isinstance(market, dict):
+            continue
         market_id = str(market.get("id", "")).upper().replace("-", "").replace("_", "").replace("/", "")
         compact_symbol = market_symbol.upper().replace("/", "").replace(":", "").replace("-", "").replace("_", "")
         if cleaned in {market_id, compact_symbol}:
@@ -489,13 +497,13 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
     except ccxt.InsufficientFunds as e:
         logger.error(f"[Exchange] Insufficient funds: {e}")
-        return {"status": "error", "reason": "Insufficient funds"}
+        return {"status": "error", "reason": f"Insufficient funds: {e}"}
     except ccxt.NetworkError as e:
         logger.error(f"[Exchange] Network error: {e}")
-        return {"status": "error", "reason": "Network error"}
+        return {"status": "error", "reason": f"Network error: {e}"}
     except Exception as e:
         logger.error(f"[Exchange] Order failed: {e}")
-        return {"status": "error", "reason": "Order execution failed"}
+        return {"status": "error", "reason": f"Order execution failed: {e}"}
 
 
 async def _place_stop_loss(exchange, symbol, side, quantity, stop_price, result):
@@ -546,11 +554,11 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
     return tp_results
 
 
-def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: float) -> list[tuple[str, dict]]:
+def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: float) -> list[tuple[str, dict[str, Any]]]:
     """Return exchange-aware conditional-order candidates."""
-    reduce_params = {"reduceOnly": True, "closePosition": False}
+    reduce_params: dict[str, Any] = {"reduceOnly": True, "closePosition": False}
     if kind == "take_profit":
-        candidates = [
+        candidates: list[tuple[str, dict[str, Any]]] = [
             ("take_profit_market", {**reduce_params, "stopPrice": trigger_price}),
             ("take_profit", {**reduce_params, "stopPrice": trigger_price}),
             ("market", {**reduce_params, "triggerPrice": trigger_price, "takeProfitPrice": trigger_price}),
@@ -694,7 +702,7 @@ def _simulate_order(decision: TradeDecision) -> dict:
         "take_profit": decision.take_profit,
         "take_profit_orders": tp_info,
         "trailing_stop_config": trailing_config,
-        "trailing_stop-mode": trailing_mode if isinstance(trailing_mode, str) else trailing_mode.value,
+        "trailing_stop_mode": trailing_mode if isinstance(trailing_mode, str) else trailing_mode.value,
         "trailing_pct": decision.trailing_stop.trail_pct if decision.trailing_stop else 0,
         "sandbox_mode": False,
         "order_type": order_type,
@@ -899,7 +907,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         return []
 
 
-async def get_recent_orders(symbol: str = None, limit: int = 50, exchange_config: dict | None = None) -> list[dict]:
+async def get_recent_orders(symbol: str | None = None, limit: int = 50, exchange_config: dict | None = None) -> list[dict]:
     """Fetch recent closed orders from exchange."""
     exchange_config = exchange_config or {}
     if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
@@ -959,7 +967,7 @@ async def test_exchange_connection(
             live=True,
             sandbox=sandbox_mode,
         )
-        balance = await asyncio.to_thread(exchange.fetch_balance)
+        await asyncio.to_thread(exchange.fetch_balance)
         mode = " sandbox/testnet" if sandbox_mode else ""
         return {"success": True, "message": f"Connected to {exchange_id}{mode} successfully"}
     except ccxt.AuthenticationError as e:

@@ -4,16 +4,14 @@ Manages position averaging down/up with configurable parameters.
 Enhanced with live exchange execution support.
 """
 import asyncio
-import json
-from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Optional
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+
 from loguru import logger
 
 from core.utils.datetime import utcnow
-from models import TradeDecision, SignalDirection, TakeProfitLevel, TrailingStopConfig, TrailingStopMode
+from models import SignalDirection, TradeDecision
 
 
 class DCAMode(Enum):
@@ -93,7 +91,7 @@ class DCAPosition:
     lowest_price: float = 0.0
     started_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
-    closed_at: Optional[datetime] = None
+    closed_at: datetime | None = None
     close_reason: str = ""
 
 
@@ -102,7 +100,7 @@ class DCAEngine:
         self.positions: dict[str, DCAPosition] = {}
         self.configs: dict[str, DCAConfig] = {}
         self.price_cache: dict[str, float] = {}
-        self._monitor_task: Optional[asyncio.Task] = None
+        self._monitor_task: asyncio.Task | None = None
 
     def _ensure_strategy_id(self, config: DCAConfig) -> None:
         if not config.strategy_id:
@@ -156,7 +154,7 @@ class DCAEngine:
             reason="initial_entry_paper",
             fees_usdt=initial_capital * config.fee_pct / 100,
         )
-        logger.info(f"[DCA] Paper mode - simulated initial entry")
+        logger.info("[DCA] Paper mode - simulated initial entry")
         return self._finalize_position(position, config, entry, current_price)
 
     def create_position(
@@ -188,7 +186,6 @@ class DCAEngine:
         position = self._build_position(config)
 
         initial_qty = self._calculate_initial_quantity(config, current_price)
-        initial_capital = initial_qty * current_price
 
         try:
             from exchange import execute_trade
@@ -239,7 +236,7 @@ class DCAEngine:
             return config.fixed_size_usdt / price
         return 0.0
 
-    def _calculate_stop_loss_price(self, config: DCAConfig, entry_price: float, direction: SignalDirection) -> Optional[float]:
+    def _calculate_stop_loss_price(self, config: DCAConfig, entry_price: float, direction: SignalDirection) -> float | None:
         if config.stop_loss_pct <= 0:
             return None
         if direction == SignalDirection.LONG:
@@ -247,7 +244,7 @@ class DCAEngine:
         else:
             return entry_price * (1 + config.stop_loss_pct / 100)
 
-    def _calculate_take_profit_price(self, config: DCAConfig, entry_price: float, direction: SignalDirection) -> Optional[float]:
+    def _calculate_take_profit_price(self, config: DCAConfig, entry_price: float, direction: SignalDirection) -> float | None:
         if config.take_profit_pct <= 0:
             return None
         if direction == SignalDirection.LONG:
@@ -282,8 +279,6 @@ class DCAEngine:
 
         spacing_pct = config.entry_spacing_pct
 
-        next_entry_idx = len(position.entries) + 1
-
         if config.mode == "average_down":
             if position.direction == "long":
                 position.next_entry_price = position.average_entry_price * (1 - spacing_pct / 100)
@@ -317,7 +312,7 @@ class DCAEngine:
                 position.take_profit_price = avg_entry * (1 - config.take_profit_pct / 100)
 
     async def check_and_execute(self, position_id: str, current_price: float, exchange_config: dict | None = None) -> dict:
-        result = {"action": "none", "reason": ""}
+        result: dict[str, object] = {"action": "none", "reason": ""}
 
         if position_id not in self.positions:
             return {"action": "error", "reason": "Position not found"}
@@ -382,21 +377,24 @@ class DCAEngine:
         if total_capital >= config.max_total_capital_usdt:
             return False
 
+        if position.next_entry_price <= 0:
+            return False
+
         if config.mode == "average_down":
             if position.direction == "long":
                 loss_pct = (position.average_entry_price - current_price) / position.average_entry_price * 100
-                return loss_pct >= config.activation_loss_pct
+                return loss_pct >= config.activation_loss_pct and current_price <= position.next_entry_price
             else:
                 loss_pct = (current_price - position.average_entry_price) / position.average_entry_price * 100
-                return loss_pct >= config.activation_loss_pct
+                return loss_pct >= config.activation_loss_pct and current_price >= position.next_entry_price
 
         elif config.mode == "average_up":
             if position.direction == "long":
                 gain_pct = (current_price - position.average_entry_price) / position.average_entry_price * 100
-                return gain_pct >= config.activation_loss_pct
+                return gain_pct >= config.activation_loss_pct and current_price >= position.next_entry_price
             else:
                 gain_pct = (position.average_entry_price - current_price) / position.average_entry_price * 100
-                return gain_pct >= config.activation_loss_pct
+                return gain_pct >= config.activation_loss_pct and current_price <= position.next_entry_price
 
         return False
 
@@ -469,7 +467,6 @@ class DCAEngine:
         position.entries_remaining -= 1
 
         total_qty = position.total_quantity
-        total_capital = position.total_capital_usdt
 
         weighted_avg = sum(e.entry_price * e.quantity for e in position.entries) / total_qty
         position.average_entry_price = weighted_avg
