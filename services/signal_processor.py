@@ -437,9 +437,14 @@ class SignalProcessor:
             or settings.exchange.default_order_type
             or "market"
         ).lower().strip()
+        limit_timeout_overrides = (
+            exchange_cfg.get("limit_timeout_overrides")
+            if "limit_timeout_overrides" in exchange_cfg
+            else settings.exchange.limit_timeout_overrides
+        )
         decision.limit_timeout_secs = resolve_limit_timeout_secs(
             signal.timeframe,
-            exchange_cfg.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides,
+            limit_timeout_overrides,
         )
 
         # Check AI recommendation
@@ -876,7 +881,11 @@ class SignalProcessor:
                     "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
                     "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
                     "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
-                    "limit_timeout_overrides": user_exchange.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides,
+                    "limit_timeout_overrides": (
+                        user_exchange.get("limit_timeout_overrides")
+                        if "limit_timeout_overrides" in user_exchange
+                        else settings.exchange.limit_timeout_overrides
+                    ),
                     "max_leverage": user.max_leverage or 20,
                     "max_position_pct": user.max_position_pct or settings.risk.max_position_pct,
                 })

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import pre_filter
 from models import AIAnalysis, MarketContext, PreFilterResult, SignalDirection, TradeDecision, TradingViewSignal
 from services.signal_processor import SignalProcessor, compute_webhook_fingerprint, verify_webhook_signature
 
@@ -280,6 +281,42 @@ class TestSignalProcessorBuildDecision:
 
         assert decision.limit_timeout_secs == 6 * 60 * 60
 
+    def test_build_trade_decision_preserves_explicit_empty_limit_timeout_overrides(
+        self,
+        processor,
+        sample_market,
+        monkeypatch,
+    ):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=50000.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="Good setup",
+            suggested_stop_loss=49000,
+            suggested_tp1=51000,
+            tp1_qty_pct=100.0,
+        )
+        monkeypatch.setattr("services.signal_processor.settings.exchange.limit_timeout_overrides", {"1h": 2 * 60 * 60})
+
+        decision = processor._build_trade_decision(
+            signal,
+            analysis,
+            sample_market,
+            None,
+            {"exchange": {"limit_timeout_overrides": {}}},
+        )
+
+        assert decision.limit_timeout_secs == 8 * 60 * 60
+
     @patch("services.signal_processor.analyze_signal", new_callable=AsyncMock)
     @pytest.mark.asyncio
     async def test_run_ai_analysis_passes_user_settings(self, mock_analyze_signal, processor, sample_signal, sample_market):
@@ -339,6 +376,44 @@ class TestSignalProcessorBuildDecision:
         kwargs = mock_run_pre_filter.await_args.kwargs
         assert kwargs["use_scoring"] is True
         assert kwargs["min_pass_score"] == 70.0
+
+    @pytest.mark.asyncio
+    async def test_run_prefilter_blocks_aliased_duplicate_signal_during_cooldown(self, processor, monkeypatch):
+        with pre_filter._state_lock:
+            pre_filter._recent_signals.clear()
+
+        monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=0))
+        monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
+        monkeypatch.setattr("pre_filter.get_recent_trade_results_async", AsyncMock(return_value=[]))
+
+        signal_a = TradingViewSignal(
+            secret="test",
+            ticker="SPYUSDT.P",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=500.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        signal_b = TradingViewSignal(
+            secret="test",
+            ticker="SPY/USDT:USDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=500.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        market = MarketContext(ticker="SPYUSDT", current_price=500.0)
+
+        first = await pre_filter.run_pre_filter_async(signal_a, market, user_id="user-1")
+        second = await pre_filter.run_pre_filter_async(signal_b, market, user_id="user-1")
+
+        assert first.passed is True
+        assert second.passed is False
+        assert "cooldown" in second.reason.lower()
 
     def test_modified_entry_within_range(self, processor, sample_signal, sample_market):
         """Should use AI modified entry when within 5% of signal price."""

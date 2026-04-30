@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user
 from core.database import SharedSignalModel, SignalSubscriptionModel, get_db
+from core.utils.common import position_symbol_key
 from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/api/social", tags=["Social Signals"])
@@ -178,15 +179,18 @@ async def list_shared_signals(
     db: AsyncSession = Depends(get_db),
 ):
     """List shared signals from community."""
+    max_limit = max(1, min(limit, 200))
     query = select(SharedSignalModel).where(SharedSignalModel.status == "active")
-    if ticker:
-        query = query.where(SharedSignalModel.ticker == ticker)
     if direction:
         query = query.where(SharedSignalModel.direction == direction)
 
-    query = query.order_by(SharedSignalModel.created_at.desc()).limit(max(1, min(limit, 200)))
+    query = query.order_by(SharedSignalModel.created_at.desc())
     result = await db.execute(query)
-    signals = [_signal_to_dict(row) for row in result.scalars().all()]
+    rows = result.scalars().all()
+    if ticker:
+        target_key = position_symbol_key(ticker)
+        rows = [row for row in rows if position_symbol_key(row.ticker) == target_key]
+    signals = [_signal_to_dict(row) for row in rows[:max_limit]]
 
     return {
         "signals": signals,

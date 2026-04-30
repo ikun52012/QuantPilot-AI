@@ -37,7 +37,13 @@ from models import (
     TrailingStopConfig,
     TrailingStopMode,
 )
-from pre_filter import FilterThresholds, calculate_filter_score
+from pre_filter import (
+    FilterThresholds,
+    _record_filter_block,
+    calculate_filter_score,
+    get_filter_stats,
+    reset_filter_stats,
+)
 from smc_analyzer import (
     calculate_premium_discount,
     detect_fvgs,
@@ -310,6 +316,12 @@ class TestPreFilterThresholds:
         btc_atr = thresholds.get("atr_pct_max", "BTCUSDT")
         assert btc_atr == 10.0
 
+    def test_dynamic_thresholds_match_aliased_symbols(self):
+        """Dynamic thresholds should apply to equivalent alias symbols."""
+        thresholds = FilterThresholds.instance()
+        btc_atr = thresholds.get("atr_pct_max", "BTC/USDT:USDT")
+        assert btc_atr == 10.0
+
     def test_custom_threshold_override(self):
         """Custom threshold override."""
         thresholds = FilterThresholds.instance()
@@ -321,6 +333,23 @@ class TestPreFilterThresholds:
         """Unknown threshold returns None."""
         thresholds = FilterThresholds.instance()
         assert thresholds.get("unknown_key") is None
+
+    def test_filter_stats_canonicalize_symbol_aliases(self):
+        """Filter stats should merge alias-equivalent symbols into one key."""
+        reset_filter_stats()
+        _record_filter_block("cooldown", "BTCUSDT.P")
+        _record_filter_block("cooldown", "BTC/USDT:USDT")
+
+        stats = get_filter_stats()
+        assert stats["cooldown"]["BTCUSDT"] == 2
+
+    def test_reset_filter_stats_clears_buffered_counts(self):
+        """Reset should clear pending buffered stats as well as flushed stats."""
+        reset_filter_stats()
+        _record_filter_block("cooldown", "BTCUSDT")
+        reset_filter_stats()
+
+        assert get_filter_stats() == {}
 
 
 class TestFilterScoreCalculation:

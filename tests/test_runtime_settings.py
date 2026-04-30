@@ -101,6 +101,71 @@ async def test_save_ai_settings_allows_clearing_strings_and_voting(monkeypatch):
     assert updated["deepseek_model"] == ""
 
 
+@pytest.mark.asyncio
+async def test_save_exchange_settings_allows_clearing_credentials_and_empty_timeout_overrides(monkeypatch):
+    class _FakeSession:
+        pass
+
+    monkeypatch.setattr(runtime_settings.settings.exchange, "api_key", "GLOBAL_KEY")
+    monkeypatch.setattr(runtime_settings.settings.exchange, "api_secret", "GLOBAL_SECRET")
+    monkeypatch.setattr(runtime_settings.settings.exchange, "password", "GLOBAL_PASSWORD")
+    monkeypatch.setattr(runtime_settings.settings.exchange, "limit_timeout_overrides", {"1h": 3600})
+
+    monkeypatch.setattr(
+        runtime_settings,
+        "_load_encrypted_dict",
+        AsyncMock(
+            return_value={
+                "name": "okx",
+                "api_key": "OLD_KEY",
+                "api_secret": "OLD_SECRET",
+                "password": "OLD_PASSWORD",
+                "limit_timeout_overrides": {"1h": 7200},
+            }
+        ),
+    )
+    monkeypatch.setattr(runtime_settings, "_save_encrypted_dict", AsyncMock())
+
+    updated = await runtime_settings.save_exchange_settings(
+        _FakeSession(),
+        {
+            "api_key": "",
+            "api_secret": "",
+            "password": "",
+            "limit_timeout_overrides": {},
+        },
+    )
+
+    assert updated["api_key"] == ""
+    assert updated["api_secret"] == ""
+    assert updated["password"] == ""
+    assert updated["limit_timeout_overrides"] == {}
+
+
+@pytest.mark.asyncio
+async def test_save_telegram_settings_allows_clearing_bot_token(monkeypatch):
+    class _FakeSession:
+        pass
+
+    monkeypatch.setattr(runtime_settings.settings.telegram, "bot_token", "GLOBAL_TOKEN")
+    monkeypatch.setattr(runtime_settings.settings.telegram, "chat_id", "GLOBAL_CHAT")
+
+    monkeypatch.setattr(
+        runtime_settings,
+        "_load_encrypted_dict",
+        AsyncMock(return_value={"bot_token": "OLD_TOKEN", "chat_id": "OLD_CHAT"}),
+    )
+    monkeypatch.setattr(runtime_settings, "_save_encrypted_dict", AsyncMock())
+
+    updated = await runtime_settings.save_telegram_settings(
+        _FakeSession(),
+        {"bot_token": "", "chat_id": ""},
+    )
+
+    assert updated["bot_token"] == ""
+    assert updated["chat_id"] == ""
+
+
 def test_apply_runtime_settings_respects_empty_limit_timeout_overrides(monkeypatch):
     monkeypatch.setattr(runtime_settings.settings.exchange, "limit_timeout_overrides", {"1h": 3600})
 

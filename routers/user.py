@@ -301,17 +301,19 @@ async def _exchange_config_for_user(db: AsyncSession, user: dict) -> dict:
     settings_data = _load_user_settings(db_user)
     exchange = settings_data.get("exchange") or {}
     return {
-        "exchange": exchange.get("name") or exchange.get("exchange") or settings.exchange.name,
-        "api_key": exchange.get("api_key") or "",
-        "api_secret": exchange.get("api_secret") or "",
-        "password": exchange.get("password") or "",
+        "exchange": exchange.get("name") if "name" in exchange else exchange.get("exchange") or settings.exchange.name,
+        "api_key": str(exchange.get("api_key") if "api_key" in exchange else ""),
+        "api_secret": str(exchange.get("api_secret") if "api_secret" in exchange else ""),
+        "password": str(exchange.get("password") if "password" in exchange else ""),
         "live_trading": bool(exchange.get("live_trading")),
         "sandbox_mode": bool(exchange.get("sandbox_mode")),
-        "market_type": exchange.get("market_type") or settings.exchange.market_type,
-        "default_order_type": exchange.get("default_order_type") or settings.exchange.default_order_type,
-        "stop_loss_order_type": exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
+        "market_type": exchange.get("market_type") if "market_type" in exchange else settings.exchange.market_type,
+        "default_order_type": exchange.get("default_order_type") if "default_order_type" in exchange else settings.exchange.default_order_type,
+        "stop_loss_order_type": exchange.get("stop_loss_order_type") if "stop_loss_order_type" in exchange else settings.exchange.stop_loss_order_type,
         "limit_timeout_overrides": normalize_limit_timeout_overrides(
-            exchange.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides
+            exchange.get("limit_timeout_overrides")
+            if "limit_timeout_overrides" in exchange
+            else settings.exchange.limit_timeout_overrides
         ),
     }
 
@@ -679,12 +681,12 @@ async def get_user_settings(
     exchange = response_data.setdefault("exchange", {})
     exchange.setdefault("name", exchange.get("exchange") or settings.exchange.name)
     exchange.setdefault("exchange", exchange.get("name") or settings.exchange.name)
-    exchange.setdefault("market_type", exchange.get("market_type") or settings.exchange.market_type)
-    exchange.setdefault("default_order_type", exchange.get("default_order_type") or settings.exchange.default_order_type)
-    exchange.setdefault("stop_loss_order_type", exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type)
+    exchange.setdefault("market_type", settings.exchange.market_type)
+    exchange.setdefault("default_order_type", settings.exchange.default_order_type)
+    exchange.setdefault("stop_loss_order_type", settings.exchange.stop_loss_order_type)
     exchange.setdefault(
         "limit_timeout_overrides",
-        normalize_limit_timeout_overrides(exchange.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides),
+        normalize_limit_timeout_overrides(settings.exchange.limit_timeout_overrides),
     )
     exchange["api_configured"] = bool(exchange.get("api_key") and exchange.get("api_secret"))
     exchange.pop("api_key", None)
@@ -755,7 +757,7 @@ async def save_exchange_settings(
 ):
     """Save exchange settings."""
     if _is_admin(user) and request.url.path.endswith("/api/settings/exchange"):
-        await runtime_settings.save_exchange_settings(db, req.model_dump())
+        await runtime_settings.save_exchange_settings(db, req.model_dump(exclude_unset=True))
         await db.commit()
         return {"status": "ok"}
 
@@ -778,7 +780,7 @@ async def save_take_profit_settings(
 ):
     """Save take-profit settings."""
     if _is_admin(user) and request.url.path.endswith("/api/settings/take-profit"):
-        await runtime_settings.save_take_profit_settings(db, req.model_dump())
+        await runtime_settings.save_take_profit_settings(db, req.model_dump(exclude_unset=True))
         await db.commit()
         return {"status": "ok"}
 
@@ -815,7 +817,7 @@ async def save_ai_settings(
 ):
     """Persist admin AI runtime settings."""
     _require_admin(user)
-    await runtime_settings.save_ai_settings(db, req.model_dump())
+    await runtime_settings.save_ai_settings(db, req.model_dump(exclude_unset=True))
     await db.commit()
     return {"status": "ok"}
 
@@ -828,7 +830,7 @@ async def save_telegram_settings(
 ):
     """Persist admin Telegram runtime settings."""
     _require_admin(user)
-    await runtime_settings.save_telegram_settings(db, req.model_dump())
+    await runtime_settings.save_telegram_settings(db, req.model_dump(exclude_unset=True))
     await db.commit()
     return {"status": "ok"}
 
@@ -841,7 +843,7 @@ async def save_risk_settings(
 ):
     """Persist admin risk runtime settings."""
     _require_admin(user)
-    await runtime_settings.save_risk_settings(db, req.model_dump())
+    await runtime_settings.save_risk_settings(db, req.model_dump(exclude_unset=True))
     await db.commit()
     return {"status": "ok"}
 
@@ -854,7 +856,7 @@ async def save_trailing_stop_settings(
 ):
     """Persist admin trailing-stop runtime settings."""
     _require_admin(user)
-    await runtime_settings.save_trailing_stop_settings(db, req.model_dump())
+    await runtime_settings.save_trailing_stop_settings(db, req.model_dump(exclude_unset=True))
     await db.commit()
     return {"status": "ok"}
 

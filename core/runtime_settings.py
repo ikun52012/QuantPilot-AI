@@ -371,15 +371,15 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 async def save_exchange_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
     current = await _load_encrypted_dict(session, EXCHANGE_KEY)
     updated = {
-        "name": str(data.get("exchange") or data.get("name") or current.get("name") or settings.exchange.name).lower().strip(),
-        "api_key": str(data.get("api_key") or current.get("api_key") or settings.exchange.api_key or ""),
-        "api_secret": str(data.get("api_secret") or current.get("api_secret") or settings.exchange.api_secret or ""),
-        "password": str(data.get("password") or current.get("password") or settings.exchange.password or ""),
+        "name": _coalesce_str(data.get("exchange"), data.get("name"), current.get("name"), settings.exchange.name).lower().strip(),
+        "api_key": _coalesce_str(data.get("api_key"), current.get("api_key"), settings.exchange.api_key),
+        "api_secret": _coalesce_str(data.get("api_secret"), current.get("api_secret"), settings.exchange.api_secret),
+        "password": _coalesce_str(data.get("password"), current.get("password"), settings.exchange.password),
         "live_trading": _to_bool(data.get("live_trading"), _to_bool(current.get("live_trading"), settings.exchange.live_trading)),
         "sandbox_mode": _to_bool(data.get("sandbox_mode"), _to_bool(current.get("sandbox_mode"), settings.exchange.sandbox_mode)),
-        "market_type": str(data.get("market_type") or current.get("market_type") or settings.exchange.market_type).lower().strip(),
-        "default_order_type": str(data.get("default_order_type") or current.get("default_order_type") or settings.exchange.default_order_type).lower().strip(),
-        "stop_loss_order_type": str(data.get("stop_loss_order_type") or current.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type).lower().strip(),
+        "market_type": _coalesce_str(data.get("market_type"), current.get("market_type"), settings.exchange.market_type).lower().strip(),
+        "default_order_type": _coalesce_str(data.get("default_order_type"), current.get("default_order_type"), settings.exchange.default_order_type).lower().strip(),
+        "stop_loss_order_type": _coalesce_str(data.get("stop_loss_order_type"), current.get("stop_loss_order_type"), settings.exchange.stop_loss_order_type).lower().strip(),
         "limit_timeout_overrides": normalize_limit_timeout_overrides(
             data.get("limit_timeout_overrides")
             if "limit_timeout_overrides" in data
@@ -426,8 +426,8 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
 async def save_telegram_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
     current = await _load_encrypted_dict(session, TELEGRAM_KEY)
     updated = {
-        "bot_token": str(data.get("bot_token") or current.get("bot_token") or settings.telegram.bot_token or ""),
-        "chat_id": str(data.get("chat_id") if data.get("chat_id") is not None else current.get("chat_id", settings.telegram.chat_id or "")),
+        "bot_token": _coalesce_str(data.get("bot_token"), current.get("bot_token"), settings.telegram.bot_token),
+        "chat_id": _coalesce_str(data.get("chat_id"), current.get("chat_id"), settings.telegram.chat_id),
     }
     await _save_encrypted_dict(session, TELEGRAM_KEY, updated)
     apply_runtime_settings({"telegram": updated})

@@ -14,6 +14,7 @@ from typing import Any
 
 from loguru import logger
 
+from core.utils.common import position_symbol_key
 from core.utils.datetime import utcnow
 from models import MarketContext, PreFilterResult, SignalDirection, TradingViewSignal
 from trade_logger import get_recent_trade_results_async, get_today_pnl_async
@@ -45,7 +46,8 @@ def _load_filter_stats() -> dict[str, dict[str, int]]:
                         if not isinstance(ticker, str):
                             continue
                         try:
-                            normalized_counts[ticker] = int(count)
+                            key = position_symbol_key(ticker).upper() or ticker.upper()
+                            normalized_counts[key] = normalized_counts.get(key, 0) + int(count)
                         except (TypeError, ValueError):
                             continue
                     loaded[check_name] = normalized_counts
@@ -74,7 +76,7 @@ def _record_filter_block(check_name: str, ticker: str) -> None:
         if check_name not in _filter_stats_buffer:
             _filter_stats_buffer[check_name] = {}
 
-        key = ticker.upper()
+        key = position_symbol_key(ticker).upper() or ticker.upper()
         _filter_stats_buffer[check_name][key] = _filter_stats_buffer[check_name].get(key, 0) + 1
 
         now = time.time()
@@ -106,14 +108,21 @@ def _flush_filter_stats() -> None:
 def get_filter_stats() -> dict[str, dict[str, int]]:
     """Return current filter blocking statistics."""
     with _filter_stats_lock:
-        return dict(_filter_stats)
+        merged = {check_name: dict(ticker_counts) for check_name, ticker_counts in _filter_stats.items()}
+        for check_name, ticker_counts in _filter_stats_buffer.items():
+            current = merged.setdefault(check_name, {})
+            for ticker, count in ticker_counts.items():
+                current[ticker] = current.get(ticker, 0) + count
+        return merged
 
 
 def reset_filter_stats() -> None:
     """Reset all filter statistics."""
-    global _filter_stats
+    global _filter_stats, _filter_stats_buffer, _filter_stats_last_flush
     with _filter_stats_lock:
         _filter_stats = {}
+        _filter_stats_buffer = {}
+        _filter_stats_last_flush = 0.0
         _save_filter_stats({})
 
 
@@ -183,6 +192,8 @@ class FilterThresholds:
     def get(self, key: str, ticker: str = "") -> Any:
         """Get threshold value, applying dynamic adjustments."""
         ticker_upper = ticker.upper().strip()
+        if ticker_upper not in self.DYNAMIC_THRESHOLDS:
+            ticker_upper = position_symbol_key(ticker).upper() or ticker_upper
 
         if key in self._custom_thresholds:
             return self._custom_thresholds[key]
@@ -780,10 +791,12 @@ async def run_pre_filter_async(
     all_reasons = reasons + soft_fail_reasons
 
     if all_passed:
+        ticker_key = position_symbol_key(signal.ticker)
         with _state_lock:
             _recent_signals.append({
                 "user_id": user_id or "admin",
                 "ticker": signal.ticker,
+                "ticker_key": ticker_key,
                 "direction": signal.direction,
                 "timestamp": utcnow(),
             })
@@ -811,12 +824,13 @@ def _check_cooldown(signal: TradingViewSignal, cooldown_seconds: int = 300, user
     """Check if we received a similar signal recently (thread-safe)."""
     cutoff = utcnow() - timedelta(seconds=cooldown_seconds)
     scope = user_id or "admin"
+    target_key = position_symbol_key(signal.ticker)
     with _state_lock:
         recent = [s for s in _recent_signals if s["timestamp"] > cutoff]
         for s in recent:
             if (
                 s.get("user_id", "admin") == scope
-                and s["ticker"] == signal.ticker
+                and (s.get("ticker_key") or position_symbol_key(s.get("ticker", ""))) == target_key
                 and s["direction"] == signal.direction
             ):
                 return False

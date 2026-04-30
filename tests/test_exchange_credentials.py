@@ -130,6 +130,73 @@ async def test_execute_trade_does_not_fallback_to_global_credentials_for_user(mo
     assert config["password"] == ""
     assert config["live_trading"] is True
     assert config["sandbox_mode"] is True
+    assert config["limit_timeout_overrides"] == {"1h": 3600}
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_preserves_explicit_empty_limit_timeout_overrides(monkeypatch):
+    processor = SignalProcessor(session=AsyncMock())
+    decision = processor._build_trade_decision(
+        TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        ),
+        AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="ok",
+            suggested_stop_loss=95.0,
+            suggested_tp1=110.0,
+            tp1_qty_pct=100.0,
+        ),
+        MarketContext(ticker="BTCUSDT", current_price=100.0),
+        None,
+        {},
+    )
+
+    monkeypatch.setattr(settings.exchange, "name", "binance")
+    monkeypatch.setattr(settings.exchange, "api_key", "GLOBAL_KEY")
+    monkeypatch.setattr(settings.exchange, "api_secret", "GLOBAL_SECRET")
+    monkeypatch.setattr(settings.exchange, "password", "GLOBAL_PASSWORD")
+    monkeypatch.setattr(settings.exchange, "live_trading", True)
+    monkeypatch.setattr(settings.exchange, "sandbox_mode", False)
+    monkeypatch.setattr(settings.exchange, "market_type", "contract")
+    monkeypatch.setattr(settings.exchange, "default_order_type", "market")
+    monkeypatch.setattr(settings.exchange, "stop_loss_order_type", "market")
+    monkeypatch.setattr(settings.exchange, "limit_timeout_overrides", {"1h": 21600})
+    monkeypatch.setattr(settings.risk, "max_position_pct", 10.0)
+
+    fake_user = SimpleNamespace(live_trading_allowed=True, max_leverage=20, max_position_pct=10.0)
+
+    async def fake_execute_trade(_decision, exchange_config):
+        return {"status": "simulated", "captured_exchange_config": dict(exchange_config)}
+
+    monkeypatch.setattr("services.signal_processor.get_user_by_id", AsyncMock(return_value=fake_user))
+    monkeypatch.setattr("services.signal_processor.get_user_active_subscription", AsyncMock(return_value=object()))
+    monkeypatch.setattr("services.signal_processor.trading_allowed", AsyncMock(return_value={"allowed": True}))
+    monkeypatch.setattr("services.signal_processor.execute_trade", fake_execute_trade)
+    monkeypatch.setattr(
+        "services.signal_processor.log_trade_db",
+        AsyncMock(return_value=SimpleNamespace(id="trade-1", payload_json="{}")),
+    )
+    monkeypatch.setattr("services.signal_processor.record_order_event", AsyncMock(return_value=SimpleNamespace(id="evt-1")))
+    monkeypatch.setattr("services.signal_processor.notify_trade_executed", AsyncMock())
+    monkeypatch.setattr("services.signal_processor.record_trade", lambda *args, **kwargs: None)
+
+    result = await processor._execute_trade(
+        decision,
+        "user-1",
+        {"exchange": {"name": "okx", "limit_timeout_overrides": {}, "live_trading": True}},
+    )
+
+    config = result["captured_exchange_config"]
+    assert config["limit_timeout_overrides"] == {}
 
 
 @pytest.mark.asyncio

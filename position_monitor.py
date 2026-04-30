@@ -23,11 +23,11 @@ from core.utils.common import (
     loads_dict,
     loads_list,
     normalize_limit_timeout_overrides,
+    position_symbol_key,
     price_pnl_pct,
     safe_bool,
     safe_float,
     suggested_limit_timeout_secs,
-    symbol_key,
 )
 from core.utils.datetime import utcnow
 
@@ -91,7 +91,7 @@ def _effective_remaining_quantity(position: PositionModel, opened_qty: float) ->
 
 
 def _symbol_key(symbol: str) -> str:
-    return symbol_key(symbol)
+    return position_symbol_key(symbol)
 
 
 def _price_pnl_pct(direction: str, entry_price: float, exit_price: float, leverage: float = 1.0) -> float:
@@ -399,7 +399,12 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
         )
 
         try:
-            symbol = await asyncio.to_thread(_resolve_symbol, exchange, position.ticker)
+            symbol = await asyncio.to_thread(
+                _resolve_symbol,
+                exchange,
+                position.ticker,
+                exchange_config.get("market_type", settings.exchange.market_type),
+            )
             order = await asyncio.to_thread(exchange.fetch_order, position.entry_order_id, symbol)
 
             order_status = str(order.get("status", "")).lower()
@@ -554,7 +559,7 @@ def _find_exchange_position(position: PositionModel, exchange_positions: list[di
     for item in exchange_positions:
         symbol = _symbol_key(item.get("symbol"))
         side = str(item.get("side") or "").lower()
-        if target and target not in symbol and symbol not in target:
+        if target != symbol:
             continue
         if direction and side and direction not in side:
             continue
@@ -611,7 +616,7 @@ def _order_has_close_status(order: dict) -> bool:
 def _symbols_match(left: str, right: str) -> bool:
     left_key = _symbol_key(left)
     right_key = _symbol_key(right)
-    return bool(left_key and right_key and (left_key in right_key or right_key in left_key))
+    return bool(left_key and right_key and left_key == right_key)
 
 
 def _close_reason_for_order(position: PositionModel, order: dict | None) -> str:

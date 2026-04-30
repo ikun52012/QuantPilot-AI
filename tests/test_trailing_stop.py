@@ -8,6 +8,8 @@ from core.database import PositionModel
 from exchange import place_protective_stop
 from position_monitor import (
     _adjust_trailing_stop_on_tp_hit,
+    _check_pending_limit_orders,
+    _find_exchange_position,
     _hit_take_profit_levels,
     _loads_dict,
     _loads_list,
@@ -410,3 +412,60 @@ async def test_reconcile_paper_position_adjusts_trailing_stop(monkeypatch):
 def test_pending_limit_timeout_defaults_to_extended_window():
     position = PositionModel()
     assert _position_limit_timeout_secs(position) == 8 * 60 * 60
+
+
+def test_find_exchange_position_matches_alias_but_not_different_contract_family():
+    position = PositionModel(ticker="SHIBUSDT.P", direction="long")
+
+    match = _find_exchange_position(
+        position,
+        [
+            {"symbol": "1000SHIB/USDT:USDT", "side": "long"},
+            {"symbol": "SHIB/USDT:USDT", "side": "long"},
+        ],
+    )
+
+    assert match is not None
+    assert match["symbol"] == "SHIB/USDT:USDT"
+
+
+@pytest.mark.asyncio
+async def test_check_pending_limit_orders_passes_market_type_to_symbol_resolution(monkeypatch):
+    class FakeExchange:
+        def fetch_order(self, order_id, symbol):
+            return {"id": order_id, "symbol": symbol, "status": "open", "timestamp": 0}
+
+        def cancel_order(self, order_id, symbol):
+            return {"id": order_id, "symbol": symbol, "status": "canceled"}
+
+    fake_exchange = FakeExchange()
+    resolve_calls = []
+
+    async def fake_close_exchange(_exchange):
+        return None
+
+    def fake_resolve_symbol(exchange, symbol, market_type=None):
+        resolve_calls.append((exchange, symbol, market_type))
+        return "TRB/USDT:USDT"
+
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: fake_exchange)
+    monkeypatch.setattr("exchange._resolve_symbol", fake_resolve_symbol)
+    monkeypatch.setattr("exchange._close_exchange", fake_close_exchange)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    position = PositionModel(
+        ticker="TRBUSDT.P",
+        status="pending",
+        entry_order_id="ord-1",
+    )
+
+    await _check_pending_limit_orders(
+        FakeSession(),
+        position,
+        {"exchange": "okx", "market_type": "contract", "live_trading": True},
+    )
+
+    assert resolve_calls == [(fake_exchange, "TRBUSDT.P", "contract")]

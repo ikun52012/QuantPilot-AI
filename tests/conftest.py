@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.config import settings
 from core.database import Base, db_manager
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
@@ -86,3 +87,11 @@ def test_admin_data():
         "email": "admin@example.com",
         "password": "AdminPass123!",
     }
+
+
+@pytest.fixture(autouse=True)
+def restore_runtime_settings_state():
+    snapshot = settings.model_copy(deep=True)
+    yield
+    for field_name in snapshot.__class__.model_fields:
+        setattr(settings, field_name, getattr(snapshot, field_name))

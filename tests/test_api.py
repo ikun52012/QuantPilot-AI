@@ -2,12 +2,14 @@
 API endpoint tests.
 """
 
+from datetime import timedelta
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from core.database import PaymentModel, SubscriptionModel, SubscriptionPlanModel, UserModel
+from core.database import PaymentModel, SharedSignalModel, SubscriptionModel, SubscriptionPlanModel, UserModel
 from core.security import hash_password
 from core.utils.datetime import utcnow
 from tests.test_admin_updates import _login_admin
@@ -411,6 +413,145 @@ class TestUserEndpoints:
         }
 
     @pytest.mark.asyncio
+    async def test_user_settings_preserve_empty_limit_timeout_overrides(self, client: AsyncClient, test_user_data, monkeypatch):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        headers = _csrf_headers(login)
+
+        monkeypatch.setattr("routers.user.settings.exchange.limit_timeout_overrides", {"1h": 21600})
+
+        response = await client.post(
+            "/api/user/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "",
+                "api_secret": "",
+                "password": "",
+                "live_trading": False,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+                "limit_timeout_overrides": {},
+            },
+        )
+        assert response.status_code == 200
+
+        settings_response = await client.get("/api/user/settings")
+        assert settings_response.status_code == 200
+        exchange = settings_response.json()["exchange"]
+        assert exchange["limit_timeout_overrides"] == {}
+
+    @pytest.mark.asyncio
+    async def test_admin_exchange_partial_update_preserves_existing_values(self, client: AsyncClient, db_session, test_admin_data):
+        headers = await _login_admin(client, db_session, test_admin_data)
+
+        initial = await client.post(
+            "/api/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "keep-key",
+                "api_secret": "keep-secret",
+                "password": "keep-password",
+                "live_trading": True,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+                "limit_timeout_overrides": {"1h": 7200},
+            },
+        )
+        assert initial.status_code == 200
+
+        partial = await client.post(
+            "/api/settings/exchange",
+            headers=headers,
+            json={"sandbox_mode": False},
+        )
+        assert partial.status_code == 200
+
+        status_response = await client.get("/api/status", headers=headers)
+        assert status_response.status_code == 200
+        status = status_response.json()
+        assert status["exchange"] == "okx"
+        assert status["exchange_api_configured"] is True
+        assert status["exchange_sandbox_mode"] is False
+        assert status["exchange_market_type"] == "contract"
+        assert status["exchange_default_order_type"] == "limit"
+        assert status["exchange_limit_timeout_overrides"] == {"1h": 7200}
+
+    @pytest.mark.asyncio
+    async def test_admin_exchange_settings_allow_clearing_credentials(self, client: AsyncClient, db_session, test_admin_data):
+        headers = await _login_admin(client, db_session, test_admin_data)
+
+        initial = await client.post(
+            "/api/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "k",
+                "api_secret": "s",
+                "password": "p",
+                "live_trading": False,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+            },
+        )
+        assert initial.status_code == 200
+
+        cleared = await client.post(
+            "/api/settings/exchange",
+            headers=headers,
+            json={
+                "api_key": "",
+                "api_secret": "",
+                "password": "",
+            },
+        )
+        assert cleared.status_code == 200
+
+        status_response = await client.get("/api/status", headers=headers)
+        assert status_response.status_code == 200
+        status = status_response.json()
+        assert status["exchange_api_configured"] is False
+        assert status["exchange_password_configured"] is False
+
+    @pytest.mark.asyncio
+    async def test_admin_telegram_settings_allow_clearing_bot_token(self, client: AsyncClient, db_session, test_admin_data):
+        headers = await _login_admin(client, db_session, test_admin_data)
+
+        initial = await client.post(
+            "/api/settings/telegram",
+            headers=headers,
+            json={
+                "bot_token": "telegram-token",
+                "chat_id": "123456",
+            },
+        )
+        assert initial.status_code == 200
+
+        cleared = await client.post(
+            "/api/settings/telegram",
+            headers=headers,
+            json={
+                "bot_token": "",
+                "chat_id": "",
+            },
+        )
+        assert cleared.status_code == 200
+
+        status_response = await client.get("/api/status", headers=headers)
+        assert status_response.status_code == 200
+        telegram = status_response.json()["telegram"]
+        assert telegram["bot_configured"] is False
+        assert telegram["configured"] is False
+        assert telegram["chat_id"] == ""
+
+    @pytest.mark.asyncio
     async def test_user_exchange_settings_allow_clearing_credentials(self, client: AsyncClient, test_user_data):
         login = await client.post("/api/auth/register", json=test_user_data)
         assert login.status_code == 200
@@ -592,6 +733,46 @@ class TestSocialEndpoints:
         post_response = await client.post(f"/api/social/follow/{publisher['username']}", headers=follow_headers)
         assert post_response.status_code == 200
         assert post_response.json()["status"] == "following"
+
+    @pytest.mark.asyncio
+    async def test_list_shared_signals_matches_aliased_ticker_before_limit(self, client: AsyncClient, test_user_data, db_session):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        user_id = login.json()["user"]["id"]
+        now = utcnow()
+
+        db_session.add_all([
+            SharedSignalModel(
+                id="sig-old-target",
+                user_id=user_id,
+                username=test_user_data["username"].lower(),
+                ticker="SPYUSDT.P",
+                direction="long",
+                entry_price=500.0,
+                status="active",
+                created_at=now - timedelta(minutes=1),
+            ),
+            SharedSignalModel(
+                id="sig-newer-other",
+                user_id=user_id,
+                username=test_user_data["username"].lower(),
+                ticker="BTCUSDT",
+                direction="long",
+                entry_price=50000.0,
+                status="active",
+                created_at=now,
+            ),
+        ])
+        await db_session.commit()
+
+        response = await client.get("/api/social/list", params={"ticker": "SPY/USDT:USDT", "limit": 1})
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["total"] == 1
+        assert len(payload["signals"]) == 1
+        assert payload["signals"][0]["signal_id"] == "sig-old-target"
+        assert payload["signals"][0]["ticker"] == "SPYUSDT.P"
 
     @pytest.mark.asyncio
     async def test_inline_2fa_login_failed_attempts_are_limited(self, client: AsyncClient, test_user_data, db_session):

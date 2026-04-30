@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 from core.config import settings
-from core.utils.common import resolve_limit_timeout_secs
+from core.utils.common import position_symbol_key, resolve_limit_timeout_secs
 from core.utils.datetime import parse_datetime_utc_naive, utcnow
 
 
@@ -1327,16 +1327,20 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
     query = select(PositionModel).where(
         PositionModel.status.in_(["open", "pending"]),
         PositionModel.direction == open_direction,
-        PositionModel.ticker == ticker,
     )
     if user_id:
         query = query.where(PositionModel.user_id == user_id)
     else:
         query = query.where(PositionModel.user_id.is_(None))
-    query = query.order_by(PositionModel.opened_at.desc()).limit(1)
+    query = query.order_by(PositionModel.opened_at.desc())
 
     result = await session.execute(query)
-    position = result.scalar_one_or_none()
+    target_key = position_symbol_key(ticker)
+    candidates = [
+        row for row in result.scalars().all()
+        if position_symbol_key(row.ticker) == target_key
+    ]
+    position = candidates[0] if candidates else None
 
     if not position:
         return entry
