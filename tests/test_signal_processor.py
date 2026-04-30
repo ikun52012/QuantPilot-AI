@@ -149,6 +149,26 @@ class TestSignalProcessorBuildDecision:
         assert decision.execute is False
         assert "direction conflict" in decision.reason.lower()
 
+    @pytest.mark.asyncio
+    async def test_check_position_conflict_matches_symbol_aliases(self, processor):
+        decision = TradeDecision(ticker="SPY/USDT:USDT", direction=SignalDirection.SHORT)
+        processor.session.execute = AsyncMock(return_value=type(
+            "_Result",
+            (),
+            {
+                "scalars": lambda self: type(
+                    "_Scalars",
+                    (),
+                    {"all": lambda self: [type("_Pos", (), {"ticker": "SPYUSDT.P", "direction": "long", "id": "abcd1234-0000"})()]},
+                )()
+            },
+        )())
+
+        conflict = await processor._check_position_conflict(decision, "user-1")
+
+        assert conflict is not None
+        assert "conflicting position" in conflict.lower()
+
     def test_reject_no_stop_loss(self, processor, sample_signal, sample_market):
         """Should reject when no valid stop loss for opening trade."""
         analysis = AIAnalysis(

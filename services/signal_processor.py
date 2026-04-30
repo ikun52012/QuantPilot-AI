@@ -30,7 +30,7 @@ from core.metrics import (
 )
 from core.security import decrypt_settings_payload
 from core.trading_control import trading_allowed
-from core.utils.common import first_valid, resolve_limit_timeout_secs, safe_float
+from core.utils.common import first_valid, position_symbol_key, resolve_limit_timeout_secs, safe_float
 from exchange import execute_trade
 from market_data import fetch_enhanced_market_context, fetch_market_context
 from models import (
@@ -1019,15 +1019,16 @@ class SignalProcessor:
         Returns a rejection reason string, or None if no conflict.
         """
         try:
-            stmt = select(PositionModel).where(
-                PositionModel.status.in_(["open", "pending"]),
-                PositionModel.ticker == decision.ticker,
-            )
+            stmt = select(PositionModel).where(PositionModel.status.in_(["open", "pending"]))
             if user_id:
                 stmt = stmt.where(PositionModel.user_id == user_id)
 
             result = await self.session.execute(stmt)
-            open_positions = list(result.scalars().all())
+            target_key = position_symbol_key(decision.ticker)
+            open_positions = [
+                pos for pos in result.scalars().all()
+                if position_symbol_key(pos.ticker) == target_key
+            ]
 
             if not open_positions:
                 return None

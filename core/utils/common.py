@@ -230,6 +230,23 @@ def symbol_key(symbol: str) -> str:
     return normalize_symbol(symbol).lower()
 
 
+def position_symbol_key(symbol: str) -> str:
+    """Canonicalize equivalent display/exchange position symbols for matching."""
+    normalized = str(symbol or "").upper().strip()
+    if not normalized:
+        return ""
+    for suffix in (".P", "PERP"):
+        if normalized.endswith(suffix):
+            normalized = normalized[:-len(suffix)]
+            break
+    if ":" in normalized and "/" in normalized:
+        left, _, contract = normalized.partition(":")
+        base, _, quote = left.partition("/")
+        if base and quote and contract == quote:
+            return symbol_key(f"{base}{quote}")
+    return symbol_key(normalized)
+
+
 def price_pnl_pct(
     direction: str,
     entry_price: float,

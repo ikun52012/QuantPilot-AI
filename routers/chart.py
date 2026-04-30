@@ -12,26 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import get_current_user
 from core.database import PositionModel, WebhookEventModel, get_db
-from core.utils.common import symbol_key
+from core.utils.common import position_symbol_key
 from market_data import fetch_ohlcv_history
 
 router = APIRouter(prefix="/api/chart", tags=["Chart"])
-
-
-def _chart_symbol_key(symbol: str) -> str:
-    normalized = str(symbol or "").upper().strip()
-    if not normalized:
-        return ""
-    for suffix in (".P", "PERP"):
-        if normalized.endswith(suffix):
-            normalized = normalized[:-len(suffix)]
-            break
-    if ":" in normalized and "/" in normalized:
-        left, _, contract = normalized.partition(":")
-        base, _, quote = left.partition("/")
-        if base and quote and contract == quote:
-            return symbol_key(f"{base}{quote}")
-    return symbol_key(normalized)
 
 
 class ChartDataRequest(BaseModel):
@@ -162,10 +146,10 @@ async def get_position_markers(
             .where(PositionModel.user_id == user_id)
             .where(PositionModel.status.in_(["open", "pending"]))
         )
-        target_key = _chart_symbol_key(ticker)
+        target_key = position_symbol_key(ticker)
         positions = [
             pos for pos in result.scalars().all()
-            if _chart_symbol_key(pos.ticker) == target_key
+            if position_symbol_key(pos.ticker) == target_key
         ]
 
         markers = []
@@ -214,10 +198,10 @@ async def get_signal_markers(
             .order_by(WebhookEventModel.created_at.desc())
             .limit(50)
         )
-        target_key = _chart_symbol_key(ticker)
+        target_key = position_symbol_key(ticker)
         events = [
             event for event in result.scalars().all()
-            if _chart_symbol_key(event.ticker) == target_key
+            if position_symbol_key(event.ticker) == target_key
         ]
 
         markers = []

@@ -25,7 +25,7 @@ from core.database import (
 )
 from core.request_utils import public_base_url
 from core.security import decrypt_settings_payload, encrypt_settings_payload
-from core.utils.common import normalize_limit_timeout_overrides, symbol_key
+from core.utils.common import normalize_limit_timeout_overrides, position_symbol_key
 from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/api", tags=["user"])
@@ -246,20 +246,10 @@ def _loads_list(value) -> list:
         return []
 
 
-def _position_symbol_key(symbol: str) -> str:
-    normalized = str(symbol or "").upper().strip()
-    if not normalized:
-        return ""
-    for suffix in (".P", "PERP"):
-        if normalized.endswith(suffix):
-            normalized = normalized[:-len(suffix)]
-            break
-    if ":" in normalized and "/" in normalized:
-        left, _, contract = normalized.partition(":")
-        base, _, quote = left.partition("/")
-        if base and quote and contract == quote:
-            return symbol_key(f"{base}{quote}")
-    return symbol_key(normalized)
+def _present_str(value, fallback: str = "") -> str:
+    if value is None:
+        return fallback
+    return str(value)
 
 
 async def _save_user_settings(db: AsyncSession, db_user, settings_data: dict) -> None:
@@ -273,9 +263,9 @@ async def _save_user_exchange(db: AsyncSession, db_user, req: UserSettingsReques
     current["exchange"] = {
         "name": req.exchange.lower().strip(),
         "exchange": req.exchange.lower().strip(),
-        "api_key": req.api_key or current_exchange.get("api_key", ""),
-        "api_secret": req.api_secret or current_exchange.get("api_secret", ""),
-        "password": req.password or current_exchange.get("password", ""),
+        "api_key": _present_str(req.api_key, _present_str(current_exchange.get("api_key"), "")),
+        "api_secret": _present_str(req.api_secret, _present_str(current_exchange.get("api_secret"), "")),
+        "password": _present_str(req.password, _present_str(current_exchange.get("password"), "")),
         "live_trading": bool(req.live_trading),
         "sandbox_mode": bool(req.sandbox_mode),
         "market_type": req.market_type,
@@ -410,7 +400,7 @@ async def get_positions(
             exchange_positions = await get_open_positions(exchange_config)
 
             def _position_key(symbol: str, side: str) -> str:
-                return f"{_position_symbol_key(symbol)}::{str(side or '').lower().strip()}"
+                return f"{position_symbol_key(symbol)}::{str(side or '').lower().strip()}"
 
             db_keys = {
                 _position_key(str(item.get("symbol") or ""), str(item.get("side") or ""))

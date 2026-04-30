@@ -411,6 +411,52 @@ class TestUserEndpoints:
         }
 
     @pytest.mark.asyncio
+    async def test_user_exchange_settings_allow_clearing_credentials(self, client: AsyncClient, test_user_data):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        headers = _csrf_headers(login)
+
+        initial = await client.post(
+            "/api/user/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "k",
+                "api_secret": "s",
+                "password": "p",
+                "live_trading": True,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+            },
+        )
+        assert initial.status_code == 200
+
+        cleared = await client.post(
+            "/api/user/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "",
+                "api_secret": "",
+                "password": "",
+                "live_trading": False,
+                "sandbox_mode": False,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+            },
+        )
+        assert cleared.status_code == 200
+
+        settings_response = await client.get("/api/user/settings")
+        assert settings_response.status_code == 200
+        exchange = settings_response.json()["exchange"]
+        assert exchange["api_configured"] is False
+        assert "password" not in exchange
+
+    @pytest.mark.asyncio
     async def test_history_returns_take_profit_levels(self, client: AsyncClient, test_user_data, db_session):
         login = await client.post("/api/auth/register", json=test_user_data)
         assert login.status_code == 200
