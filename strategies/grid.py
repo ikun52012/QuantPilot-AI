@@ -61,6 +61,7 @@ class GridLevel:
     fees_usdt: float = 0.0
     grid_index: int | None = None
     pair_level: float | None = None
+    exchange_order_status: str = ""
 
 
 @dataclass
@@ -102,6 +103,10 @@ class GridEngine:
     def _ensure_strategy_id(self, config: GridConfig) -> None:
         if not config.strategy_id:
             config.strategy_id = f"grid_{config.ticker}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    @staticmethod
+    def _is_live_limit_level(level: GridLevel, config: GridConfig) -> bool:
+        return (not config.paper_mode) and bool(level.order_id) and str(level.exchange_order_status or "").lower() in {"open", "new", "pending"}
 
     def _initialize_grid_position(self, config: GridConfig, current_price: float) -> GridPosition:
         self._ensure_strategy_id(config)
@@ -187,6 +192,7 @@ class GridEngine:
 
                 if order_result.get("status") in ["filled", "pending", "simulated"]:
                     level.order_id = order_result.get("order_id", "")
+                    level.exchange_order_status = str(order_result.get("exchange_order_status") or order_result.get("status") or "")
                     logger.info(f"[Grid] Placed grid order {level.side} @ {level.price}: {order_result.get('order_id')}")
                 else:
                     logger.error(f"[Grid] Failed to place grid order: {order_result}")
@@ -346,30 +352,34 @@ class GridEngine:
         pnl = 0.0
 
         if not config.paper_mode:
-            try:
-                from exchange import execute_trade
+            if self._is_live_limit_level(level, config):
+                logger.info(f"[Grid] Exchange limit order already filled for {config.ticker} @ {fill_price}; skipping duplicate market order")
+            else:
+                try:
+                    from exchange import execute_trade
 
-                direction = SignalDirection.LONG if level.side == "buy" else SignalDirection.SHORT
-                decision = TradeDecision(
-                    execute=True,
-                    direction=direction,
-                    ticker=config.ticker,
-                    entry_price=fill_price,
-                    quantity=level.quantity,
-                    reason=f"Grid {level.side} filled at {fill_price}",
-                    order_type="market",
-                )
+                    direction = SignalDirection.LONG if level.side == "buy" else SignalDirection.SHORT
+                    decision = TradeDecision(
+                        execute=True,
+                        direction=direction,
+                        ticker=config.ticker,
+                        entry_price=fill_price,
+                        quantity=level.quantity,
+                        reason=f"Grid {level.side} filled at {fill_price}",
+                        order_type="market",
+                    )
 
-                order_result = await execute_trade(decision, exchange_config)
+                    order_result = await execute_trade(decision, exchange_config)
 
-                if order_result.get("status") in ["filled", "simulated"]:
-                    level.order_id = order_result.get("order_id", "")
-                    logger.info(f"[Grid] Executed grid trade: {order_result.get('order_id')}")
-                else:
-                    logger.error(f"[Grid] Failed to execute grid trade: {order_result}")
+                    if order_result.get("status") in ["filled", "simulated"]:
+                        level.order_id = order_result.get("order_id", "")
+                        level.exchange_order_status = str(order_result.get("exchange_order_status") or order_result.get("status") or "")
+                        logger.info(f"[Grid] Executed grid trade: {order_result.get('order_id')}")
+                    else:
+                        logger.error(f"[Grid] Failed to execute grid trade: {order_result}")
 
-            except Exception as e:
-                logger.error(f"[Grid] Exchange execution failed: {e}")
+                except Exception as e:
+                    logger.error(f"[Grid] Exchange execution failed: {e}")
 
         pair_level = self._find_pair_level(position, level)
 
@@ -501,22 +511,14 @@ class GridEngine:
 
         if config and not config.paper_mode:
             try:
-                from exchange import execute_trade
+                from exchange import cancel_order
 
                 for level in position.grid_levels:
                     if level.status == "pending" and level.order_id:
                         try:
-                            direction = SignalDirection.LONG if level.side == "buy" else SignalDirection.SHORT
-                            close_dir = SignalDirection.CLOSE_LONG if direction == SignalDirection.LONG else SignalDirection.CLOSE_SHORT
-                            decision = TradeDecision(
-                                execute=True,
-                                direction=close_dir,
-                                ticker=position.ticker,
-                                quantity=level.quantity,
-                                reason=f"Grid close: {reason}",
-                                order_type="market",
-                            )
-                            await execute_trade(decision, exchange_config)
+                            await cancel_order(level.order_id, position.ticker, exchange_config)
+                            level.order_id = ""
+                            level.exchange_order_status = "cancelled"
                         except Exception as e:
                             logger.warning(f"[Grid] Failed to cancel grid order {level.order_id}: {e}")
 

@@ -1,16 +1,24 @@
 // QuantPilot AI Service Worker for PWA
-const CACHE_VERSION = 'v4.5.4';
+// Keep this in sync with versioned asset URLs in the HTML entrypoints.
+const CACHE_VERSION = '20260430-2';
 const CACHE_NAME = `quantpilot-${CACHE_VERSION}`;
 const STATIC_CACHE = `quantpilot-static-${CACHE_VERSION}`;
-
-const STATIC_ASSETS = [
-  '/',
-  '/dashboard',
+const NETWORK_FIRST_PATHS = new Set([
   '/static/style.css',
   '/static/app.js',
   '/static/js/qp-core.js',
   '/static/js/charts.js',
+  '/static/js/i18n.js',
   '/static/manifest.json',
+]);
+
+const STATIC_ASSETS = [
+  '/static/style.css?v=20260430-2',
+  '/static/app.js?v=20260430-2',
+  '/static/js/qp-core.js?v=20260430-2',
+  '/static/js/charts.js?v=20260430-2',
+  '/static/js/i18n.js?v=20260430-2',
+  '/static/manifest.json?v=20260430-2',
   '/static/icon.svg',
 ];
 
@@ -44,6 +52,11 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  if (shouldUseNetworkFirst(url)) {
+    event.respondWith(handleNetworkFirstRequest(event.request));
+    return;
+  }
+
   if (!shouldCacheRequest(event.request, url)) {
     event.respondWith(fetch(event.request));
     return;
@@ -59,6 +72,25 @@ function shouldCacheRequest(request, url) {
   if (url.pathname.startsWith('/api/')) return false;
 
   return STATIC_ASSETS.includes(url.pathname) || url.pathname.startsWith('/static/');
+}
+
+function shouldUseNetworkFirst(url) {
+  return url.origin === self.location.origin && NETWORK_FIRST_PATHS.has(url.pathname);
+}
+
+async function handleNetworkFirstRequest(request) {
+  try {
+    const networkResponse = await fetch(request);
+    if (networkResponse && networkResponse.ok) {
+      const responseForCache = networkResponse.clone();
+      eventWaitUntilSafe(
+        caches.open(STATIC_CACHE).then((cache) => cache.put(request, responseForCache))
+      );
+    }
+    return networkResponse;
+  } catch (_) {
+    return caches.match(request) || fetch(request);
+  }
 }
 
 async function handleStaticRequest(request) {

@@ -143,6 +143,7 @@ class ExchangeConfig(BaseModel):
     market_type: str = "contract"
     default_order_type: str = "limit"
     stop_loss_order_type: str = "market"
+    limit_timeout_overrides: dict[str, int] = Field(default_factory=dict)
     pool_max_size: int = 50
 
     @field_validator('name')
@@ -190,6 +191,7 @@ class ExchangeConfig(BaseModel):
             market_type=os.getenv("EXCHANGE_MARKET_TYPE", "contract"),
             default_order_type=os.getenv("EXCHANGE_DEFAULT_ORDER_TYPE", "limit"),
             stop_loss_order_type=os.getenv("EXCHANGE_STOP_LOSS_ORDER_TYPE", "market"),
+            limit_timeout_overrides=_json_env("EXCHANGE_LIMIT_TIMEOUT_OVERRIDES", {}),
             pool_max_size=int(os.getenv("EXCHANGE_POOL_MAX_SIZE", "50")),
         )
 

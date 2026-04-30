@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import (
@@ -137,21 +138,33 @@ async def register(
 
     pw_hash = hash_password(req.password)
     try:
-        user = await create_user(db, username, email, pw_hash)
-    except ValueError as err:
-        raise HTTPException(400, str(err)) from err
+        invite = None
+        if invite_required.lower() == "true" and invite_code:
+            result = await db.execute(
+                select(InviteCodeModel).where(InviteCodeModel.code == invite_code).with_for_update()
+            )
+            invite = result.scalar_one_or_none()
+            if not invite or not invite.is_active:
+                raise HTTPException(400, "Invalid or expired invite code")
+            if invite.expires_at and _to_naive_utc(invite.expires_at) < utcnow():
+                raise HTTPException(400, "Invite code has expired")
+            if invite.max_uses > 0 and invite.used_count >= invite.max_uses:
+                raise HTTPException(400, "Invite code has reached maximum uses")
 
-    if invite_required.lower() == "true" and invite_code:
-        result = await db.execute(
-            select(InviteCodeModel).where(InviteCodeModel.code == invite_code)
-        )
-        invite = result.scalar_one_or_none()
+        user = await create_user(db, username, email, pw_hash)
         if invite:
             invite.used_count += 1
             invite.last_used_by = user.id
             invite.last_used_at = utcnow()
             if invite.max_uses > 0 and invite.used_count >= invite.max_uses:
                 invite.is_active = False
+
+        await db.commit()
+    except ValueError as err:
+        raise HTTPException(400, str(err)) from err
+    except IntegrityError as err:
+        await db.rollback()
+        raise HTTPException(400, "Username or email already exists") from err
 
     token = create_token(user.id, user.username, user.role, user.token_version or 0)
     set_auth_cookie(response, token, request)

@@ -4,9 +4,13 @@ API endpoint tests.
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from core.database import UserModel
+from core.database import PaymentModel, SubscriptionModel, SubscriptionPlanModel, UserModel
 from core.security import hash_password
+from core.utils.datetime import utcnow
+from tests.test_admin_updates import _login_admin
 
 
 def _csrf_headers(response) -> dict[str, str]:
@@ -152,6 +156,53 @@ class TestAuthEndpoints:
         )
         assert response.status_code == 429
 
+    @pytest.mark.asyncio
+    async def test_2fa_verify_rejects_non_pending_token(self, client: AsyncClient, test_user_data):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        token = login.json()["token"]
+
+        response = await client.post(
+            "/api/auth/2fa/verify",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"code": "000000"},
+        )
+        assert response.status_code == 403
+        assert "not pending" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_2fa_verify_rejects_revoked_pending_token(self, client: AsyncClient, test_user_data, db_session):
+        from core.totp import encrypt_totp_secret
+
+        user = UserModel(
+            username=test_user_data["username"].lower(),
+            email=test_user_data["email"].lower(),
+            password_hash=hash_password(test_user_data["password"]),
+            totp_secret=encrypt_totp_secret("JBSWY3DPEHPK3PXP"),
+            totp_enabled=True,
+            token_version=0,
+        )
+        db_session.add(user)
+        await db_session.commit()
+
+        login = await client.post("/api/auth/login", json={
+            "username": test_user_data["username"],
+            "password": test_user_data["password"],
+        })
+        assert login.status_code == 200
+        pending_token = login.json()["token"]
+
+        user.token_version = 1
+        await db_session.commit()
+
+        response = await client.post(
+            "/api/auth/2fa/verify",
+            headers={"Authorization": f"Bearer {pending_token}"},
+            json={"code": "000000"},
+        )
+        assert response.status_code == 401
+        assert "revoked" in response.json()["detail"].lower()
+
 
 class TestUserEndpoints:
     @pytest.mark.asyncio
@@ -267,6 +318,91 @@ class TestUserEndpoints:
         assert exchange["stop_loss_order_type"] == "market"
 
     @pytest.mark.asyncio
+    async def test_user_settings_return_limit_timeout_overrides(self, client: AsyncClient, test_user_data):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        headers = _csrf_headers(login)
+
+        response = await client.post(
+            "/api/user/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "k",
+                "api_secret": "s",
+                "password": "p",
+                "live_trading": True,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+                "limit_timeout_overrides": {
+                    "15m": 7200,
+                    "30m": 14400,
+                    "1h": 21600,
+                    "4h": 86400,
+                    "1d": 432000,
+                },
+            },
+        )
+        assert response.status_code == 200
+
+        settings_response = await client.get("/api/user/settings")
+        assert settings_response.status_code == 200
+        exchange = settings_response.json()["exchange"]
+        assert exchange["limit_timeout_overrides"] == {
+            "15m": 7200,
+            "30m": 14400,
+            "1h": 21600,
+            "4h": 86400,
+            "1d": 432000,
+        }
+
+    @pytest.mark.asyncio
+    async def test_history_returns_take_profit_levels(self, client: AsyncClient, test_user_data, db_session):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        user_id = login.json()["user"]["id"]
+
+        payload = {
+            "signal": {"price": 50000},
+            "analysis": {
+                "suggested_stop_loss": 49000,
+                "suggested_tp1": 51000,
+                "suggested_tp2": 52000,
+                "tp1_qty_pct": 50,
+                "tp2_qty_pct": 50,
+            },
+            "result": {
+                "entry_price": 50000,
+                "take_profit_orders": [
+                    {"level": 1, "price": 51000, "qty_pct": 50},
+                    {"level": 2, "price": 52000, "qty_pct": 50},
+                ],
+            },
+        }
+        db_session.add(
+            __import__("core.database", fromlist=["TradeModel"]).TradeModel(
+                user_id=user_id,
+                timestamp=utcnow(),
+                ticker="BTCUSDT",
+                direction="long",
+                execute=True,
+                order_status="filled",
+                pnl_pct=0.0,
+                payload_json=__import__("json").dumps(payload),
+            )
+        )
+        await db_session.commit()
+
+        response = await client.get("/api/history")
+        assert response.status_code == 200
+        item = response.json()[0]
+        assert len(item["take_profit_levels"]) == 2
+        assert item["take_profit_levels"][0]["price"] == 51000
+        assert item["take_profit_levels"][1]["price"] == 52000
+
+    @pytest.mark.asyncio
     async def test_chart_position_markers_include_pending_positions(self, client: AsyncClient, test_user_data, db_session):
         from core.database import PositionModel
         from core.utils.datetime import utcnow
@@ -372,6 +508,119 @@ class TestPlanEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
+
+
+class TestSubscriptionConsistency:
+    @pytest.mark.asyncio
+    async def test_admin_grant_subscription_cancels_previous_active(self, client: AsyncClient, db_session, test_admin_data, test_user_data):
+        headers = await _login_admin(client, db_session, test_admin_data)
+
+        user = UserModel(
+            username=test_user_data["username"].lower(),
+            email=test_user_data["email"].lower(),
+            password_hash=hash_password(test_user_data["password"]),
+            is_active=True,
+        )
+        plan_a = SubscriptionPlanModel(name="Alpha", description="", price_usdt=10, duration_days=30, features_json="[]")
+        plan_b = SubscriptionPlanModel(name="Beta", description="", price_usdt=20, duration_days=60, features_json="[]")
+        db_session.add_all([user, plan_a, plan_b])
+        await db_session.commit()
+
+        first = await client.post(
+            f"/api/admin/user/{user.id}/subscription",
+            json={"plan_id": plan_a.id, "status": "active"},
+            headers=headers,
+        )
+        assert first.status_code == 200
+
+        second = await client.post(
+            f"/api/admin/user/{user.id}/subscription",
+            json={"plan_id": plan_b.id, "status": "active"},
+            headers=headers,
+        )
+        assert second.status_code == 200
+
+        rows = (await db_session.execute(
+            select(SubscriptionModel)
+            .where(SubscriptionModel.user_id == user.id)
+            .order_by(SubscriptionModel.created_at.asc())
+        )).scalars().all()
+        assert len(rows) == 2
+        assert rows[0].status == "cancelled"
+        assert rows[1].status == "active"
+
+    @pytest.mark.asyncio
+    async def test_confirm_payment_cancels_previous_active_subscription(self, client: AsyncClient, db_session, test_admin_data, test_user_data):
+        headers = await _login_admin(client, db_session, test_admin_data)
+
+        user = UserModel(
+            username=test_user_data["username"].lower(),
+            email=test_user_data["email"].lower(),
+            password_hash=hash_password(test_user_data["password"]),
+            is_active=True,
+        )
+        plan_a = SubscriptionPlanModel(name="Alpha", description="", price_usdt=10, duration_days=30, features_json="[]")
+        plan_b = SubscriptionPlanModel(name="Beta", description="", price_usdt=20, duration_days=60, features_json="[]")
+        db_session.add_all([user, plan_a, plan_b])
+        await db_session.flush()
+
+        active_sub = SubscriptionModel(
+            user_id=user.id,
+            plan_id=plan_a.id,
+            status="active",
+            start_date=(now := utcnow()),
+            end_date=now,
+        )
+        pending_sub = SubscriptionModel(user_id=user.id, plan_id=plan_b.id, status="pending")
+        db_session.add_all([active_sub, pending_sub])
+        await db_session.flush()
+
+        payment = PaymentModel(
+            user_id=user.id,
+            subscription_id=pending_sub.id,
+            amount=20,
+            currency="USDT",
+            network="TRC20",
+            wallet_address="TADDR123",
+            status="submitted",
+            tx_hash="tx-123456",
+        )
+        db_session.add(payment)
+        await db_session.commit()
+
+        response = await client.post(f"/api/admin/payment/{payment.id}/confirm", headers=headers)
+        assert response.status_code == 200
+
+        await db_session.refresh(active_sub)
+        await db_session.refresh(pending_sub)
+        await db_session.refresh(payment)
+        assert payment.status == "confirmed"
+        assert active_sub.status == "cancelled"
+        assert pending_sub.status == "active"
+
+    @pytest.mark.asyncio
+    async def test_payment_tx_hash_unique_only_when_non_empty(self, db_session, test_user_data):
+        user = UserModel(
+            username=test_user_data["username"].lower(),
+            email=test_user_data["email"].lower(),
+            password_hash=hash_password(test_user_data["password"]),
+            is_active=True,
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        db_session.add_all([
+            PaymentModel(user_id=user.id, amount=10, tx_hash=""),
+            PaymentModel(user_id=user.id, amount=20, tx_hash=""),
+        ])
+        await db_session.flush()
+
+        db_session.add(PaymentModel(user_id=user.id, amount=30, tx_hash="tx-dup"))
+        await db_session.flush()
+
+        db_session.add(PaymentModel(user_id=user.id, amount=40, tx_hash="tx-dup"))
+        with pytest.raises(IntegrityError):
+            await db_session.flush()
 
 
 class TestI18nEndpoints:

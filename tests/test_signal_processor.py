@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from models import AIAnalysis, MarketContext, SignalDirection, TradeDecision, TradingViewSignal
+from models import AIAnalysis, MarketContext, PreFilterResult, SignalDirection, TradeDecision, TradingViewSignal
 from services.signal_processor import SignalProcessor, compute_webhook_fingerprint, verify_webhook_signature
 
 
@@ -189,6 +189,108 @@ class TestSignalProcessorBuildDecision:
         assert decision.execute is True
         assert decision.stop_loss == 49000
         assert len(decision.take_profit_levels) > 0
+
+    @pytest.mark.parametrize(
+        ("timeframe", "expected_timeout"),
+        [
+            ("15", 2 * 60 * 60),
+            ("30", 4 * 60 * 60),
+            ("60", 8 * 60 * 60),
+            ("240", 48 * 60 * 60),
+            ("1D", 7 * 24 * 60 * 60),
+        ],
+    )
+    def test_build_trade_decision_sets_timeframe_aware_limit_timeout(
+        self,
+        processor,
+        sample_market,
+        timeframe,
+        expected_timeout,
+    ):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=50000.0,
+            timeframe=timeframe,
+            strategy="test",
+            message="",
+        )
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="Good setup",
+            suggested_stop_loss=49000,
+            suggested_tp1=51000,
+            tp1_qty_pct=100.0,
+        )
+
+        decision = processor._build_trade_decision(signal, analysis, sample_market, None, {})
+
+        assert decision.limit_timeout_secs == expected_timeout
+
+    def test_build_trade_decision_uses_limit_timeout_overrides(self, processor, sample_market):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=50000.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="Good setup",
+            suggested_stop_loss=49000,
+            suggested_tp1=51000,
+            tp1_qty_pct=100.0,
+        )
+
+        decision = processor._build_trade_decision(
+            signal,
+            analysis,
+            sample_market,
+            None,
+            {"exchange": {"limit_timeout_overrides": {"1h": 6 * 60 * 60}}},
+        )
+
+        assert decision.limit_timeout_secs == 6 * 60 * 60
+
+    @patch("services.signal_processor.analyze_signal", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_run_ai_analysis_passes_user_settings(self, mock_analyze_signal, processor, sample_signal, sample_market):
+        mock_analyze_signal.return_value = AIAnalysis(confidence=0.8, recommendation="execute", reasoning="ok")
+        user_settings = {
+            "take_profit": {"num_levels": 3},
+            "trailing_stop": {"mode": "step_trailing", "trail_pct": 1.2},
+        }
+
+        await processor._run_ai_analysis(sample_signal, sample_market, user_settings)
+
+        mock_analyze_signal.assert_awaited_once_with(sample_signal, sample_market, user_settings)
+
+    @patch("services.signal_processor.run_pre_filter_async", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_run_prefilter_enables_scoring_when_min_pass_score_positive(
+        self,
+        mock_run_pre_filter,
+        processor,
+        sample_signal,
+        sample_market,
+        monkeypatch,
+    ):
+        mock_run_pre_filter.return_value = PreFilterResult(passed=True, reason="ok", checks={}, score=88.0)
+        monkeypatch.setattr("pre_filter.get_thresholds", lambda: type("_T", (), {"get": staticmethod(lambda key, ticker="": 70.0 if key == "min_pass_score" else None)})())
+
+        await processor._run_prefilter(sample_signal, sample_market, None, {})
+
+        kwargs = mock_run_pre_filter.await_args.kwargs
+        assert kwargs["use_scoring"] is True
+        assert kwargs["min_pass_score"] == 70.0
 
     def test_modified_entry_within_range(self, processor, sample_signal, sample_market):
         """Should use AI modified entry when within 5% of signal price."""

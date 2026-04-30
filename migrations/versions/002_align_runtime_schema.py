@@ -39,6 +39,13 @@ def _create_index_if_missing(inspector, name: str, table_name: str, columns: lis
         op.create_index(name, table_name, columns)
 
 
+def _create_partial_index_if_missing(inspector, bind, name: str, table_name: str, columns: list[str], where: str) -> None:
+    if bind.dialect.name not in {"sqlite", "postgresql"}:
+        return
+    if table_name in _tables(inspector) and name not in _indexes(inspector, table_name):
+        op.create_index(name, table_name, columns, unique=True, postgresql_where=sa.text(where), sqlite_where=sa.text(where))
+
+
 def upgrade():
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -174,6 +181,7 @@ def upgrade():
     _create_index_if_missing(inspector, "idx_shared_signals_ticker_direction", "shared_signals", ["ticker", "direction"])
     _create_index_if_missing(inspector, "idx_signal_subscriptions_user", "signal_subscriptions", ["user_id"])
     _create_index_if_missing(inspector, "idx_signal_subscriptions_signal", "signal_subscriptions", ["signal_id"])
+    _create_partial_index_if_missing(inspector, bind, "uq_payments_tx_hash_non_empty", "payments", ["tx_hash"], "tx_hash <> ''")
 
 
 def downgrade():
@@ -188,6 +196,7 @@ def downgrade():
         ("idx_strategy_states_user_type", "strategy_states"),
         ("idx_order_events_user_created", "order_events"),
         ("idx_order_events_status_retry", "order_events"),
+        ("uq_payments_tx_hash_non_empty", "payments"),
     ]:
         if table_name in _tables(inspector) and name in _indexes(inspector, table_name):
             op.drop_index(name, table_name=table_name)

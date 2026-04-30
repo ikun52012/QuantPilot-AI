@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 from core.config import settings
+from core.utils.common import resolve_limit_timeout_secs
 from core.utils.datetime import parse_datetime_utc_naive, utcnow
 
 
@@ -249,7 +250,7 @@ class PositionModel(Base):
     open_trade_id = Column(String(36), nullable=True)
     entry_order_id = Column(String(128), default="")
     order_type = Column(String(40), default="market")
-    limit_timeout_secs = Column(Float, default=300.0)
+    limit_timeout_secs = Column(Float, default=14400.0)
     stop_loss = Column(Float, nullable=True)
     take_profit_json = Column(Text, default="[]")
     stop_loss_order_id = Column(String(128), default="")
@@ -495,6 +496,15 @@ class DatabaseManager:
                     quoted_column = sync_conn.dialect.identifier_preparer.quote(name)
                     sync_conn.execute(text(f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {effective_ddl}"))
 
+        def create_index_if_missing(name: str, ddl: str) -> None:
+            existing_indexes = {
+                index["name"]
+                for table_name in tables
+                for index in inspector.get_indexes(table_name)
+            }
+            if name not in existing_indexes:
+                sync_conn.execute(text(ddl))
+
         add_missing_columns("users", {
             "balance_usdt": "FLOAT DEFAULT 0",
             "is_active": "BOOLEAN DEFAULT true",
@@ -595,7 +605,7 @@ class DatabaseManager:
             "open_trade_id": "VARCHAR(36)",
             "entry_order_id": "VARCHAR(128) DEFAULT ''",
             "order_type": "VARCHAR(40) DEFAULT 'market'",
-            "limit_timeout_secs": "FLOAT DEFAULT 300",
+            "limit_timeout_secs": "FLOAT DEFAULT 14400",
             "stop_loss": "FLOAT",
             "take_profit_json": "TEXT DEFAULT '[]'",
             "stop_loss_order_id": "VARCHAR(128) DEFAULT ''",
@@ -675,19 +685,24 @@ class DatabaseManager:
             "max_position_pct": "FLOAT DEFAULT 10",
             "created_at": "TIMESTAMP",
         })
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_webhook_secret_hash ON users(webhook_secret_hash)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_trades_user_timestamp ON trades(user_id, timestamp)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_webhook_fingerprint_created ON webhook_events(fingerprint, created_at)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_positions_user_status ON positions(user_id, status)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_order_events_status_retry ON order_events(status, retry_state, next_retry_at)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_order_events_user_created ON order_events(user_id, created_at)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_strategy_states_user_type ON strategy_states(user_id, strategy_type)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_strategy_states_type_status ON strategy_states(strategy_type, status)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shared_signals_status_created ON shared_signals(status, created_at)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shared_signals_ticker_direction ON shared_signals(ticker, direction)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_signal_subscriptions_user ON signal_subscriptions(user_id)"))
-        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS idx_signal_subscriptions_signal ON signal_subscriptions(signal_id)"))
+        create_index_if_missing("idx_users_webhook_secret_hash", "CREATE INDEX idx_users_webhook_secret_hash ON users(webhook_secret_hash)")
+        create_index_if_missing("idx_trades_user_timestamp", "CREATE INDEX idx_trades_user_timestamp ON trades(user_id, timestamp)")
+        create_index_if_missing("idx_webhook_fingerprint_created", "CREATE INDEX idx_webhook_fingerprint_created ON webhook_events(fingerprint, created_at)")
+        create_index_if_missing("idx_positions_status", "CREATE INDEX idx_positions_status ON positions(status)")
+        create_index_if_missing("idx_positions_user_status", "CREATE INDEX idx_positions_user_status ON positions(user_id, status)")
+        create_index_if_missing("idx_order_events_status_retry", "CREATE INDEX idx_order_events_status_retry ON order_events(status, retry_state, next_retry_at)")
+        create_index_if_missing("idx_order_events_user_created", "CREATE INDEX idx_order_events_user_created ON order_events(user_id, created_at)")
+        create_index_if_missing("idx_strategy_states_user_type", "CREATE INDEX idx_strategy_states_user_type ON strategy_states(user_id, strategy_type)")
+        create_index_if_missing("idx_strategy_states_type_status", "CREATE INDEX idx_strategy_states_type_status ON strategy_states(strategy_type, status)")
+        create_index_if_missing("idx_shared_signals_status_created", "CREATE INDEX idx_shared_signals_status_created ON shared_signals(status, created_at)")
+        create_index_if_missing("idx_shared_signals_ticker_direction", "CREATE INDEX idx_shared_signals_ticker_direction ON shared_signals(ticker, direction)")
+        create_index_if_missing("idx_signal_subscriptions_user", "CREATE INDEX idx_signal_subscriptions_user ON signal_subscriptions(user_id)")
+        create_index_if_missing("idx_signal_subscriptions_signal", "CREATE INDEX idx_signal_subscriptions_signal ON signal_subscriptions(signal_id)")
+        if dialect_name in {"sqlite", "postgresql"}:
+            create_index_if_missing(
+                "uq_payments_tx_hash_non_empty",
+                "CREATE UNIQUE INDEX uq_payments_tx_hash_non_empty ON payments(tx_hash) WHERE tx_hash <> ''",
+            )
 
     async def close(self):
         """Close database connections."""
@@ -761,6 +776,14 @@ async def get_user_by_id(session: AsyncSession, user_id: str) -> UserModel | Non
     """Get user by ID."""
     result = await session.execute(
         select(UserModel).where(UserModel.id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def lock_user_by_id(session: AsyncSession, user_id: str) -> UserModel | None:
+    """Get and lock a user row for transactional updates."""
+    result = await session.execute(
+        select(UserModel).where(UserModel.id == user_id).with_for_update()
     )
     return result.scalar_one_or_none()
 
@@ -853,7 +876,25 @@ async def get_user_active_subscription(session: AsyncSession, user_id: str) -> S
         )
         .order_by(SubscriptionModel.end_date.desc())
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
+
+
+async def deactivate_user_subscriptions(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    exclude_subscription_id: str | None = None,
+    reason_status: str = "cancelled",
+) -> None:
+    """Ensure a user has at most one active subscription row."""
+    query = (
+        update(SubscriptionModel)
+        .where(SubscriptionModel.user_id == user_id, SubscriptionModel.status == "active")
+        .values(status=reason_status)
+    )
+    if exclude_subscription_id:
+        query = query.where(SubscriptionModel.id != exclude_subscription_id)
+    await session.execute(query)
 
 
 # ─────────────────────────────────────────────
@@ -1227,7 +1268,12 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
             )
             live_trading = _safe_bool(exchange_config.get("live_trading"), status != "simulated")
             order_type = str(order_details.get("order_type") or "market").lower()
-            limit_timeout_secs = _safe_float(order_details.get("limit_timeout_secs"), 300.0)
+            signal_timeframe = (entry.get("signal") or {}).get("timeframe")
+            timeout_overrides = (exchange_config or {}).get("limit_timeout_overrides") or {}
+            limit_timeout_secs = _safe_float(
+                order_details.get("limit_timeout_secs"),
+                float(resolve_limit_timeout_secs(signal_timeframe, timeout_overrides)),
+            )
             position_status = "pending" if status == "pending" else "open"
 
             trailing_stop_config = order_details.get("trailing_stop_config") or {}

@@ -1,6 +1,7 @@
 """Tests for DCA and Grid Strategies."""
 
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -302,6 +303,43 @@ class TestGridEngine:
         await engine._close_grid(grid.config_id, 53000.0, "out_of_range")
 
         assert grid.status == "closed"
+
+    @pytest.mark.asyncio
+    async def test_live_grid_fill_skips_duplicate_market_order_for_existing_limit(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        config.paper_mode = False
+        level = grid.grid_levels[0]
+        level.order_id = "limit-1"
+        level.exchange_order_status = "open"
+
+        execute_trade = AsyncMock()
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+
+        result = await engine._execute_grid_level(grid.config_id, level, level.price, config, {"live_trading": True})
+
+        assert result["success"] is True
+        execute_trade.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_close_live_grid_cancels_pending_orders_instead_of_market_closing(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        config.paper_mode = False
+        pending_levels = grid.grid_levels[:2]
+        for idx, level in enumerate(pending_levels, start=1):
+            level.status = "pending"
+            level.order_id = f"order-{idx}"
+            level.exchange_order_status = "open"
+
+        cancel_order = AsyncMock(return_value={"status": "cancelled"})
+        execute_trade = AsyncMock()
+        monkeypatch.setattr("exchange.cancel_order", cancel_order)
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+
+        await engine._close_grid(grid.config_id, 53000.0, "out_of_range", {"live_trading": True})
+
+        assert cancel_order.await_count == 2
+        execute_trade.assert_not_awaited()
+        assert all(level.exchange_order_status == "cancelled" for level in pending_levels)
 
 
 class TestDCAEntry:

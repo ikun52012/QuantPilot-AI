@@ -30,6 +30,7 @@ from core.metrics import (
 )
 from core.security import decrypt_settings_payload
 from core.trading_control import trading_allowed
+from core.utils.common import first_valid, resolve_limit_timeout_secs, safe_float
 from exchange import execute_trade
 from market_data import fetch_enhanced_market_context, fetch_market_context
 from models import (
@@ -236,7 +237,7 @@ class SignalProcessor:
                 }
 
             # Step 3: AI Analysis
-            analysis = await self._run_ai_analysis(signal, market)
+            analysis = await self._run_ai_analysis(signal, market, user_settings)
 
             # Step 4: Build trade decision
             decision = self._build_trade_decision(signal, analysis, market, user_id, user_settings)
@@ -324,9 +325,14 @@ class SignalProcessor:
         user_settings: dict | None = None,
     ) -> PreFilterResult:
         """Run pre-filter checks."""
+        from pre_filter import get_thresholds
+
         # Get user settings for limits
         max_daily_trades = int(getattr(settings.risk, "max_daily_trades", 0) or 0)
         max_daily_loss = float(getattr(settings.risk, "max_daily_loss_pct", 0.0) or 0.0)
+        thresholds = get_thresholds()
+        min_pass_score = float(thresholds.get("min_pass_score", signal.ticker) or 0.0)
+        use_scoring = min_pass_score > 0.0
 
         user_risk = (user_settings or {}).get("risk") or {}
         if user_risk:
@@ -352,6 +358,8 @@ class SignalProcessor:
             max_daily_trades=max_daily_trades,
             max_daily_loss_pct=max_daily_loss,
             user_id=user_id,
+            use_scoring=use_scoring,
+            min_pass_score=min_pass_score,
         )
 
         record_prefilter_result(
@@ -367,12 +375,13 @@ class SignalProcessor:
         self,
         signal: TradingViewSignal,
         market: MarketContext,
+        user_settings: dict | None = None,
     ) -> AIAnalysis:
         """Run AI analysis on the signal."""
         import time
         start = time.time()
 
-        analysis = await analyze_signal(signal, market)
+        analysis = await analyze_signal(signal, market, user_settings)
 
         latency = time.time() - start
         record_ai_analysis(
@@ -408,6 +417,10 @@ class SignalProcessor:
             or settings.exchange.default_order_type
             or "market"
         ).lower().strip()
+        decision.limit_timeout_secs = resolve_limit_timeout_secs(
+            signal.timeframe,
+            exchange_cfg.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides,
+        )
 
         # Check AI recommendation
         if analysis.recommendation == "reject":
@@ -475,9 +488,15 @@ class SignalProcessor:
             from models import TrailingStopConfig, TrailingStopMode
             decision.trailing_stop = TrailingStopConfig(
                 mode=TrailingStopMode(trailing_mode),
-                trail_pct=float(trailing_cfg.get("trail_pct") or settings.trailing_stop.trail_pct),
-                activation_profit_pct=float(trailing_cfg.get("activation_profit_pct") or settings.trailing_stop.activation_profit_pct),
-                trailing_step_pct=float(trailing_cfg.get("trailing_step_pct") or settings.trailing_stop.trailing_step_pct),
+                trail_pct=safe_float(first_valid(trailing_cfg.get("trail_pct"), settings.trailing_stop.trail_pct), settings.trailing_stop.trail_pct),
+                activation_profit_pct=safe_float(
+                    first_valid(trailing_cfg.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct),
+                    settings.trailing_stop.activation_profit_pct,
+                ),
+                trailing_step_pct=safe_float(
+                    first_valid(trailing_cfg.get("trailing_step_pct"), settings.trailing_stop.trailing_step_pct),
+                    settings.trailing_stop.trailing_step_pct,
+                ),
             )
 
         # Calculate position size
@@ -530,15 +549,15 @@ class SignalProcessor:
 
         risk_cfg = user_settings.get("risk") or {}
         tp_cfg = user_settings.get("take_profit") or {}
-        stop_pct = max(0.01, float(risk_cfg.get("custom_stop_loss_pct") or settings.risk.custom_stop_loss_pct or 0))
-        tp1_pct = float(tp_cfg.get("tp1_pct") or settings.take_profit.tp1_pct)
-        tp2_pct = float(tp_cfg.get("tp2_pct") or settings.take_profit.tp2_pct)
-        tp3_pct = float(tp_cfg.get("tp3_pct") or settings.take_profit.tp3_pct)
-        tp4_pct = float(tp_cfg.get("tp4_pct") or settings.take_profit.tp4_pct)
-        tp1_qty = float(tp_cfg.get("tp1_qty") or settings.take_profit.tp1_qty)
-        tp2_qty = float(tp_cfg.get("tp2_qty") or settings.take_profit.tp2_qty)
-        tp3_qty = float(tp_cfg.get("tp3_qty") or settings.take_profit.tp3_qty)
-        tp4_qty = float(tp_cfg.get("tp4_qty") or settings.take_profit.tp4_qty)
+        stop_pct = max(0.01, safe_float(first_valid(risk_cfg.get("custom_stop_loss_pct"), settings.risk.custom_stop_loss_pct), 0.0))
+        tp1_pct = safe_float(first_valid(tp_cfg.get("tp1_pct"), settings.take_profit.tp1_pct), settings.take_profit.tp1_pct)
+        tp2_pct = safe_float(first_valid(tp_cfg.get("tp2_pct"), settings.take_profit.tp2_pct), settings.take_profit.tp2_pct)
+        tp3_pct = safe_float(first_valid(tp_cfg.get("tp3_pct"), settings.take_profit.tp3_pct), settings.take_profit.tp3_pct)
+        tp4_pct = safe_float(first_valid(tp_cfg.get("tp4_pct"), settings.take_profit.tp4_pct), settings.take_profit.tp4_pct)
+        tp1_qty = safe_float(first_valid(tp_cfg.get("tp1_qty"), settings.take_profit.tp1_qty), settings.take_profit.tp1_qty)
+        tp2_qty = safe_float(first_valid(tp_cfg.get("tp2_qty"), settings.take_profit.tp2_qty), settings.take_profit.tp2_qty)
+        tp3_qty = safe_float(first_valid(tp_cfg.get("tp3_qty"), settings.take_profit.tp3_qty), settings.take_profit.tp3_qty)
+        tp4_qty = safe_float(first_valid(tp_cfg.get("tp4_qty"), settings.take_profit.tp4_qty), settings.take_profit.tp4_qty)
 
         if signal.direction == SignalDirection.LONG:
             decision.stop_loss = round(entry * (1 - stop_pct / 100.0), 8)
@@ -808,6 +827,7 @@ class SignalProcessor:
             "market_type": settings.exchange.market_type,
             "default_order_type": settings.exchange.default_order_type,
             "stop_loss_order_type": settings.exchange.stop_loss_order_type,
+            "limit_timeout_overrides": settings.exchange.limit_timeout_overrides,
         }
         if user_id:
             user = await get_user_by_id(self.session, user_id)
@@ -818,14 +838,15 @@ class SignalProcessor:
                 user_exchange = (user_settings or {}).get("exchange") or {}
                 exchange_config.update({
                     "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
-                    "api_key": user_exchange.get("api_key") or settings.exchange.api_key,
-                    "api_secret": user_exchange.get("api_secret") or settings.exchange.api_secret,
-                    "password": user_exchange.get("password") or settings.exchange.password,
+                    "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else settings.exchange.api_key,
+                    "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else settings.exchange.api_secret,
+                    "password": user_exchange.get("password") if "password" in user_exchange else settings.exchange.password,
                     "live_trading": bool(user_exchange.get("live_trading", False)),
                     "sandbox_mode": bool(user_exchange.get("sandbox_mode", False)),
                     "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
                     "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
                     "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
+                    "limit_timeout_overrides": user_exchange.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides,
                     "max_leverage": user.max_leverage or 20,
                     "max_position_pct": user.max_position_pct or settings.risk.max_position_pct,
                 })

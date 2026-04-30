@@ -15,9 +15,10 @@ from core.database import (
     PaymentModel,
     SubscriptionModel,
     SubscriptionPlanModel,
+    deactivate_user_subscriptions,
     get_db,
     get_user_active_subscription,
-    get_user_by_id,
+    lock_user_by_id,
 )
 from core.utils.datetime import to_utc, utcnow
 
@@ -49,6 +50,26 @@ class RedeemCodeRequest(BaseModel):
 
 def _as_utc(dt):
     return to_utc(dt) if dt else dt
+
+
+async def _activate_subscription_row(
+    db: AsyncSession,
+    subscription: SubscriptionModel,
+    *,
+    duration_days: int,
+    now=None,
+):
+    """Activate one subscription while cancelling any other active rows for the user."""
+    activation_time = now or utcnow()
+    subscription.status = "active"
+    subscription.start_date = activation_time
+    subscription.end_date = activation_time + timedelta(days=duration_days)
+    await db.flush()
+    await deactivate_user_subscriptions(
+        db,
+        subscription.user_id,
+        exclude_subscription_id=subscription.id,
+    )
 
 
 # ─────────────────────────────────────────────
@@ -150,11 +171,6 @@ async def create_subscription(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new subscription."""
-    # Check for existing active subscription
-    existing = await get_user_active_subscription(db, user["sub"])
-    if existing:
-        raise HTTPException(400, "You already have an active subscription")
-
     # Get plan
     result = await db.execute(
         select(SubscriptionPlanModel).where(SubscriptionPlanModel.id == req.plan_id)
@@ -166,9 +182,13 @@ async def create_subscription(
     if not plan.is_active:
         raise HTTPException(400, "This plan is not available")
 
-    db_user = await get_user_by_id(db, user["sub"])
+    db_user = await lock_user_by_id(db, user["sub"])
     if not db_user:
         raise HTTPException(404, "User not found")
+
+    existing = await get_user_active_subscription(db, user["sub"])
+    if existing:
+        raise HTTPException(400, "You already have an active subscription")
 
     now = utcnow()
     activate_now = plan.price_usdt <= 0 or (db_user.balance_usdt or 0) >= plan.price_usdt
@@ -179,11 +199,14 @@ async def create_subscription(
     subscription = SubscriptionModel(
         user_id=user["sub"],
         plan_id=plan.id,
-        status="active" if activate_now else "pending",
-        start_date=now if activate_now else None,
-        end_date=(now + timedelta(days=plan.duration_days)) if activate_now else None,
+        status="pending",
+        start_date=None,
+        end_date=None,
     )
     db.add(subscription)
+    await db.flush()
+    if activate_now:
+        await _activate_subscription_row(db, subscription, duration_days=plan.duration_days, now=now)
     await db.commit()
 
     return {
@@ -307,7 +330,7 @@ async def submit_payment(
     """Submit a payment transaction hash."""
     # Get payment
     result = await db.execute(
-        select(PaymentModel).where(PaymentModel.id == req.payment_id)
+        select(PaymentModel).where(PaymentModel.id == req.payment_id).with_for_update()
     )
     payment = result.scalar_one_or_none()
 
@@ -320,15 +343,16 @@ async def submit_payment(
     if payment.status != "pending":
         raise HTTPException(400, f"Payment is {payment.status}")
 
+    normalized_tx_hash = req.tx_hash.strip()
     # Check for duplicate tx hash
     result = await db.execute(
-        select(PaymentModel).where(PaymentModel.tx_hash == req.tx_hash)
+        select(PaymentModel).where(PaymentModel.tx_hash == normalized_tx_hash, PaymentModel.id != payment.id)
     )
     if result.scalar_one_or_none():
         raise HTTPException(400, "Transaction hash already used")
 
     # Update payment
-    payment.tx_hash = req.tx_hash
+    payment.tx_hash = normalized_tx_hash
     payment.status = "submitted"
     await db.commit()
 
@@ -378,9 +402,10 @@ async def redeem_code(
     """Redeem a code for subscription or balance."""
     from core.database import RedeemCodeModel
 
+    normalized_code = req.code.upper().strip()
     # Find code
     result = await db.execute(
-        select(RedeemCodeModel).where(RedeemCodeModel.code == req.code.upper().strip())
+        select(RedeemCodeModel).where(RedeemCodeModel.code == normalized_code).with_for_update()
     )
     code = result.scalar_one_or_none()
 
@@ -397,7 +422,7 @@ async def redeem_code(
         raise HTTPException(400, "Code has expired")
 
     # Get user
-    db_user = await get_user_by_id(db, user["sub"])
+    db_user = await lock_user_by_id(db, user["sub"])
     if not db_user:
         raise HTTPException(404, "User not found")
 
@@ -417,11 +442,13 @@ async def redeem_code(
         subscription = SubscriptionModel(
             user_id=user["sub"],
             plan_id=code.plan_id,
-            status="active",
-            start_date=utcnow(),
-            end_date=utcnow() + timedelta(days=duration_days),
+            status="pending",
+            start_date=None,
+            end_date=None,
         )
         db.add(subscription)
+        await db.flush()
+        await _activate_subscription_row(db, subscription, duration_days=duration_days)
         subscription_payload = {
             "plan_id": code.plan_id,
             "plan_name": plan.name if plan else "",

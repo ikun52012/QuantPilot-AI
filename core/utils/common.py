@@ -33,6 +33,8 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return result
     except (TypeError, ValueError, OverflowError):
         return default
+
+
 def safe_int(value: Any, default: int = 0) -> int:
     """
     Safely convert value to int with fallback.
@@ -254,6 +256,90 @@ def price_pnl_pct(
     else:
         raw = ((exit_price - entry_price) / entry_price) * 100.0
     return raw * leverage
+
+
+def timeframe_to_minutes(timeframe: Any, default: int = 60) -> int:
+    """Normalize TradingView-style timeframe values into minutes."""
+    if timeframe is None:
+        return default
+
+    text = str(timeframe).strip().lower()
+    if not text:
+        return default
+
+    text = {
+        "week": "1w",
+        "weekly": "1w",
+        "day": "1d",
+        "daily": "1d",
+        "hour": "1h",
+    }.get(text, text)
+
+    numeric = re.fullmatch(r"(\d+)", text)
+    if numeric:
+        value = int(numeric.group(1))
+        return value if value > 0 else default
+
+    match = re.fullmatch(r"(\d+)([mhdw])", text)
+    if not match:
+        return default
+
+    value = int(match.group(1))
+    unit = match.group(2)
+    multiplier = {
+        "m": 1,
+        "h": 60,
+        "d": 1440,
+        "w": 10080,
+    }[unit]
+    minutes = value * multiplier
+    return minutes if minutes > 0 else default
+
+
+def suggested_limit_timeout_secs(timeframe: Any, default: int = 4 * 60 * 60) -> int:
+    """Return a reasonable pending-limit timeout based on signal timeframe."""
+    minutes = timeframe_to_minutes(timeframe, default=60)
+    if minutes <= 15:
+        return 2 * 60 * 60
+    if minutes <= 30:
+        return 4 * 60 * 60
+    if minutes <= 60:
+        return 8 * 60 * 60
+    if minutes <= 4 * 60:
+        return 48 * 60 * 60
+    if minutes <= 24 * 60:
+        return 7 * 24 * 60 * 60
+    return max(default, 7 * 24 * 60 * 60)
+
+
+def normalize_limit_timeout_overrides(data: Any) -> dict[str, int]:
+    """Normalize custom pending-limit timeout overrides in seconds."""
+    if not isinstance(data, dict):
+        return {}
+
+    normalized: dict[str, int] = {}
+    for key in ("15m", "30m", "1h", "4h", "1d"):
+        value = safe_int(data.get(key), 0)
+        if value > 0:
+            normalized[key] = value
+    return normalized
+
+
+def resolve_limit_timeout_secs(timeframe: Any, overrides: dict[str, Any] | None = None, default: int = 4 * 60 * 60) -> int:
+    """Resolve pending-limit timeout using defaults plus optional overrides."""
+    key_minutes = timeframe_to_minutes(timeframe, default=60)
+    normalized = normalize_limit_timeout_overrides(overrides)
+    if key_minutes <= 15:
+        return normalized.get("15m", 2 * 60 * 60)
+    if key_minutes <= 30:
+        return normalized.get("30m", 4 * 60 * 60)
+    if key_minutes <= 60:
+        return normalized.get("1h", 8 * 60 * 60)
+    if key_minutes <= 4 * 60:
+        return normalized.get("4h", 48 * 60 * 60)
+    if key_minutes <= 24 * 60:
+        return normalized.get("1d", 7 * 24 * 60 * 60)
+    return max(default, normalized.get("1d", 7 * 24 * 60 * 60))
 
 
 def is_valid_email(email: str) -> bool:

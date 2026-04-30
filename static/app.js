@@ -19,6 +19,7 @@ let _systemSocket = null;
 let _priceSocket = null;
 let _priceSocketTicker = '';
 let _chartRealtimeState = null;
+let _launchContext = null;
 
 // ─── i18n / Multi-language Support ───
 let _i18nCache = {};
@@ -194,12 +195,87 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateUserUI();
     setupRealtimeStatus();
     setupSpotlight();
-    const hashPage = window.location.hash ? window.location.hash.slice(1) : '';
+    _launchContext = parseLaunchContext();
+    const hashPage = _launchContext.page || (window.location.hash ? window.location.hash.slice(1) : '');
     const initialPage = document.getElementById(`page-${hashPage}`)
         ? hashPage
         : (isAdmin() ? 'dashboard' : 'user');
     switchPage(initialPage);
 });
+
+function parseLaunchContext() {
+    const params = new URLSearchParams(window.location.search || '');
+    const hashPage = window.location.hash ? window.location.hash.slice(1) : '';
+    return {
+        page: hashPage,
+        title: params.get('title') || '',
+        text: params.get('text') || '',
+        url: params.get('url') || '',
+        data: params.get('data') || '',
+    };
+}
+
+function clearLaunchQuery() {
+    if (!window.location.search) return;
+    const nextHash = window.location.hash || '';
+    history.replaceState(null, '', `${window.location.pathname}${nextHash}`);
+}
+
+function getPendingProtocolSignal() {
+    try {
+        return sessionStorage.getItem('qp_protocol_signal') || '';
+    } catch {
+        return '';
+    }
+}
+
+function sanitizeTickerSymbol(value) {
+    return String(value || '').toUpperCase().replace(/[^A-Z0-9./:_-]/g, '').trim();
+}
+
+function applySocialLaunchContext() {
+    if (!_launchContext) return;
+    const sharedTitle = (_launchContext.title || '').trim();
+    const sharedText = (_launchContext.text || '').trim();
+    const sharedUrl = (_launchContext.url || '').trim();
+    if (!sharedTitle && !sharedText && !sharedUrl) return;
+
+    const combinedText = [sharedTitle, sharedText].filter(Boolean).join(' ').trim();
+    const tickerMatch = combinedText.toUpperCase().match(/\b([A-Z0-9]{2,20}(?:USDT|USDC|BUSD|USD|BTC|ETH|BNB)(?:\.P)?)\b/);
+    const entryMatch = combinedText.match(/(?:entry|price)\s*[:=@-]?\s*(\d+(?:\.\d+)?)/i);
+    const directionMatch = combinedText.match(/\b(long|short)\b/i);
+
+    const ticker = sanitizeTickerSymbol(tickerMatch ? tickerMatch[1] : '');
+    if (ticker) setFieldValue('social-ticker', ticker);
+    if (directionMatch) setFieldValue('social-direction', String(directionMatch[1]).toLowerCase());
+    if (entryMatch) setFieldValue('social-entry', entryMatch[1]);
+
+    const reasonParts = [];
+    if (sharedTitle) reasonParts.push(sharedTitle);
+    if (sharedText) reasonParts.push(sharedText);
+    if (sharedUrl) reasonParts.push(sharedUrl);
+    if (reasonParts.length) {
+        setFieldValue('social-reason', reasonParts.join('\n').trim());
+    }
+
+    showToast('Shared content imported into the signal form.', 'info', 'Share Target');
+    _launchContext.title = '';
+    _launchContext.text = '';
+    _launchContext.url = '';
+    clearLaunchQuery();
+}
+
+function applyProtocolLaunchContext() {
+    if (!_launchContext?.data) return;
+    const payload = String(_launchContext.data || '').trim();
+    if (!payload) return;
+    try {
+        sessionStorage.setItem('qp_protocol_signal', payload);
+    } catch {}
+    showToast('Protocol signal payload imported into the dashboard.', 'info', 'Protocol Launch');
+    _launchContext.data = '';
+    clearLaunchQuery();
+}
 
 function setupSpotlight() {
     document.addEventListener('mousemove', e => {
@@ -465,11 +541,13 @@ function switchPage(page) {
     if (window.location.hash !== `#${page}`) {
         history.replaceState(null, '', `${window.location.pathname}#${page}`);
     }
+    if (page === 'dashboard') applyProtocolLaunchContext();
     if (page === 'dashboard') loadDashboard();
     if (page === 'positions') loadPositions();
     if (page === 'history') loadHistory();
     if (page === 'analytics') loadAnalytics();
     if (page === 'charts') loadChartPage();
+    if (page === 'social') applySocialLaunchContext();
     if (page === 'social') loadSocialPage();
     if (page === 'settings') loadSettings();
     if (page === 'user') loadUserPortal();
@@ -558,6 +636,14 @@ function renderDashboardBrief(perf = {}, overview = {}, status = {}) {
             text: `Win rate ${win.toFixed(1)}%, Sharpe ${(Number(perf.sharpe_ratio || 0)).toFixed(2)}.`,
         },
     ];
+    const protocolSignal = getPendingProtocolSignal();
+    if (protocolSignal) {
+        items.unshift({
+            icon: 'ri-radar-line',
+            title: 'Protocol signal imported',
+            text: protocolSignal.length > 120 ? `${protocolSignal.slice(0, 117)}...` : protocolSignal,
+        });
+    }
     queue.innerHTML = items.map(item => `<div class="queue-item"><i class="${item.icon}"></i><div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.text)}</span></div></div>`).join('');
 }
 
@@ -637,7 +723,10 @@ async function loadHistory() {
             const time = t.timestamp ? new Date(t.timestamp).toLocaleString() : '--';
             const statusClass = safeClassToken(status);
             const leverage = t.ai?.recommended_leverage ? ` / ${Number(t.ai.recommended_leverage).toFixed(1)}x` : '';
-            return `<tr><td>${escapeHtml(time)}</td><td><strong>${escapeHtml(t.ticker||'--')}</strong></td><td><span class="badge ${isLong?'badge-long':'badge-short'}">${escapeHtml(dir)}</span></td><td>${t.entry_price?'$'+formatNum(t.entry_price):'--'}</td><td>${t.stop_loss?'$'+formatNum(t.stop_loss):'--'}</td><td>${t.take_profit?'$'+formatNum(t.take_profit):'--'}</td><td>${(conf*100).toFixed(0)}%${escapeHtml(leverage)}</td><td><span class="badge badge-${statusClass}">${escapeHtml(status)}</span></td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">${pnl?pnl.toFixed(2)+'%':'--'}</td></tr>`;
+            const tpText = Array.isArray(t.take_profit_levels) && t.take_profit_levels.length
+                ? formatTakeProfitLevels(t.take_profit_levels)
+                : (t.take_profit ? '$'+formatNum(t.take_profit) : '--');
+            return `<tr><td>${escapeHtml(time)}</td><td><strong>${escapeHtml(t.ticker||'--')}</strong></td><td><span class="badge ${isLong?'badge-long':'badge-short'}">${escapeHtml(dir)}</span></td><td>${t.entry_price?'$'+formatNum(t.entry_price):'--'}</td><td>${t.stop_loss?'$'+formatNum(t.stop_loss):'--'}</td><td>${tpText}</td><td>${(conf*100).toFixed(0)}%${escapeHtml(leverage)}</td><td><span class="badge badge-${statusClass}">${escapeHtml(status)}</span></td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">${pnl?pnl.toFixed(2)+'%':'--'}</td></tr>`;
         }).join('');
     } catch (err) { showToast(err.message, 'error', 'History Load Failed'); }
 }
@@ -675,6 +764,41 @@ function toggleExchangePasswordField() {
     const exchange = document.getElementById('set-exchange')?.value;
     const group = document.getElementById('password-group');
     if (group) group.style.display = ['okx','bitget'].includes(exchange) ? 'block' : 'none';
+}
+
+function timeoutOverridesFromInputs(prefix) {
+    const units = {
+        '15m': 3600,
+        '30m': 3600,
+        '1h': 3600,
+        '4h': 3600,
+        '1d': 86400,
+    };
+    const values = {};
+    Object.entries(units).forEach(([key, scale]) => {
+        const el = document.getElementById(`${prefix}-limit-timeout-${key}`);
+        const raw = parseFloat(el?.value || '0');
+        if (Number.isFinite(raw) && raw > 0) values[key] = Math.round(raw * scale);
+    });
+    return values;
+}
+
+function readNumberInput(id, fallback, parser = parseFloat) {
+    const el = document.getElementById(id);
+    if (!el) return fallback;
+    const raw = String(el.value ?? '').trim();
+    if (!raw) return fallback;
+    const parsed = parser(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function applyTimeoutOverrideFields(prefix, overrides) {
+    const values = overrides || {};
+    setFieldValue(`${prefix}-limit-timeout-15m`, Number(values['15m'] || 7200) / 3600);
+    setFieldValue(`${prefix}-limit-timeout-30m`, Number(values['30m'] || 14400) / 3600);
+    setFieldValue(`${prefix}-limit-timeout-1h`, Number(values['1h'] || 28800) / 3600);
+    setFieldValue(`${prefix}-limit-timeout-4h`, Number(values['4h'] || 172800) / 3600);
+    setFieldValue(`${prefix}-limit-timeout-1d`, Number(values['1d'] || 604800) / 86400);
 }
 
 function toggleCustomAIFields() {
@@ -739,6 +863,7 @@ async function loadSettings() {
         setFieldValue('set-exchange-market-type', userExchange.market_type || status.exchange_market_type || 'contract');
         setFieldValue('set-default-order-type', userExchange.default_order_type || status.exchange_default_order_type || 'limit');
         setFieldValue('set-stop-loss-order-type', userExchange.stop_loss_order_type || status.exchange_stop_loss_order_type || 'market');
+        applyTimeoutOverrideFields('set', userExchange.limit_timeout_overrides || status.exchange_limit_timeout_overrides || {});
         toggleExchangePasswordField();
         setSecretPlaceholder('set-api-key', Boolean(userExchange.api_configured) || status.exchange_api_configured, 'Enter API Key');
         setSecretPlaceholder('set-api-secret', Boolean(userExchange.api_configured) || status.exchange_api_configured, 'Enter API Secret');
@@ -841,7 +966,8 @@ async function testConnection() {
             sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false,
             market_type: document.getElementById('set-exchange-market-type')?.value || 'contract',
             default_order_type: document.getElementById('set-default-order-type')?.value || 'limit',
-            stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market'
+            stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market',
+            limit_timeout_overrides: timeoutOverridesFromInputs('set')
         })});
         result.className = `conn-result ${resp.success?'success':'error'}`;
         result.textContent = resp.message;
@@ -858,9 +984,10 @@ async function saveExchangeSettings() { await saveSettings('/api/settings/exchan
     sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false,
     market_type: document.getElementById('set-exchange-market-type')?.value || 'contract',
     default_order_type: document.getElementById('set-default-order-type')?.value || 'limit',
-    stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market'
+    stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market',
+    limit_timeout_overrides: timeoutOverridesFromInputs('set')
 }, 'btn-save-exchange'); }
-async function saveAISettings() { const provider = document.getElementById('set-ai-provider').value; await saveSettings('/api/settings/ai', { provider, api_key:document.getElementById('set-ai-key').value, temperature:parseFloat(document.getElementById('set-ai-temp').value)||0.3, max_tokens:parseInt(document.getElementById('set-ai-tokens').value)||1000, custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'', openrouter_enabled: provider === 'openrouter', openrouter_model: document.getElementById('set-openrouter-model')?.value || 'openai/gpt-5.5', mistral_model: document.getElementById('set-mistral-model')?.value || 'mistral-large-latest', openai_model: document.getElementById('set-openai-model')?.value || 'gpt-5.5', anthropic_model: document.getElementById('set-anthropic-model')?.value || 'claude-opus-4-7', deepseek_model: document.getElementById('set-deepseek-model')?.value || 'deepseek-v4-pro' }, 'btn-save-ai'); }
+async function saveAISettings() { const provider = document.getElementById('set-ai-provider').value; await saveSettings('/api/settings/ai', { provider, api_key:document.getElementById('set-ai-key').value, temperature:readNumberInput('set-ai-temp', 0.3), max_tokens:readNumberInput('set-ai-tokens', 1000, value => parseInt(value, 10)), custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'', openrouter_enabled: provider === 'openrouter', openrouter_model: document.getElementById('set-openrouter-model')?.value || 'openai/gpt-5.5', mistral_model: document.getElementById('set-mistral-model')?.value || 'mistral-large-latest', openai_model: document.getElementById('set-openai-model')?.value || 'gpt-5.5', anthropic_model: document.getElementById('set-anthropic-model')?.value || 'claude-opus-4-7', deepseek_model: document.getElementById('set-deepseek-model')?.value || 'deepseek-v4-pro' }, 'btn-save-ai'); }
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
 async function saveRiskSettings() {
     const exitMode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';
@@ -868,31 +995,31 @@ async function saveRiskSettings() {
     const sizingMode = document.querySelector('input[name="position-sizing-mode"]:checked')?.value || 'percentage';
     let accountEquity = 10000;
     if (sizingMode === 'percentage') {
-        accountEquity = parseFloat(document.getElementById('set-equity')?.value) || 10000;
+        accountEquity = readNumberInput('set-equity', 10000);
     } else if (sizingMode === 'risk_ratio') {
-        accountEquity = parseFloat(document.getElementById('set-equity-risk')?.value) || 10000;
+        accountEquity = readNumberInput('set-equity-risk', 10000);
     } else {
-        accountEquity = parseFloat(document.getElementById('set-equity')?.value) || 10000;
+        accountEquity = readNumberInput('set-equity', 10000);
     }
     await saveSettings('/api/settings/risk', {
-        max_position_pct: parseFloat(document.getElementById('set-max-pos').value) || 10,
-        max_daily_trades: parseInt(document.getElementById('set-max-trades').value) || 10,
-        max_daily_loss_pct: parseFloat(document.getElementById('set-max-loss').value) || 5,
+        max_position_pct: readNumberInput('set-max-pos', 10),
+        max_daily_trades: readNumberInput('set-max-trades', 10, value => parseInt(value, 10)),
+        max_daily_loss_pct: readNumberInput('set-max-loss', 5),
         exit_management_mode: exitMode,
         ai_risk_profile: profile,
-        custom_stop_loss_pct: parseFloat(document.getElementById('set-custom-sl').value) || 1.5,
+        custom_stop_loss_pct: readNumberInput('set-custom-sl', 1.5),
         ai_exit_system_prompt: document.getElementById('set-ai-exit-prompt').value || '',
         position_sizing_mode: sizingMode,
         account_equity_usdt: accountEquity,
-        fixed_position_size_usdt: parseFloat(document.getElementById('set-fixed-size')?.value) || 100,
-        risk_per_trade_pct: parseFloat(document.getElementById('set-risk-per-trade')?.value) || 1,
+        fixed_position_size_usdt: readNumberInput('set-fixed-size', 100),
+        risk_per_trade_pct: readNumberInput('set-risk-per-trade', 1),
     });
 }
 
 // ─── Take-Profit ───
 function toggleTPLevels() { const num = parseInt(document.getElementById('set-tp-levels').value)||1; for(let i=1;i<=4;i++){const r=document.getElementById(`tp-row-${i}`);if(r)r.style.display=i<=num?'block':'none';} }
 async function saveTPSettings() {
-    const data = { num_levels:parseInt(document.getElementById('set-tp-levels').value)||1, tp1_pct:parseFloat(document.getElementById('set-tp1-pct').value)||2.0, tp2_pct:parseFloat(document.getElementById('set-tp2-pct').value)||4.0, tp3_pct:parseFloat(document.getElementById('set-tp3-pct').value)||6.0, tp4_pct:parseFloat(document.getElementById('set-tp4-pct').value)||10.0, tp1_qty:parseFloat(document.getElementById('set-tp1-qty').value)||25.0, tp2_qty:parseFloat(document.getElementById('set-tp2-qty').value)||25.0, tp3_qty:parseFloat(document.getElementById('set-tp3-qty').value)||25.0, tp4_qty:parseFloat(document.getElementById('set-tp4-qty').value)||25.0 };
+    const data = { num_levels:readNumberInput('set-tp-levels', 1, value => parseInt(value, 10)), tp1_pct:readNumberInput('set-tp1-pct', 2.0), tp2_pct:readNumberInput('set-tp2-pct', 4.0), tp3_pct:readNumberInput('set-tp3-pct', 6.0), tp4_pct:readNumberInput('set-tp4-pct', 10.0), tp1_qty:readNumberInput('set-tp1-qty', 25.0), tp2_qty:readNumberInput('set-tp2-qty', 25.0), tp3_qty:readNumberInput('set-tp3-qty', 25.0), tp4_qty:readNumberInput('set-tp4-qty', 25.0) };
     const total = [data.tp1_qty,data.tp2_qty,data.tp3_qty,data.tp4_qty].slice(0,data.num_levels).reduce((a,b)=>a+b,0);
     if (total > 100) { showToast(`Total close % is ${total}%. Must be ≤ 100%.`,'warning','Invalid TP Config'); return; }
     await saveSettings('/api/settings/take-profit', data);
@@ -910,7 +1037,7 @@ function toggleTSFields() {
     if (descs[mode]) { dt.textContent = descs[mode]; d.style.display = 'flex'; }
 }
 async function saveTSSettings() {
-    const data = { mode:document.getElementById('set-ts-mode').value, trail_pct:parseFloat(document.getElementById('set-ts-trail-pct').value)||1.0, activation_profit_pct:parseFloat(document.getElementById('set-ts-activation').value)||1.0, trailing_step_pct:parseFloat(document.getElementById('set-ts-step').value)||0.5 };
+    const data = { mode:document.getElementById('set-ts-mode').value, trail_pct:readNumberInput('set-ts-trail-pct', 1.0), activation_profit_pct:readNumberInput('set-ts-activation', 1.0), trailing_step_pct:readNumberInput('set-ts-step', 0.5) };
     await saveSettings('/api/settings/trailing-stop', data);
     showToast(`Trailing stop: ${data.mode}`,'success','Trailing Stop Updated');
 }
@@ -1074,6 +1201,7 @@ function renderUserSettings(data) {
     setFieldValue('user-market-type', ex.market_type || 'contract');
     setFieldValue('user-default-order-type', ex.default_order_type || 'limit');
     setFieldValue('user-stop-loss-order-type', ex.stop_loss_order_type || 'market');
+    applyTimeoutOverrideFields('user', ex.limit_timeout_overrides || {});
     const sandbox = document.getElementById('user-sandbox-mode');
     if (sandbox) sandbox.checked = Boolean(ex.sandbox_mode);
     const liveSelect = document.getElementById('user-live-trading');
@@ -1149,6 +1277,7 @@ async function saveUserExchangeSettings() {
         market_type: document.getElementById('user-market-type')?.value || 'contract',
         default_order_type: document.getElementById('user-default-order-type')?.value || 'limit',
         stop_loss_order_type: document.getElementById('user-stop-loss-order-type')?.value || 'market',
+        limit_timeout_overrides: timeoutOverridesFromInputs('user'),
     };
     await fetchAPI('/api/user/settings/exchange', { method:'POST', body:JSON.stringify(data) });
     ['user-api-key','user-api-secret','user-api-password'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
@@ -1158,15 +1287,15 @@ async function saveUserExchangeSettings() {
 
 async function saveUserTPSettings() {
     const data = {
-        num_levels: parseInt(document.getElementById('user-tp-levels')?.value) || 1,
-        tp1_pct: parseFloat(document.getElementById('user-tp1-pct')?.value) || 2,
-        tp2_pct: parseFloat(document.getElementById('user-tp2-pct')?.value) || 4,
-        tp3_pct: parseFloat(document.getElementById('user-tp3-pct')?.value) || 6,
-        tp4_pct: parseFloat(document.getElementById('user-tp4-pct')?.value) || 10,
-        tp1_qty: parseFloat(document.getElementById('user-tp1-qty')?.value) || 25,
-        tp2_qty: parseFloat(document.getElementById('user-tp2-qty')?.value) || 25,
-        tp3_qty: parseFloat(document.getElementById('user-tp3-qty')?.value) || 25,
-        tp4_qty: parseFloat(document.getElementById('user-tp4-qty')?.value) || 25,
+        num_levels: readNumberInput('user-tp-levels', 1, value => parseInt(value, 10)),
+        tp1_pct: readNumberInput('user-tp1-pct', 2),
+        tp2_pct: readNumberInput('user-tp2-pct', 4),
+        tp3_pct: readNumberInput('user-tp3-pct', 6),
+        tp4_pct: readNumberInput('user-tp4-pct', 10),
+        tp1_qty: readNumberInput('user-tp1-qty', 25),
+        tp2_qty: readNumberInput('user-tp2-qty', 25),
+        tp3_qty: readNumberInput('user-tp3-qty', 25),
+        tp4_qty: readNumberInput('user-tp4-qty', 25),
     };
     await fetchAPI('/api/user/settings/take-profit', { method:'POST', body:JSON.stringify(data) });
     showToast('Take-profit settings saved.','success','Saved');
@@ -2088,7 +2217,9 @@ async function saveFilterThresholds() {
     const data = {};
     thresholdFields.forEach(key => {
         const el = document.getElementById(`threshold-${key}`);
-        if (el) data[key] = parseFloat(el.value) || null;
+        if (!el) return;
+        const raw = String(el.value ?? '').trim();
+        data[key] = raw === '' ? null : readNumberInput(`threshold-${key}`, null);
     });
 
     try {
@@ -2619,6 +2750,14 @@ function selectPaymentNetwork(button, subscriptionId, amount) {
 function setText(id, value) {
     const el = document.getElementById(id);
     if (el) el.textContent = value ?? '';
+}
+function formatTakeProfitLevels(levels, fallback = '--') {
+    if (!Array.isArray(levels) || !levels.length) return fallback;
+    const parts = levels
+        .map(level => Number(level?.price))
+        .filter(value => Number.isFinite(value) && value > 0)
+        .map(value => `$${formatNum(value)}`);
+    return parts.length ? parts.join(' / ') : fallback;
 }
 function pickBalance(section, quote = 'USDT') {
     if (!section || typeof section !== 'object') return 0;

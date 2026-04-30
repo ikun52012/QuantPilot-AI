@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Register — QuantPilot AI</title>
     <meta name="theme-color" content="#0f151f">
-    <link rel="manifest" href="/static/manifest.json">
+    <link rel="manifest" href="/static/manifest.json?v=20260430-2">
     <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800|inter:300,400,500,600" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <style>
@@ -112,7 +112,7 @@
         </div>
     </div>
 </div>
-<script data-cfasync="false" src="/static/js/i18n.js" defer></script>
+<script data-cfasync="false" src="/static/js/i18n.js?v=20260430-2" defer></script>
 <script data-cfasync="false">
 const form = document.getElementById('register-form');
 const errEl = document.getElementById('error-msg');
@@ -193,7 +193,7 @@ form.addEventListener('submit', async (e) => {
 
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+        navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' }).catch(() => {});
     });
 }
 </script>

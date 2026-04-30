@@ -230,12 +230,16 @@ async def get_pending_2fa_user(
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if not payload.get("2fa_pending"):
+        raise HTTPException(status_code=403, detail="2FA verification is not pending")
 
     user = await get_user_by_id(db, payload["sub"])
     if not user:
         raise HTTPException(status_code=401, detail="User no longer exists")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
+    if int(payload.get("ver", 0)) != int(user.token_version or 0):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
 
     return {
         "sub": user.id,

@@ -216,6 +216,15 @@ class FilterThresholds:
                 if key in self.DEFAULT_THRESHOLDS:
                     self._custom_thresholds[key] = value
 
+    def reload_from_dict(self, data: dict[str, Any] | None = None) -> None:
+        """Reload custom thresholds from env plus persisted overrides."""
+        with self._instance_lock:
+            self._custom_thresholds = {}
+            self._load_from_env()
+            for key, value in (data or {}).items():
+                if key in self.DEFAULT_THRESHOLDS:
+                    self._custom_thresholds[key] = value
+
     def to_dict(self) -> dict[str, Any]:
         """Return all thresholds as a dictionary."""
         with self._instance_lock:

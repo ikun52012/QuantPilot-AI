@@ -1,0 +1,174 @@
+import json
+
+import pytest
+
+from ai_analyzer import (
+    _AI_CACHE,
+    _analysis_config_signature,
+    _build_user_prompt,
+    _get_cached_analysis,
+    _get_effective_system_prompt,
+    _set_cached_analysis,
+)
+from core.config import settings
+from core.database import PositionModel
+from models import AIAnalysis, MarketContext, TradingViewSignal
+from position_monitor import _paper_trailing_stop_price
+from services.signal_processor import SignalProcessor
+
+
+@pytest.fixture(autouse=True)
+def clear_ai_cache():
+    _AI_CACHE.clear()
+    yield
+    _AI_CACHE.clear()
+
+
+@pytest.fixture
+def sample_signal():
+    return TradingViewSignal(
+        secret="test",
+        ticker="BTCUSDT",
+        exchange="BINANCE",
+        direction="long",
+        price=50000.0,
+        timeframe="60",
+        strategy="test",
+        message="",
+    )
+
+
+@pytest.fixture
+def sample_market():
+    return MarketContext(
+        ticker="BTCUSDT",
+        current_price=50000.0,
+        price_change_1h=1.0,
+        volume_24h=1000000.0,
+    )
+
+
+def test_effective_system_prompt_uses_user_risk_and_tp_settings(monkeypatch):
+    monkeypatch.setattr(settings.risk, "ai_risk_profile", "balanced")
+    monkeypatch.setattr(settings.risk, "exit_management_mode", "ai")
+    monkeypatch.setattr(settings.risk, "ai_exit_system_prompt", "")
+    monkeypatch.setattr(settings.take_profit, "num_levels", 1)
+
+    prompt = _get_effective_system_prompt(
+        {
+            "risk": {
+                "ai_risk_profile": "aggressive",
+                "exit_management_mode": "ai",
+                "ai_exit_system_prompt": "Use wider stops.",
+            },
+            "take_profit": {"num_levels": 3},
+        }
+    )
+
+    assert "AI risk profile: AGGRESSIVE." in prompt
+    assert "exactly 3 take-profit targets" in prompt
+    assert "Use wider stops." in prompt
+
+
+def test_build_user_prompt_respects_custom_exit_mode(sample_signal, sample_market, monkeypatch):
+    monkeypatch.setattr(settings.risk, "exit_management_mode", "ai")
+    prompt = _build_user_prompt(
+        sample_signal,
+        sample_market,
+        user_settings={
+            "risk": {"exit_management_mode": "custom"},
+            "take_profit": {"num_levels": 4},
+        },
+    )
+
+    assert "The server is using custom fixed exits" in prompt
+    assert "Generate valid prices for suggested_tp1" not in prompt
+
+
+def test_build_user_prompt_includes_modify_and_null_field_contract(sample_signal, sample_market, monkeypatch):
+    monkeypatch.setattr(settings.risk, "exit_management_mode", "ai")
+
+    prompt = _build_user_prompt(
+        sample_signal,
+        sample_market,
+        user_settings={"take_profit": {"num_levels": 2}},
+    )
+
+    assert "Use recommendation='modify' only if you also provide a valid suggested_entry" in prompt
+    assert "If recommendation is 'reject' or 'hold', set suggested_entry, suggested_stop_loss, and all TP fields to null" in prompt
+
+
+@pytest.mark.asyncio
+async def test_ai_cache_isolated_by_effective_settings():
+    analysis = AIAnalysis(confidence=0.8, recommendation="execute", reasoning="ok")
+    sig_one = _analysis_config_signature({"take_profit": {"num_levels": 1}})
+    sig_two = _analysis_config_signature({"take_profit": {"num_levels": 3}})
+
+    await _set_cached_analysis("BTCUSDT", "long", analysis, "50000.00", "60", sig_one)
+
+    assert await _get_cached_analysis("BTCUSDT", "long", "50000.00", "60", sig_one) is analysis
+    assert await _get_cached_analysis("BTCUSDT", "long", "50000.00", "60", sig_two) is None
+
+
+def test_analysis_config_signature_changes_with_zero_preserved_trailing_value():
+    baseline = _analysis_config_signature({"trailing_stop": {"activation_profit_pct": 0.0}})
+    changed = _analysis_config_signature({"trailing_stop": {"activation_profit_pct": 1.0}})
+    assert baseline != changed
+
+
+def test_custom_exit_plan_preserves_zero_qty_override(monkeypatch):
+    monkeypatch.setattr(settings.take_profit, "num_levels", 2)
+    monkeypatch.setattr(settings.take_profit, "tp1_pct", 2.0)
+    monkeypatch.setattr(settings.take_profit, "tp2_pct", 4.0)
+    monkeypatch.setattr(settings.take_profit, "tp1_qty", 50.0)
+    monkeypatch.setattr(settings.take_profit, "tp2_qty", 50.0)
+    monkeypatch.setattr(settings.risk, "custom_stop_loss_pct", 1.5)
+
+    processor = SignalProcessor(session=None)
+    signal = TradingViewSignal(
+        secret="test",
+        ticker="BTCUSDT",
+        exchange="BINANCE",
+        direction="long",
+        price=100.0,
+        timeframe="60",
+        strategy="test",
+        message="",
+    )
+    analysis = AIAnalysis(confidence=0.8, recommendation="execute", reasoning="ok")
+    decision = processor._build_trade_decision(
+        signal,
+        analysis,
+        MarketContext(ticker="BTCUSDT", current_price=100.0),
+        None,
+        {
+            "risk": {"exit_management_mode": "custom"},
+            "take_profit": {
+                "num_levels": 2,
+                "tp1_pct": 2.0,
+                "tp2_pct": 4.0,
+                "tp1_qty": 100.0,
+                "tp2_qty": 0.0,
+            },
+        },
+    )
+
+    assert decision.execute is True
+    assert len(decision.take_profit_levels) == 1
+    assert decision.take_profit_levels[0].qty_pct == 100.0
+    assert decision.take_profit_levels[0].price == 102.0
+
+
+def test_paper_trailing_stop_price_preserves_zero_activation(monkeypatch):
+    monkeypatch.setattr(settings.trailing_stop, "activation_profit_pct", 1.0)
+    monkeypatch.setattr(settings.trailing_stop, "trail_pct", 1.0)
+
+    position = PositionModel(
+        direction="long",
+        entry_price=100.0,
+        trailing_stop_config_json=json.dumps({"mode": "moving", "trail_pct": 1.0, "activation_profit_pct": 0.0}),
+    )
+
+    new_stop = _paper_trailing_stop_price(position, 100.0)
+
+    assert new_stop == pytest.approx(99.0)

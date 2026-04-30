@@ -30,6 +30,7 @@ from core.database import (
     SubscriptionPlanModel,
     UserModel,
     WebhookEventModel,
+    deactivate_user_subscriptions,
     get_admin_setting,
     get_all_users,
     get_db,
@@ -492,6 +493,9 @@ async def grant_user_subscription(
         end_date=(now + timedelta(days=duration_days)) if status == "active" else None,
     )
     db.add(sub)
+    await db.flush()
+    if status == "active":
+        await deactivate_user_subscriptions(db, user_id, exclude_subscription_id=sub.id)
     await db.commit()
     await _add_audit_log(db, admin, "grant_subscription", "user", user_id, f"Granted {plan.name} to {user.username}", request)
     return {"status": "ok", "subscription_id": sub.id}
@@ -1321,6 +1325,8 @@ async def _activate_payment_subscription(db: AsyncSession, payment: PaymentModel
             subscription.status = "active"
             subscription.start_date = now
             subscription.end_date = now + timedelta(days=duration_days)
+            await db.flush()
+            await deactivate_user_subscriptions(db, subscription.user_id, exclude_subscription_id=subscription.id)
 
 async def _add_audit_log(
     db: AsyncSession,
@@ -1402,7 +1408,17 @@ async def update_filter_thresholds(
         thresholds.set_custom(key, value)
         updates[key] = value
 
-    await set_admin_setting(db, "prefilter_thresholds", json.dumps(updates))
+    current_raw = await get_admin_setting(db, "prefilter_thresholds", "")
+    try:
+        persisted = json.loads(current_raw) if current_raw else {}
+        if not isinstance(persisted, dict):
+            persisted = {}
+    except Exception:
+        persisted = {}
+
+    persisted.update(updates)
+
+    await set_admin_setting(db, "prefilter_thresholds", json.dumps(persisted))
     await db.commit()
 
     await _add_audit_log(db, admin, "update_filter_thresholds", "settings", "", f"Updated {len(updates)} thresholds", request)
@@ -1733,6 +1749,14 @@ def _version_tuple(value: str) -> tuple[int, int, int]:
     return (parts[0], parts[1], parts[2])
 
 
+def _docker_image_for_version(version: str, updater: bool = False) -> str:
+    repo = f"{GITHUB_REPO.lower()}-updater" if updater else GITHUB_REPO.lower()
+    normalized = str(version or "").strip().lstrip("v")
+    if not normalized:
+        raise ValueError("version is required for docker image tag")
+    return f"ghcr.io/{repo}:v{normalized}"
+
+
 def _next_update_task_id() -> str:
     return f"upd_{utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
@@ -1836,7 +1860,8 @@ async def _fetch_latest_release_data() -> dict:
             "release_body": latest_release.get("body", ""),
             "published_at": latest_release.get("published_at", ""),
             "download_url": f"https://github.com/{GITHUB_REPO}/releases/tag/v{latest_version}",
-            "docker_image": f"ghcr.io/{GITHUB_REPO.lower()}:latest",
+            "docker_image": _docker_image_for_version(latest_version),
+            "updater_image": _docker_image_for_version(latest_version, updater=True),
         }
     except httpx.TimeoutException:
         return {
@@ -1916,6 +1941,8 @@ async def perform_update(
         "updated_at": queued_at,
         "current_version": current_version,
         "target_version": latest_version,
+        "target_image": release.get("docker_image", _docker_image_for_version(latest_version)),
+        "target_updater_image": release.get("updater_image", _docker_image_for_version(latest_version, updater=True)),
         "release_name": release.get("release_name", latest_version),
         "release_url": release.get("release_url", ""),
         "message": f"Update to v{latest_version} has been queued.",

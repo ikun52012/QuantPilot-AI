@@ -140,7 +140,7 @@ docker compose up -d
 The production compose file uses the published GHCR image by default:
 
 ```bash
-SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:latest
+SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v4.5.3
 ```
 
 If you want the admin panel one-click update button to work, keep the bundled `updater`

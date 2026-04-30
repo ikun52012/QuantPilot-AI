@@ -19,7 +19,14 @@ from core.security import (
     verify_password,
 )
 from core.utils.common import safe_bool, safe_float, safe_int, safe_str
-from exchange import _normalize_symbol, _valid_stop_loss, _valid_take_profit
+from exchange import (
+    _create_exchange_order,
+    _normalize_symbol,
+    _resolve_symbol,
+    _symbol_candidates,
+    _valid_stop_loss,
+    _valid_take_profit,
+)
 from models import (
     MarketContext,
     SignalDirection,
@@ -141,6 +148,44 @@ class TestSymbolNormalization:
     def test_unknown_quote(self):
         """Unknown quote currency."""
         assert _normalize_symbol("BTCXYZ") == "BTCXYZUSDT"
+
+    def test_contract_candidates_prefer_perpetual_market(self):
+        """Contract mode should try perpetual symbols before spot pairs."""
+        candidates = _symbol_candidates("TRBUSDT", "contract")
+        assert candidates[0] == "TRB/USDT:USDT"
+        assert "TRB/USDT" in candidates
+
+    def test_resolve_symbol_prefers_contract_market_when_requested(self):
+        """Contract routing should not resolve a futures ticker to spot when both exist."""
+
+        class _FakeExchange:
+            def __init__(self):
+                self.options = {"defaultType": "future"}
+
+            def load_markets(self):
+                return {
+                    "TRB/USDT": {"id": "TRBUSDT", "spot": True, "contract": False},
+                    "TRB/USDT:USDT": {"id": "TRBUSDT", "spot": False, "contract": True, "swap": True},
+                }
+
+        exchange = _FakeExchange()
+        assert _resolve_symbol(exchange, "TRBUSDT", "contract") == "TRB/USDT:USDT"
+
+    def test_resolve_symbol_prefers_spot_market_when_requested(self):
+        """Spot routing should still resolve the same ticker to spot."""
+
+        class _FakeExchange:
+            def __init__(self):
+                self.options = {"defaultType": "spot"}
+
+            def load_markets(self):
+                return {
+                    "TRB/USDT": {"id": "TRBUSDT", "spot": True, "contract": False},
+                    "TRB/USDT:USDT": {"id": "TRBUSDT", "spot": False, "contract": True, "swap": True},
+                }
+
+        exchange = _FakeExchange()
+        assert _resolve_symbol(exchange, "TRBUSDT", "spot") == "TRB/USDT"
 
 
 class TestStopLossTakeProfitValidation:
@@ -627,3 +672,37 @@ class TestTradeDecision:
             ]
         )
         assert len(decision.take_profit_levels) == 2
+
+
+class TestExchangeOrderRetries:
+    @pytest.mark.asyncio
+    async def test_okx_order_retries_with_pos_side_after_parameter_error(self):
+        class _FakeExchange:
+            id = "okx"
+
+            def create_order(self, *, symbol, type, side, amount, price=None, params=None):
+                if "posSide" not in (params or {}):
+                    raise RuntimeError(
+                        'okx {"code":"1","data":[{"sCode":"51000","sMsg":"Parameter posSide error "}]}'
+                    )
+                return {
+                    "id": "okx-order-1",
+                    "symbol": symbol,
+                    "type": type,
+                    "side": side,
+                    "amount": amount,
+                    "price": price,
+                    "params": params,
+                }
+
+        order = await _create_exchange_order(
+            _FakeExchange(),
+            symbol="PLTR/USDT:USDT",
+            order_type="market",
+            side="buy",
+            amount=1.0,
+        )
+
+        assert order["id"] == "okx-order-1"
+        assert order["params"]["tdMode"] == "cross"
+        assert order["params"]["posSide"] == "long"

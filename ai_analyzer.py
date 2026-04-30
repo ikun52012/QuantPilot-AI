@@ -4,6 +4,7 @@ Uses LLM APIs (OpenAI / Anthropic / DeepSeek / OpenRouter) to analyze trading si
 This is the brain of the system.
 """
 import asyncio
+import hashlib
 import json
 import time as _time
 from collections.abc import Awaitable, Callable, Coroutine
@@ -14,6 +15,7 @@ from loguru import logger
 
 from core.ai_cost_tracker import ai_costs, extract_usage_from_response
 from core.config import settings
+from core.utils.common import first_valid, safe_float, safe_int
 from models import AIAnalysis, MarketContext, SignalDirection, TradingViewSignal
 from models import TrailingStopMode as _TrailingStopMode
 
@@ -39,7 +41,13 @@ _AI_CACHE: dict[str, tuple[float, "AIAnalysis"]] = {}
 _AI_CACHE_LOCK = asyncio.Lock()
 
 
-def _ai_cache_key(ticker: str, direction: str, price_bucket: str = "", timeframe: str = "") -> str:
+def _ai_cache_key(
+    ticker: str,
+    direction: str,
+    price_bucket: str = "",
+    timeframe: str = "",
+    config_signature: str = "",
+) -> str:
     """Generate cache key with price bucket and timeframe to avoid stale cache hits.
 
     Price is bucketed to 1% intervals to allow cache hits for similar prices
@@ -50,6 +58,8 @@ def _ai_cache_key(ticker: str, direction: str, price_bucket: str = "", timeframe
         key += f":{timeframe}"
     if price_bucket:
         key += f":{price_bucket}"
+    if config_signature:
+        key += f":{config_signature}"
     return key
 
 
@@ -70,8 +80,9 @@ async def _get_cached_analysis(
     direction: str,
     price_bucket: str = "",
     timeframe: str = "",
+    config_signature: str = "",
 ) -> AIAnalysis | None:
-    key = _ai_cache_key(ticker, direction, price_bucket, timeframe)
+    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature)
     async with _AI_CACHE_LOCK:
         entry = _AI_CACHE.get(key)
         if entry and (_time.monotonic() - entry[0]) < _AI_CACHE_TTL:
@@ -85,8 +96,9 @@ async def _set_cached_analysis(
     analysis: AIAnalysis,
     price_bucket: str = "",
     timeframe: str = "",
+    config_signature: str = "",
 ) -> None:
-    key = _ai_cache_key(ticker, direction, price_bucket, timeframe)
+    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature)
     async with _AI_CACHE_LOCK:
         _AI_CACHE[key] = (_time.monotonic(), analysis)
         now = _time.monotonic()
@@ -153,7 +165,13 @@ Key rules:
 - For take-profit levels: space them based on ATR and volatility
   - In trending markets, use wider TP spacing
   - In ranging markets, use tighter TP spacing
-  - TP quantities should sum to ≤ 100%
+- TP quantities should sum to ≤ 100%
+- Use "modify" only when the trade thesis is valid but entry quality is poor and you can provide a materially better `suggested_entry`
+- Use "reject" when the setup is invalid, structurally conflicted, or lacks a safe invalidation level
+- Use "hold" only when the data is insufficient or ambiguous; do not use "hold" as a synonym for reject
+- If you recommend "execute" or "modify", include a valid `suggested_stop_loss` and valid TP levels required by the server
+- If you recommend "reject" or "hold", set `suggested_entry`, `suggested_stop_loss`, `suggested_take_profit`, and all `suggested_tp*` fields to null
+- If `suggested_direction` matches the incoming signal direction, return null instead of repeating the same direction
 
 Respond ONLY with the JSON object, no other text."""
 
@@ -206,34 +224,99 @@ RISK_PROFILE_PROMPTS = {
 }
 
 
-def _get_effective_system_prompt() -> str:
+def _effective_risk_config(user_settings: dict | None = None):
+    risk_cfg = (user_settings or {}).get("risk") or {}
+
+    class _Risk:
+        _mode = str(first_valid(risk_cfg.get("exit_management_mode"), settings.risk.exit_management_mode) or "ai").lower().strip()
+        exit_management_mode = _mode if _mode in {"ai", "custom"} else "ai"
+
+        _profile = str(first_valid(risk_cfg.get("ai_risk_profile"), settings.risk.ai_risk_profile) or "balanced").lower().strip()
+        ai_risk_profile = _profile if _profile in RISK_PROFILE_PROMPTS else "balanced"
+
+        ai_exit_system_prompt = str(first_valid(risk_cfg.get("ai_exit_system_prompt"), settings.risk.ai_exit_system_prompt) or "")
+
+    return _Risk()
+
+
+def _analysis_config_signature(user_settings: dict | None = None) -> str:
+    risk_config = _effective_risk_config(user_settings)
+    tp_config = _effective_take_profit_config(user_settings)
+    ts_config = _effective_trailing_stop_config(user_settings)
+
+    payload = {
+        "provider": settings.ai.provider,
+        "openai_model": settings.ai.openai_model,
+        "anthropic_model": settings.ai.anthropic_model,
+        "deepseek_model": settings.ai.deepseek_model,
+        "mistral_model": settings.ai.mistral_model,
+        "openrouter_enabled": settings.ai.openrouter_enabled,
+        "openrouter_model": settings.ai.openrouter_model,
+        "custom_provider_enabled": settings.ai.custom_provider_enabled,
+        "custom_provider_name": settings.ai.custom_provider_name,
+        "custom_provider_model": settings.ai.custom_provider_model,
+        "custom_provider_api_url": settings.ai.custom_provider_api_url,
+        "voting_enabled": settings.ai.voting_enabled,
+        "voting_models": settings.ai.voting_models,
+        "voting_weights": settings.ai.voting_weights,
+        "voting_strategy": settings.ai.voting_strategy,
+        "ai_custom_system_prompt": settings.ai.custom_system_prompt,
+        "exit_management_mode": risk_config.exit_management_mode,
+        "ai_risk_profile": risk_config.ai_risk_profile,
+        "ai_exit_system_prompt": risk_config.ai_exit_system_prompt,
+        "take_profit": {
+            "num_levels": tp_config.num_levels,
+            "tp1_pct": tp_config.tp1_pct,
+            "tp2_pct": tp_config.tp2_pct,
+            "tp3_pct": tp_config.tp3_pct,
+            "tp4_pct": tp_config.tp4_pct,
+            "tp1_qty": tp_config.tp1_qty,
+            "tp2_qty": tp_config.tp2_qty,
+            "tp3_qty": tp_config.tp3_qty,
+            "tp4_qty": tp_config.tp4_qty,
+        },
+        "trailing_stop": {
+            "mode": ts_config.mode,
+            "trail_pct": ts_config.trail_pct,
+            "activation_profit_pct": ts_config.activation_profit_pct,
+            "trailing_step_pct": ts_config.trailing_step_pct,
+        },
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _get_effective_system_prompt(user_settings: dict | None = None) -> str:
     """Return system prompt with optional custom additions."""
     base = SYSTEM_PROMPT
 
     # Always include SMC/FVG optimization instructions
     base += "\n" + SMC_FVG_PROMPT
 
-    profile = settings.risk.ai_risk_profile.lower().strip()
-    base += "\n\n" + RISK_PROFILE_PROMPTS.get(profile, RISK_PROFILE_PROMPTS["balanced"])
+    risk_config = _effective_risk_config(user_settings)
+    base += "\n\n" + RISK_PROFILE_PROMPTS.get(risk_config.ai_risk_profile, RISK_PROFILE_PROMPTS["balanced"])
 
-    num_tp = settings.take_profit.num_levels
+    num_tp = _effective_take_profit_config(user_settings).num_levels
 
-    if settings.risk.exit_management_mode == "ai":
+    if risk_config.exit_management_mode == "ai":
+        beyond_level_instruction = ""
+        if num_tp < 4:
+            beyond_level_instruction = (
+                f" For TP levels beyond {num_tp} (TP{num_tp+1} to TP4), you MUST set them to null "
+                f"(not 0, not a number, but null). Similarly, tp{num_tp+1}_qty_pct through tp4_qty_pct should be 0."
+            )
         tp_instruction = (
             f"\n\nExit management mode: AI-generated exits are enabled. "
             f"You must provide suggested_stop_loss plus exactly {num_tp} take-profit targets. "
             f"The server is configured for {num_tp} TP levels. "
             f"You MUST generate suggested_tp1 through suggested_tp{num_tp} with valid prices. "
-            f"For TP levels beyond {num_tp} (TP{num_tp+1} to TP4), you MUST set them to null (not 0, not a number, but null). "
-            f"Example: if num_levels=2, suggested_tp1 and suggested_tp2 should have valid prices, "
-            f"but suggested_tp3 and suggested_tp4 must be null. "
-            f"Similarly, tp1_qty_pct through tp{num_tp}_qty_pct should sum to 100% or less, "
-            f"and tp{num_tp+1}_qty_pct through tp4_qty_pct should be 0. "
+            f"tp1_qty_pct through tp{num_tp}_qty_pct should sum to 100% or less."
+            f"{beyond_level_instruction} "
             f"Obey the requested risk profile for exit levels."
         )
         base += tp_instruction
-        if settings.risk.ai_exit_system_prompt:
-            base += f"\nExit-generation instructions:\n{settings.risk.ai_exit_system_prompt}"
+        if risk_config.ai_exit_system_prompt:
+            base += f"\nExit-generation instructions:\n{risk_config.ai_exit_system_prompt}"
     else:
         base += (
             "\n\nExit management mode: custom fixed exits are enabled. "
@@ -245,10 +328,51 @@ def _get_effective_system_prompt() -> str:
     return base
 
 
-def _build_user_prompt(signal: TradingViewSignal, market: MarketContext, smc_text: str = "") -> str:
+def _effective_take_profit_config(user_settings: dict | None = None):
+    tp_cfg = (user_settings or {}).get("take_profit") or {}
+
+    class _TP:
+        num_levels = max(1, min(safe_int(first_valid(tp_cfg.get("num_levels"), settings.take_profit.num_levels), 1), 4))
+        tp1_pct = safe_float(first_valid(tp_cfg.get("tp1_pct"), settings.take_profit.tp1_pct), settings.take_profit.tp1_pct)
+        tp2_pct = safe_float(first_valid(tp_cfg.get("tp2_pct"), settings.take_profit.tp2_pct), settings.take_profit.tp2_pct)
+        tp3_pct = safe_float(first_valid(tp_cfg.get("tp3_pct"), settings.take_profit.tp3_pct), settings.take_profit.tp3_pct)
+        tp4_pct = safe_float(first_valid(tp_cfg.get("tp4_pct"), settings.take_profit.tp4_pct), settings.take_profit.tp4_pct)
+        tp1_qty = safe_float(first_valid(tp_cfg.get("tp1_qty"), settings.take_profit.tp1_qty), settings.take_profit.tp1_qty)
+        tp2_qty = safe_float(first_valid(tp_cfg.get("tp2_qty"), settings.take_profit.tp2_qty), settings.take_profit.tp2_qty)
+        tp3_qty = safe_float(first_valid(tp_cfg.get("tp3_qty"), settings.take_profit.tp3_qty), settings.take_profit.tp3_qty)
+        tp4_qty = safe_float(first_valid(tp_cfg.get("tp4_qty"), settings.take_profit.tp4_qty), settings.take_profit.tp4_qty)
+
+    return _TP()
+
+
+def _effective_trailing_stop_config(user_settings: dict | None = None):
+    trailing_cfg = (user_settings or {}).get("trailing_stop") or {}
+
+    class _TS:
+        mode = str(trailing_cfg.get("mode") or settings.trailing_stop.mode)
+        trail_pct = safe_float(first_valid(trailing_cfg.get("trail_pct"), settings.trailing_stop.trail_pct), settings.trailing_stop.trail_pct)
+        activation_profit_pct = safe_float(
+            first_valid(trailing_cfg.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct),
+            settings.trailing_stop.activation_profit_pct,
+        )
+        trailing_step_pct = safe_float(
+            first_valid(trailing_cfg.get("trailing_step_pct"), settings.trailing_stop.trailing_step_pct),
+            settings.trailing_stop.trailing_step_pct,
+        )
+
+    return _TS()
+
+
+def _build_user_prompt(
+    signal: TradingViewSignal,
+    market: MarketContext,
+    smc_text: str = "",
+    user_settings: dict | None = None,
+) -> str:
     """Build the user prompt with signal, market data, and SMC analysis."""
-    tp_config = settings.take_profit
-    ts_config = settings.trailing_stop
+    risk_config = _effective_risk_config(user_settings)
+    tp_config = _effective_take_profit_config(user_settings)
+    ts_config = _effective_trailing_stop_config(user_settings)
 
     tp_section = f"""
 ## Take-Profit Configuration
@@ -264,6 +388,31 @@ def _build_user_prompt(signal: TradingViewSignal, market: MarketContext, smc_tex
 - Trail Distance %: {ts_config.trail_pct}%
 - Activation Profit %: {ts_config.activation_profit_pct}%
 - Trailing Step %: {ts_config.trailing_step_pct}%"""
+
+    exit_instructions = [
+        "IMPORTANT: The server expects EXACTLY "
+        f"{tp_config.num_levels} take-profit targets.",
+        f"- Generate valid prices for suggested_tp1 through suggested_tp{tp_config.num_levels}",
+        "- Use recommendation='modify' only if you also provide a valid suggested_entry different from the raw signal price",
+        "- If recommendation is 'execute', suggested_entry may be null when the signal price is already acceptable",
+        "- If recommendation is 'reject' or 'hold', set suggested_entry, suggested_stop_loss, and all TP fields to null",
+    ]
+    if tp_config.num_levels < 4:
+        exit_instructions.extend([
+            f"- Set suggested_tp{tp_config.num_levels + 1} through suggested_tp4 to null (not a number, but null)",
+            f"- Set tp{tp_config.num_levels + 1}_qty_pct through tp4_qty_pct to 0",
+        ])
+    exit_instructions.append(
+        f"- The first {tp_config.num_levels} TP quantities should sum to 100% or less"
+    )
+
+    if risk_config.exit_management_mode == "ai":
+        exit_instruction_text = "\n".join(exit_instructions)
+    else:
+        exit_instruction_text = (
+            "IMPORTANT: The server is using custom fixed exits. You may comment on risk and trade quality, "
+            "but AI stop-loss and take-profit prices will be ignored."
+        )
 
     return f"""Analyze this trading signal:
 
@@ -294,11 +443,7 @@ def _build_user_prompt(signal: TradingViewSignal, market: MarketContext, smc_tex
 {tp_section}
 {ts_section}
 
-IMPORTANT: The server expects EXACTLY {tp_config.num_levels} take-profit targets.
-- Generate valid prices for suggested_tp1 through suggested_tp{tp_config.num_levels}
-- Set suggested_tp{tp_config.num_levels + 1} through suggested_tp4 to null (not a number, but null)
-- Set tp{tp_config.num_levels + 1}_qty_pct through tp4_qty_pct to 0
-- The first {tp_config.num_levels} TP quantities should sum to 100% or less
+{exit_instruction_text}
 
 {smc_text}
 Should this signal be executed, modified, or rejected? If the entry price is suboptimal based on SMC analysis, recommend "modify" and provide a better suggested_entry price. Provide your analysis as JSON."""
@@ -859,6 +1004,7 @@ async def _aggregate_voting_results_async(
 async def analyze_signal(
     signal: TradingViewSignal,
     market: MarketContext,
+    user_settings: dict | None = None,
 ) -> AIAnalysis:
     """
     Send signal + market context to LLM and parse the response.
@@ -869,6 +1015,7 @@ async def analyze_signal(
     """
     price_bucket = _price_to_bucket(market.current_price) if market.current_price > 0 else ""
     timeframe = str(signal.timeframe or "")
+    config_signature = _analysis_config_signature(user_settings)
 
     cache_key_suffix = ""
     if settings.ai.voting_enabled and settings.ai.voting_models:
@@ -879,6 +1026,7 @@ async def analyze_signal(
         signal.direction.value + cache_key_suffix,
         price_bucket,
         timeframe,
+        config_signature,
     )
     if cached is not None:
         logger.info(f"[AI] Using cached analysis for {signal.ticker} {signal.direction.value} @ {price_bucket}")
@@ -916,8 +1064,8 @@ async def analyze_signal(
     except Exception as e:
         logger.warning(f"[AI/SMC] SMC analysis failed, proceeding without: {e}")
 
-    system_prompt = _get_effective_system_prompt()
-    user_prompt = _build_user_prompt(signal, market, smc_text)
+    system_prompt = _get_effective_system_prompt(user_settings)
+    user_prompt = _build_user_prompt(signal, market, smc_text, user_settings)
 
     if settings.ai.voting_enabled and settings.ai.voting_models:
         logger.info(
@@ -960,7 +1108,14 @@ async def analyze_signal(
                 settings.ai.voting_weights,
             )
 
-            await _set_cached_analysis(signal.ticker, signal.direction.value + cache_key_suffix, final_analysis, price_bucket, timeframe)
+            await _set_cached_analysis(
+                signal.ticker,
+                signal.direction.value + cache_key_suffix,
+                final_analysis,
+                price_bucket,
+                timeframe,
+                config_signature,
+            )
             return final_analysis
 
         except asyncio.TimeoutError:
@@ -997,7 +1152,14 @@ async def analyze_signal(
             f"[AI] Result: {analysis.recommendation} "
             f"(confidence={analysis.confidence:.2f}, risk={analysis.risk_score:.2f})"
         )
-        await _set_cached_analysis(signal.ticker, signal.direction.value + cache_key_suffix, analysis, price_bucket, timeframe)
+        await _set_cached_analysis(
+            signal.ticker,
+            signal.direction.value + cache_key_suffix,
+            analysis,
+            price_bucket,
+            timeframe,
+            config_signature,
+        )
         return analysis
 
     except httpx.HTTPStatusError as e:

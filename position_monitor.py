@@ -18,13 +18,55 @@ from core.database import (
     record_position_close_trade_async,
 )
 from core.security import decrypt_settings_payload
-from core.utils.common import loads_dict, loads_list, price_pnl_pct, safe_bool, safe_float, symbol_key
+from core.utils.common import (
+    first_valid,
+    loads_dict,
+    loads_list,
+    normalize_limit_timeout_overrides,
+    price_pnl_pct,
+    safe_bool,
+    safe_float,
+    suggested_limit_timeout_secs,
+    symbol_key,
+)
 from core.utils.datetime import utcnow
 
 # Backward-compatible aliases used by older tests and imports.
 _safe_float = safe_float
 _loads_list = loads_list
 _loads_dict = loads_dict
+
+
+def _position_limit_timeout_secs(position: PositionModel) -> float:
+    configured = safe_float(getattr(position, "limit_timeout_secs", 0), 0.0)
+    if configured > 0:
+        return configured
+    return float(suggested_limit_timeout_secs("1h"))
+
+
+def _paper_trailing_stop_price(position: PositionModel, mark_price: float) -> float | None:
+    trailing_config = loads_dict(position.trailing_stop_config_json)
+    trailing_mode = str(trailing_config.get("mode") or settings.trailing_stop.mode or "none").lower()
+    if trailing_mode not in {"moving", "profit_pct_trailing"}:
+        return None
+
+    direction = str(position.direction or "long").lower()
+    entry_price = safe_float(position.entry_price)
+    if mark_price <= 0 or entry_price <= 0:
+        return None
+
+    activation_pct = safe_float(
+        first_valid(trailing_config.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct),
+        1.0,
+    )
+    trail_pct = safe_float(first_valid(trailing_config.get("trail_pct"), settings.trailing_stop.trail_pct), 1.0)
+    profit_pct = _price_pnl_pct(direction, entry_price, mark_price, 1.0)
+    if profit_pct < activation_pct:
+        return None
+
+    if direction == "short":
+        return mark_price * (1 + trail_pct / 100.0)
+    return mark_price * (1 - trail_pct / 100.0)
 
 
 def _has_partial_position_fills(position: PositionModel) -> bool:
@@ -67,6 +109,7 @@ def _get_exchange_config_for_position(position: PositionModel) -> dict | None:
         "user_id": position.user_id,
         "sandbox_mode": position.sandbox_mode,
         "live_trading": position.live_trading,
+        "limit_timeout_overrides": normalize_limit_timeout_overrides(getattr(settings.exchange, "limit_timeout_overrides", {})),
     }
 
 
@@ -153,9 +196,9 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
                 exchange = (user_settings or {}).get("exchange") or {}
                 config.update({
                     "exchange": exchange.get("name") or exchange.get("exchange") or config["exchange"],
-                    "api_key": exchange.get("api_key") or "",
-                    "api_secret": exchange.get("api_secret") or "",
-                    "password": exchange.get("password") or "",
+                    "api_key": exchange.get("api_key") if "api_key" in exchange else config["api_key"],
+                    "api_secret": exchange.get("api_secret") if "api_secret" in exchange else config["api_secret"],
+                    "password": exchange.get("password") if "password" in exchange else config["password"],
                     "live_trading": safe_bool(exchange.get("live_trading"), config["live_trading"]),
                     "sandbox_mode": safe_bool(exchange.get("sandbox_mode"), config["sandbox_mode"]),
                     "market_type": exchange.get("market_type") or config["market_type"],
@@ -184,7 +227,7 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
     entry_price = safe_float(position.entry_price)
     direction = str(position.direction or "long").lower()
     order_type = str(position.order_type or "market").lower()
-    limit_timeout = safe_float(position.limit_timeout_secs, 300)
+    limit_timeout = _position_limit_timeout_secs(position)
 
     entry_filled = position.status != "pending"
 
@@ -235,6 +278,21 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
     if entry_filled and not stats.get("updated"):
         stats["updated"] += 1
 
+    trailing_stop = _paper_trailing_stop_price(position, close)
+    current_stop = safe_float(position.stop_loss)
+    if trailing_stop and trailing_stop > 0:
+        should_update = False
+        if current_stop <= 0:
+            should_update = True
+        elif direction == "short" and trailing_stop < current_stop:
+            should_update = True
+        elif direction != "short" and trailing_stop > current_stop:
+            should_update = True
+        if should_update:
+            position.stop_loss = trailing_stop
+            position.updated_at = utcnow()
+            stats["adjusted"] += 1
+
     stop_loss = safe_float(position.stop_loss)
     stop_hit = bool(stop_loss > 0 and ((direction == "long" and low <= stop_loss) or (direction == "short" and high >= stop_loss)))
 
@@ -281,6 +339,7 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
 
         position.remaining_quantity = remaining_qty
         position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
+        _update_unrealized(position, close)
         position.updated_at = utcnow()
         await session.flush()
 
@@ -369,7 +428,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                 if created_at:
                     import time
                     order_age_secs = (time.time() * 1000 - created_at) / 1000
-                    limit_timeout = getattr(position, "limit_timeout_secs", 300) or 300
+                    limit_timeout = _position_limit_timeout_secs(position)
                     if order_age_secs > limit_timeout:
                         # Cancel the order
                         try:
@@ -571,6 +630,13 @@ def _update_unrealized(position: PositionModel, mark_price: float) -> None:
     remaining_qty = _effective_remaining_quantity(position, opened_qty)
     remaining_weight = min(1.0, max(0.0, remaining_qty / opened_qty)) if opened_qty > 0 else 1.0
     open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, position.leverage) * remaining_weight
+    entry_price = safe_float(position.entry_price)
+    leverage = max(1.0, safe_float(position.leverage, 1.0))
+    if entry_price > 0 and opened_qty > 0 and remaining_qty > 0:
+        margin_used = (entry_price * opened_qty) / leverage
+        position.unrealized_pnl_usdt = round(margin_used * (open_pnl / 100.0), 8)
+    else:
+        position.unrealized_pnl_usdt = 0.0
     position.last_price = mark_price
     position.current_pnl_pct = round(safe_float(position.realized_pnl_pct) + open_pnl, 6)
     position.updated_at = utcnow()
@@ -595,8 +661,11 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
     new_stop = None
 
     if trailing_mode == "moving":
-        trail_pct = safe_float(trailing_config.get("trail_pct") or settings.trailing_stop.trail_pct, 1.5)
-        activation_pct = safe_float(trailing_config.get("activation_profit_pct") or settings.trailing_stop.activation_profit_pct, 0.5)
+        trail_pct = safe_float(first_valid(trailing_config.get("trail_pct"), settings.trailing_stop.trail_pct), 1.5)
+        activation_pct = safe_float(
+            first_valid(trailing_config.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct),
+            0.5,
+        )
         profit_pct = _price_pnl_pct(direction, entry_price, mark_price, 1.0)
         if profit_pct < activation_pct:
             return False
@@ -606,8 +675,11 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
             new_stop = mark_price * (1 - trail_pct / 100.0)
 
     elif trailing_mode == "profit_pct_trailing":
-        activation_pct = safe_float(trailing_config.get("activation_profit_pct") or settings.trailing_stop.activation_profit_pct, 1.0)
-        trail_pct = safe_float(trailing_config.get("trail_pct") or settings.trailing_stop.trail_pct, 0.5)
+        activation_pct = safe_float(
+            first_valid(trailing_config.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct),
+            1.0,
+        )
+        trail_pct = safe_float(first_valid(trailing_config.get("trail_pct"), settings.trailing_stop.trail_pct), 0.5)
         profit_pct = _price_pnl_pct(direction, entry_price, mark_price, 1.0)
         if profit_pct < activation_pct:
             return False
@@ -631,6 +703,7 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
         quantity=remaining_qty,
         stop_price=new_stop,
         exchange_config=exchange_config,
+        existing_order_id=position.stop_loss_order_id or None,
     )
     if result.get("status") in {"placed", "simulated"}:
         position.stop_loss = new_stop
@@ -719,6 +792,7 @@ async def _adjust_trailing_stop_on_tp_hit(
         quantity=remaining_qty,
         stop_price=new_stop,
         exchange_config=exchange_config,
+        existing_order_id=position.stop_loss_order_id or None,
     )
     if result.get("status") in {"placed", "simulated"}:
         position.stop_loss = new_stop

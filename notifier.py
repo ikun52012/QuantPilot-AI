@@ -78,6 +78,13 @@ _PHRASES = {
 }
 
 
+def _format_take_profit_text(decision: TradeDecision) -> str:
+    levels = list(decision.take_profit_levels or [])
+    if levels:
+        return ", ".join(str(tp.price) for tp in levels if getattr(tp, "price", None))
+    return str(decision.take_profit)
+
+
 def _t(key: str) -> str:
     lang = _lang()
     return _PHRASES.get(lang, _PHRASES["en"]).get(key, _PHRASES["en"].get(key, key))
@@ -145,6 +152,13 @@ async def notify_ai_analysis(ticker: str, analysis: AIAnalysis):
     if analysis.warnings:
         warnings_text = f"\n⚠️ {_t('warnings')}:\n" + "\n".join(f"  • {w}" for w in analysis.warnings)
 
+    tp_levels = [
+        value
+        for value in [analysis.suggested_tp1, analysis.suggested_tp2, analysis.suggested_tp3, analysis.suggested_tp4]
+        if value
+    ]
+    tp_text = f"\n{_t('take_profit')}: <code>{', '.join(str(v) for v in tp_levels)}</code>" if tp_levels else ""
+
     text = (
         f"{emoji} <b>{_t('ai_analysis')}: {analysis.recommendation.upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -153,6 +167,7 @@ async def notify_ai_analysis(ticker: str, analysis: AIAnalysis):
         f"{_t('risk_score')}: {analysis.risk_score:.0%}\n"
         f"{_t('market')}: {analysis.market_condition}\n"
         f"{_t('position_size')}: {analysis.position_size_pct:.0%}\n"
+        f"{tp_text}"
         f"\n💬 {analysis.reasoning}"
         f"{warnings_text}"
     )
@@ -171,7 +186,7 @@ async def notify_trade_executed(decision: TradeDecision, order_result: dict):
             f"{_t('direction')}: <b>{decision.direction.value.upper() if decision.direction else 'N/A'}</b>\n"
             f"{_t('entry')}: <code>{decision.entry_price}</code>\n"
             f"{_t('stop_loss')}: <code>{decision.stop_loss}</code>\n"
-            f"{_t('take_profit')}: <code>{decision.take_profit}</code>\n"
+            f"{_t('take_profit')}: <code>{_format_take_profit_text(decision)}</code>\n"
             f"{_t('quantity')}: <code>{decision.quantity}</code>"
         )
         if decision.ai_analysis:

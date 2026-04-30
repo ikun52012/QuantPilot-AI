@@ -1,11 +1,21 @@
 """Tests for trailing stop functionality."""
+import json
+from unittest.mock import AsyncMock
+
 import pytest
 
+from core.database import PositionModel
+from exchange import place_protective_stop
 from position_monitor import (
+    _adjust_trailing_stop_on_tp_hit,
     _hit_take_profit_levels,
     _loads_dict,
     _loads_list,
+    _maybe_adjust_trailing_stop,
+    _paper_trailing_stop_price,
+    _position_limit_timeout_secs,
     _price_pnl_pct,
+    _reconcile_paper_position,
     _safe_float,
 )
 
@@ -217,3 +227,186 @@ class TestTrailingStopLogic:
         new_stop = mark_price * (1 + trail_pct / 100.0)
 
         assert new_stop == pytest.approx(95.95)
+
+
+@pytest.mark.asyncio
+async def test_place_protective_stop_replaces_existing_order(monkeypatch):
+    class FakeExchange:
+        def __init__(self):
+            self.options = {"defaultType": "future"}
+
+    fake_exchange = FakeExchange()
+    cancel_calls = []
+    create_calls = []
+
+    async def fake_cancel(exchange, symbol, order_id):
+        cancel_calls.append((exchange, symbol, order_id))
+        return {"status": "cancelled", "order_id": order_id, "symbol": symbol}
+
+    async def fake_create(exchange, symbol, kind, side, amount, trigger_price):
+        create_calls.append((exchange, symbol, kind, side, amount, trigger_price))
+        return {"id": "stop-new"}
+
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: fake_exchange)
+    monkeypatch.setattr("exchange._resolve_symbol", lambda *args, **kwargs: "TRB/USDT:USDT")
+    monkeypatch.setattr("exchange._cancel_exchange_order", fake_cancel)
+    monkeypatch.setattr("exchange._create_conditional_order", fake_create)
+
+    result = await place_protective_stop(
+        ticker="TRBUSDT",
+        direction="long",
+        quantity=1.5,
+        stop_price=99.0,
+        exchange_config={"live_trading": True, "market_type": "contract"},
+        existing_order_id="stop-old",
+    )
+
+    assert result["status"] == "placed"
+    assert result["order_id"] == "stop-new"
+    assert result["replaced_order_id"] == "stop-old"
+    assert cancel_calls == [(fake_exchange, "TRB/USDT:USDT", "stop-old")]
+    assert create_calls == [(fake_exchange, "TRB/USDT:USDT", "stop_loss", "sell", 1.5, 99.0)]
+
+
+@pytest.mark.asyncio
+async def test_maybe_adjust_trailing_stop_passes_existing_order_id():
+    position = PositionModel(
+        ticker="BTCUSDT",
+        direction="long",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        stop_loss=95.0,
+        stop_loss_order_id="stop-old",
+        trailing_stop_config_json=json.dumps({"mode": "moving", "trail_pct": 1.0, "activation_profit_pct": 1.0}),
+    )
+    place_stop = AsyncMock(return_value={"status": "placed", "order_id": "stop-new"})
+
+    changed = await _maybe_adjust_trailing_stop(
+        position,
+        {"live_trading": True},
+        {"markPrice": 110.0},
+        place_stop,
+    )
+
+    assert changed is True
+    place_stop.assert_awaited_once()
+    assert place_stop.await_args.kwargs["existing_order_id"] == "stop-old"
+    assert position.stop_loss_order_id == "stop-new"
+
+
+@pytest.mark.asyncio
+async def test_adjust_trailing_stop_on_tp_hit_passes_existing_order_id():
+    position = PositionModel(
+        ticker="BTCUSDT",
+        direction="long",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=0.5,
+        stop_loss=95.0,
+        stop_loss_order_id="stop-old",
+        trailing_stop_config_json=json.dumps({"mode": "breakeven_on_tp1"}),
+    )
+    tp_levels = [{"level": 1, "price": 110.0, "qty_pct": 50, "status": "hit"}]
+    hit_levels = [{"level": 1, "price": 110.0, "qty_pct": 50, "status": "hit"}]
+    place_stop = AsyncMock(return_value={"status": "placed", "order_id": "stop-new"})
+
+    changed = await _adjust_trailing_stop_on_tp_hit(
+        position,
+        tp_levels,
+        hit_levels,
+        {"live_trading": True},
+        place_stop,
+    )
+
+    assert changed is True
+    place_stop.assert_awaited_once()
+    assert place_stop.await_args.kwargs["existing_order_id"] == "stop-old"
+    assert position.stop_loss_order_id == "stop-new"
+
+
+@pytest.mark.asyncio
+async def test_partial_take_profit_recalculates_remaining_pnl_metrics(monkeypatch):
+    position = PositionModel(
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        leverage=1.0,
+        take_profit_json=json.dumps([
+            {"level": 1, "price": 110.0, "qty_pct": 50, "status": "pending"},
+            {"level": 2, "price": 120.0, "qty_pct": 50, "status": "pending"},
+        ]),
+    )
+
+    async def fake_get_latest_candle(*args, **kwargs):
+        return {"high": 111.0, "low": 99.0, "close": 108.0}
+
+    async def fake_get_ticker(*args, **kwargs):
+        return {"last": 108.0}
+
+    monkeypatch.setattr("exchange.get_latest_candle", fake_get_latest_candle)
+    monkeypatch.setattr("exchange.get_ticker", fake_get_ticker)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    stats = await _reconcile_paper_position(FakeSession(), position, {"live_trading": False})
+
+    assert stats["partials"] == 1
+    assert position.remaining_quantity == pytest.approx(0.5)
+    assert position.realized_pnl_pct == pytest.approx(5.0)
+    assert position.current_pnl_pct == pytest.approx(9.0)
+    assert position.unrealized_pnl_usdt == pytest.approx(4.0)
+
+
+def test_paper_trailing_stop_price_activates_for_moving_mode():
+    position = PositionModel(
+        direction="long",
+        entry_price=100.0,
+        trailing_stop_config_json=json.dumps({"mode": "moving", "trail_pct": 1.0, "activation_profit_pct": 1.0}),
+    )
+
+    new_stop = _paper_trailing_stop_price(position, 105.0)
+
+    assert new_stop == pytest.approx(103.95)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_paper_position_adjusts_trailing_stop(monkeypatch):
+    position = PositionModel(
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        stop_loss=95.0,
+        trailing_stop_config_json=json.dumps({"mode": "moving", "trail_pct": 1.0, "activation_profit_pct": 1.0}),
+    )
+
+    async def fake_get_latest_candle(*args, **kwargs):
+        return {"high": 106.0, "low": 104.0, "close": 105.0}
+
+    async def fake_get_ticker(*args, **kwargs):
+        return {"last": 105.0}
+
+    monkeypatch.setattr("exchange.get_latest_candle", fake_get_latest_candle)
+    monkeypatch.setattr("exchange.get_ticker", fake_get_ticker)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    stats = await _reconcile_paper_position(FakeSession(), position, {"live_trading": False})
+
+    assert stats["adjusted"] == 1
+    assert position.stop_loss == pytest.approx(103.95)
+
+
+def test_pending_limit_timeout_defaults_to_extended_window():
+    position = PositionModel()
+    assert _position_limit_timeout_secs(position) == 8 * 60 * 60

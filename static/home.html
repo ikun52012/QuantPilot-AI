@@ -7,7 +7,7 @@
     <meta name="description" content="QuantPilot AI v4.5.3 — AI-assisted crypto trade automation with TradingView webhooks, pre-filtering, multi-TP exits, strategy automation, and multi-exchange execution.">
     <meta name="keywords" content="crypto trading, AI trading, quantitative trading, GPT-4o, Claude, DeepSeek, OpenRouter, Binance, OKX, automated trading">
     <meta name="theme-color" content="#0f151f">
-    <link rel="manifest" href="/static/manifest.json">
+    <link rel="manifest" href="/static/manifest.json?v=20260430-2">
     <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800,900|inter:300,400,500,600|jetbrains+mono:400,500" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <style>
@@ -1008,7 +1008,7 @@
     </div>
 </footer>
 
-<script data-cfasync="false" src="/static/js/i18n.js" defer></script>
+<script data-cfasync="false" src="/static/js/i18n.js?v=20260430-2" defer></script>
 <script data-cfasync="false">
     // ── Scroll reveal ──
     const revealObserver = new IntersectionObserver((entries) => {
@@ -1085,7 +1085,7 @@
 
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+            navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' }).catch(() => {});
         });
     }
 

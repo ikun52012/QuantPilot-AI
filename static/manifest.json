@@ -2,7 +2,7 @@
   "name": "QuantPilot AI Trading",
   "short_name": "QuantPilot",
   "description": "Production-grade crypto trading platform with AI analysis, backtesting, and automated strategies",
-  "start_url": "/",
+  "start_url": "/dashboard",
   "display": "standalone",
   "background_color": "#07090d",
   "theme_color": "#0f151f",
@@ -41,6 +41,22 @@
   "launch_handler": {
     "client_mode": ["focus-existing", "auto"]
   },
+  "share_target": {
+    "action": "/share",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "protocol_handlers": [
+    {
+      "protocol": "web+tvsignal",
+      "url": "/signal?data=%s"
+    }
+  ],
   "handle_links": "preferred",
   "capture_links": "existing-client-navigate"
 }

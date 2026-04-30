@@ -4,8 +4,9 @@ QuantPilot AI - Data Models
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from core.utils.common import suggested_limit_timeout_secs
 from core.utils.datetime import utcnow
 
 
@@ -231,7 +232,13 @@ class TradeDecision(BaseModel):
     # Order type: market or limit
     order_type: str = Field(default="market", description="market or limit")
     # For limit orders: maximum time to wait before cancelling (seconds)
-    limit_timeout_secs: int = Field(default=300, ge=10, le=3600)
+    limit_timeout_secs: int = Field(default=4 * 60 * 60, ge=10, le=7 * 24 * 60 * 60)
+
+    @model_validator(mode="after")
+    def _apply_signal_timeframe_timeout(self):
+        if self.signal and self.limit_timeout_secs == 4 * 60 * 60:
+            self.limit_timeout_secs = suggested_limit_timeout_secs(self.signal.timeframe)
+        return self
 
 
 # ─────────────────────────────────────────────

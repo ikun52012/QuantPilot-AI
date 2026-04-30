@@ -6,10 +6,10 @@
     <title>QuantPilot AI — Dashboard</title>
     <meta name="description" content="QuantPilot AI trading operations dashboard">
     <meta name="theme-color" content="#0f151f">
-    <link rel="manifest" href="/static/manifest.json">
+    <link rel="manifest" href="/static/manifest.json?v=20260430-2">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <script data-cfasync="false" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=20260430-2">
 </head>
 <body>
     <!-- Background effects -->
@@ -513,6 +513,18 @@
                             <p class="hint">Stop loss is sent as market trigger order to reduce non-fill risk.</p>
                         </div>
                     </div>
+                    <div class="form-group">
+                        <label>Pending Limit Order Timeout</label>
+                        <p class="hint">Configure how long pending limit entries stay open before the system cancels them.</p>
+                    </div>
+                    <div class="form-row five-col">
+                        <div class="form-group"><label for="set-limit-timeout-15m">15m Signals</label><input type="number" id="set-limit-timeout-15m" class="text-input" min="0.25" step="0.25"></div>
+                        <div class="form-group"><label for="set-limit-timeout-30m">30m Signals</label><input type="number" id="set-limit-timeout-30m" class="text-input" min="0.5" step="0.5"></div>
+                        <div class="form-group"><label for="set-limit-timeout-1h">1h Signals</label><input type="number" id="set-limit-timeout-1h" class="text-input" min="1" step="1"></div>
+                        <div class="form-group"><label for="set-limit-timeout-4h">4h Signals</label><input type="number" id="set-limit-timeout-4h" class="text-input" min="1" step="1"></div>
+                        <div class="form-group"><label for="set-limit-timeout-1d">1d Signals</label><input type="number" id="set-limit-timeout-1d" class="text-input" min="1" step="1"></div>
+                    </div>
+                    <p class="hint">Units: 15m/30m/1h/4h are in hours, 1d is in days.</p>
                     <div class="form-row">
                         <button class="btn btn-primary" onclick="testConnection()" id="btn-test-conn">
                             <i class="ri-link"></i> Test Connection
@@ -1178,6 +1190,18 @@
                         <div class="form-group"><label for="user-default-order-type">Entry Order Type</label><select id="user-default-order-type" class="select-input"><option value="limit">Limit</option><option value="market">Market</option></select></div>
                         <div class="form-group"><label for="user-stop-loss-order-type">Stop Loss Type</label><select id="user-stop-loss-order-type" class="select-input"><option value="market">Stop Market</option></select></div>
                     </div>
+                    <div class="form-group">
+                        <label>Pending Limit Order Timeout</label>
+                        <p class="hint">Control how long your pending limit entries can wait before automatic cancellation.</p>
+                    </div>
+                    <div class="form-row five-col">
+                        <div class="form-group"><label for="user-limit-timeout-15m">15m Signals</label><input type="number" id="user-limit-timeout-15m" class="text-input" min="0.25" step="0.25"></div>
+                        <div class="form-group"><label for="user-limit-timeout-30m">30m Signals</label><input type="number" id="user-limit-timeout-30m" class="text-input" min="0.5" step="0.5"></div>
+                        <div class="form-group"><label for="user-limit-timeout-1h">1h Signals</label><input type="number" id="user-limit-timeout-1h" class="text-input" min="1" step="1"></div>
+                        <div class="form-group"><label for="user-limit-timeout-4h">4h Signals</label><input type="number" id="user-limit-timeout-4h" class="text-input" min="1" step="1"></div>
+                        <div class="form-group"><label for="user-limit-timeout-1d">1d Signals</label><input type="number" id="user-limit-timeout-1d" class="text-input" min="1" step="1"></div>
+                    </div>
+                    <p class="hint">Units: 15m/30m/1h/4h are in hours, 1d is in days.</p>
                     <div class="form-row">
                         <div class="form-group">
                             <label class="checkbox-label">
@@ -2079,13 +2103,13 @@
     <!-- Toast notifications -->
     <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
 
-    <script data-cfasync="false" src="/static/js/qp-core.js"></script>
-    <script data-cfasync="false" src="/static/js/charts.js"></script>
-    <script data-cfasync="false" src="/static/app.js"></script>
+    <script data-cfasync="false" src="/static/js/qp-core.js?v=20260430-2"></script>
+    <script data-cfasync="false" src="/static/js/charts.js?v=20260430-2"></script>
+    <script data-cfasync="false" src="/static/app.js?v=20260430-2"></script>
     <script data-cfasync="false">
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+                navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' }).catch(() => {});
             });
         }
     </script>

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.database import get_admin_setting, set_admin_setting
 from core.security import decrypt_settings_payload, encrypt_settings_payload
+from core.utils.common import first_valid, normalize_limit_timeout_overrides
 
 EXCHANGE_KEY = "runtime_exchange"
 AI_KEY = "runtime_ai"
@@ -83,6 +84,13 @@ def _normalize_ai_provider(provider: Any, default: str | None = None) -> str:
     return value if value in allowed else settings.ai.provider
 
 
+def _coalesce_str(*values: Any, default: str = "") -> str:
+    value = first_valid(*values)
+    if value is None:
+        return default
+    return str(value)
+
+
 async def _load_encrypted_dict(session: AsyncSession, key: str) -> dict[str, Any]:
     raw = await get_admin_setting(session, key, "")
     if not raw:
@@ -126,6 +134,9 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.exchange.market_type = str(exchange.get("market_type") or settings.exchange.market_type).lower().strip()
         settings.exchange.default_order_type = str(exchange.get("default_order_type") or settings.exchange.default_order_type).lower().strip()
         settings.exchange.stop_loss_order_type = str(exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type).lower().strip()
+        settings.exchange.limit_timeout_overrides = normalize_limit_timeout_overrides(
+            exchange.get("limit_timeout_overrides") if "limit_timeout_overrides" in exchange else settings.exchange.limit_timeout_overrides
+        )
 
     ai = runtime.get("ai") or {}
     if ai:
@@ -147,21 +158,21 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.ai.max_tokens = _to_int(ai.get("max_tokens"), settings.ai.max_tokens, 100, 4000)
         settings.ai.custom_system_prompt = str(ai.get("custom_system_prompt") or "")
         settings.ai.custom_provider_enabled = _to_bool(ai.get("custom_provider_enabled"), settings.ai.custom_provider_enabled)
-        settings.ai.custom_provider_name = str(ai.get("custom_provider_name") or settings.ai.custom_provider_name)
-        settings.ai.custom_provider_model = str(ai.get("custom_provider_model") or "")
-        settings.ai.custom_provider_api_url = str(ai.get("custom_provider_api_url") or "")
+        settings.ai.custom_provider_name = _coalesce_str(ai.get("custom_provider_name"), settings.ai.custom_provider_name, default="custom")
+        settings.ai.custom_provider_model = _coalesce_str(ai.get("custom_provider_model"), default="")
+        settings.ai.custom_provider_api_url = _coalesce_str(ai.get("custom_provider_api_url"), default="")
         settings.ai.openrouter_enabled = _to_bool(ai.get("openrouter_enabled"), settings.ai.openrouter_enabled)
-        settings.ai.openrouter_model = str(ai.get("openrouter_model") or settings.ai.openrouter_model)
-        settings.ai.openrouter_site_url = str(ai.get("openrouter_site_url") or settings.ai.openrouter_site_url)
-        settings.ai.openrouter_app_name = str(ai.get("openrouter_app_name") or settings.ai.openrouter_app_name)
-        settings.ai.mistral_api_key = str(ai.get("mistral_api_key") or settings.ai.mistral_api_key)
-        settings.ai.mistral_model = str(ai.get("mistral_model") or settings.ai.mistral_model)
-        settings.ai.openai_model = str(ai.get("openai_model") or settings.ai.openai_model)
-        settings.ai.anthropic_model = str(ai.get("anthropic_model") or settings.ai.anthropic_model)
-        settings.ai.deepseek_model = str(ai.get("deepseek_model") or settings.ai.deepseek_model)
+        settings.ai.openrouter_model = _coalesce_str(ai.get("openrouter_model"), settings.ai.openrouter_model)
+        settings.ai.openrouter_site_url = _coalesce_str(ai.get("openrouter_site_url"), settings.ai.openrouter_site_url)
+        settings.ai.openrouter_app_name = _coalesce_str(ai.get("openrouter_app_name"), settings.ai.openrouter_app_name)
+        settings.ai.mistral_api_key = _coalesce_str(ai.get("mistral_api_key"), settings.ai.mistral_api_key)
+        settings.ai.mistral_model = _coalesce_str(ai.get("mistral_model"), settings.ai.mistral_model)
+        settings.ai.openai_model = _coalesce_str(ai.get("openai_model"), settings.ai.openai_model)
+        settings.ai.anthropic_model = _coalesce_str(ai.get("anthropic_model"), settings.ai.anthropic_model)
+        settings.ai.deepseek_model = _coalesce_str(ai.get("deepseek_model"), settings.ai.deepseek_model)
         if "voting_enabled" in ai:
             settings.ai.voting_enabled = _to_bool(ai.get("voting_enabled"), settings.ai.voting_enabled)
-        if ai.get("voting_models"):
+        if "voting_models" in ai:
             models = ai.get("voting_models")
             if isinstance(models, list):
                 settings.ai.voting_models = models
@@ -170,7 +181,7 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
                     settings.ai.voting_models = json.loads(models)
                 except Exception as e:
                     logger.debug(f"[RuntimeSettings] Failed to parse voting_models: {e}")
-        if ai.get("voting_weights"):
+        if "voting_weights" in ai:
             weights = ai.get("voting_weights")
             if isinstance(weights, dict):
                 settings.ai.voting_weights = weights
@@ -179,7 +190,7 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
                     settings.ai.voting_weights = json.loads(weights)
                 except Exception as e:
                     logger.debug(f"[RuntimeSettings] Failed to parse voting_weights: {e}")
-        if ai.get("voting_strategy"):
+        if "voting_strategy" in ai:
             strategy = str(ai.get("voting_strategy") or "weighted").lower().strip()
             if strategy in {"weighted", "consensus", "best_confidence"}:
                 settings.ai.voting_strategy = strategy
@@ -338,6 +349,19 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                         os.environ["OI_CHANGE_THRESHOLD_PCT"] = str(ef_settings.get("oi_change_threshold_pct"))
             except Exception as e:
                 logger.debug(f"[RuntimeSettings] Failed to parse enhanced_filters_raw: {e}")
+
+        prefilter_thresholds_raw = await get_admin_setting(session, "prefilter_thresholds", "")
+        try:
+            prefilter_thresholds = json.loads(prefilter_thresholds_raw) if prefilter_thresholds_raw else {}
+            if not isinstance(prefilter_thresholds, dict):
+                prefilter_thresholds = {}
+        except Exception as e:
+            logger.debug(f"[RuntimeSettings] Failed to parse prefilter_thresholds: {e}")
+            prefilter_thresholds = {}
+
+        from pre_filter import get_thresholds
+
+        get_thresholds().reload_from_dict(prefilter_thresholds)
     except Exception as e:
         logger.debug(f"[RuntimeSettings] Failed to apply persisted admin settings: {e}")
 
@@ -356,6 +380,11 @@ async def save_exchange_settings(session: AsyncSession, data: dict[str, Any]) ->
         "market_type": str(data.get("market_type") or current.get("market_type") or settings.exchange.market_type).lower().strip(),
         "default_order_type": str(data.get("default_order_type") or current.get("default_order_type") or settings.exchange.default_order_type).lower().strip(),
         "stop_loss_order_type": str(data.get("stop_loss_order_type") or current.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type).lower().strip(),
+        "limit_timeout_overrides": normalize_limit_timeout_overrides(
+            data.get("limit_timeout_overrides")
+            if "limit_timeout_overrides" in data
+            else current.get("limit_timeout_overrides", settings.exchange.limit_timeout_overrides)
+        ),
     }
     await _save_encrypted_dict(session, EXCHANGE_KEY, updated)
     apply_runtime_settings({"exchange": updated})
@@ -364,30 +393,30 @@ async def save_exchange_settings(session: AsyncSession, data: dict[str, Any]) ->
 
 async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
     current = await _load_encrypted_dict(session, AI_KEY)
-    provider = _normalize_ai_provider(data.get("provider") or current.get("provider"))
+    provider = _normalize_ai_provider(first_valid(data.get("provider"), current.get("provider")))
     updated = {
         "provider": provider,
-        "api_key": str(data.get("api_key") or current.get("api_key") or _current_ai_key(provider) or ""),
+        "api_key": _coalesce_str(data.get("api_key"), current.get("api_key"), _current_ai_key(provider)),
         "temperature": _to_float(data.get("temperature"), _to_float(current.get("temperature"), settings.ai.temperature), 0, 2),
         "max_tokens": _to_int(data.get("max_tokens"), _to_int(current.get("max_tokens"), settings.ai.max_tokens), 100, 4000),
         "custom_system_prompt": str(data.get("custom_system_prompt") if data.get("custom_system_prompt") is not None else current.get("custom_system_prompt", "")),
         "custom_provider_enabled": _to_bool(data.get("custom_provider_enabled"), _to_bool(current.get("custom_provider_enabled"), False)),
-        "custom_provider_name": str(data.get("custom_provider_name") or current.get("custom_provider_name") or settings.ai.custom_provider_name),
-        "custom_provider_model": str(data.get("custom_provider_model") or current.get("custom_provider_model") or ""),
-        "custom_provider_api_url": str(data.get("custom_provider_api_url") or current.get("custom_provider_api_url") or ""),
+        "custom_provider_name": _coalesce_str(data.get("custom_provider_name"), current.get("custom_provider_name"), settings.ai.custom_provider_name, default="custom"),
+        "custom_provider_model": _coalesce_str(data.get("custom_provider_model"), current.get("custom_provider_model"), default=""),
+        "custom_provider_api_url": _coalesce_str(data.get("custom_provider_api_url"), current.get("custom_provider_api_url"), default=""),
         "openrouter_enabled": _to_bool(data.get("openrouter_enabled"), _to_bool(current.get("openrouter_enabled"), settings.ai.openrouter_enabled)),
-        "openrouter_model": str(data.get("openrouter_model") or current.get("openrouter_model") or settings.ai.openrouter_model),
-        "openrouter_site_url": str(data.get("openrouter_site_url") or current.get("openrouter_site_url") or settings.ai.openrouter_site_url),
-        "openrouter_app_name": str(data.get("openrouter_app_name") or current.get("openrouter_app_name") or settings.ai.openrouter_app_name),
-        "mistral_api_key": str(data.get("mistral_api_key") or current.get("mistral_api_key") or settings.ai.mistral_api_key or ""),
-        "mistral_model": str(data.get("mistral_model") or current.get("mistral_model") or settings.ai.mistral_model),
-        "openai_model": str(data.get("openai_model") or current.get("openai_model") or settings.ai.openai_model),
-        "anthropic_model": str(data.get("anthropic_model") or current.get("anthropic_model") or settings.ai.anthropic_model),
-        "deepseek_model": str(data.get("deepseek_model") or current.get("deepseek_model") or settings.ai.deepseek_model),
+        "openrouter_model": _coalesce_str(data.get("openrouter_model"), current.get("openrouter_model"), settings.ai.openrouter_model),
+        "openrouter_site_url": _coalesce_str(data.get("openrouter_site_url"), current.get("openrouter_site_url"), settings.ai.openrouter_site_url),
+        "openrouter_app_name": _coalesce_str(data.get("openrouter_app_name"), current.get("openrouter_app_name"), settings.ai.openrouter_app_name),
+        "mistral_api_key": _coalesce_str(data.get("mistral_api_key"), current.get("mistral_api_key"), settings.ai.mistral_api_key),
+        "mistral_model": _coalesce_str(data.get("mistral_model"), current.get("mistral_model"), settings.ai.mistral_model),
+        "openai_model": _coalesce_str(data.get("openai_model"), current.get("openai_model"), settings.ai.openai_model),
+        "anthropic_model": _coalesce_str(data.get("anthropic_model"), current.get("anthropic_model"), settings.ai.anthropic_model),
+        "deepseek_model": _coalesce_str(data.get("deepseek_model"), current.get("deepseek_model"), settings.ai.deepseek_model),
         "voting_enabled": _to_bool(data.get("voting_enabled"), _to_bool(current.get("voting_enabled"), settings.ai.voting_enabled)),
-        "voting_models": list(data.get("voting_models") or current.get("voting_models") or settings.ai.voting_models),
-        "voting_weights": dict(data.get("voting_weights") or current.get("voting_weights") or settings.ai.voting_weights),
-        "voting_strategy": str(data.get("voting_strategy") or current.get("voting_strategy") or settings.ai.voting_strategy),
+        "voting_models": list(data.get("voting_models") if "voting_models" in data else current.get("voting_models", settings.ai.voting_models)),
+        "voting_weights": dict(data.get("voting_weights") if "voting_weights" in data else current.get("voting_weights", settings.ai.voting_weights)),
+        "voting_strategy": _coalesce_str(data.get("voting_strategy"), current.get("voting_strategy"), settings.ai.voting_strategy),
     }
     await _save_encrypted_dict(session, AI_KEY, updated)
     apply_runtime_settings({"ai": updated})
@@ -466,6 +495,7 @@ def runtime_status() -> dict[str, Any]:
         "exchange_market_type": settings.exchange.market_type,
         "exchange_default_order_type": settings.exchange.default_order_type,
         "exchange_stop_loss_order_type": settings.exchange.stop_loss_order_type,
+        "exchange_limit_timeout_overrides": normalize_limit_timeout_overrides(settings.exchange.limit_timeout_overrides),
         "exchange_api_configured": _public_secret_configured(settings.exchange.api_key),
         "exchange_password_configured": _public_secret_configured(settings.exchange.password),
         "ai_provider": settings.ai.provider,

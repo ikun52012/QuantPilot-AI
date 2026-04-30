@@ -43,6 +43,22 @@ class TestServiceWorkerRoute:
         assert response.headers["service-worker-allowed"] == "/"
         assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
 
+    def test_sw_js_uses_network_first_for_dashboard_bundle(self, sync_client: TestClient):
+        response = sync_client.get("/sw.js")
+
+        assert response.status_code == 200
+        assert "const NETWORK_FIRST_PATHS = new Set([" in response.text
+        assert "'/static/app.js'" in response.text
+        assert "'/static/style.css'" in response.text
+        assert "handleNetworkFirstRequest" in response.text
+
+    def test_sw_js_does_not_precache_dashboard_shell_routes(self, sync_client: TestClient):
+        response = sync_client.get("/sw.js")
+
+        assert response.status_code == 200
+        assert "  '/'," not in response.text
+        assert "  '/dashboard'," not in response.text
+
 
 class TestCompatibilityRedirects:
     def test_share_get_redirects_with_query_before_hash(self, sync_client: TestClient):
@@ -86,6 +102,38 @@ class TestCompatibilityRedirects:
 
         assert response.status_code == 303
         assert response.headers["location"] == "/dashboard?data=tvsignal%3A%2F%2Fopen%3Fid%3D42#dashboard"
+
+
+class TestDashboardShell:
+    def test_dashboard_html_versions_frontend_assets(self, sync_client: TestClient):
+        register = sync_client.post(
+            "/api/auth/register",
+            json={
+                "username": "dashuser",
+                "email": "dash@example.com",
+                "password": "Str0ng!Pass123",
+            },
+        )
+        assert register.status_code == 200
+
+        response = sync_client.get("/dashboard")
+
+        assert response.status_code == 200
+        assert '/static/style.css?v=' in response.text
+        assert '/static/js/qp-core.js?v=' in response.text
+        assert '/static/js/charts.js?v=' in response.text
+        assert '/static/app.js?v=' in response.text
+        assert "updateViaCache: 'none'" in response.text
+
+    def test_manifest_exposes_share_and_protocol_handlers(self, sync_client: TestClient):
+        response = sync_client.get("/static/manifest.json")
+
+        assert response.status_code == 200
+        manifest = response.json()
+        assert manifest["start_url"] == "/dashboard"
+        assert manifest["share_target"]["action"] == "/share"
+        assert manifest["share_target"]["params"] == {"title": "title", "text": "text", "url": "url"}
+        assert manifest["protocol_handlers"] == [{"protocol": "web+tvsignal", "url": "/signal?data=%s"}]
 
 
 class TestWebSocketCookieFallback:

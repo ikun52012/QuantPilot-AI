@@ -33,6 +33,9 @@ except ModuleNotFoundError:
         class AuthenticationError(Exception):
             pass
 
+        class OrderNotFound(Exception):
+            pass
+
         binance = okx = bybit = bitget = gate = coinbase = None
 
     ccxt = _MissingCCXT()
@@ -45,6 +48,95 @@ async def _close_exchange(exchange):
     result = await asyncio.to_thread(close)
     if inspect.isawaitable(result):
         await result
+
+
+_MISSING = object()
+
+
+def _credential_value(value: object = _MISSING, fallback: str = "") -> str:
+    """Preserve explicit empty credentials instead of falling back to globals."""
+    if value is _MISSING:
+        return str(fallback or "")
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _credential_from_exchange_config(exchange_config: dict[str, Any], key: str, fallback: str = "") -> str:
+    """Resolve a credential from config while preserving explicit empty values."""
+    if key in exchange_config:
+        return _credential_value(exchange_config.get(key))
+    return _credential_value(_MISSING, fallback)
+
+
+def _is_order_not_found_error(exc: Exception) -> bool:
+    """Best-effort detection for exchanges that raise generic not-found errors."""
+    if isinstance(exc, getattr(ccxt, "OrderNotFound", Exception)):
+        return True
+    return "not found" in str(exc).lower()
+
+
+def _is_okx_pos_side_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "posside error" in text or ('"scode":"51000"' in text and "posside" in text)
+
+
+def _exchange_id(exchange: ccxt.Exchange) -> str:
+    return str(getattr(exchange, "id", "") or "").lower().strip()
+
+
+def _okx_position_side(side: str) -> str:
+    return "long" if str(side).lower() == "buy" else "short"
+
+
+def _order_create_attempts(exchange, side: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    base = dict(params or {})
+    if _exchange_id(exchange) != "okx":
+        return [base]
+
+    pos_side = _okx_position_side(side)
+    return [
+        {**base, "tdMode": base.get("tdMode") or "cross"},
+        {**base, "tdMode": base.get("tdMode") or "cross", "posSide": pos_side},
+    ]
+
+
+async def _create_exchange_order(
+    exchange,
+    symbol: str,
+    order_type: str,
+    side: str,
+    amount: float,
+    price: float | None = None,
+    params: dict[str, Any] | None = None,
+) -> dict:
+    """Create an exchange order with small exchange-specific retries."""
+    errors: list[str] = []
+    for attempt_params in _order_create_attempts(exchange, side, params):
+        try:
+            if price is None:
+                return await asyncio.to_thread(
+                    exchange.create_order,
+                    symbol=symbol,
+                    type=order_type,
+                    side=side,
+                    amount=amount,
+                    params=attempt_params,
+                )
+            return await asyncio.to_thread(
+                exchange.create_order,
+                symbol=symbol,
+                type=order_type,
+                side=side,
+                amount=amount,
+                price=price,
+                params=attempt_params,
+            )
+        except Exception as exc:
+            errors.append(f"{attempt_params}: {exc}")
+            if not (_exchange_id(exchange) == "okx" and _is_okx_pos_side_error(exc)):
+                break
+    raise RuntimeError("; ".join(errors[-2:]) or f"Failed to create {order_type} order")
 
 
 # ─────────────────────────────────────────────
@@ -179,16 +271,20 @@ def _build_exchange(
         options["defaultType"] = "spot"
 
     # Build exchange config
+    resolved_api_key = _credential_value(api_key, settings.exchange.api_key)
+    resolved_api_secret = _credential_value(api_secret, settings.exchange.api_secret)
+    resolved_password = _credential_value(password, settings.exchange.password)
+
     exchange_config: dict[str, object] = {
-        "apiKey": api_key if api_key else settings.exchange.api_key,
-        "secret": api_secret if api_secret else settings.exchange.api_secret,
+        "apiKey": resolved_api_key,
+        "secret": resolved_api_secret,
         "enableRateLimit": True,
         "options": options,
     }
 
     # Add password for exchanges that require it
-    if password or "password" in (config.get("extra_keys") or []):
-        exchange_config["password"] = password if password else settings.exchange.password
+    if resolved_password or "password" in (config.get("extra_keys") or []):
+        exchange_config["password"] = resolved_password
 
     # Create exchange instance
     exchange = exchange_class(exchange_config)
@@ -265,30 +361,78 @@ def _valid_take_profit(direction: SignalDirection, entry: float, price: float | 
     return None
 
 
-def _symbol_candidates(symbol: str) -> list[str]:
+def _market_type_key(market_type: str | None) -> str:
+    """Normalize exchange market type to spot vs contract."""
+    value = str(market_type or "").lower().strip()
+    if value == "spot":
+        return "spot"
+    if value in {"contract", "future", "futures", "swap", "linear", "inverse"}:
+        return "contract"
+    return ""
+
+
+def _exchange_market_type(exchange: ccxt.Exchange, market_type: str | None = None) -> str:
+    """Infer the desired market type from explicit config or exchange options."""
+    explicit_type = _market_type_key(market_type)
+    if explicit_type:
+        return explicit_type
+    options = getattr(exchange, "options", {}) or {}
+    return _market_type_key(options.get("defaultType"))
+
+
+def _market_matches_type(market: dict[str, Any], market_type: str) -> bool:
+    """Check whether a CCXT market row matches the requested market family."""
+    if not market_type:
+        return True
+
+    is_contract = bool(market.get("contract") or market.get("swap") or market.get("future"))
+    if market_type == "contract":
+        return is_contract
+    if market_type == "spot":
+        if market.get("spot") is True:
+            return True
+        return not is_contract
+    return True
+
+
+def _symbol_candidates(symbol: str, market_type: str | None = None) -> list[str]:
     """Return common CCXT symbol candidates for a TradingView-style ticker."""
+    raw_symbol = str(symbol or "").upper().replace(" ", "")
     cleaned = _normalize_symbol(symbol).replace("/", "")
     quotes = ["USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]
-    candidates = [symbol.upper(), cleaned]
+    prefer_contract = _market_type_key(market_type) == "contract"
+    candidates: list[str] = []
+    if "/" in raw_symbol:
+        candidates.append(raw_symbol)
+
     for quote in quotes:
         if cleaned.endswith(quote) and len(cleaned) > len(quote):
             base = cleaned[:-len(quote)]
-            candidates.extend([
-                f"{base}/{quote}",
-                f"{base}/{quote}:{quote}",
-                f"{base}{quote}",
-            ])
+            pair_symbol = f"{base}/{quote}"
+            contract_symbol = f"{pair_symbol}:{quote}"
+            if prefer_contract:
+                candidates.extend([contract_symbol, pair_symbol, f"{base}{quote}"])
+            else:
+                candidates.extend([pair_symbol, contract_symbol, f"{base}{quote}"])
             break
     else:
-        candidates.extend([f"{cleaned}/USDT", f"{cleaned}/USDT:USDT", f"{cleaned}USDT"])
+        pair_symbol = f"{cleaned}/USDT"
+        contract_symbol = f"{pair_symbol}:USDT"
+        if prefer_contract:
+            candidates.extend([contract_symbol, pair_symbol, f"{cleaned}USDT"])
+        else:
+            candidates.extend([pair_symbol, contract_symbol, f"{cleaned}USDT"])
+
+    candidates.extend([cleaned, raw_symbol])
 
     # Preserve order while removing duplicates.
     return list(dict.fromkeys(candidates))
 
 
-def _resolve_symbol(exchange: ccxt.Exchange, symbol: str) -> str:
+def _resolve_symbol(exchange: ccxt.Exchange, symbol: str, market_type: str | None = None) -> str:
     """Resolve a TradingView ticker into an exchange market symbol."""
-    candidates = _symbol_candidates(symbol)
+    target_market_type = _exchange_market_type(exchange, market_type)
+    candidates = _symbol_candidates(symbol, target_market_type)
     try:
         markets = exchange.load_markets()
     except Exception as e:
@@ -296,10 +440,16 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str) -> str:
         return candidates[0]
 
     for candidate in candidates:
+        market = markets.get(candidate)
+        if isinstance(market, dict) and _market_matches_type(market, target_market_type):
+            return candidate
+
+    for candidate in candidates:
         if candidate in markets:
             return candidate
 
     cleaned = _normalize_symbol(symbol).replace("/", "")
+    fallback_symbol = ""
     for market_symbol_raw, market in markets.items():
         market_symbol = str(market_symbol_raw)
         if not isinstance(market, dict):
@@ -307,7 +457,13 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str) -> str:
         market_id = str(market.get("id", "")).upper().replace("-", "").replace("_", "").replace("/", "")
         compact_symbol = market_symbol.upper().replace("/", "").replace(":", "").replace("-", "").replace("_", "")
         if cleaned in {market_id, compact_symbol}:
-            return market_symbol
+            if _market_matches_type(market, target_market_type):
+                return market_symbol
+            if not fallback_symbol:
+                fallback_symbol = market_symbol
+
+    if fallback_symbol:
+        return fallback_symbol
 
     logger.warning(f"[Exchange] Symbol {symbol} not found in loaded markets; using {candidates[0]}")
     return candidates[0]
@@ -341,14 +497,19 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-        password=exchange_config.get("password") or settings.exchange.password,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=live_trading,
         sandbox=sandbox_mode,
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
-    symbol = await asyncio.to_thread(_resolve_symbol, exchange, decision.ticker)
+    symbol = await asyncio.to_thread(
+        _resolve_symbol,
+        exchange,
+        decision.ticker,
+        exchange_config.get("market_type") or settings.exchange.market_type,
+    )
 
     try:
         leverage = None
@@ -382,20 +543,20 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
         if order_type == "limit" and decision.entry_price and decision.entry_price > 0:
             logger.info(f"[Exchange] Placing {side} LIMIT order: {symbol} qty={decision.quantity} @ {decision.entry_price}")
-            order = await asyncio.to_thread(
-                exchange.create_order,
+            order = await _create_exchange_order(
+                exchange,
                 symbol=symbol,
-                type="limit",
+                order_type="limit",
                 side=side,
                 amount=decision.quantity,
                 price=decision.entry_price,
             )
         else:
             logger.info(f"[Exchange] Placing {side} MARKET order: {symbol} qty={decision.quantity}")
-            order = await asyncio.to_thread(
-                exchange.create_order,
+            order = await _create_exchange_order(
+                exchange,
                 symbol=symbol,
-                type="market",
+                order_type="market",
                 side=side,
                 amount=decision.quantity,
             )
@@ -455,9 +616,11 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 sl_side = "sell" if side == "buy" else "buy"
                 trail_pct = decision.trailing_stop.trail_pct
                 callback_rate = trail_pct  # Binance uses callbackRate
-                ts_order = await asyncio.to_thread(
-                    exchange.create_order,
-                    symbol=symbol, type="trailing_stop_market", side=sl_side,
+                ts_order = await _create_exchange_order(
+                    exchange,
+                    symbol=symbol,
+                    order_type="trailing_stop_market",
+                    side=sl_side,
                     amount=decision.quantity,
                     params={
                         "callbackRate": callback_rate,
@@ -582,14 +745,14 @@ def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: floa
 
 async def _create_conditional_order(exchange, symbol: str, kind: str, side: str, amount: float, trigger_price: float) -> dict:
     """Try exchange-specific conditional order formats before failing."""
-    exchange_id = getattr(exchange, "id", "").lower()
+    exchange_id = _exchange_id(exchange)
     errors = []
     for order_type, params in _conditional_order_attempts(exchange_id, kind, trigger_price):
         try:
-            return await asyncio.to_thread(
-                exchange.create_order,
+            return await _create_exchange_order(
+                exchange,
                 symbol=symbol,
-                type=order_type,
+                order_type=order_type,
                 side=side,
                 amount=amount,
                 params=params,
@@ -600,12 +763,62 @@ async def _create_conditional_order(exchange, symbol: str, kind: str, side: str,
     raise RuntimeError("; ".join(errors[-3:]) or f"Failed to create {kind} order")
 
 
+async def _cancel_exchange_order(exchange, symbol: str, order_id: str) -> dict:
+    """Cancel an exchange order by id while tolerating already-gone orders."""
+    if not order_id:
+        return {"status": "skipped", "order_id": "", "symbol": symbol}
+
+    try:
+        result = await asyncio.to_thread(exchange.cancel_order, order_id, symbol)
+        return {
+            "status": "cancelled",
+            "order_id": str((result or {}).get("id") or order_id),
+            "symbol": symbol,
+        }
+    except Exception as exc:
+        if _is_order_not_found_error(exc):
+            return {"status": "not_found", "order_id": order_id, "symbol": symbol}
+        logger.error(f"[Exchange] Failed to cancel order {order_id} on {symbol}: {exc}")
+        return {"status": "error", "order_id": order_id, "symbol": symbol, "reason": str(exc)}
+
+
+async def cancel_order(order_id: str, ticker: str, exchange_config: dict | None = None) -> dict:
+    """Cancel a specific exchange order."""
+    exchange_config = exchange_config or {}
+    if not order_id:
+        return {"status": "skipped", "order_id": "", "ticker": ticker}
+    if not exchange_config.get("live_trading", settings.exchange.live_trading):
+        return {"status": "simulated", "order_id": order_id, "ticker": ticker}
+
+    exchange = _get_or_create_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
+        live=True,
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+    )
+    try:
+        symbol = await asyncio.to_thread(
+            _resolve_symbol,
+            exchange,
+            ticker,
+            exchange_config.get("market_type") or settings.exchange.market_type,
+        )
+        return await _cancel_exchange_order(exchange, symbol, order_id)
+    except Exception as exc:
+        logger.error(f"[Exchange] Failed to cancel order {order_id} for {ticker}: {exc}")
+        return {"status": "error", "order_id": order_id, "ticker": ticker, "reason": str(exc)}
+
+
 async def place_protective_stop(
     ticker: str,
     direction: str,
     quantity: float,
     stop_price: float,
     exchange_config: dict | None = None,
+    existing_order_id: str | None = None,
 ) -> dict:
     """Place a reduce-only protective stop for an already-open monitored position."""
     exchange_config = exchange_config or {}
@@ -613,18 +826,37 @@ async def place_protective_stop(
         return {"status": "simulated", "stop_price": stop_price}
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-        password=exchange_config.get("password") or settings.exchange.password,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
-        symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
+        symbol = await asyncio.to_thread(
+            _resolve_symbol,
+            exchange,
+            ticker,
+            exchange_config.get("market_type") or settings.exchange.market_type,
+        )
         side = "sell" if str(direction).lower() == SignalDirection.LONG.value else "buy"
+        cancelled_order_id = ""
+        if existing_order_id:
+            cancel_result = await _cancel_exchange_order(exchange, symbol, str(existing_order_id))
+            if cancel_result.get("status") == "error":
+                return {
+                    "status": "error",
+                    "reason": cancel_result.get("reason") or "Failed to replace protective stop",
+                    "symbol": symbol,
+                    "stop_price": stop_price,
+                }
+            cancelled_order_id = str(cancel_result.get("order_id") or existing_order_id)
         order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price)
-        return {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price}
+        result = {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price}
+        if cancelled_order_id:
+            result["replaced_order_id"] = cancelled_order_id
+        return result
     except Exception as e:
         logger.error(f"[Exchange] Failed to place protective stop: {e}")
         return {"status": "error", "reason": str(e)}
@@ -637,9 +869,12 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, side: str) -> di
         for pos in positions:
             if pos["symbol"] == symbol and float(pos.get("contracts", 0)) > 0:
                 amount = float(pos["contracts"])
-                order = await asyncio.to_thread(
-                    exchange.create_order,
-                    symbol=symbol, type="market", side=side, amount=amount,
+                order = await _create_exchange_order(
+                    exchange,
+                    symbol=symbol,
+                    order_type="market",
+                    side=side,
+                    amount=amount,
                     params={"reduceOnly": True},
                 )
                 logger.info(f"[Exchange] ✅ Position closed: {order.get('id')}")
@@ -727,9 +962,9 @@ async def get_account_balance(exchange_config: dict | None = None) -> dict:
         }
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-        password=exchange_config.get("password") or settings.exchange.password,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
@@ -766,11 +1001,12 @@ async def get_balance(exchange_config: dict | None = None) -> dict:
         }
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-        password=exchange_config.get("password") or settings.exchange.password,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
         balance = await asyncio.to_thread(exchange.fetch_balance)
@@ -792,15 +1028,20 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
     exchange_config = exchange_config or {}
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-        password=exchange_config.get("password") or settings.exchange.password,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
-        resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
+        resolved_symbol = await asyncio.to_thread(
+            _resolve_symbol,
+            exchange,
+            symbol,
+            exchange_config.get("market_type") or settings.exchange.market_type,
+        )
         ticker = await asyncio.to_thread(exchange.fetch_ticker, resolved_symbol)
         return {
             "symbol": ticker.get("symbol"),
@@ -823,15 +1064,20 @@ async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config:
     exchange_config = exchange_config or {}
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-        password=exchange_config.get("password") or settings.exchange.password,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
-        resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
+        resolved_symbol = await asyncio.to_thread(
+            _resolve_symbol,
+            exchange,
+            symbol,
+            exchange_config.get("market_type") or settings.exchange.market_type,
+        )
         candles = await asyncio.to_thread(exchange.fetch_ohlcv, resolved_symbol, timeframe, None, 2)
         if not candles:
             ticker = await asyncio.to_thread(exchange.fetch_ticker, resolved_symbol)
@@ -859,9 +1105,9 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         return []
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-        password=exchange_config.get("password") or settings.exchange.password,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
@@ -914,16 +1160,21 @@ async def get_recent_orders(symbol: str | None = None, limit: int = 50, exchange
         return []
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-        api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-        api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-        password=exchange_config.get("password") or settings.exchange.password,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
     )
     try:
         if symbol:
-            resolved_symbol = await asyncio.to_thread(_resolve_symbol, exchange, symbol)
+            resolved_symbol = await asyncio.to_thread(
+                _resolve_symbol,
+                exchange,
+                symbol,
+                exchange_config.get("market_type") or settings.exchange.market_type,
+            )
             orders = await asyncio.to_thread(exchange.fetch_closed_orders, resolved_symbol, None, limit)
         else:
             orders = await asyncio.to_thread(exchange.fetch_closed_orders, None, None, limit)
@@ -956,6 +1207,7 @@ async def test_exchange_connection(
     api_secret: str,
     password: str = "",
     sandbox_mode: bool = False,
+    market_type: str | None = None,
 ) -> dict:
     """Test if exchange API keys are valid."""
     try:
@@ -966,6 +1218,7 @@ async def test_exchange_connection(
             password=password,
             live=True,
             sandbox=sandbox_mode,
+            market_type=market_type or settings.exchange.market_type,
         )
         await asyncio.to_thread(exchange.fetch_balance)
         mode = " sandbox/testnet" if sandbox_mode else ""

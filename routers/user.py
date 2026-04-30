@@ -25,6 +25,7 @@ from core.database import (
 )
 from core.request_utils import public_base_url
 from core.security import decrypt_settings_payload, encrypt_settings_payload
+from core.utils.common import normalize_limit_timeout_overrides
 from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/api", tags=["user"])
@@ -44,6 +45,7 @@ class UserSettingsRequest(BaseModel):
     market_type: str = Field(default="contract", max_length=20)
     default_order_type: str = Field(default="limit", max_length=20)
     stop_loss_order_type: str = Field(default="market", max_length=20)
+    limit_timeout_overrides: dict[str, int] = Field(default_factory=dict)
 
     @field_validator("exchange")
     @classmethod
@@ -263,6 +265,7 @@ async def _save_user_exchange(db: AsyncSession, db_user, req: UserSettingsReques
         "market_type": req.market_type,
         "default_order_type": req.default_order_type,
         "stop_loss_order_type": req.stop_loss_order_type,
+        "limit_timeout_overrides": normalize_limit_timeout_overrides(req.limit_timeout_overrides),
     }
     await _save_user_settings(db, db_user, current)
 
@@ -278,6 +281,7 @@ def _global_exchange_config() -> dict:
         "market_type": settings.exchange.market_type,
         "default_order_type": settings.exchange.default_order_type,
         "stop_loss_order_type": settings.exchange.stop_loss_order_type,
+        "limit_timeout_overrides": normalize_limit_timeout_overrides(settings.exchange.limit_timeout_overrides),
     }
 
 
@@ -300,6 +304,9 @@ async def _exchange_config_for_user(db: AsyncSession, user: dict) -> dict:
         "market_type": exchange.get("market_type") or settings.exchange.market_type,
         "default_order_type": exchange.get("default_order_type") or settings.exchange.default_order_type,
         "stop_loss_order_type": exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
+        "limit_timeout_overrides": normalize_limit_timeout_overrides(
+            exchange.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides
+        ),
     }
 
 
@@ -518,6 +525,19 @@ async def get_history(
                 or analysis.get("suggested_tp1")
                 or payload.get("take_profit")
             ),
+            "take_profit_levels": (
+                order_details.get("take_profit_orders")
+                or payload.get("take_profit_levels")
+                or [
+                    {
+                        "level": idx,
+                        "price": analysis.get(f"suggested_tp{idx}"),
+                        "qty_pct": analysis.get(f"tp{idx}_qty_pct"),
+                    }
+                    for idx in range(1, 5)
+                    if analysis.get(f"suggested_tp{idx}")
+                ]
+            ),
             "close_reason": payload.get("close_reason"),
             "ai": {
                 "confidence": analysis.get("confidence"),
@@ -652,6 +672,10 @@ async def get_user_settings(
     exchange.setdefault("market_type", exchange.get("market_type") or settings.exchange.market_type)
     exchange.setdefault("default_order_type", exchange.get("default_order_type") or settings.exchange.default_order_type)
     exchange.setdefault("stop_loss_order_type", exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type)
+    exchange.setdefault(
+        "limit_timeout_overrides",
+        normalize_limit_timeout_overrides(exchange.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides),
+    )
     exchange["api_configured"] = bool(exchange.get("api_key") and exchange.get("api_secret"))
     exchange.pop("api_key", None)
     exchange.pop("api_secret", None)
@@ -882,6 +906,7 @@ async def test_connection(
         api_secret=req.api_secret,
         password=req.password,
         sandbox_mode=req.sandbox_mode,
+        market_type=req.market_type,
     )
 
     return result
