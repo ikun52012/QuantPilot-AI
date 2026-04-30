@@ -281,6 +281,7 @@ def _analysis_config_signature(user_settings: dict | None = None) -> str:
             "activation_profit_pct": ts_config.activation_profit_pct,
             "trailing_step_pct": ts_config.trailing_step_pct,
         },
+        "prefilter": (user_settings or {}).get("_prefilter_summary") or {},
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -373,6 +374,7 @@ def _build_user_prompt(
     risk_config = _effective_risk_config(user_settings)
     tp_config = _effective_take_profit_config(user_settings)
     ts_config = _effective_trailing_stop_config(user_settings)
+    prefilter_summary = ((user_settings or {}).get("_prefilter_summary") or {}) if isinstance(user_settings, dict) else {}
 
     tp_section = f"""
 ## Take-Profit Configuration
@@ -389,6 +391,25 @@ def _build_user_prompt(
 - Activation Profit %: {ts_config.activation_profit_pct}%
 - Trailing Step %: {ts_config.trailing_step_pct}%"""
 
+    prefilter_lines = []
+    if prefilter_summary:
+        score = prefilter_summary.get("score")
+        if score is not None:
+            prefilter_lines.append(f"- Pre-filter Score: {score}")
+        hard_fail_count = prefilter_summary.get("hard_fail_count")
+        if hard_fail_count is not None:
+            prefilter_lines.append(f"- Hard Fails Before AI: {hard_fail_count}")
+        soft_fail_count = prefilter_summary.get("soft_fail_count")
+        if soft_fail_count is not None:
+            prefilter_lines.append(f"- Soft Fails Before AI: {soft_fail_count}")
+        notable = prefilter_summary.get("notable_checks") or []
+        if notable:
+            prefilter_lines.append(f"- Notable Checks: {'; '.join(str(item) for item in notable)}")
+
+    prefilter_section = ""
+    if prefilter_lines:
+        prefilter_section = "\n## Pre-Filter Context\n" + "\n".join(prefilter_lines)
+
     exit_instructions = [
         "IMPORTANT: The server expects EXACTLY "
         f"{tp_config.num_levels} take-profit targets.",
@@ -396,6 +417,7 @@ def _build_user_prompt(
         "- Use recommendation='modify' only if you also provide a valid suggested_entry different from the raw signal price",
         "- If recommendation is 'execute', suggested_entry may be null when the signal price is already acceptable",
         "- If recommendation is 'reject' or 'hold', set suggested_entry, suggested_stop_loss, and all TP fields to null",
+        "- If pre-filter context shows stretched or weak conditions, lower confidence and risk instead of ignoring it",
     ]
     if tp_config.num_levels < 4:
         exit_instructions.extend([
@@ -442,6 +464,7 @@ def _build_user_prompt(
 - Orderbook Imbalance (bid/ask): {market.orderbook_imbalance if market.orderbook_imbalance is not None else 'N/A'}
 {tp_section}
 {ts_section}
+{prefilter_section}
 
 {exit_instruction_text}
 

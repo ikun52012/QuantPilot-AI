@@ -98,6 +98,34 @@ def test_build_user_prompt_includes_modify_and_null_field_contract(sample_signal
     assert "If recommendation is 'reject' or 'hold', set suggested_entry, suggested_stop_loss, and all TP fields to null" in prompt
 
 
+def test_build_user_prompt_includes_prefilter_context(sample_signal, sample_market, monkeypatch):
+    monkeypatch.setattr(settings.risk, "exit_management_mode", "ai")
+
+    prompt = _build_user_prompt(
+        sample_signal,
+        sample_market,
+        user_settings={
+            "_prefilter_summary": {
+                "score": 72.5,
+                "hard_fail_count": 0,
+                "soft_fail_count": 2,
+                "notable_checks": ["spread", "funding_rate"],
+            }
+        },
+    )
+
+    assert "## Pre-Filter Context" in prompt
+    assert "Pre-filter Score: 72.5" in prompt
+    assert "Soft Fails Before AI: 2" in prompt
+    assert "Notable Checks: spread; funding_rate" in prompt
+
+
+def test_analysis_config_signature_changes_with_prefilter_summary():
+    baseline = _analysis_config_signature({"_prefilter_summary": {"score": 80.0, "soft_fail_count": 1}})
+    changed = _analysis_config_signature({"_prefilter_summary": {"score": 65.0, "soft_fail_count": 2}})
+    assert baseline != changed
+
+
 @pytest.mark.asyncio
 async def test_ai_cache_isolated_by_effective_settings():
     analysis = AIAnalysis(confidence=0.8, recommendation="execute", reasoning="ok")

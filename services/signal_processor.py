@@ -237,7 +237,7 @@ class SignalProcessor:
                 }
 
             # Step 3: AI Analysis
-            analysis = await self._run_ai_analysis(signal, market, user_settings)
+            analysis = await self._run_ai_analysis(signal, market, prefilter_result, user_settings)
 
             # Step 4: Build trade decision
             decision = self._build_trade_decision(signal, analysis, market, user_id, user_settings)
@@ -376,12 +376,32 @@ class SignalProcessor:
         signal: TradingViewSignal,
         market: MarketContext,
         user_settings: dict | None = None,
+        prefilter_result: PreFilterResult | None = None,
     ) -> AIAnalysis:
         """Run AI analysis on the signal."""
         import time
         start = time.time()
 
-        analysis = await analyze_signal(signal, market, user_settings)
+        scoped_user_settings = dict(user_settings or {})
+        if prefilter_result is not None:
+            soft_fail_count = sum(1 for check in prefilter_result.checks.values() if check.get("soft_fail", False))
+            hard_fail_count = sum(
+                1
+                for check in prefilter_result.checks.values()
+                if not check.get("passed", True) and not check.get("disabled", False) and not check.get("soft_fail", False)
+            )
+            notable_checks = []
+            for check_name, check in prefilter_result.checks.items():
+                if check.get("soft_fail", False) or not check.get("passed", True):
+                    notable_checks.append(check_name)
+            scoped_user_settings["_prefilter_summary"] = {
+                "score": round(float(prefilter_result.score), 2),
+                "soft_fail_count": soft_fail_count,
+                "hard_fail_count": hard_fail_count,
+                "notable_checks": notable_checks[:6],
+            }
+
+        analysis = await analyze_signal(signal, market, scoped_user_settings)
 
         latency = time.time() - start
         record_ai_analysis(
@@ -451,23 +471,33 @@ class SignalProcessor:
         # ── SMC/FVG entry optimization ──
         # When AI recommends "modify" and provides a suggested_entry, use it
         # as the optimal entry price instead of the raw signal price.
-        if decision.execute and analysis.recommendation == "modify" and analysis.suggested_entry:
+        if decision.execute and analysis.recommendation == "modify":
+            if analysis.suggested_entry is None:
+                decision.execute = False
+                decision.reason = "AI recommended modify without a suggested entry"
+                return decision
+
             suggested = float(analysis.suggested_entry)
-            if suggested > 0:
-                price_diff_pct = abs(suggested - signal.price) / signal.price * 100 if signal.price > 0 else 0
-                # Only accept modified entry if it's within 5% of signal price
-                # (prevents AI from suggesting wildly different prices)
-                if price_diff_pct <= 5.0:
-                    logger.info(
-                        f"[Signal] AI modified entry: {signal.price} → {suggested} "
-                        f"({price_diff_pct:+.2f}% adjustment via SMC/FVG)"
-                    )
-                    decision.entry_price = suggested
-                else:
-                    logger.warning(
-                        f"[Signal] AI suggested entry {suggested} is {price_diff_pct:.2f}% "
-                        f"from signal price {signal.price}; using original price"
-                    )
+            if suggested <= 0:
+                decision.execute = False
+                decision.reason = "AI recommended modify with an invalid suggested entry"
+                return decision
+
+            price_diff_pct = abs(suggested - signal.price) / signal.price * 100 if signal.price > 0 else 0
+            # Only accept modified entry if it's within 5% of signal price
+            # (prevents AI from suggesting wildly different prices)
+            if price_diff_pct <= 5.0:
+                logger.info(
+                    f"[Signal] AI modified entry: {signal.price} → {suggested} "
+                    f"({price_diff_pct:+.2f}% adjustment via SMC/FVG)"
+                )
+                decision.entry_price = suggested
+            else:
+                decision.execute = False
+                decision.reason = (
+                    f"AI suggested entry {suggested} is {price_diff_pct:.2f}% away from signal price"
+                )
+                return decision
 
         if decision.execute:
             self._apply_exit_plan(decision, signal, analysis, user_settings or {})
