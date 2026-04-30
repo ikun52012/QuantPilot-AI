@@ -25,7 +25,7 @@ from core.database import (
 )
 from core.request_utils import public_base_url
 from core.security import decrypt_settings_payload, encrypt_settings_payload
-from core.utils.common import normalize_limit_timeout_overrides
+from core.utils.common import normalize_limit_timeout_overrides, symbol_key
 from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/api", tags=["user"])
@@ -246,6 +246,22 @@ def _loads_list(value) -> list:
         return []
 
 
+def _position_symbol_key(symbol: str) -> str:
+    normalized = str(symbol or "").upper().strip()
+    if not normalized:
+        return ""
+    for suffix in (".P", "PERP"):
+        if normalized.endswith(suffix):
+            normalized = normalized[:-len(suffix)]
+            break
+    if ":" in normalized and "/" in normalized:
+        left, _, contract = normalized.partition(":")
+        base, _, quote = left.partition("/")
+        if base and quote and contract == quote:
+            return symbol_key(f"{base}{quote}")
+    return symbol_key(normalized)
+
+
 async def _save_user_settings(db: AsyncSession, db_user, settings_data: dict) -> None:
     db_user.settings_json = json.dumps(encrypt_settings_payload(settings_data))
     await db.commit()
@@ -392,15 +408,19 @@ async def get_positions(
     if exchange_config.get("live_trading"):
         try:
             exchange_positions = await get_open_positions(exchange_config)
+
+            def _position_key(symbol: str, side: str) -> str:
+                return f"{_position_symbol_key(symbol)}::{str(side or '').lower().strip()}"
+
             db_keys = {
-                f"{str(item.get('symbol') or '').upper()}::{str(item.get('side') or '').lower()}"
+                _position_key(str(item.get("symbol") or ""), str(item.get("side") or ""))
                 for item in db_items
                 if str(item.get("status") or "").lower() == "open"
             }
             for p in exchange_positions:
                 symbol = str(p.get("symbol") or "")
                 side = str(p.get("side") or "")
-                key = f"{symbol.upper()}::{side.lower()}"
+                key = _position_key(symbol, side)
                 if key in db_keys:
                     continue
                 exchange_items.append({

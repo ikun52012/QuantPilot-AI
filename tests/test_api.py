@@ -287,6 +287,58 @@ class TestUserEndpoints:
         assert data[0]["status"] == "pending"
 
     @pytest.mark.asyncio
+    async def test_positions_deduplicate_exchange_symbol_aliases(self, client: AsyncClient, test_user_data, db_session, monkeypatch):
+        from core.database import PositionModel
+        from core.utils.datetime import utcnow
+
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        user_id = login.json()["user"]["id"]
+
+        db_session.add(PositionModel(
+            user_id=user_id,
+            ticker="SPYUSDT.P",
+            direction="long",
+            status="open",
+            entry_price=500.0,
+            quantity=1.0,
+            remaining_quantity=1.0,
+            opened_at=utcnow(),
+            live_trading=True,
+        ))
+        await db_session.commit()
+
+        async def fake_exchange_config_for_user(_db, _user):
+            return {"live_trading": True, "sandbox_mode": False, "exchange": "okx"}
+
+        async def fake_get_open_positions(_exchange_config):
+            return [
+                {
+                    "symbol": "SPY/USDT:USDT",
+                    "side": "long",
+                    "contracts": 1.0,
+                    "entryPrice": 500.0,
+                    "entry_price": 500.0,
+                    "markPrice": 501.0,
+                    "mark_price": 501.0,
+                    "unrealizedPnl": 1.0,
+                    "unrealized_pnl": 1.0,
+                    "percentage": 0.2,
+                    "leverage": 1.0,
+                }
+            ]
+
+        monkeypatch.setattr("routers.user._exchange_config_for_user", fake_exchange_config_for_user)
+        monkeypatch.setattr("exchange.get_open_positions", fake_get_open_positions)
+
+        response = await client.get("/api/positions")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["symbol"] == "SPYUSDT.P"
+        assert data[0]["source"] == "db"
+
+    @pytest.mark.asyncio
     async def test_user_settings_returns_exchange_market_and_order_fields(self, client: AsyncClient, test_user_data):
         login = await client.post("/api/auth/register", json=test_user_data)
         assert login.status_code == 200
@@ -429,6 +481,33 @@ class TestUserEndpoints:
         payload = response.json()
         assert payload["count"] == 1
         assert payload["markers"][0]["text"].startswith("LONG @ 50000.00")
+
+    @pytest.mark.asyncio
+    async def test_chart_position_markers_match_symbol_aliases(self, client: AsyncClient, test_user_data, db_session):
+        from core.database import PositionModel
+        from core.utils.datetime import utcnow
+
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        user_id = login.json()["user"]["id"]
+
+        db_session.add(PositionModel(
+            user_id=user_id,
+            ticker="SPYUSDT.P",
+            direction="long",
+            status="open",
+            entry_price=500.0,
+            quantity=1.0,
+            remaining_quantity=1.0,
+            opened_at=utcnow(),
+        ))
+        await db_session.commit()
+
+        response = await client.get("/api/chart/positions/SPYUSDT")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["count"] == 1
+        assert payload["markers"][0]["text"].startswith("LONG @ 500.00")
 
 
 class TestSocialEndpoints:
