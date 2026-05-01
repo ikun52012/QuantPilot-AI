@@ -796,9 +796,13 @@ prefilter_result: PreFilterResult | None = None,
         size_fraction = self._normalize_size_pct(size_pct)
 
         if sizing_mode == "fixed":
-            # Fixed USDT amount per trade
+            # Fixed USDT amount per trade - use exactly the configured amount
+            # size_fraction from AI should NOT reduce the fixed amount
             fixed_amount = float(risk_settings["fixed_position_size_usdt"])
-            notional_value = fixed_amount * leverage * size_fraction
+            notional_value = fixed_amount * leverage
+            logger.info(
+                f"[PositionSize] Fixed mode: margin={fixed_amount}USDT, leverage={leverage}, notional={notional_value}USDT"
+            )
 
         elif sizing_mode == "risk_ratio":
             # Risk X% of account per trade - requires valid stop loss
