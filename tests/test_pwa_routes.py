@@ -147,8 +147,9 @@ class TestWebSocketCookieFallback:
             },
         )
         assert register.status_code == 200
+        token = register.json()["token"]
 
-        with sync_client.websocket_connect("/ws/positions") as websocket:
+        with sync_client.websocket_connect(f"/ws/positions?token={token}") as websocket:
             connected = websocket.receive_json()
             assert connected["type"] == "connected"
 

@@ -167,31 +167,13 @@ async def websocket_positions(websocket: WebSocket):
     - trade_executed: {trade_id, ticker, direction, entry_price}
 
     Authentication:
-    - Must send auth message within _WS_AUTH_TIMEOUT_SECS seconds
-    - Unauthenticated connections are closed with code 4008
+    - Token via query param `?token=...` or cookie
+    - Unauthenticated connections are closed with code 4001
     """
     user_id = None
 
     try:
-        await websocket.accept()
-
-        try:
-            first_message = await asyncio.wait_for(
-                websocket.receive_text(),
-                timeout=_WS_AUTH_TIMEOUT_SECS,
-            )
-            message = json.loads(first_message)
-            if message.get("type") != "auth":
-                await websocket.close(code=4008, reason="First message must be auth")
-                return
-            token = message.get("token") or _extract_ws_token(websocket)
-        except asyncio.TimeoutError:
-            await websocket.close(code=4008, reason="Authentication timeout")
-            return
-        except json.JSONDecodeError:
-            await websocket.close(code=4008, reason="Invalid auth message")
-            return
-
+        token = _extract_ws_token(websocket)
         if not token:
             await websocket.close(code=4001, reason="Missing authentication token")
             return
