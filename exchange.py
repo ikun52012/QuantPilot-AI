@@ -1172,7 +1172,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
                 notional = pos.get('notional')
                 entry_price = pos.get('entryPrice')
                 mark_price = pos.get('markPrice')
-                
+
                 # BUG FIX: Always calculate percentage from entry vs mark price
                 # Don't trust exchange's 'percentage' field as it may contain incorrect data
                 percentage = None
@@ -1188,7 +1188,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
                                 percentage = ((entry - mark) / entry) * 100
                     except (TypeError, ValueError, ZeroDivisionError):
                         pass
-                
+
                 # Fallback: calculate from unrealized_pnl / notional if available
                 if percentage is None and unrealized_pnl is not None and notional:
                     try:
