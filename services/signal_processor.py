@@ -237,7 +237,7 @@ class SignalProcessor:
                 }
 
             # Step 3: AI Analysis
-            analysis = await self._run_ai_analysis(signal, market, prefilter_result, user_settings)
+            analysis = await self._run_ai_analysis(signal, market, user_settings, prefilter_result)
 
             # Step 4: Build trade decision
             decision = self._build_trade_decision(signal, analysis, market, user_id, user_settings)
