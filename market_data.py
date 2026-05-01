@@ -212,7 +212,7 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
                 orderbook = cast(dict[str, list[list[float]]], orderbook_result)
 
             current_price = _to_float(ticker_data.get("last"), 0.0)
-            
+
             if current_price <= 0:
                 logger.warning(f"[MarketData] {exchange_id} returned zero price for {ticker}")
                 raise ValueError("Zero price from exchange")
@@ -288,7 +288,7 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             logger.warning(f"[MarketData] {exchange_id} market context unavailable for {ticker}: {e}")
 
     from commodity_data import fetch_commodity_market_context, is_special_commodity
-    
+
     commodity_type = is_special_commodity(ticker)
     if commodity_type:
         logger.info(f"[MarketData] Detected {commodity_type} ticker {ticker}, trying Yahoo Finance fallback")

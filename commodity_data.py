@@ -6,7 +6,6 @@ import asyncio
 import re
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -19,13 +18,13 @@ _yfinance_cache: OrderedDict[str, tuple[float, MarketContext]] = OrderedDict()
 _yfinance_cache_lock = asyncio.Lock()
 
 _COMMODITY_SYMBOL_MAP = {
-    "XAU": "GCUSD",  # Gold
-    "XAG": "SIUSD",  # Silver  
-    "XPD": "PAUSD",  # Palladium
-    "XPT": "PLUSD",  # Platinum
-    "XBR": "BZUSD",  # Brent Crude Oil
-    "XTI": "CLUSD",  # WTI Crude Oil
-    "NG": "NGUSD",   # Natural Gas
+    "XAU": "GCUSD",
+    "XAG": "SIUSD",
+    "XPD": "PAUSD",
+    "XPT": "PLUSD",
+    "XBR": "BZUSD",
+    "XTI": "CLUSD",
+    "NG": "NGUSD",
 }
 
 _STOCK_TOKEN_PATTERN = re.compile(
@@ -40,16 +39,16 @@ def is_special_commodity(ticker: str) -> str | None:
     Returns the commodity type: 'metal', 'oil', 'stock', or None.
     """
     ticker_upper = ticker.upper().replace(".P", "").replace("_P", "").replace("-", "")
-    
+
     for metal_code in ["XAU", "XAG", "XPD", "XPT", "XBR", "XTI", "NG"]:
         if ticker_upper.startswith(metal_code):
             if metal_code in ["XBR", "XTI", "NG"]:
                 return "oil"
             return "metal"
-    
+
     if _STOCK_TOKEN_PATTERN.match(ticker_upper):
         return "stock"
-    
+
     return None
 
 
@@ -58,16 +57,16 @@ def get_yfinance_symbol(ticker: str) -> str:
     Convert crypto ticker to Yahoo Finance symbol.
     """
     ticker_upper = ticker.upper().replace(".P", "").replace("_P", "").replace("-", "")
-    
+
     for commodity_code, yf_code in _COMMODITY_SYMBOL_MAP.items():
         if ticker_upper.startswith(commodity_code):
             return f"{yf_code}=X"
-    
+
     stock_match = _STOCK_TOKEN_PATTERN.match(ticker_upper)
     if stock_match:
         stock_symbol = stock_match.group(1)
         return stock_symbol
-    
+
     return ticker_upper
 
 
@@ -82,35 +81,35 @@ async def fetch_yfinance_data(symbol: str) -> dict[str, Any] | None:
     except ImportError:
         has_yfinance = False
         logger.debug("[CommodityData] yfinance not installed, trying direct API")
-    
+
     if has_yfinance:
         try:
             ticker_obj = await asyncio.to_thread(yfinance.Ticker, symbol)
             info = await asyncio.to_thread(lambda: ticker_obj.info)
             hist = await asyncio.to_thread(lambda: ticker_obj.history(period="5d", interval="1h"))
-            
+
             if not info and hist.empty:
                 return None
-            
+
             current_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose", 0)
-            
+
             if not hist.empty:
                 closes = hist["Close"].tolist()
                 price_1h_ago = closes[-2] if len(closes) >= 2 else current_price
                 price_24h_ago = closes[-24] if len(closes) >= 24 else closes[0] if closes else current_price
                 price_change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago > 0 else 0
                 price_change_24h = ((current_price - price_24h_ago) / price_24h_ago * 100) if price_24h_ago > 0 else 0
-                
+
                 high_24h = max(closes[-24:]) if len(closes) >= 24 else max(closes) if closes else current_price
                 low_24h = min(closes[-24:]) if len(closes) >= 24 else min(closes) if closes else current_price
-                
+
                 volumes = hist["Volume"].tolist() if "Volume" in hist.columns else []
                 volume_24h = sum(volumes[-24:]) if len(volumes) >= 24 else sum(volumes) if volumes else 0
-                
+
                 rsi = _calculate_rsi_yf(closes, 14)
                 atr = _calculate_atr_yf(hist, 14)
                 atr_pct = (atr / current_price * 100) if current_price > 0 and atr > 0 else 0
-                
+
                 ema_fast = _calculate_ema_yf(closes, 8)
                 ema_slow = _calculate_ema_yf(closes, 21)
             else:
@@ -123,7 +122,7 @@ async def fetch_yfinance_data(symbol: str) -> dict[str, Any] | None:
                 atr_pct = None
                 ema_fast = None
                 ema_slow = None
-            
+
             return {
                 "current_price": float(current_price),
                 "price_change_1h": float(price_change_1h),
@@ -141,7 +140,7 @@ async def fetch_yfinance_data(symbol: str) -> dict[str, Any] | None:
         except Exception as e:
             logger.warning(f"[CommodityData] yfinance fetch failed for {symbol}: {e}")
             return None
-    
+
     return await _fetch_yfinance_direct_api(symbol)
 
 
@@ -151,50 +150,50 @@ async def _fetch_yfinance_direct_api(symbol: str) -> dict[str, Any] | None:
     Fallback when yfinance library is not installed.
     """
     import httpx
-    
+
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=5d"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        
+
         async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 return None
-            
+
             data = resp.json()
             result = data.get("chart", {}).get("result", [])
             if not result:
                 return None
-            
+
             quote = result[0]
             meta = quote.get("meta", {})
             indicators = quote.get("indicators", {}).get("quote", [])
-            
+
             if not indicators:
                 return None
-            
+
             quotes = indicators[0]
             closes = [c for c in quotes.get("close", []) if c is not None]
             volumes = [v for v in quotes.get("volume", []) if v is not None]
             highs = [h for h in quotes.get("high", []) if h is not None]
-            lows = [l for l in quotes.get("low", []) if l is not None]
-            
+            lows = [low for low in quotes.get("low", []) if low is not None]
+
             current_price = meta.get("regularMarketPrice", closes[-1] if closes else 0)
             price_1h_ago = closes[-2] if len(closes) >= 2 else current_price
             price_24h_ago = closes[-24] if len(closes) >= 24 else closes[0] if closes else current_price
-            
+
             price_change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago > 0 else 0
             price_change_24h = ((current_price - price_24h_ago) / price_24h_ago * 100) if price_24h_ago > 0 else 0
-            
+
             high_24h = max(highs[-24:]) if len(highs) >= 24 else max(highs) if highs else current_price
             low_24h = min(lows[-24:]) if len(lows) >= 24 else min(lows) if lows else current_price
             volume_24h = sum(volumes[-24:]) if len(volumes) >= 24 else sum(volumes) if volumes else 0
-            
+
             rsi = _calculate_rsi_yf(closes, 14)
             atr_pct = None
             ema_fast = _calculate_ema_yf(closes, 8)
             ema_slow = _calculate_ema_yf(closes, 21)
-            
+
             return {
                 "current_price": float(current_price),
                 "price_change_1h": float(price_change_1h),
@@ -218,17 +217,17 @@ def _calculate_rsi_yf(closes: list[float], period: int = 14) -> float | None:
     """Calculate RSI from price closes."""
     if len(closes) < period + 1:
         return None
-    
+
     deltas = [closes[i + 1] - closes[i] for i in range(len(closes) - 1)]
     gains = [d if d > 0 else 0 for d in deltas]
     losses = [-d if d < 0 else 0 for d in deltas]
-    
+
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-    
+
     if avg_loss == 0:
         return 100.0
-    
+
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return round(rsi, 2)
@@ -239,11 +238,11 @@ def _calculate_atr_yf(hist: Any, period: int = 14) -> float:
     try:
         if len(hist) < period + 1:
             return 0
-        
+
         highs = hist["High"].tolist()
         lows = hist["Low"].tolist()
         closes = hist["Close"].tolist()
-        
+
         tr_list = []
         for i in range(1, len(highs)):
             tr = max(
@@ -252,7 +251,7 @@ def _calculate_atr_yf(hist: Any, period: int = 14) -> float:
                 abs(lows[i] - closes[i - 1])
             )
             tr_list.append(tr)
-        
+
         atr = sum(tr_list[-period:]) / period
         return atr
     except Exception:
@@ -263,13 +262,13 @@ def _calculate_ema_yf(closes: list[float], period: int) -> float | None:
     """Calculate EMA from price closes."""
     if len(closes) < period:
         return None
-    
+
     multiplier = 2 / (period + 1)
     ema = sum(closes[:period]) / period
-    
+
     for price in closes[period:]:
         ema = (price - ema) * multiplier + ema
-    
+
     return round(ema, 4)
 
 
@@ -281,25 +280,25 @@ async def fetch_commodity_market_context(ticker: str) -> MarketContext | None:
     commodity_type = is_special_commodity(ticker)
     if not commodity_type:
         return None
-    
+
     now = time.monotonic()
-    
+
     async with _yfinance_cache_lock:
         entry = _yfinance_cache.get(ticker)
         if entry and (now - entry[0]) < _YFINANCE_CACHE_TTL:
             _yfinance_cache.move_to_end(ticker)
             logger.debug(f"[CommodityData] Cache hit for {ticker}")
             return entry[1]
-    
+
     yf_symbol = get_yfinance_symbol(ticker)
     logger.info(f"[CommodityData] Fetching {commodity_type} data for {ticker} via {yf_symbol}")
-    
+
     data = await fetch_yfinance_data(yf_symbol)
-    
+
     if not data:
         logger.warning(f"[CommodityData] No data available for {ticker}")
         return None
-    
+
     context = MarketContext(
         ticker=ticker,
         current_price=data["current_price"],
@@ -321,16 +320,16 @@ async def fetch_commodity_market_context(ticker: str) -> MarketContext | None:
         orderbook_imbalance=None,
         long_short_ratio=None,
     )
-    
+
     async with _yfinance_cache_lock:
         _yfinance_cache[ticker] = (time.monotonic(), context)
         _yfinance_cache.move_to_end(ticker)
         while len(_yfinance_cache) > _YFINANCE_CACHE_MAX_SIZE:
             _yfinance_cache.popitem(last=False)
-    
+
     logger.info(
         f"[CommodityData] ✅ Got {commodity_type} data for {ticker}: "
         f"price={context.current_price:.2f}, 24h_change={context.price_change_24h:+.2f}%"
     )
-    
+
     return context
