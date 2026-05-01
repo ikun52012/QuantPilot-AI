@@ -1005,7 +1005,7 @@ prefilter_result: PreFilterResult | None = None,
             return
         risk_settings = self._resolved_risk_settings(user_settings)
         sizing_mode = risk_settings.get("position_sizing_mode", "percentage")
-        
+
         # Fixed mode: ensure quantity matches the configured fixed amount
         # Skip the max_position_pct limit since user explicitly set the amount
         if sizing_mode == "fixed":
@@ -1022,7 +1022,7 @@ prefilter_result: PreFilterResult | None = None,
                 )
                 decision.quantity = round(expected_notional / decision.entry_price, 6)
             return
-        
+
         # Percentage/risk_ratio mode: apply max_position_pct limit
         account_equity = float(risk_settings["account_equity_usdt"])
         exchange_cap = self._coerce_risk_float(
