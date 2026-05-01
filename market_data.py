@@ -187,11 +187,9 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             )
             ticker_result, ohlcv_1h_result, ohlcv_4h_result, orderbook_result = fetch_results
 
-            # BUG FIX: Handle individual fetch failures gracefully instead of
-            # crashing the entire pipeline when one exchange call fails.
             if isinstance(ticker_result, Exception):
                 logger.warning(f"[MarketData] {exchange_id} ticker fetch failed for {ticker}: {ticker_result}")
-                raise ticker_result  # fall through to next exchange
+                raise ticker_result
 
             ticker_data = cast(dict[str, Any], ticker_result)
 
@@ -214,6 +212,11 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
                 orderbook = cast(dict[str, list[list[float]]], orderbook_result)
 
             current_price = _to_float(ticker_data.get("last"), 0.0)
+            
+            if current_price <= 0:
+                logger.warning(f"[MarketData] {exchange_id} returned zero price for {ticker}")
+                raise ValueError("Zero price from exchange")
+
             price_1h_ago = float(ohlcv_1h[-2][4]) if len(ohlcv_1h) >= 2 else current_price
             price_4h_ago = float(ohlcv_4h[-2][4]) if len(ohlcv_4h) >= 2 else current_price
 
@@ -284,8 +287,20 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             last_error = e
             logger.warning(f"[MarketData] {exchange_id} market context unavailable for {ticker}: {e}")
 
+    from commodity_data import fetch_commodity_market_context, is_special_commodity
+    
+    commodity_type = is_special_commodity(ticker)
+    if commodity_type:
+        logger.info(f"[MarketData] Detected {commodity_type} ticker {ticker}, trying Yahoo Finance fallback")
+        commodity_context = await fetch_commodity_market_context(ticker)
+        if commodity_context and commodity_context.current_price > 0:
+            context_any = cast(Any, commodity_context)
+            context_any._market_data_source = "yfinance"
+            context_any._commodity_type = commodity_type
+            return commodity_context
+
     logger.error(f"[MarketData] Failed to fetch context for {ticker} from all market data sources: {last_error}")
-    return MarketContext(ticker=ticker, current_price=0.0)
+    return _empty_market_context(ticker)
 
 
 async def _safe_fetch_funding_rate(exchange: Any, symbol: str) -> float | None:
