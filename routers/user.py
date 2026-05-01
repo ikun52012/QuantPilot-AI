@@ -31,6 +31,36 @@ from core.utils.datetime import utcnow
 router = APIRouter(prefix="/api", tags=["user"])
 
 
+def _simplify_symbol(ticker: str) -> str:
+    """Simplify ticker name by removing USDT, USD, PERP, .P suffixes."""
+    ticker = str(ticker or "").upper().strip()
+    for suffix in ["USDT.P", "USDT", "USD.P", "USD", "PERP", ".P", "_P"]:
+        if ticker.endswith(suffix):
+            ticker = ticker[:-len(suffix)]
+            break
+    return ticker or ticker
+
+
+def _status_text(status: str) -> str:
+    """Convert status code to human-readable text."""
+    status_map = {
+        "pending": "挂单中",
+        "open": "持仓中",
+        "closed": "已平仓",
+        "cancelled": "已取消",
+    }
+    return status_map.get(str(status or "").lower(), status or "未知")
+
+
+def _loads_list(json_str: str) -> list:
+    """Parse JSON list safely."""
+    try:
+        data = json.loads(str(json_str or "[]"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 # ─────────────────────────────────────────────
 # Request Models
 # ─────────────────────────────────────────────
@@ -373,6 +403,7 @@ async def get_positions(
         {
             "id": p.id,
             "symbol": p.ticker,
+            "symbol_short": _simplify_symbol(p.ticker),
             "side": p.direction,
             "contracts": p.remaining_quantity or p.quantity,
             "entryPrice": p.entry_price,
@@ -380,14 +411,19 @@ async def get_positions(
             "markPrice": p.last_price,
             "mark_price": p.last_price,
             "stop_loss": p.stop_loss,
-            "take_profit_levels": _loads_list(p.take_profit_json),
-            "unrealizedPnl": p.unrealized_pnl_usdt or 0,
-            "unrealized_pnl": p.unrealized_pnl_usdt or 0,
-            "percentage": p.current_pnl_pct,
+            "liquidationPrice": getattr(p, 'liquidation_price', None),
+            "liquidation_price": getattr(p, 'liquidation_price', None),
+            "margin": getattr(p, 'margin', None) or (p.entry_price * (p.remaining_quantity or p.quantity) / (p.leverage or 1)),
             "leverage": p.leverage,
+            "take_profit_levels": _loads_list(p.take_profit_json),
+            "unrealizedPnl": p.unrealized_pnl_usdt or 0 if p.status == "open" else 0,
+            "unrealized_pnl": p.unrealized_pnl_usdt or 0 if p.status == "open" else 0,
+            "percentage": p.current_pnl_pct if p.status == "open" else None,
+            "pnl_pct": p.current_pnl_pct if p.status == "open" else None,
             "mode": "exchange" if p.live_trading else "paper",
             "sandbox_mode": p.sandbox_mode,
             "status": p.status,
+            "status_text": _status_text(p.status),
             "opened_at": p.opened_at.isoformat() if p.opened_at else None,
             "updated_at": p.updated_at.isoformat() if p.updated_at else None,
             "source": "db",
