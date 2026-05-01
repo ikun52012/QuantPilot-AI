@@ -5,17 +5,23 @@ Handles TradingView webhook signals.
 Security layers:
 1. HMAC signature (optional, for enhanced security)
 2. Payload secret (required, TradingView compatible)
+
+Processing:
+- Returns 202 Accepted immediately to prevent TradingView timeout
+- Actual processing runs in background task
+- Fingerprint deduplication prevents duplicate execution
 """
+import asyncio
 import hmac
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.database import get_admin_setting, get_db
+from core.database import db_manager, get_admin_setting, get_db
 from core.request_utils import client_ip as get_client_ip
 from core.security import is_placeholder_webhook_secret
 from models import TradingViewSignal
@@ -27,6 +33,7 @@ router = APIRouter(prefix="", tags=["webhook"])
 @router.post("/webhook")
 async def webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -42,8 +49,12 @@ async def webhook(
     - HMAC signature is optional (extra security layer for other integrations)
     - Payload secret is REQUIRED (primary security for TradingView)
     - In live_trading mode, payload secret must be strong (not placeholder)
+
+    Processing:
+    - Returns 202 Accepted immediately (within ~100ms)
+    - Actual processing runs in background to avoid TradingView timeout
+    - Fingerprint deduplication prevents duplicate signals
     """
-    # Get raw body
     try:
         raw_body = await request.body()
         body = json.loads(raw_body)
@@ -51,48 +62,37 @@ async def webhook(
         logger.error(f"[Webhook] Invalid JSON: {err}")
         raise HTTPException(400, "Invalid JSON payload") from err
 
-    # Verify HMAC signature if present (optional, extra security)
     signature = (
         request.headers.get("x-tvss-signature", "") or
         request.headers.get("x-signal-signature", "") or
         request.headers.get("x-webhook-signature", "")
     )
     if signature:
-        # Signature present - verify it
         if not verify_webhook_signature(raw_body, signature):
             logger.warning("[Webhook] Invalid HMAC signature (signature was present but invalid)")
             raise HTTPException(401, "Invalid HMAC signature")
     else:
-        # No signature header - normal for TradingView
-        # Allow request, payload secret will be validated below
         logger.debug("[Webhook] No HMAC signature header (TradingView compatibility mode)")
 
-    # Extract secret from payload (REQUIRED for TradingView)
     secret = body.get("secret", "").strip()
     if not secret:
         logger.warning("[Webhook] Missing webhook secret in payload")
         raise HTTPException(401, "Missing webhook secret in payload")
 
-    # Get client IP
     client_ip = get_client_ip(request)
 
-    # Validate signal
     try:
         signal = TradingViewSignal(**body)
     except Exception as err:
         logger.error(f"[Webhook] Invalid signal: {err}")
         raise HTTPException(400, f"Invalid signal: {err}") from err
 
-    # Determine user by secret
     user = await _find_user_by_secret(db, secret)
     user_id = user.id if user else None
 
-    # Verify secret
     if not user_id:
-        # Check admin secret
         admin_secret = await get_admin_setting(db, "webhook_secret", settings.server.webhook_secret)
 
-        # Live trading mode security check
         if settings.exchange.live_trading:
             if is_placeholder_webhook_secret(admin_secret):
                 logger.error(
@@ -105,16 +105,40 @@ async def webhook(
             logger.warning(f"[Webhook] Invalid secret from {client_ip}")
             raise HTTPException(401, "Invalid webhook secret")
 
-    # Process signal
-    processor = SignalProcessor(db)
-    result = await processor.process_webhook(
+    background_tasks.add_task(
+        _process_webhook_background,
         signal=signal,
         user_id=user_id,
         client_ip=client_ip,
         raw_body=body,
     )
 
-    return JSONResponse(content=result)
+    return JSONResponse(
+        status_code=202,
+        content={"status": "accepted", "message": "Signal queued for processing"},
+    )
+
+
+async def _process_webhook_background(
+    signal: TradingViewSignal,
+    user_id: str | None,
+    client_ip: str,
+    raw_body: dict,
+):
+    """Process webhook signal in background to avoid TradingView timeout."""
+    try:
+        async with db_manager.async_session_factory() as session:
+            processor = SignalProcessor(session)
+            result = await processor.process_webhook(
+                signal=signal,
+                user_id=user_id,
+                client_ip=client_ip,
+                raw_body=raw_body,
+            )
+            await session.commit()
+            logger.info(f"[Webhook] Background processing complete: {result.get('status')}")
+    except Exception as exc:
+        logger.error(f"[Webhook] Background processing error: {exc}")
 
 
 async def _find_user_by_secret(db: AsyncSession, secret: str):

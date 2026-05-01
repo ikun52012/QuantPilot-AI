@@ -353,16 +353,16 @@ class ServerConfig(BaseModel):
 class DatabaseConfig(BaseModel):
     """Database configuration."""
     url: str = "sqlite+aiosqlite:///./data/server.db"
-    pool_size: int = 5
-    max_overflow: int = 10
+    pool_size: int = 15
+    max_overflow: int = 20
     echo: bool = False
 
     @classmethod
     def from_env(cls) -> "DatabaseConfig":
         return cls(
             url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/server.db"),
-            pool_size=int(os.getenv("DATABASE_POOL_SIZE", "5")),
-            max_overflow=int(os.getenv("DATABASE_MAX_OVERFLOW", "10")),
+            pool_size=int(os.getenv("DATABASE_POOL_SIZE", "15")),
+            max_overflow=int(os.getenv("DATABASE_MAX_OVERFLOW", "20")),
             echo=os.getenv("DATABASE_ECHO", "false").lower() == "true",
         )
 
@@ -478,7 +478,7 @@ class Settings(BaseModel):
             warnings.append("PUBLIC_BASE_URL appears to use a placeholder value")
 
         if self.server.cors_origins == ["*"] and self.is_production:
-            warnings.append("CORS_ORIGINS=['*'] is too permissive for production")
+            errors.append("CORS_ORIGINS=['*'] is not allowed in production (LIVE_TRADING=true). Set explicit origins or disable live trading.")
 
         if self.server.trusted_hosts == ["*"] and self.is_production:
             warnings.append("TRUSTED_HOSTS=['*'] is too permissive for production")

@@ -1,12 +1,18 @@
 """
 QuantPilot AI - Telegram Notifications
 Sends trading notifications to Telegram with i18n support.
+Includes retry mechanism for network resilience.
 """
+import asyncio
+
 import httpx
 from loguru import logger
 
 from core.config import settings
 from models import AIAnalysis, TradeDecision
+
+_TELEGRAM_MAX_RETRIES = 2
+_TELEGRAM_RETRY_DELAY_SECS = 2.0
 
 
 def _lang() -> str:
@@ -91,26 +97,32 @@ def _t(key: str) -> str:
 
 
 async def send_telegram(text: str):
-    """Send a message to Telegram."""
+    """Send a message to Telegram with retry mechanism."""
     if not settings.telegram.bot_token or not settings.telegram.chat_id:
         logger.debug("[Telegram] Not configured, skipping notification")
         return
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"https://api.telegram.org/bot{settings.telegram.bot_token}/sendMessage",
-                json={
-                    "chat_id": settings.telegram.chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
-            )
-            resp.raise_for_status()
-            logger.debug("[Telegram] Message sent")
-    except Exception as e:
-        logger.error(f"[Telegram] Failed to send message: {e}")
+    for attempt in range(_TELEGRAM_MAX_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{settings.telegram.bot_token}/sendMessage",
+                    json={
+                        "chat_id": settings.telegram.chat_id,
+                        "text": text,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                    },
+                )
+                resp.raise_for_status()
+                logger.debug("[Telegram] Message sent")
+                return
+        except Exception as e:
+            if attempt < _TELEGRAM_MAX_RETRIES:
+                logger.warning(f"[Telegram] Send failed (attempt {attempt + 1}), retrying: {e}")
+                await asyncio.sleep(_TELEGRAM_RETRY_DELAY_SECS)
+            else:
+                logger.error(f"[Telegram] Failed to send message after {_TELEGRAM_MAX_RETRIES + 1} attempts: {e}")
 
 
 async def notify_signal_received(ticker: str, direction: str, price: float):

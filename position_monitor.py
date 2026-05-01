@@ -36,6 +36,8 @@ _safe_float = safe_float
 _loads_list = loads_list
 _loads_dict = loads_dict
 
+_position_monitor_lock = asyncio.Lock()
+
 
 def _position_limit_timeout_secs(position: PositionModel) -> float:
     configured = safe_float(getattr(position, "limit_timeout_secs", 0), 0.0)
@@ -125,42 +127,61 @@ async def get_monitor_state() -> dict:
 
 
 async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
-    """Run one full tracking cycle and persist TP/SL/PnL updates."""
-    stats = {
-        "tracked": 0,
-        "updated": 0,
-        "partials": 0,
-        "closed": 0,
-        "adjusted": 0,
-        "errors": 0,
-        "timestamp": utcnow().isoformat(),
-    }
+    """Run one full tracking cycle and persist TP/SL/PnL updates.
+    
+    Protected by asyncio.Lock to prevent concurrent execution from
+    both scheduler and manual admin API trigger.
+    """
+    if _position_monitor_lock.locked():
+        logger.warning("[PositionMonitor] Already running, skipping duplicate invocation")
+        return {
+            "tracked": 0,
+            "updated": 0,
+            "partials": 0,
+            "closed": 0,
+            "adjusted": 0,
+            "errors": 0,
+            "skipped": True,
+            "reason": "Already running",
+            "timestamp": utcnow().isoformat(),
+        }
 
-    try:
-        async with db_manager.async_session_factory() as session:
-            result = await session.execute(
-                select(PositionModel)
-                .where(PositionModel.status.in_(["open", "pending"]))
-                .order_by(PositionModel.opened_at.asc())
-            )
-            positions = list(result.scalars().all())
-            stats["tracked"] = len(positions)
+    async with _position_monitor_lock:
+        stats = {
+            "tracked": 0,
+            "updated": 0,
+            "partials": 0,
+            "closed": 0,
+            "adjusted": 0,
+            "errors": 0,
+            "timestamp": utcnow().isoformat(),
+        }
 
-            for position in positions:
-                try:
-                    changed = await _reconcile_position(session, position, user_configs or {})
-                    for key, value in changed.items():
-                        stats[key] = stats.get(key, 0) + value
-                except Exception as exc:
-                    stats["errors"] += 1
-                    logger.error(f"[PositionMonitor] Failed to reconcile {position.id}: {exc}")
+        try:
+            async with db_manager.async_session_factory() as session:
+                result = await session.execute(
+                    select(PositionModel)
+                    .where(PositionModel.status.in_(["open", "pending"]))
+                    .order_by(PositionModel.opened_at.asc())
+                )
+                positions = list(result.scalars().all())
+                stats["tracked"] = len(positions)
 
-            await session.commit()
-    except Exception as exc:
-        stats["errors"] += 1
-        logger.error(f"[PositionMonitor] Cycle failed: {exc}")
+                for position in positions:
+                    try:
+                        changed = await _reconcile_position(session, position, user_configs or {})
+                        for key, value in changed.items():
+                            stats[key] = stats.get(key, 0) + value
+                    except Exception as exc:
+                        stats["errors"] += 1
+                        logger.error(f"[PositionMonitor] Failed to reconcile {position.id}: {exc}")
 
-    return stats
+                await session.commit()
+        except Exception as exc:
+            stats["errors"] += 1
+            logger.error(f"[PositionMonitor] Cycle failed: {exc}")
+
+        return stats
 
 
 async def _reconcile_position(session, position: PositionModel, user_configs: dict) -> dict:

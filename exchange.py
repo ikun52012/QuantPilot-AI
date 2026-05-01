@@ -7,6 +7,7 @@ import asyncio
 import hashlib as _hashlib
 import inspect
 import threading as _threading
+import time
 from typing import Any
 
 from loguru import logger
@@ -146,6 +147,9 @@ async def _create_exchange_order(
 # ─────────────────────────────────────────────
 _exchange_pool: dict[str, ccxt.Exchange] = {}
 _exchange_pool_lock = _threading.Lock()
+_exchange_pool_health: dict[str, dict[str, Any]] = {}
+_HEALTH_CHECK_INTERVAL_SECS = 300
+_MAX_CONSECUTIVE_FAILURES = 3
 
 
 def _get_or_create_exchange(
@@ -161,6 +165,8 @@ def _get_or_create_exchange(
 
     Uses double-checked locking pattern to avoid race conditions
     while minimizing lock contention.
+
+    Includes health check to evict stale/unhealthy connections.
     """
     eid = (exchange_id or settings.exchange.name).lower().strip()
     cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:8]
@@ -168,25 +174,62 @@ def _get_or_create_exchange(
     market_key = str(market_type or settings.exchange.market_type or "contract").lower().strip()
     cache_key = f"{eid}:{sb}:{market_key}:{cred_hash}"
 
-    # First check without lock (fast path)
     existing = _exchange_pool.get(cache_key)
     if existing is not None:
-        return existing
+        health = _exchange_pool_health.get(cache_key, {})
+        now = time.time()
+        last_check = health.get("last_check", 0)
+        consecutive_failures = health.get("consecutive_failures", 0)
 
-    # Second check with lock (creation path)
+        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+            logger.warning(f"[Exchange] Evicting unhealthy cached instance: {cache_key}")
+            _exchange_pool.pop(cache_key, None)
+            _exchange_pool_health.pop(cache_key, None)
+            try:
+                close = getattr(existing, "close", None)
+                if close:
+                    close()
+            except Exception:
+                pass
+        elif now - last_check > _HEALTH_CHECK_INTERVAL_SECS:
+            try:
+                existing.fetch_time()
+                _exchange_pool_health[cache_key] = {
+                    "last_check": now,
+                    "consecutive_failures": 0,
+                }
+                return existing
+            except Exception as exc:
+                logger.warning(f"[Exchange] Health check failed for {cache_key}: {exc}")
+                _exchange_pool_health[cache_key] = {
+                    "last_check": now,
+                    "consecutive_failures": consecutive_failures + 1,
+                }
+                if consecutive_failures + 1 >= _MAX_CONSECUTIVE_FAILURES:
+                    _exchange_pool.pop(cache_key, None)
+                    _exchange_pool_health.pop(cache_key, None)
+                    try:
+                        close = getattr(existing, "close", None)
+                        if close:
+                            close()
+                    except Exception:
+                        pass
+                else:
+                    return existing
+        else:
+            return existing
+
     with _exchange_pool_lock:
-        # Double-check: another thread might have created it while we waited
         existing = _exchange_pool.get(cache_key)
         if existing is not None:
             return existing
 
-        # Create instance while holding lock to prevent duplicate creation
         instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox, market_type)
 
-        # Manage pool size
         if len(_exchange_pool) >= settings.exchange.pool_max_size:
             oldest_key = next(iter(_exchange_pool))
             evicted = _exchange_pool.pop(oldest_key, None)
+            _exchange_pool_health.pop(oldest_key, None)
             if evicted is not None:
                 try:
                     close = getattr(evicted, "close", None)
@@ -196,6 +239,10 @@ def _get_or_create_exchange(
                     pass
 
         _exchange_pool[cache_key] = instance
+        _exchange_pool_health[cache_key] = {
+            "last_check": time.time(),
+            "consecutive_failures": 0,
+        }
         return instance
 
 

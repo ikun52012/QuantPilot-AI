@@ -137,6 +137,9 @@ class PaymentModel(Base):
 class TradeModel(Base):
     """Trade log model."""
     __tablename__ = "trades"
+    __table_args__ = (
+        Index("idx_trades_user_timestamp", "user_id", "timestamp"),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
@@ -237,6 +240,9 @@ class RedeemCodeModel(Base):
 class PositionModel(Base):
     """Position tracking model."""
     __tablename__ = "positions"
+    __table_args__ = (
+        Index("idx_positions_user_status", "user_id", "status"),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), nullable=True, index=True)

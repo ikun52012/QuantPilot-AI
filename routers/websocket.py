@@ -20,8 +20,9 @@ router = APIRouter(tags=["WebSocket"])
 verify_jwt_token = verify_token
 
 # WebSocket rate limiting
-_WS_CONNECTION_LIMIT_PER_USER = 5  # Max 5 connections per user
-_WS_CONNECTION_COOLDOWN = 60  # 60 seconds cooldown between connections
+_WS_CONNECTION_LIMIT_PER_USER = 5
+_WS_CONNECTION_COOLDOWN = 60
+_WS_AUTH_TIMEOUT_SECS = 5.0
 _ws_connection_times: dict[str, list[float]] = defaultdict(list)
 
 
@@ -164,11 +165,33 @@ async def websocket_positions(websocket: WebSocket):
     - position_update: {position_id, ticker, pnl_pct, current_price, ...}
     - position_closed: {position_id, exit_reason, pnl_pct}
     - trade_executed: {trade_id, ticker, direction, entry_price}
+    
+    Authentication:
+    - Must send auth message within _WS_AUTH_TIMEOUT_SECS seconds
+    - Unauthenticated connections are closed with code 4008
     """
     user_id = None
 
     try:
-        token = _extract_ws_token(websocket)
+        await websocket.accept()
+
+        try:
+            first_message = await asyncio.wait_for(
+                websocket.receive_text(),
+                timeout=_WS_AUTH_TIMEOUT_SECS,
+            )
+            message = json.loads(first_message)
+            if message.get("type") != "auth":
+                await websocket.close(code=4008, reason="First message must be auth")
+                return
+            token = message.get("token") or _extract_ws_token(websocket)
+        except asyncio.TimeoutError:
+            await websocket.close(code=4008, reason="Authentication timeout")
+            return
+        except json.JSONDecodeError:
+            await websocket.close(code=4008, reason="Invalid auth message")
+            return
+
         if not token:
             await websocket.close(code=4001, reason="Missing authentication token")
             return

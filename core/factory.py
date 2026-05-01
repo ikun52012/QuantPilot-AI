@@ -5,7 +5,7 @@ Creates and configures the FastAPI application instance.
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -27,7 +27,6 @@ from routers.strategy_editor import router as strategy_editor_router
 from routers.subscription import router as subscription_router
 from routers.user import router as user_router
 
-# Import routers
 from routers.webhook import router as webhook_router
 from routers.websocket import router as websocket_router
 
@@ -306,7 +305,20 @@ def create_app() -> FastAPI:
         logger.error(f"Unhandled exception (rid={request_id}): {exc}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"detail": "Internal server error", "request_id": request_id},
+            content={"status": "error", "detail": "Internal server error", "reason": "Internal server error", "request_id": request_id},
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        request_id = getattr(request.state, "request_id", "unknown")
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "status": "error",
+                "detail": exc.detail,
+                "reason": exc.detail,
+                "request_id": request_id,
+            },
         )
 
     return app
