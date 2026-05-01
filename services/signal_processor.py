@@ -1004,6 +1004,26 @@ prefilter_result: PreFilterResult | None = None,
         if not decision.entry_price or not decision.quantity or decision.quantity <= 0:
             return
         risk_settings = self._resolved_risk_settings(user_settings)
+        sizing_mode = risk_settings.get("position_sizing_mode", "percentage")
+        
+        # Fixed mode: ensure quantity matches the configured fixed amount
+        # Skip the max_position_pct limit since user explicitly set the amount
+        if sizing_mode == "fixed":
+            fixed_amount = float(risk_settings.get("fixed_position_size_usdt", 100.0))
+            leverage = 1.0
+            if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
+                leverage = max(1.0, float(decision.ai_analysis.recommended_leverage))
+            expected_notional = fixed_amount * leverage
+            current_notional = decision.quantity * decision.entry_price
+            if abs(current_notional - expected_notional) > 1.0:
+                logger.warning(
+                    f"[Signal] Fixed mode: correcting notional from {current_notional:.2f}USDT "
+                    f"to {expected_notional:.2f}USDT (margin={fixed_amount}USDT, leverage={leverage})"
+                )
+                decision.quantity = round(expected_notional / decision.entry_price, 6)
+            return
+        
+        # Percentage/risk_ratio mode: apply max_position_pct limit
         account_equity = float(risk_settings["account_equity_usdt"])
         exchange_cap = self._coerce_risk_float(
             exchange_config.get("max_position_pct"),

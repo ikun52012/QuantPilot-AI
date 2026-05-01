@@ -692,17 +692,19 @@ async function loadPositions() {
     try {
         const [positions, balance] = await Promise.all([fetchAPI('/api/positions'), fetchAPI('/api/balance')]);
         const tbody = document.getElementById('positions-body');
-        if (!positions.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No open positions</td></tr>'; }
-        else { tbody.innerHTML = positions.map(p => {
+        if (!positions.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No open positions</td></tr>'; }
+else { tbody.innerHTML = positions.map(p => {
             const entry = firstDefined(p.entry_price, p.entryPrice);
             const mark = firstDefined(p.mark_price, p.markPrice);
             const liq = firstDefined(p.liquidation_price, p.liquidationPrice);
+            const margin = firstDefined(p.margin, null);
             const pnl = Number(firstDefined(p.unrealized_pnl, p.unrealizedPnl, 0));
             const pct = firstDefined(p.percentage, null);
             const pctText = pct == null ? '--' : `${Number(pct) >= 0 ? '+' : ''}${Number(pct).toFixed(2)}%`;
             const mode = p.source === 'exchange_live' ? 'Exchange' : (p.mode || 'paper');
-            const statusText = p.status ? `<div class="hint">${escapeHtml(String(p.status).toUpperCase())}</div>` : '';
-            return `<tr><td><strong>${escapeHtml(p.symbol||'--')}</strong><div class="hint">${escapeHtml(mode)}</div>${statusText}</td><td><span class="badge ${p.side==='long'?'badge-long':'badge-short'}">${escapeHtml(p.side||'--')}</span></td><td>${escapeHtml(p.contracts)}</td><td>$${formatNum(entry)}</td><td>$${formatNum(mark)}</td><td>${liq?'$'+formatNum(liq):'--'}</td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">$${formatNum(pnl)}</td><td class="${pct == null || Number(pct)>=0?'pnl-positive':'pnl-negative'}">${pctText}</td><td>${escapeHtml(p.leverage||'--')}x</td></tr>`;
+            const statusText = p.status_text ? `<div class="hint">${escapeHtml(p.status_text)}</div>` : (p.status ? `<div class="hint">${escapeHtml(String(p.status).toUpperCase())}</div>` : '');
+            const symbolDisplay = p.symbol_short || p.symbol || '--';
+            return `<tr><td><strong>${escapeHtml(symbolDisplay)}</strong><div class="hint">${escapeHtml(mode)}</div>${statusText}</td><td><span class="badge ${p.side==='long'?'badge-long':'badge-short'}">${escapeHtml(p.side||'--')}</span></td><td>${escapeHtml(p.contracts)}</td><td>$${formatNum(entry)}</td><td>$${formatNum(mark)}</td><td>${liq?'$'+formatNum(liq):'--'}</td><td>${margin?'$'+formatNum(margin):'--'}</td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">$${formatNum(pnl)}</td><td class="${pct == null || Number(pct)>=0?'pnl-positive':'pnl-negative'}">${pctText}</td><td>${escapeHtml(p.leverage||'--')}x</td></tr>`;
         }).join(''); }
         document.getElementById('bal-total').textContent = `$${formatNum(balance.total_quote ?? pickBalance(balance.total, balance.quote))}`;
         document.getElementById('bal-free').textContent = `$${formatNum(balance.free_quote ?? pickBalance(balance.free, balance.quote))}`;
