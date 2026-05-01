@@ -445,7 +445,7 @@ async def run_pre_filter_async(
     # ── Check 3: Duplicate signal cooldown (Dynamic) ──
     base_cooldown = thresholds.get("cooldown_seconds", ticker)
     dynamic_enabled = thresholds.get("dynamic_cooldown_enabled", ticker)
-    
+
     if dynamic_enabled:
         win_multiplier = thresholds.get("cooldown_win_multiplier", ticker)
         loss_multiplier = thresholds.get("cooldown_loss_multiplier", ticker)
@@ -465,7 +465,7 @@ async def run_pre_filter_async(
             cooldown_secs = base_cooldown
     else:
         cooldown_secs = base_cooldown
-    
+
     cooldown_ok = _check_cooldown(signal, cooldown_seconds=cooldown_secs, user_id=user_id)
     checks["cooldown"] = {
         "passed": cooldown_ok,
@@ -676,7 +676,7 @@ async def run_pre_filter_async(
     try:
         recent_results = await get_recent_trade_results_async(limit=5, user_id=user_id)
         consec_losses = sum(1 for r in recent_results[:consec_max] if r.get("pnl_pct", 0) < 0)
-        
+
         if len(recent_results) >= consec_max:
             last_n = recent_results[:consec_max]
             if all(r.get("pnl_pct", 0) < 0 for r in last_n):
@@ -710,10 +710,10 @@ async def run_pre_filter_async(
     saturation_max = thresholds.get("signal_saturation_max", ticker)
     same_dir_count = _count_recent_same_direction(signal, window_minutes=60, user_id=user_id)
     opposite_dir_count = _count_recent_opposite_direction(signal, window_minutes=60, user_id=user_id)
-    
+
     if same_dir_count >= saturation_max:
         saturation_ok = False
-    
+
     reverse_signal_boost = False
     if opposite_dir_count >= saturation_max - 1 and same_dir_count < saturation_max:
         reverse_signal_boost = True
@@ -897,14 +897,14 @@ async def run_pre_filter_async(
     try:
         from enhanced_market_data import fetch_liquidation_heatmap
         liq_data = await fetch_liquidation_heatmap(ticker)
-        nearest_liq = liq_data.get("nearest_liq_level")
+        liq_data.get("nearest_liq_level")
         nearest_distance = liq_data.get("nearest_liq_distance_pct")
-        
+
         if nearest_distance is not None and nearest_distance < liq_distance_min:
             total_liq = liq_data.get("total_long_liq_usd", 0) + liq_data.get("total_short_liq_usd", 0)
             if total_liq > 10_000_000:
                 liq_ok = False
-        
+
         checks["liquidation_heatmap"] = {
             "passed": liq_ok,
             "nearest_liq_distance_pct": nearest_distance,
@@ -925,16 +925,16 @@ async def run_pre_filter_async(
         from enhanced_market_data import fetch_long_short_ratio
         ls_data = await fetch_long_short_ratio(ticker)
         current_ratio = ls_data.get("current_ratio")
-        
+
         if current_ratio is not None:
             is_long = signal.direction in (SignalDirection.LONG,)
             is_short = signal.direction in (SignalDirection.SHORT,)
-            
+
             if is_long and current_ratio > ls_high:
                 ls_ok = False
             elif is_short and current_ratio < ls_low:
                 ls_ok = False
-        
+
         checks["long_short_ratio"] = {
             "passed": ls_ok,
             "current_ratio": current_ratio,
@@ -959,16 +959,16 @@ async def run_pre_filter_async(
             divergence = cvd_data.get("divergence")
             strength = cvd_data.get("strength", 0)
             div_type = cvd_data.get("type")
-            
+
             if divergence and strength > cvd_threshold:
                 is_long = signal.direction in (SignalDirection.LONG,)
                 is_short = signal.direction in (SignalDirection.SHORT,)
-                
+
                 if is_long and div_type == "bearish":
                     cvd_ok = False
                 elif is_short and div_type == "bullish":
                     cvd_ok = False
-            
+
             checks["cvd_divergence"] = {
                 "passed": cvd_ok,
                 "divergence_type": div_type,
@@ -989,10 +989,10 @@ async def run_pre_filter_async(
         from enhanced_market_data import fetch_basis_data
         basis_data = await fetch_basis_data(ticker)
         basis_pct = basis_data.get("basis_pct")
-        
+
         if basis_pct is not None:
             basis_ok = abs(basis_pct) < basis_max
-        
+
         checks["basis_check"] = {
             "passed": basis_ok,
             "basis_pct": basis_pct,
@@ -1014,16 +1014,16 @@ async def run_pre_filter_async(
         fg_data = await fetch_fear_greed_index()
         fg_value = fg_data.get("value")
         fg_class = fg_data.get("classification")
-        
+
         is_long = signal.direction in (SignalDirection.LONG,)
         is_short = signal.direction in (SignalDirection.SHORT,)
-        
+
         if fg_value is not None:
             if fg_value <= fg_threshold and is_long:
                 fg_ok = False
             elif fg_value >= 80 and is_short:
                 fg_ok = False
-        
+
         checks["fear_greed"] = {
             "passed": fg_ok,
             "value": fg_value,
@@ -1046,12 +1046,12 @@ async def run_pre_filter_async(
             regime_data = await detect_volatility_regime(ohlcv_1h)
             regime = regime_data.get("regime")
             suggestion = regime_data.get("suggestion")
-            
+
             if regime == "extreme_volatility":
                 regime_ok = False
             elif regime == "high_volatility" and market.atr_pct and market.atr_pct > vol_multiplier * regime_data.get("avg_atr_pct", 5):
                 regime_ok = False
-            
+
             checks["volatility_regime"] = {
                 "passed": regime_ok,
                 "regime": regime,
