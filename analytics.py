@@ -35,11 +35,13 @@ async def calculate_performance(
     if not trades:
         return _empty_performance()
 
-    # Calculate metrics
-    total_trades = len(trades)
+    # Calculate metrics - only count executed trades that entered the market
     executed_trades = [t for t in trades if bool(getattr(t, "execute", False))]
-    closed_trades = [t for t in executed_trades if _is_closed_trade(t)]
-    open_trades = len(executed_trades) - len(closed_trades)
+    # Filter out pending/rejected orders - only count filled/closed trades
+    filled_or_closed = [t for t in executed_trades if _is_filled_or_closed(t)]
+    closed_trades = [t for t in filled_or_closed if _is_closed_trade(t)]
+    open_trades = len(filled_or_closed) - len(closed_trades)
+    total_trades = len(filled_or_closed)
 
     # PnL calculations
     pnls = [float(getattr(t, "pnl_pct", 0.0)) for t in closed_trades if getattr(t, "pnl_pct", None) is not None]
@@ -219,6 +221,20 @@ def _empty_performance() -> dict[str, Any]:
         "equity_curve": [],
         "ai_stats": {},
     }
+
+
+def _is_filled_or_closed(trade: Any) -> bool:
+    """
+    Check if trade is filled (entered market) or closed (exited market).
+    Excludes pending, rejected, cancelled orders.
+    """
+    status = str(getattr(trade, "order_status", "") or "").lower()
+    # Valid statuses: filled (entered), simulated (paper entered), closed (exited)
+    valid_statuses = {
+        "filled", "simulated", "closed", "paper_closed", "exchange_closed",
+        "tp_hit", "sl_hit", "limit_filled"
+    }
+    return status in valid_statuses
 
 
 def _is_closed_trade(trade: Any) -> bool:
