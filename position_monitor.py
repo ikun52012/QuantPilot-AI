@@ -128,7 +128,7 @@ async def get_monitor_state() -> dict:
 
 async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
     """Run one full tracking cycle and persist TP/SL/PnL updates.
-    
+
     Protected by asyncio.Lock to prevent concurrent execution from
     both scheduler and manual admin API trigger.
     """

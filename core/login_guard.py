@@ -12,8 +12,8 @@ from loguru import logger
 from core.config import settings
 
 _MAX_ATTEMPTS = 5
-_LOCKOUT_SECONDS = 900  # 15 minutes
-_WINDOW_SECONDS = 600   # 10-minute sliding window
+_LOCKOUT_SECONDS = 900
+_WINDOW_SECONDS = 600
 
 _lock = threading.Lock()
 _attempts: dict[str, list[float]] = {}
@@ -64,7 +64,7 @@ def _cleanup_old_entries() -> None:
 def is_locked_out(ip: str) -> bool:
     """Check if an IP is currently locked out."""
     _init_redis()
-    
+
     if _redis_client:
         try:
             lockout_data = _redis_client.get(_redis_key_lockout(ip))
@@ -93,7 +93,7 @@ def is_locked_out(ip: str) -> bool:
 def remaining_lockout_seconds(ip: str) -> int:
     """Return seconds remaining in lockout, or 0 if not locked."""
     _init_redis()
-    
+
     if _redis_client:
         try:
             lockout_data = _redis_client.get(_redis_key_lockout(ip))
@@ -120,24 +120,24 @@ def record_failed_attempt(ip: str) -> int | None:
     """
     _init_redis()
     now = time.time()
-    
+
     if _redis_client:
         try:
             attempts_key = _redis_key_attempts(ip)
             lockout_key = _redis_key_lockout(ip)
-            
+
             existing = _redis_client.get(attempts_key)
             attempts = json.loads(existing) if existing else []
             cutoff = now - _WINDOW_SECONDS
             attempts = [t for t in attempts if t > cutoff]
             attempts.append(now)
-            
+
             if len(attempts) >= _MAX_ATTEMPTS:
                 _redis_client.setex(lockout_key, _LOCKOUT_SECONDS, str(now))
                 _redis_client.delete(attempts_key)
                 logger.warning(f"[LoginGuard] IP {ip} locked out after {_MAX_ATTEMPTS} failed attempts (Redis)")
                 return None
-            
+
             _redis_client.setex(attempts_key, _WINDOW_SECONDS, json.dumps(attempts))
             remaining = _MAX_ATTEMPTS - len(attempts)
             return remaining
@@ -163,7 +163,7 @@ def record_failed_attempt(ip: str) -> int | None:
 def record_successful_login(ip: str) -> None:
     """Clear failed attempts on successful login."""
     _init_redis()
-    
+
     if _redis_client:
         try:
             _redis_client.delete(_redis_key_attempts(ip))
@@ -180,7 +180,7 @@ def record_successful_login(ip: str) -> None:
 def get_stats() -> dict:
     """Return current lockout statistics."""
     _init_redis()
-    
+
     if _redis_client:
         try:
             lockout_keys = _redis_client.keys("login_guard:lockout:*")

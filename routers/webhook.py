@@ -11,7 +11,6 @@ Processing:
 - Actual processing runs in background task
 - Fingerprint deduplication prevents duplicate execution
 """
-import asyncio
 import hmac
 import json
 

@@ -165,7 +165,7 @@ async def websocket_positions(websocket: WebSocket):
     - position_update: {position_id, ticker, pnl_pct, current_price, ...}
     - position_closed: {position_id, exit_reason, pnl_pct}
     - trade_executed: {trade_id, ticker, direction, entry_price}
-    
+
     Authentication:
     - Must send auth message within _WS_AUTH_TIMEOUT_SECS seconds
     - Unauthenticated connections are closed with code 4008

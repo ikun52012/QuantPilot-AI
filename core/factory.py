@@ -26,7 +26,6 @@ from routers.strategies import router as strategies_router
 from routers.strategy_editor import router as strategy_editor_router
 from routers.subscription import router as subscription_router
 from routers.user import router as user_router
-
 from routers.webhook import router as webhook_router
 from routers.websocket import router as websocket_router
 
