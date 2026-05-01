@@ -380,6 +380,18 @@ async def run_pre_filter_async(
     soft_fail_reasons: list[str] = []
     ticker = signal.ticker.upper()
 
+    has_price_data = market.current_price > 0
+    has_volume_data = market.volume_24h > 0
+    has_atr_data = market.atr_pct is not None
+    has_rsi_data = market.rsi_1h is not None
+    has_spread_data = market.bid_ask_spread > 0
+    has_orderbook_data = market.orderbook_imbalance is not None
+    has_funding_data = market.funding_rate is not None
+    has_oi_data = market.open_interest_change_pct is not None
+    has_ema_data = market.ema_fast is not None and market.ema_slow is not None
+
+    missing_data_checks = []
+
     # ── Check 1: Daily trade limit ──
     try:
         daily_count_snapshot = await count_today_executed_trades_async(user_id=user_id)
@@ -426,7 +438,7 @@ async def run_pre_filter_async(
     # ── Check 4: Price sanity check ──
     price_ok = True
     price_deviation_max = thresholds.get("price_deviation_pct_max", ticker)
-    if market.current_price > 0 and signal.price > 0:
+    if has_price_data and signal.price > 0:
         price_diff = abs(signal.price - market.current_price) / market.current_price * 100
         price_ok = price_diff < price_deviation_max
         checks["price_sanity"] = {
@@ -439,11 +451,14 @@ async def run_pre_filter_async(
         if not price_ok:
             reasons.append(f"Signal price deviates {price_diff:.2f}% from market")
             _record_filter_block("price_sanity", ticker)
+    elif not has_price_data:
+        checks["price_sanity"] = {"passed": True, "missing_data": True, "note": "No price data available"}
+        missing_data_checks.append("price_sanity")
 
     # ── Check 5: Extreme volatility guard ──
     vol_ok = True
     atr_max = thresholds.get("atr_pct_max", ticker)
-    if market.atr_pct is not None:
+    if has_atr_data:
         vol_ok = market.atr_pct < atr_max
         checks["volatility_guard"] = {
             "passed": vol_ok,
@@ -453,11 +468,14 @@ async def run_pre_filter_async(
         if not vol_ok:
             reasons.append(f"Extreme volatility: ATR% = {market.atr_pct:.2f}% > {atr_max}%")
             _record_filter_block("volatility_guard", ticker)
+    elif not has_atr_data:
+        checks["volatility_guard"] = {"passed": True, "missing_data": True, "note": "No ATR data available"}
+        missing_data_checks.append("volatility_guard")
 
     # ── Check 6: Spread check ──
     spread_ok = True
     spread_max = thresholds.get("spread_pct_max", ticker)
-    if market.bid_ask_spread > 0:
+    if has_spread_data:
         spread_ok = market.bid_ask_spread < spread_max
         checks["spread"] = {
             "passed": spread_ok,
@@ -467,11 +485,14 @@ async def run_pre_filter_async(
         if not spread_ok:
             soft_fail_reasons.append(f"Spread wide: {market.bid_ask_spread:.4f}% (soft fail)")
             checks["spread"]["soft_fail"] = True
+    elif not has_spread_data:
+        checks["spread"] = {"passed": True, "missing_data": True, "note": "No spread data available"}
+        missing_data_checks.append("spread")
 
     # ── Check 7: Volume sanity ──
     volume_ok = True
     volume_min = thresholds.get("volume_24h_min", ticker)
-    if market.volume_24h > 0:
+    if has_volume_data:
         volume_ok = market.volume_24h > volume_min
         checks["volume"] = {
             "passed": volume_ok,
@@ -481,6 +502,9 @@ async def run_pre_filter_async(
         if not volume_ok:
             soft_fail_reasons.append(f"Low volume: ${market.volume_24h:,.0f} (soft fail)")
             checks["volume"]["soft_fail"] = True
+    elif not has_volume_data:
+        checks["volume"] = {"passed": True, "missing_data": True, "note": "No volume data available"}
+        missing_data_checks.append("volume")
 
     # ── Check 8: Large sudden move guard ──
     sudden_move_ok = True
@@ -504,7 +528,7 @@ async def run_pre_filter_async(
     rsi_ok = True
     rsi_long_max = thresholds.get("rsi_long_max", ticker)
     rsi_short_min = thresholds.get("rsi_short_min", ticker)
-    if market.rsi_1h is not None:
+    if has_rsi_data:
         is_long = signal.direction in (SignalDirection.LONG,)
         is_short = signal.direction in (SignalDirection.SHORT,)
 
@@ -522,11 +546,14 @@ async def run_pre_filter_async(
         if not rsi_ok:
             reasons.append(f"RSI extreme: {market.rsi_1h:.1f} conflicts with {signal.direction.value}")
             _record_filter_block("rsi_extreme", ticker)
+    elif not has_rsi_data:
+        checks["rsi_extreme"] = {"passed": True, "missing_data": True, "note": "No RSI data available"}
+        missing_data_checks.append("rsi_extreme")
 
     # ── Check 10: Funding Rate Guard ──
     funding_ok = True
     funding_threshold = thresholds.get("funding_rate_threshold", ticker)
-    if market.funding_rate is not None:
+    if has_funding_data:
         is_long = signal.direction in (SignalDirection.LONG,)
         is_short = signal.direction in (SignalDirection.SHORT,)
 
@@ -544,12 +571,15 @@ async def run_pre_filter_async(
         if not funding_ok:
             soft_fail_reasons.append(f"Funding rate extreme: {market.funding_rate*100:.4f}% (soft fail)")
             checks["funding_rate"]["soft_fail"] = True
+    elif not has_funding_data:
+        checks["funding_rate"] = {"passed": True, "missing_data": True, "note": "No funding rate data available"}
+        missing_data_checks.append("funding_rate")
 
     # ── Check 11: Orderbook Imbalance Guard ──
     ob_ok = True
     ob_long_min = thresholds.get("orderbook_long_min", ticker)
     ob_short_max = thresholds.get("orderbook_short_max", ticker)
-    if market.orderbook_imbalance is not None and market.orderbook_imbalance > 0:
+    if has_orderbook_data and market.orderbook_imbalance > 0:
         is_long = signal.direction in (SignalDirection.LONG,)
         is_short = signal.direction in (SignalDirection.SHORT,)
 
@@ -567,6 +597,9 @@ async def run_pre_filter_async(
         if not ob_ok:
             reasons.append(f"Orderbook imbalance {market.orderbook_imbalance:.2f} against {signal.direction.value}")
             _record_filter_block("orderbook_imbalance", ticker)
+    elif not has_orderbook_data:
+        checks["orderbook_imbalance"] = {"passed": True, "missing_data": True, "note": "No orderbook data available"}
+        missing_data_checks.append("orderbook_imbalance")
 
     # ── Check 12: Weekend / Low Liquidity Hours Guard ──
     time_ok = True
@@ -634,7 +667,7 @@ async def run_pre_filter_async(
     # ── Check 15: EMA Trend Alignment ──
     ema_ok = True
     ema_diff_min = thresholds.get("ema_diff_pct_min", ticker)
-    if market.ema_fast is not None and market.ema_slow is not None:
+    if has_ema_data:
         is_long = signal.direction in (SignalDirection.LONG,)
         is_short = signal.direction in (SignalDirection.SHORT,)
 
@@ -658,6 +691,9 @@ async def run_pre_filter_async(
         if not ema_ok:
             soft_fail_reasons.append("EMA trend conflict (soft fail)")
             checks["ema_alignment"]["soft_fail"] = True
+    elif not has_ema_data:
+        checks["ema_alignment"] = {"passed": True, "missing_data": True, "note": "No EMA data available"}
+        missing_data_checks.append("ema_alignment")
 
     # ── Check 16: Market Structure (SMC) Validation ──
     structure_ok = True
@@ -696,7 +732,7 @@ async def run_pre_filter_async(
     # ── Check 17: Open Interest Change (NEW) ──
     oi_ok = True
     oi_max = thresholds.get("oi_change_pct_max", ticker)
-    if market.open_interest_change_pct is not None:
+    if has_oi_data:
         oi_ok = abs(market.open_interest_change_pct) < oi_max
         checks["oi_change"] = {
             "passed": oi_ok,
@@ -707,6 +743,9 @@ async def run_pre_filter_async(
         if not oi_ok:
             soft_fail_reasons.append(f"OI change: {market.open_interest_change_pct:+.2f}% (soft fail)")
             checks["oi_change"]["soft_fail"] = True
+    elif not has_oi_data:
+        checks["oi_change"] = {"passed": True, "missing_data": True, "note": "No OI data available"}
+        missing_data_checks.append("oi_change")
 
     # ── Check 18: Correlated Assets Check (NEW) ──
     correlated_ok = True

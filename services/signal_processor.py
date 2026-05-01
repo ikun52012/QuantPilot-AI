@@ -376,7 +376,7 @@ class SignalProcessor:
         signal: TradingViewSignal,
         market: MarketContext,
         user_settings: dict | None = None,
-        prefilter_result: PreFilterResult | None = None,
+prefilter_result: PreFilterResult | None = None,
     ) -> AIAnalysis:
         """Run AI analysis on the signal."""
         import time
@@ -390,14 +390,16 @@ class SignalProcessor:
                 for check in prefilter_result.checks.values()
                 if not check.get("passed", True) and not check.get("disabled", False) and not check.get("soft_fail", False)
             )
+            missing_data_count = sum(1 for check in prefilter_result.checks.values() if check.get("missing_data", False))
             notable_checks = []
             for check_name, check in prefilter_result.checks.items():
-                if check.get("soft_fail", False) or not check.get("passed", True):
+                if check.get("soft_fail", False) or not check.get("passed", True) or check.get("missing_data", False):
                     notable_checks.append(check_name)
             scoped_user_settings["_prefilter_summary"] = {
                 "score": round(float(prefilter_result.score), 2),
                 "soft_fail_count": soft_fail_count,
                 "hard_fail_count": hard_fail_count,
+                "missing_data_count": missing_data_count,
                 "notable_checks": notable_checks[:6],
             }
 

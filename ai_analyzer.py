@@ -376,6 +376,36 @@ def _build_user_prompt(
     ts_config = _effective_trailing_stop_config(user_settings)
     prefilter_summary = ((user_settings or {}).get("_prefilter_summary") or {}) if isinstance(user_settings, dict) else {}
 
+    missing_data_items = []
+    if market.current_price <= 0:
+        missing_data_items.append("current price")
+    if market.volume_24h <= 0:
+        missing_data_items.append("24h volume")
+    if market.atr_pct is None:
+        missing_data_items.append("ATR")
+    if market.rsi_1h is None:
+        missing_data_items.append("RSI")
+    if market.bid_ask_spread <= 0:
+        missing_data_items.append("bid-ask spread")
+    if market.orderbook_imbalance is None:
+        missing_data_items.append("orderbook imbalance")
+    if market.funding_rate is None:
+        missing_data_items.append("funding rate")
+
+    missing_data_section = ""
+    if missing_data_items:
+        missing_data_section = f"""
+## ⚠️ Market Data Limitations
+This ticker may be a less common trading instrument (e.g., stock token, precious metal, or niche asset).
+The following market metrics are unavailable: {', '.join(missing_data_items)}.
+When market data is limited:
+- Base your analysis primarily on the signal price, direction, timeframe, and strategy context
+- You may still recommend "execute" if the signal appears reasonable, but use lower confidence
+- Set warnings to inform about missing data limitations
+- Use simpler stop-loss and take-profit estimates based on typical asset volatility for this type of instrument
+- DO NOT automatically reject solely due to missing market data; evaluate what information IS available
+"""
+
     tp_section = f"""
 ## Take-Profit Configuration
 - Active TP Levels: {tp_config.num_levels}
@@ -402,6 +432,9 @@ def _build_user_prompt(
         soft_fail_count = prefilter_summary.get("soft_fail_count")
         if soft_fail_count is not None:
             prefilter_lines.append(f"- Soft Fails Before AI: {soft_fail_count}")
+        missing_data_count = prefilter_summary.get("missing_data_count")
+        if missing_data_count is not None and missing_data_count > 0:
+            prefilter_lines.append(f"- Checks Skipped (Missing Data): {missing_data_count}")
         notable = prefilter_summary.get("notable_checks") or []
         if notable:
             prefilter_lines.append(f"- Notable Checks: {'; '.join(str(item) for item in notable)}")
@@ -445,6 +478,7 @@ def _build_user_prompt(
 - Timeframe: {signal.timeframe}
 - Strategy: {signal.strategy}
 - Message: {signal.message}
+{missing_data_section}
 
 ## Current Market Context
 - Current Price: {market.current_price}
