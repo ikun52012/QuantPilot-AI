@@ -102,7 +102,7 @@ services:
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-changeme-in-production} ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a '${REDIS_PASSWORD:-changeme-in-production}' ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
