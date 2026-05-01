@@ -1170,7 +1170,26 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
             if contracts != 0:
                 unrealized_pnl = pos.get('unrealizedPnl')
                 notional = pos.get('notional')
-                percentage = pos.get('percentage')
+                entry_price = pos.get('entryPrice')
+                mark_price = pos.get('markPrice')
+                
+                # BUG FIX: Always calculate percentage from entry vs mark price
+                # Don't trust exchange's 'percentage' field as it may contain incorrect data
+                percentage = None
+                if entry_price is not None and mark_price is not None:
+                    try:
+                        entry = float(entry_price)
+                        mark = float(mark_price)
+                        if entry > 0:
+                            side = str(pos.get('side') or '').lower()
+                            if side == 'long':
+                                percentage = ((mark - entry) / entry) * 100
+                            elif side == 'short':
+                                percentage = ((entry - mark) / entry) * 100
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        pass
+                
+                # Fallback: calculate from unrealized_pnl / notional if available
                 if percentage is None and unrealized_pnl is not None and notional:
                     try:
                         percentage = (float(unrealized_pnl) / abs(float(notional))) * 100
