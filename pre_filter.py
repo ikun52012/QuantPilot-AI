@@ -146,11 +146,22 @@ class FilterThresholds:
         "ema_diff_pct_min": 1.0,
         "consecutive_loss_max": 3,
         "cooldown_seconds": 300,
+        "cooldown_win_multiplier": 0.5,
+        "cooldown_loss_multiplier": 2.0,
         "price_deviation_pct_max": 2.0,
         "oi_change_pct_max": 15.0,
         "correlated_asset_change_max": 5.0,
         "whale_threshold_usd": 1_000_000,
         "min_pass_score": 0.0,
+        "liquidation_distance_pct_min": 1.0,
+        "long_short_ratio_extreme_high": 2.5,
+        "long_short_ratio_extreme_low": 0.4,
+        "basis_pct_max": 0.5,
+        "fear_greed_extreme_threshold": 20,
+        "cvd_divergence_threshold": 15.0,
+        "volatility_regime_multiplier": 1.5,
+        "position_reduce_on_loss_pct": 50.0,
+        "dynamic_cooldown_enabled": True,
     }
 
     DYNAMIC_THRESHOLDS: dict[str, dict[str, Any]] = {
@@ -276,6 +287,13 @@ FILTER_WEIGHTS: dict[str, float] = {
     "oi_change": 6.0,
     "correlated_assets": 4.0,
     "whale_activity": 5.0,
+    "macro_events": 10.0,
+    "liquidation_heatmap": 7.0,
+    "long_short_ratio": 6.0,
+    "cvd_divergence": 7.0,
+    "basis_check": 5.0,
+    "fear_greed": 4.0,
+    "volatility_regime": 6.0,
 }
 
 
@@ -424,15 +442,39 @@ async def run_pre_filter_async(
         reasons.append(f"Daily loss limit reached ({current_pnl:.2f}% / -{max_daily_loss_pct}%)")
         _record_filter_block("daily_loss_limit", ticker)
 
-    # ── Check 3: Duplicate signal cooldown ──
-    cooldown_secs = thresholds.get("cooldown_seconds", ticker)
+    # ── Check 3: Duplicate signal cooldown (Dynamic) ──
+    base_cooldown = thresholds.get("cooldown_seconds", ticker)
+    dynamic_enabled = thresholds.get("dynamic_cooldown_enabled", ticker)
+    
+    if dynamic_enabled:
+        win_multiplier = thresholds.get("cooldown_win_multiplier", ticker)
+        loss_multiplier = thresholds.get("cooldown_loss_multiplier", ticker)
+        try:
+            recent_results = await get_recent_trade_results_async(limit=5, user_id=user_id, ticker=ticker)
+            if recent_results:
+                last_pnl = recent_results[0].get("pnl_pct", 0) if recent_results else 0
+                if last_pnl > 0:
+                    cooldown_secs = int(base_cooldown * win_multiplier)
+                elif last_pnl < 0:
+                    cooldown_secs = int(base_cooldown * loss_multiplier)
+                else:
+                    cooldown_secs = base_cooldown
+            else:
+                cooldown_secs = base_cooldown
+        except Exception:
+            cooldown_secs = base_cooldown
+    else:
+        cooldown_secs = base_cooldown
+    
     cooldown_ok = _check_cooldown(signal, cooldown_seconds=cooldown_secs, user_id=user_id)
     checks["cooldown"] = {
         "passed": cooldown_ok,
         "cooldown_seconds": cooldown_secs,
+        "base_cooldown": base_cooldown,
+        "dynamic_enabled": dynamic_enabled,
     }
     if not cooldown_ok:
-        reasons.append(f"Duplicate signal within {cooldown_secs}s cooldown")
+        reasons.append(f"Duplicate signal within {cooldown_secs}s cooldown (dynamic)")
         _record_filter_block("cooldown", ticker)
 
     # ── Check 4: Price sanity check ──
@@ -626,43 +668,69 @@ async def run_pre_filter_async(
         soft_fail_reasons.append("Low liquidity period (soft fail)")
         checks["market_hours"]["soft_fail"] = True
 
-    # ── Check 13: Consecutive Loss Protection ──
+    # ── Check 13: Consecutive Loss Protection (Smart) ──
     consec_ok = True
     consec_max = thresholds.get("consecutive_loss_max", ticker)
+    position_reduce_pct = thresholds.get("position_reduce_on_loss_pct", ticker)
+    consec_losses = 0
     try:
         recent_results = await get_recent_trade_results_async(limit=5, user_id=user_id)
+        consec_losses = sum(1 for r in recent_results[:consec_max] if r.get("pnl_pct", 0) < 0)
+        
         if len(recent_results) >= consec_max:
             last_n = recent_results[:consec_max]
             if all(r.get("pnl_pct", 0) < 0 for r in last_n):
                 consec_ok = False
 
+        position_suggestion = "normal"
+        if consec_losses >= 2:
+            position_suggestion = f"reduce_by_{int(position_reduce_pct)}%"
+        if consec_losses >= consec_max - 1:
+            position_suggestion = "pause_or_minimal"
+
         checks["consecutive_loss"] = {
             "passed": consec_ok,
             "recent_results": len(recent_results),
-            "consecutive_losses": sum(1 for r in recent_results[:consec_max] if r.get("pnl_pct", 0) < 0),
+            "consecutive_losses": consec_losses,
             "threshold": consec_max,
+            "position_suggestion": position_suggestion,
+            "reduce_pct": position_reduce_pct if consec_losses >= 2 else 0,
         }
         if not consec_ok:
-            reasons.append(f"{consec_max} consecutive losses — cooling off")
+            reasons.append(f"{consec_max} consecutive losses — cooling off, suggest {position_suggestion}")
             _record_filter_block("consecutive_loss", ticker)
+        elif consec_losses >= 2:
+            soft_fail_reasons.append(f"{consec_losses} recent losses — suggest reduce position by {position_reduce_pct}%")
+            checks["consecutive_loss"]["soft_fail"] = True
     except Exception:
         checks["consecutive_loss"] = {"passed": True, "note": "Could not check"}
 
-    # ── Check 14: Same-Direction Signal Saturation ──
+    # ── Check 14: Same-Direction Signal Saturation (with Reverse Detection) ──
     saturation_ok = True
     saturation_max = thresholds.get("signal_saturation_max", ticker)
     same_dir_count = _count_recent_same_direction(signal, window_minutes=60, user_id=user_id)
+    opposite_dir_count = _count_recent_opposite_direction(signal, window_minutes=60, user_id=user_id)
+    
     if same_dir_count >= saturation_max:
         saturation_ok = False
+    
+    reverse_signal_boost = False
+    if opposite_dir_count >= saturation_max - 1 and same_dir_count < saturation_max:
+        reverse_signal_boost = True
 
     checks["signal_saturation"] = {
         "passed": saturation_ok,
         "same_direction_last_hour": same_dir_count,
+        "opposite_direction_last_hour": opposite_dir_count,
         "threshold": saturation_max,
+        "reverse_signal_boost": reverse_signal_boost,
     }
     if not saturation_ok:
         soft_fail_reasons.append(f"Signal saturation: {same_dir_count} {signal.direction.value} in 1h (soft fail)")
         checks["signal_saturation"]["soft_fail"] = True
+    elif reverse_signal_boost:
+        soft_fail_reasons.append(f"Reverse signal opportunity: {opposite_dir_count} opposite signals recently")
+        checks["signal_saturation"]["note"] = "reverse_opportunity"
 
     # ── Check 15: EMA Trend Alignment ──
     ema_ok = True
@@ -805,6 +873,199 @@ async def run_pre_filter_async(
             checks["whale_activity"]["soft_fail"] = True
 
     # ═══════════════════════════════════════════
+    # ENHANCED CHECKS (v4) - New Market Data
+    # ═══════════════════════════════════════════
+
+    # ── Check 20: Macro Events Risk ──
+    macro_ok = True
+    try:
+        from enhanced_market_data import check_macro_event_risk
+        macro_ok, macro_reason = await check_macro_event_risk()
+        checks["macro_events"] = {
+            "passed": macro_ok,
+            "reason": macro_reason,
+        }
+        if not macro_ok:
+            reasons.append(f"Macro event risk: {macro_reason}")
+            _record_filter_block("macro_events", ticker)
+    except Exception as e:
+        checks["macro_events"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ── Check 21: Liquidation Heatmap ──
+    liq_ok = True
+    liq_distance_min = thresholds.get("liquidation_distance_pct_min", ticker)
+    try:
+        from enhanced_market_data import fetch_liquidation_heatmap
+        liq_data = await fetch_liquidation_heatmap(ticker)
+        nearest_liq = liq_data.get("nearest_liq_level")
+        nearest_distance = liq_data.get("nearest_liq_distance_pct")
+        
+        if nearest_distance is not None and nearest_distance < liq_distance_min:
+            total_liq = liq_data.get("total_long_liq_usd", 0) + liq_data.get("total_short_liq_usd", 0)
+            if total_liq > 10_000_000:
+                liq_ok = False
+        
+        checks["liquidation_heatmap"] = {
+            "passed": liq_ok,
+            "nearest_liq_distance_pct": nearest_distance,
+            "total_liq_usd": liq_data.get("total_long_liq_usd", 0) + liq_data.get("total_short_liq_usd", 0),
+            "threshold_distance": liq_distance_min,
+        }
+        if not liq_ok:
+            soft_fail_reasons.append(f"Large liquidations nearby (${total_liq/1e6:.1f}M within {nearest_distance:.1f}%)")
+            checks["liquidation_heatmap"]["soft_fail"] = True
+    except Exception as e:
+        checks["liquidation_heatmap"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ── Check 22: Long/Short Ratio Extreme ──
+    ls_ok = True
+    ls_high = thresholds.get("long_short_ratio_extreme_high", ticker)
+    ls_low = thresholds.get("long_short_ratio_extreme_low", ticker)
+    try:
+        from enhanced_market_data import fetch_long_short_ratio
+        ls_data = await fetch_long_short_ratio(ticker)
+        current_ratio = ls_data.get("current_ratio")
+        
+        if current_ratio is not None:
+            is_long = signal.direction in (SignalDirection.LONG,)
+            is_short = signal.direction in (SignalDirection.SHORT,)
+            
+            if is_long and current_ratio > ls_high:
+                ls_ok = False
+            elif is_short and current_ratio < ls_low:
+                ls_ok = False
+        
+        checks["long_short_ratio"] = {
+            "passed": ls_ok,
+            "current_ratio": current_ratio,
+            "long_pct": ls_data.get("long_accounts_pct"),
+            "short_pct": ls_data.get("short_accounts_pct"),
+            "thresholds": {"high": ls_high, "low": ls_low},
+        }
+        if not ls_ok:
+            soft_fail_reasons.append(f"Long/Short ratio extreme: {current_ratio:.2f} (soft fail)")
+            checks["long_short_ratio"]["soft_fail"] = True
+    except Exception as e:
+        checks["long_short_ratio"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ── Check 23: CVD Divergence ──
+    cvd_ok = True
+    cvd_threshold = thresholds.get("cvd_divergence_threshold", ticker)
+    try:
+        ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
+        if len(ohlcv_1h) >= 20:
+            from enhanced_market_data import calculate_cvd_divergence
+            cvd_data = await calculate_cvd_divergence(ohlcv_1h)
+            divergence = cvd_data.get("divergence")
+            strength = cvd_data.get("strength", 0)
+            div_type = cvd_data.get("type")
+            
+            if divergence and strength > cvd_threshold:
+                is_long = signal.direction in (SignalDirection.LONG,)
+                is_short = signal.direction in (SignalDirection.SHORT,)
+                
+                if is_long and div_type == "bearish":
+                    cvd_ok = False
+                elif is_short and div_type == "bullish":
+                    cvd_ok = False
+            
+            checks["cvd_divergence"] = {
+                "passed": cvd_ok,
+                "divergence_type": div_type,
+                "strength": strength,
+                "price_change_pct": cvd_data.get("price_change_pct"),
+                "threshold": cvd_threshold,
+            }
+            if not cvd_ok:
+                soft_fail_reasons.append(f"CVD divergence: {div_type} (${strength:.1f}%)")
+                checks["cvd_divergence"]["soft_fail"] = True
+    except Exception as e:
+        checks["cvd_divergence"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ── Check 24: Basis (Spot vs Futures) ──
+    basis_ok = True
+    basis_max = thresholds.get("basis_pct_max", ticker)
+    try:
+        from enhanced_market_data import fetch_basis_data
+        basis_data = await fetch_basis_data(ticker)
+        basis_pct = basis_data.get("basis_pct")
+        
+        if basis_pct is not None:
+            basis_ok = abs(basis_pct) < basis_max
+        
+        checks["basis_check"] = {
+            "passed": basis_ok,
+            "basis_pct": basis_pct,
+            "spot_price": basis_data.get("spot_price"),
+            "futures_price": basis_data.get("futures_price"),
+            "threshold": basis_max,
+        }
+        if not basis_ok:
+            soft_fail_reasons.append(f"Basis abnormal: {basis_pct:.3f}% (soft fail)")
+            checks["basis_check"]["soft_fail"] = True
+    except Exception as e:
+        checks["basis_check"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ── Check 25: Fear & Greed Index ──
+    fg_ok = True
+    fg_threshold = thresholds.get("fear_greed_extreme_threshold", ticker)
+    try:
+        from enhanced_market_data import fetch_fear_greed_index
+        fg_data = await fetch_fear_greed_index()
+        fg_value = fg_data.get("value")
+        fg_class = fg_data.get("classification")
+        
+        is_long = signal.direction in (SignalDirection.LONG,)
+        is_short = signal.direction in (SignalDirection.SHORT,)
+        
+        if fg_value is not None:
+            if fg_value <= fg_threshold and is_long:
+                fg_ok = False
+            elif fg_value >= 80 and is_short:
+                fg_ok = False
+        
+        checks["fear_greed"] = {
+            "passed": fg_ok,
+            "value": fg_value,
+            "classification": fg_class,
+            "threshold": fg_threshold,
+        }
+        if not fg_ok:
+            soft_fail_reasons.append(f"Fear & Greed extreme: {fg_value} ({fg_class})")
+            checks["fear_greed"]["soft_fail"] = True
+    except Exception as e:
+        checks["fear_greed"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ── Check 26: Volatility Regime ──
+    regime_ok = True
+    vol_multiplier = thresholds.get("volatility_regime_multiplier", ticker)
+    try:
+        ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
+        if len(ohlcv_1h) >= 100:
+            from enhanced_market_data import detect_volatility_regime
+            regime_data = await detect_volatility_regime(ohlcv_1h)
+            regime = regime_data.get("regime")
+            suggestion = regime_data.get("suggestion")
+            
+            if regime == "extreme_volatility":
+                regime_ok = False
+            elif regime == "high_volatility" and market.atr_pct and market.atr_pct > vol_multiplier * regime_data.get("avg_atr_pct", 5):
+                regime_ok = False
+            
+            checks["volatility_regime"] = {
+                "passed": regime_ok,
+                "regime": regime,
+                "current_atr_pct": regime_data.get("current_atr_pct"),
+                "avg_atr_pct": regime_data.get("avg_atr_pct"),
+                "suggestion": suggestion,
+            }
+            if not regime_ok:
+                soft_fail_reasons.append(f"Volatility regime: {regime} - {suggestion}")
+                checks["volatility_regime"]["soft_fail"] = True
+    except Exception as e:
+        checks["volatility_regime"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ═══════════════════════════════════════════
     # Final Verdict
     # ═══════════════════════════════════════════
 
@@ -884,4 +1145,16 @@ def _count_recent_same_direction(signal: TradingViewSignal, window_minutes: int 
         return sum(
             1 for s in _recent_signals
             if s["timestamp"] > cutoff and s.get("user_id", "admin") == scope and s["direction"] == signal.direction
+        )
+
+
+def _count_recent_opposite_direction(signal: TradingViewSignal, window_minutes: int = 60, user_id: str | None = None) -> int:
+    """Count how many signals of the opposite direction we received recently (thread-safe)."""
+    cutoff = utcnow() - timedelta(minutes=window_minutes)
+    scope = user_id or "admin"
+    opposite_direction = SignalDirection.SHORT if signal.direction == SignalDirection.LONG else SignalDirection.LONG
+    with _state_lock:
+        return sum(
+            1 for s in _recent_signals
+            if s["timestamp"] > cutoff and s.get("user_id", "admin") == scope and s["direction"] == opposite_direction
         )

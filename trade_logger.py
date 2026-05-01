@@ -260,11 +260,15 @@ async def get_today_pnl_async(user_id: str | None = None) -> float:
         return get_today_pnl(user_id)
 
 
-async def get_recent_trade_results_async(limit: int = 5, user_id: str | None = None) -> list[dict[str, Any]]:
+async def get_recent_trade_results_async(limit: int = 5, user_id: str | None = None, ticker: str | None = None) -> list[dict[str, Any]]:
     """Get the most recent executed trade results (async version)."""
     try:
         all_trades = await get_trade_history_async(days=3, user_id=user_id)
         executed = [t for t in all_trades if t.get("execute")]
+        if ticker:
+            from core.utils.common import position_symbol_key
+            target_key = position_symbol_key(ticker)
+            executed = [t for t in executed if position_symbol_key(t.get("ticker", "")) == target_key]
         executed.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
         return executed[:limit]
     except Exception as e:
