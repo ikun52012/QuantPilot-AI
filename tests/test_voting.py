@@ -122,6 +122,7 @@ class TestAggregateVotingResults:
 class TestTrailingStopMode:
     def test_mode_values(self):
         assert TrailingStopMode.NONE.value == "none"
+        assert TrailingStopMode.AUTO.value == "auto"
         assert TrailingStopMode.MOVING.value == "moving"
         assert TrailingStopMode.BREAKEVEN_ON_TP1.value == "breakeven_on_tp1"
         assert TrailingStopMode.STEP_TRAILING.value == "step_trailing"
@@ -130,6 +131,9 @@ class TestTrailingStopMode:
     def test_mode_from_string(self):
         mode = TrailingStopMode("breakeven_on_tp1")
         assert mode == TrailingStopMode.BREAKEVEN_ON_TP1
+
+        mode_auto = TrailingStopMode("auto")
+        assert mode_auto == TrailingStopMode.AUTO
 
     def test_invalid_mode_raises(self):
         with pytest.raises(ValueError):

@@ -27,9 +27,10 @@ class SignalSource(str, Enum):
 # ─────────────────────────────────────────────
 class TrailingStopMode(str, Enum):
     NONE = "none"
-    MOVING = "moving"                        # Classic moving trailing stop
-    BREAKEVEN_ON_TP1 = "breakeven_on_tp1"    # Move SL to entry when TP1 hit
-    STEP_TRAILING = "step_trailing"          # Move SL to TP(n-1) when TP(n) hit
+    AUTO = "auto"                              # Smart auto-select based on AI analysis
+    MOVING = "moving"                          # Classic moving trailing stop
+    BREAKEVEN_ON_TP1 = "breakeven_on_tp1"      # Move SL to entry when TP1 hit
+    STEP_TRAILING = "step_trailing"            # Move SL to TP(n-1) when TP(n) hit
     PROFIT_PCT_TRAILING = "profit_pct_trailing"  # Activate trailing when profit % threshold reached
 
 

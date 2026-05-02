@@ -227,7 +227,7 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
     trailing_stop = runtime.get("trailing_stop") or {}
     if trailing_stop:
         mode = str(trailing_stop.get("mode") or settings.trailing_stop.mode)
-        allowed = {"none", "moving", "breakeven_on_tp1", "step_trailing", "profit_pct_trailing"}
+        allowed = {"none", "auto", "moving", "breakeven_on_tp1", "step_trailing", "profit_pct_trailing"}
         settings.trailing_stop.mode = mode if mode in allowed else "none"
         settings.trailing_stop.trail_pct = _to_float(trailing_stop.get("trail_pct"), settings.trailing_stop.trail_pct, 0.1, 100)
         settings.trailing_stop.activation_profit_pct = _to_float(
