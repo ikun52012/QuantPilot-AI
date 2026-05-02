@@ -701,7 +701,7 @@ prefilter_result: PreFilterResult | None = None,
         max_levels = self._max_tp_levels(user_settings)
         decision.take_profit_levels = self._build_take_profit_levels(
             signal.direction, entry_price, raw_levels, max_levels,
-            atr_pct=atr_pct, sl_price=sl_price
+            atr_pct=atr_pct, sl_price=sl_price, user_settings=user_settings
         )
         if decision.take_profit_levels:
             decision.take_profit = decision.take_profit_levels[0].price
@@ -773,6 +773,7 @@ prefilter_result: PreFilterResult | None = None,
             self._max_tp_levels(user_settings),
             atr_pct=atr_pct,
             sl_price=decision.stop_loss,
+            user_settings=user_settings,
         )
         if decision.take_profit_levels:
             decision.take_profit = decision.take_profit_levels[0].price
@@ -785,6 +786,7 @@ prefilter_result: PreFilterResult | None = None,
         max_levels: int,
         atr_pct: float = 0.0,
         sl_price: float | None = None,
+        user_settings: dict | None = None,
     ) -> list:
         """Validate TP direction, distance, and cap cumulative close quantity to 100%.
 
@@ -794,7 +796,12 @@ prefilter_result: PreFilterResult | None = None,
         """
         from models import TakeProfitLevel
 
-        min_tp_pct = self._get_min_tp_percentage(atr_pct, {})
+        min_tp_pct = self._get_min_tp_percentage(atr_pct, user_settings or {})
+
+        # Get min R:R ratio from settings
+        risk_cfg = (user_settings or {}).get("risk") or {}
+        min_rr_ratio = safe_float(risk_cfg.get("min_risk_reward_ratio"), 1.5)
+
         levels = []
         remaining_pct = 100.0
 
@@ -808,9 +815,9 @@ prefilter_result: PreFilterResult | None = None,
                 sl_dist_pct = abs(sl_price - entry) / entry * 100
                 if sl_dist_pct > 0:
                     rr_ratio = tp_dist_pct / sl_dist_pct
-                    if rr_ratio < 1.0:
+                    if rr_ratio < min_rr_ratio:
                         logger.warning(
-                            f"[Signal] TP at {price} has R:R {rr_ratio:.2f}:1, below minimum 1:1. "
+                            f"[Signal] TP at {price} has R:R {rr_ratio:.2f}:1, below minimum {min_rr_ratio}:1. "
                             f"Skipping this TP level."
                         )
                         continue
