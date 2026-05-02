@@ -993,7 +993,10 @@ async function saveAISettings() {
     const provider = document.getElementById('set-ai-provider').value;
     const customProviderName = document.getElementById('set-custom-provider-name')?.value || 'custom';
     const isCustomProvider = provider === 'custom' || provider === customProviderName.toLowerCase();
-    
+
+    const votingModelsText = document.getElementById('voting-models')?.value || '';
+    const votingModels = votingModelsText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+
     await saveSettings('/api/settings/ai', {
         provider,
         api_key: document.getElementById('set-ai-key').value,
@@ -1010,7 +1013,10 @@ async function saveAISettings() {
         mistral_model: document.getElementById('set-mistral-model')?.value || 'mistral-large-latest',
         openai_model: document.getElementById('set-openai-model')?.value || 'gpt-5.5',
         anthropic_model: document.getElementById('set-anthropic-model')?.value || 'claude-opus-4-7',
-        deepseek_model: document.getElementById('set-deepseek-model')?.value || 'deepseek-v4-pro'
+        deepseek_model: document.getElementById('set-deepseek-model')?.value || 'deepseek-v4-pro',
+        voting_enabled: document.getElementById('voting-enabled')?.checked || false,
+        voting_models: votingModels,
+        voting_strategy: document.getElementById('voting-strategy')?.value || 'weighted'
     }, 'btn-save-ai');
 }
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
