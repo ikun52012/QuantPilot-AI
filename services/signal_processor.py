@@ -628,9 +628,48 @@ prefilter_result: PreFilterResult | None = None,
                     decision.reason = rr_reason
                     return decision
 
-        # Set trailing stop
+        # Set trailing stop - use smart selector if not explicitly configured
         trailing_cfg = (user_settings or {}).get("trailing_stop") or {}
-        trailing_mode = str(trailing_cfg.get("mode") or settings.trailing_stop.mode)
+        user_trailing_mode = str(trailing_cfg.get("mode") or "").lower()
+
+        # Determine trailing stop mode
+        if user_trailing_mode and user_trailing_mode != "none" and user_trailing_mode != "auto":
+            # User explicitly configured a mode (not "auto")
+            trailing_mode = user_trailing_mode
+            trailing_reason = "User configured trailing stop mode"
+        elif user_trailing_mode == "auto" or not user_trailing_mode:
+            # Use smart trailing stop selector
+            from smart_trailing_stop import select_smart_trailing_stop
+            from timeframe_exits import get_timeframe_config
+
+            tf_config = get_timeframe_config(str(signal.timeframe or "60"))
+            num_tp_levels = self._max_tp_levels(user_settings)
+
+            trailing_decision = select_smart_trailing_stop(
+                confidence=analysis.confidence,
+                market_condition=analysis.market_condition,
+                trend_strength=analysis.trend_strength or "moderate",
+                risk_score=analysis.risk_score,
+                timeframe=str(signal.timeframe or "60"),
+                num_tp_levels=num_tp_levels,
+                atr_pct=safe_float(market.atr_pct, tf_config.default_sl_pct),
+                user_override=None,  # Auto mode, no override
+            )
+            trailing_mode = trailing_decision.mode.value
+            trailing_reason = trailing_decision.reasoning
+
+            # Log the smart selection
+            logger.info(
+                f"[Signal] Smart trailing stop selected: {trailing_mode} "
+                f"(confidence={analysis.confidence:.2f}, market={analysis.market_condition}, "
+                f"trend={analysis.trend_strength or 'moderate'}, reason={trailing_reason})"
+            )
+        else:
+            # Default from settings
+            trailing_mode = str(settings.trailing_stop.mode)
+            trailing_reason = "Default from server settings"
+
+        # Apply trailing stop if not "none"
         if trailing_mode != "none":
             from models import TrailingStopConfig, TrailingStopMode
             decision.trailing_stop = TrailingStopConfig(

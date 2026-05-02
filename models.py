@@ -207,8 +207,10 @@ class AIAnalysis(BaseModel):
     position_size_pct: float = Field(default=1.0, ge=0.0, le=1.0)  # suggested position size as % of default
     recommended_leverage: float = Field(default=0.0, ge=0.0, le=125.0, description="0.0 means stand aside/no leverage recommended")
     risk_score: float = Field(default=0.5, ge=0.0, le=1.0)
-    market_condition: str = ""          # trending / ranging / volatile / calm
+    market_condition: str = ""          # trending_up / trending_down / ranging / volatile / calm
+    trend_strength: str = ""            # strong / moderate / weak / none
     warnings: list[str] = Field(default_factory=list)
+    recommended_trailing_stop_mode: str = "none"  # none / breakeven_on_tp1 / step_trailing / moving
     raw_response: str = ""              # raw LLM output for debugging
 
 

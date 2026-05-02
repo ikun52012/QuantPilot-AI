@@ -125,6 +125,7 @@ Your analysis process:
 5. Factor in broader market conditions (funding rate, 24h trend)
 6. Determine optimal take-profit targets (up to 4 levels)
 7. Assess volatility to suggest appropriate trailing stop parameters
+8. Recommend trailing stop mode based on market conditions and confidence
 
 You MUST respond in valid JSON format with these exact fields:
 {
@@ -147,6 +148,8 @@ You MUST respond in valid JSON format with these exact fields:
     "recommended_leverage": 1-125,
     "risk_score": 0.0-1.0,
     "market_condition": "trending_up" | "trending_down" | "ranging" | "volatile" | "calm",
+    "trend_strength": "strong" | "moderate" | "weak" | "none",
+    "recommended_trailing_stop_mode": "none" | "breakeven_on_tp1" | "step_trailing" | "moving",
     "warnings": ["list of risk warnings"]
 }
 
@@ -172,6 +175,18 @@ Key rules:
 - If you recommend "execute" or "modify", include a valid `suggested_stop_loss` and valid TP levels required by the server
 - If you recommend "reject" or "hold", set `suggested_entry`, `suggested_stop_loss`, `suggested_take_profit`, and all `suggested_tp*` fields to null
 - If `suggested_direction` matches the incoming signal direction, return null instead of repeating the same direction
+
+Trailing Stop Mode Selection Guidelines:
+- "none": Strong trend + high confidence (>0.75). Let profits run, maximize R:R.
+- "step_trailing": Moderate trend, ranging market, or volatile conditions. Lock profits at each TP level.
+- "breakeven_on_tp1": High risk score (>0.7), weak trend, or uncertain market. Protect capital first.
+- "moving": Only for classic trailing stop preference (not recommended for multi-TP trades).
+
+Trend Strength Assessment:
+- "strong": Clear directional momentum, EMA alignment, price making higher highs/lower lows consistently
+- "moderate": Some trend direction but with pullbacks, EMAs somewhat aligned
+- "weak": Price oscillating around key levels, no clear direction
+- "none": No trend, pure ranging/choppy market
 
 Respond ONLY with the JSON object, no other text."""
 
@@ -1183,6 +1198,8 @@ async def _aggregate_voting_results_async(
             recommended_leverage=min(weighted_leverage, 50.0),
             risk_score=weighted_risk,
             market_condition=best_analysis.market_condition,
+            trend_strength=best_analysis.trend_strength,
+            recommended_trailing_stop_mode=best_analysis.recommended_trailing_stop_mode,
             warnings=[f"Voting result from {len(results)} models"] + best_analysis.warnings,
             raw_response=f"Voting aggregate: {combined_reasoning}",
         )
@@ -1460,6 +1477,8 @@ def _parse_response(raw: str) -> AIAnalysis:
             recommended_leverage=recommended_leverage,
             risk_score=risk_score,
             market_condition=str(data.get("market_condition", "")),
+            trend_strength=str(data.get("trend_strength", "moderate")),
+            recommended_trailing_stop_mode=str(data.get("recommended_trailing_stop_mode", "none")),
             warnings=warnings,
             raw_response=raw,
         )
