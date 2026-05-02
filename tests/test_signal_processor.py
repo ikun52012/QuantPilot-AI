@@ -418,13 +418,14 @@ class TestSignalProcessorBuildDecision:
 
     def test_modified_entry_within_range(self, processor, sample_signal, sample_market):
         """Should use AI modified entry when within 5% of signal price."""
+        # Note: For 60min timeframe, SL max is 2.0%, TP min is 3.0%
         analysis = AIAnalysis(
             confidence=0.8,
             recommendation="modify",
             reasoning="Better entry",
             suggested_entry=49500,
-            suggested_stop_loss=48500,
-            suggested_tp1=51000,
+            suggested_stop_loss=49200,  # 1.6% from 50000, within 2.0% max
+            suggested_tp1=51500,  # 3% from 50000, meets 3.0% min
             tp1_qty_pct=100.0,
         )
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
@@ -438,8 +439,8 @@ class TestSignalProcessorBuildDecision:
             recommendation="modify",
             reasoning="Wild entry",
             suggested_entry=40000,
-            suggested_stop_loss=39000,
-            suggested_tp1=51000,
+            suggested_stop_loss=39200,  # Adjusted for timeframe limits
+            suggested_tp1=41200,  # 3% from 40000
             tp1_qty_pct=100.0,
         )
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
@@ -452,8 +453,8 @@ class TestSignalProcessorBuildDecision:
             confidence=0.8,
             recommendation="modify",
             reasoning="Need a better entry",
-            suggested_stop_loss=48500,
-            suggested_tp1=51000,
+            suggested_stop_loss=49200,  # Adjusted for timeframe limits
+            suggested_tp1=51500,
             tp1_qty_pct=100.0,
         )
 

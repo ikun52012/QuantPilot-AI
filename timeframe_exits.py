@@ -28,206 +28,208 @@ class TimeframeExitConfig:
     tp4_range: tuple[float, float]  # TP4 target range
 
 
-# Timeframe configurations with realistic SL/TP distances
+# Timeframe configurations with healthy R:R ratios
+# Key principle: TP1 minimum >= SL maximum × 1.5 (ensures healthy R:R even in worst case)
+# For single-TP mode, this guarantees minimum 1.5:1 R:R ratio
 TIMEFRAME_CONFIGS: dict[str, TimeframeExitConfig] = {
-    # Very short timeframes - scalping style
+    # Very short timeframes - scalping style (R:R: 1.5:1 to 4:1)
     "1": TimeframeExitConfig(
         timeframe="1",
         min_sl_pct=0.15,
-        max_sl_pct=0.5,
-        default_sl_pct=0.25,
-        min_tp_pct=0.2,
-        max_tp_pct=0.8,
-        tp1_range=(0.2, 0.4),
-        tp2_range=(0.4, 0.6),
-        tp3_range=(0.6, 0.8),
-        tp4_range=(0.8, 1.0),
+        max_sl_pct=0.3,
+        default_sl_pct=0.2,
+        min_tp_pct=0.45,  # max_sl(0.3) × 1.5 = 0.45
+        max_tp_pct=1.2,
+        tp1_range=(0.45, 0.6),   # R:R: 1.5:1 ~ 4:1
+        tp2_range=(0.6, 0.9),
+        tp3_range=(0.9, 1.0),
+        tp4_range=(1.0, 1.2),
     ),
     "1m": TimeframeExitConfig(
         timeframe="1m",
         min_sl_pct=0.15,
-        max_sl_pct=0.5,
-        default_sl_pct=0.25,
-        min_tp_pct=0.2,
-        max_tp_pct=0.8,
-        tp1_range=(0.2, 0.4),
-        tp2_range=(0.4, 0.6),
-        tp3_range=(0.6, 0.8),
-        tp4_range=(0.8, 1.0),
+        max_sl_pct=0.3,
+        default_sl_pct=0.2,
+        min_tp_pct=0.45,
+        max_tp_pct=1.2,
+        tp1_range=(0.45, 0.6),
+        tp2_range=(0.6, 0.9),
+        tp3_range=(0.9, 1.0),
+        tp4_range=(1.0, 1.2),
     ),
-    # Short timeframes - quick trades
+    # Short timeframes (R:R: 1.5:1 to 3:1)
     "3": TimeframeExitConfig(
         timeframe="3",
         min_sl_pct=0.2,
-        max_sl_pct=0.8,
-        default_sl_pct=0.35,
-        min_tp_pct=0.3,
-        max_tp_pct=1.2,
-        tp1_range=(0.3, 0.5),
-        tp2_range=(0.5, 0.8),
-        tp3_range=(0.8, 1.0),
-        tp4_range=(1.0, 1.5),
+        max_sl_pct=0.5,
+        default_sl_pct=0.3,
+        min_tp_pct=0.75,  # max_sl(0.5) × 1.5 = 0.75
+        max_tp_pct=1.5,
+        tp1_range=(0.75, 1.0),
+        tp2_range=(1.0, 1.2),
+        tp3_range=(1.2, 1.4),
+        tp4_range=(1.4, 1.5),
     ),
     "5": TimeframeExitConfig(
         timeframe="5",
         min_sl_pct=0.25,
-        max_sl_pct=1.0,
-        default_sl_pct=0.4,
-        min_tp_pct=0.35,
-        max_tp_pct=1.5,
-        tp1_range=(0.4, 0.7),
-        tp2_range=(0.7, 1.0),
-        tp3_range=(1.0, 1.3),
-        tp4_range=(1.3, 1.8),
+        max_sl_pct=0.6,
+        default_sl_pct=0.35,
+        min_tp_pct=0.9,  # max_sl(0.6) × 1.5 = 0.9
+        max_tp_pct=1.8,
+        tp1_range=(0.9, 1.2),
+        tp2_range=(1.2, 1.4),
+        tp3_range=(1.4, 1.6),
+        tp4_range=(1.6, 1.8),
     ),
     "5m": TimeframeExitConfig(
         timeframe="5m",
         min_sl_pct=0.25,
-        max_sl_pct=1.0,
-        default_sl_pct=0.4,
-        min_tp_pct=0.35,
-        max_tp_pct=1.5,
-        tp1_range=(0.4, 0.7),
-        tp2_range=(0.7, 1.0),
-        tp3_range=(1.0, 1.3),
-        tp4_range=(1.3, 1.8),
+        max_sl_pct=0.6,
+        default_sl_pct=0.35,
+        min_tp_pct=0.9,
+        max_tp_pct=1.8,
+        tp1_range=(0.9, 1.2),
+        tp2_range=(1.2, 1.4),
+        tp3_range=(1.4, 1.6),
+        tp4_range=(1.6, 1.8),
     ),
-    # Medium-short timeframes
+    # Medium-short timeframes (R:R: 1.5:1 to 3:1)
     "15": TimeframeExitConfig(
         timeframe="15",
-        min_sl_pct=0.35,
-        max_sl_pct=2.0,
+        min_sl_pct=0.4,
+        max_sl_pct=1.0,
         default_sl_pct=0.6,
-        min_tp_pct=0.5,
-        max_tp_pct=2.5,
-        tp1_range=(0.6, 1.0),
-        tp2_range=(1.0, 1.5),
-        tp3_range=(1.5, 2.0),
-        tp4_range=(2.0, 2.5),
+        min_tp_pct=1.5,  # max_sl(1.0) × 1.5 = 1.5
+        max_tp_pct=3.0,
+        tp1_range=(1.5, 2.0),
+        tp2_range=(2.0, 2.5),
+        tp3_range=(2.5, 2.8),
+        tp4_range=(2.8, 3.0),
     ),
     "15m": TimeframeExitConfig(
         timeframe="15m",
-        min_sl_pct=0.35,
-        max_sl_pct=2.0,
+        min_sl_pct=0.4,
+        max_sl_pct=1.0,
         default_sl_pct=0.6,
-        min_tp_pct=0.5,
-        max_tp_pct=2.5,
-        tp1_range=(0.6, 1.0),
-        tp2_range=(1.0, 1.5),
-        tp3_range=(1.5, 2.0),
-        tp4_range=(2.0, 2.5),
+        min_tp_pct=1.5,
+        max_tp_pct=3.0,
+        tp1_range=(1.5, 2.0),
+        tp2_range=(2.0, 2.5),
+        tp3_range=(2.5, 2.8),
+        tp4_range=(2.8, 3.0),
     ),
-    # Medium timeframes - standard swing trades
+    # Medium timeframes (R:R: 1.5:1 to 3:1)
     "30": TimeframeExitConfig(
         timeframe="30",
-        min_sl_pct=0.5,
-        max_sl_pct=3.0,
-        default_sl_pct=0.8,
-        min_tp_pct=0.7,
-        max_tp_pct=3.5,
-        tp1_range=(0.8, 1.3),
-        tp2_range=(1.3, 2.0),
-        tp3_range=(2.0, 2.8),
-        tp4_range=(2.8, 3.5),
+        min_sl_pct=0.6,
+        max_sl_pct=1.5,
+        default_sl_pct=0.9,
+        min_tp_pct=2.25,  # max_sl(1.5) × 1.5 = 2.25
+        max_tp_pct=4.5,
+        tp1_range=(2.25, 3.0),
+        tp2_range=(3.0, 3.5),
+        tp3_range=(3.5, 4.0),
+        tp4_range=(4.0, 4.5),
     ),
     "60": TimeframeExitConfig(
         timeframe="60",
-        min_sl_pct=0.7,
-        max_sl_pct=4.0,
+        min_sl_pct=0.8,
+        max_sl_pct=2.0,
         default_sl_pct=1.2,
-        min_tp_pct=1.0,
-        max_tp_pct=5.0,
-        tp1_range=(1.2, 2.0),
-        tp2_range=(2.0, 3.0),
-        tp3_range=(3.0, 4.0),
-        tp4_range=(4.0, 5.0),
+        min_tp_pct=3.0,  # max_sl(2.0) × 1.5 = 3.0
+        max_tp_pct=6.0,
+        tp1_range=(3.0, 4.0),
+        tp2_range=(4.0, 4.8),
+        tp3_range=(4.8, 5.4),
+        tp4_range=(5.4, 6.0),
     ),
     "1h": TimeframeExitConfig(
         timeframe="1h",
-        min_sl_pct=0.7,
-        max_sl_pct=4.0,
+        min_sl_pct=0.8,
+        max_sl_pct=2.0,
         default_sl_pct=1.2,
-        min_tp_pct=1.0,
-        max_tp_pct=5.0,
-        tp1_range=(1.2, 2.0),
-        tp2_range=(2.0, 3.0),
-        tp3_range=(3.0, 4.0),
-        tp4_range=(4.0, 5.0),
+        min_tp_pct=3.0,
+        max_tp_pct=6.0,
+        tp1_range=(3.0, 4.0),
+        tp2_range=(4.0, 4.8),
+        tp3_range=(4.8, 5.4),
+        tp4_range=(5.4, 6.0),
     ),
-    # Longer timeframes - position trades
+    # Longer timeframes (R:R: 1.5:1 to 3:1)
     "120": TimeframeExitConfig(
         timeframe="120",
-        min_sl_pct=1.0,
-        max_sl_pct=5.0,
+        min_sl_pct=1.2,
+        max_sl_pct=3.0,
         default_sl_pct=1.8,
-        min_tp_pct=1.5,
-        max_tp_pct=6.0,
-        tp1_range=(1.8, 2.5),
-        tp2_range=(2.5, 3.5),
-        tp3_range=(3.5, 4.5),
-        tp4_range=(4.5, 6.0),
+        min_tp_pct=4.5,  # max_sl(3.0) × 1.5 = 4.5
+        max_tp_pct=9.0,
+        tp1_range=(4.5, 6.0),
+        tp2_range=(6.0, 7.0),
+        tp3_range=(7.0, 8.0),
+        tp4_range=(8.0, 9.0),
     ),
     "240": TimeframeExitConfig(
         timeframe="240",
-        min_sl_pct=1.5,
-        max_sl_pct=7.0,
+        min_sl_pct=2.0,
+        max_sl_pct=4.0,
         default_sl_pct=2.5,
-        min_tp_pct=2.0,
-        max_tp_pct=8.0,
-        tp1_range=(2.5, 3.5),
-        tp2_range=(3.5, 5.0),
-        tp3_range=(5.0, 6.5),
-        tp4_range=(6.5, 8.0),
+        min_tp_pct=6.0,  # max_sl(4.0) × 1.5 = 6.0
+        max_tp_pct=12.0,
+        tp1_range=(6.0, 8.0),
+        tp2_range=(8.0, 9.5),
+        tp3_range=(9.5, 10.5),
+        tp4_range=(10.5, 12.0),
     ),
     "4h": TimeframeExitConfig(
         timeframe="4h",
-        min_sl_pct=1.5,
-        max_sl_pct=7.0,
+        min_sl_pct=2.0,
+        max_sl_pct=4.0,
         default_sl_pct=2.5,
-        min_tp_pct=2.0,
-        max_tp_pct=8.0,
-        tp1_range=(2.5, 3.5),
-        tp2_range=(3.5, 5.0),
-        tp3_range=(5.0, 6.5),
-        tp4_range=(6.5, 8.0),
+        min_tp_pct=6.0,
+        max_tp_pct=12.0,
+        tp1_range=(6.0, 8.0),
+        tp2_range=(8.0, 9.5),
+        tp3_range=(9.5, 10.5),
+        tp4_range=(10.5, 12.0),
     ),
-    # Daily timeframe - macro trades
+    # Daily timeframe (R:R: 1.5:1 to 3:1)
     "1D": TimeframeExitConfig(
         timeframe="1D",
-        min_sl_pct=2.5,
-        max_sl_pct=10.0,
+        min_sl_pct=3.0,
+        max_sl_pct=6.0,
         default_sl_pct=4.0,
-        min_tp_pct=3.5,
-        max_tp_pct=12.0,
-        tp1_range=(4.0, 5.5),
-        tp2_range=(5.5, 7.5),
-        tp3_range=(7.5, 9.5),
-        tp4_range=(9.5, 12.0),
+        min_tp_pct=9.0,  # max_sl(6.0) × 1.5 = 9.0
+        max_tp_pct=18.0,
+        tp1_range=(9.0, 12.0),
+        tp2_range=(12.0, 14.0),
+        tp3_range=(14.0, 16.0),
+        tp4_range=(16.0, 18.0),
     ),
     "D": TimeframeExitConfig(
         timeframe="D",
-        min_sl_pct=2.5,
-        max_sl_pct=10.0,
+        min_sl_pct=3.0,
+        max_sl_pct=6.0,
         default_sl_pct=4.0,
-        min_tp_pct=3.5,
-        max_tp_pct=12.0,
-        tp1_range=(4.0, 5.5),
-        tp2_range=(5.5, 7.5),
-        tp3_range=(7.5, 9.5),
-        tp4_range=(9.5, 12.0),
+        min_tp_pct=9.0,
+        max_tp_pct=18.0,
+        tp1_range=(9.0, 12.0),
+        tp2_range=(12.0, 14.0),
+        tp3_range=(14.0, 16.0),
+        tp4_range=(16.0, 18.0),
     ),
-    # Weekly timeframe
+    # Weekly timeframe (R:R: 1.5:1 to 3:1)
     "1W": TimeframeExitConfig(
         timeframe="1W",
-        min_sl_pct=4.0,
-        max_sl_pct=15.0,
+        min_sl_pct=5.0,
+        max_sl_pct=8.0,
         default_sl_pct=6.0,
-        min_tp_pct=5.0,
-        max_tp_pct=15.0,
-        tp1_range=(6.0, 8.0),
-        tp2_range=(8.0, 10.0),
-        tp3_range=(10.0, 12.0),
-        tp4_range=(12.0, 15.0),
+        min_tp_pct=12.0,  # max_sl(8.0) × 1.5 = 12.0
+        max_tp_pct=24.0,
+        tp1_range=(12.0, 16.0),
+        tp2_range=(16.0, 18.0),
+        tp3_range=(18.0, 20.0),
+        tp4_range=(20.0, 24.0),
     ),
 }
 
@@ -321,19 +323,23 @@ This signal is on a **{config.timeframe} timeframe**. Use these distance guideli
 
 ### Stop-Loss Rules
 - MINIMUM distance: {config.min_sl_pct}% from entry
-- MAXIMUM distance: {config.max_sl_pct}% from entry
-- RECOMMENDED: {config.default_sl_pct}% from entry (adjust based on volatility)
+- MAXIMUM distance: {config.max_sl_pct}% from entry (strictly enforced)
+- RECOMMENDED: {config.default_sl_pct}% from entry
 
-### Take-Profit Targets
-- TP1: {ranges['tp1'][0]}% to {ranges['tp1'][1]}% from entry (closest target)
+### Take-Profit Targets (Healthy R:R Required)
+- TP1: {ranges['tp1'][0]}% to {ranges['tp1'][1]}% from entry
 - TP2: {ranges['tp2'][0]}% to {ranges['tp2'][1]}% from entry
 - TP3: {ranges['tp3'][0]}% to {ranges['tp3'][1]}% from entry
-- TP4: {ranges['tp4'][0]}% to {ranges['tp4'][1]}% from entry (furthest target)
+- TP4: {ranges['tp4'][0]}% to {ranges['tp4'][1]}% from entry
+
+### Risk-Reward Ratio Requirements
+- **MINIMUM R:R: 1.5:1** for any TP level (even in worst-case SL scenario)
+- If using single TP mode, TP1 must be at least {config.min_tp_pct}% to ensure healthy R:R
+- Expected R:R range: 1.5:1 to 3:1 depending on actual SL distance
 
 ### Critical Rules
-1. DO NOT set SL below {config.min_sl_pct}% - will be auto-adjusted
-2. DO NOT set SL above {config.max_sl_pct}% - will be rejected (oversized risk)
-3. DO NOT set TP1 below {config.min_tp_pct}% - will be auto-adjusted
-4. Place SL at logical invalidation point (support/resistance break), NOT random distance
-5. Scale TP levels appropriately - first target should be achievable within timeframe horizon
+1. DO NOT set SL above {config.max_sl_pct}% - will be rejected (oversized risk)
+2. DO NOT set TP1 below {config.min_tp_pct}% - will be auto-adjusted
+3. Place SL at logical invalidation point (support/resistance break), NOT random distance
+4. For single-TP mode: ensure TP1 >= SL × 1.5 for healthy profit potential
 """
