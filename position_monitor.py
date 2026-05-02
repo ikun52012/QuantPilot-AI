@@ -434,14 +434,43 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
             order_status = str(order.get("status", "")).lower()
 
             if order_status in {"closed", "filled"}:
-                # Limit order filled - update position entry price
+                # Limit order filled - update position entry price and quantity
                 filled_price = safe_float(order.get("average") or order.get("price"))
+                filled_amount = safe_float(order.get("filled") or 0)
+                filled_cost = safe_float(order.get("cost") or 0)
+
                 position.status = "open"
                 position.updated_at = utcnow()
+
                 if filled_price > 0:
                     position.entry_price = filled_price
                     position.last_price = filled_price
-                    logger.info(f"[PositionMonitor] Limit order filled for {position.ticker} @ {filled_price}")
+
+                # Sync actual filled quantity from exchange
+                if filled_amount > 0:
+                    position.quantity = filled_amount
+                    position.remaining_quantity = filled_amount
+
+                # Update margin based on actual filled cost
+                if filled_cost > 0 and position.leverage > 0:
+                    position.margin = filled_cost / position.leverage
+                elif filled_amount > 0 and filled_price > 0 and position.leverage > 0:
+                    # Fallback: calculate margin from filled_amount * filled_price
+                    position.margin = (filled_amount * filled_price) / position.leverage
+
+                # Log fee if available
+                fee_info = order.get("fee", {})
+                if fee_info:
+                    fee_cost = safe_float(fee_info.get("cost", 0))
+                    fee_currency = str(fee_info.get("currency", ""))
+                    if fee_cost > 0:
+                        position.fees_total_usdt = fee_cost
+                        logger.info(f"[PositionMonitor] Fee recorded: {fee_cost} {fee_currency}")
+
+                logger.info(
+                    f"[PositionMonitor] Limit order filled for {position.ticker}: "
+                    f"qty={filled_amount}, price={filled_price}, cost={filled_cost}, margin={position.margin}"
+                )
 
             elif order_status in {"canceled", "cancelled", "expired", "rejected"}:
                 # Order expired/cancelled - close position as failed
