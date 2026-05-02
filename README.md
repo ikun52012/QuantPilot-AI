@@ -4,6 +4,8 @@
 
 **QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral, **OpenRouter 100+ models**, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
 
+**NEW in v4.6**: Enhanced risk validation (SL/TP distance + R:R ratio), per-ticker concurrency locks, liquidity sweep analysis, dynamic volatility-based SL adjustment, smart black swan handling (profit→trail, loss→close), correlation risk control, reverse signal auto-processing, intelligent AI fallback strategy.
+
 **NEW in v4.5**: Login brute-force protection, AI cost tracking, position conflict detection, voting timeout control, automated daily backups, Telegram i18n notifications, Nginx reverse proxy template, and full content page i18n coverage.
 
 ---
@@ -15,11 +17,15 @@
   - **OpenRouter** - Access 100+ models via single API (GPT-4o, Claude, Gemini, Llama 3.1, Mistral, Qwen).
   - **Multi-Model Voting** - Combine multiple AI providers for robust decisions. Strategies: weighted, consensus, best-confidence.
   - AI performs secondary risk assessment, identifies false breakouts, recommends optimal TP/SL.
+  - **NEW**: Intelligent fallback strategy when AI API fails (ATR/RSI-based analysis).
+  - **NEW**: Liquidity sweep analysis (pools, vacuums, false breakout detection).
+  - **NEW**: Reverse signal handling (auto-close opposite position before opening new).
 
-- **🛡️ 19-Layer Pre-Filter System**
+- **🛡️ 26-Layer Pre-Filter System**
   - Strict Webhook signal processor preventing entries during whale manipulation/black swan events.
   - Circuit breakers for max daily trades and drawdown.
   - Whale activity monitoring (Whale Alert, Etherscan, Blockchain.com).
+  - NEW: Macro events, liquidation heatmap, long/short ratio, CVD divergence, basis check, fear/greed, volatility regime.
 
 - **🧪 Backtest Engine (NEW)**
   - 3 built-in strategies: Simple Trend (EMA), SMC Trend (FVG+OB), AI Assistant (Multi-indicator).
@@ -60,6 +66,11 @@
 - **🎯 Smart Tiered Risk Management & Trailing Stops**
   - Up to 4 TP levels (TP1-TP4) with configurable distances and close percentages.
   - 5 trailing stop modes: Moving, Breakeven-on-TP1, Step, Profit-%, Static.
+  - **NEW**: SL/TP distance validation (min/max based on ATR).
+  - **NEW**: R:R ratio validation (TP1 ≥ 1.5:1, avg TP ≥ 1.2:1).
+  - **NEW**: Correlation risk control (max same-direction positions & exposure).
+  - **NEW**: Black swan smart handling (profit→trail, loss→close).
+  - **NEW**: Dynamic volatility-based SL adjustment.
 
 - **📈 K-line Charts (NEW)**
   - Chart.js dashboard chart backed by authenticated market-data APIs.

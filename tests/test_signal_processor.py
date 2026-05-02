@@ -145,7 +145,7 @@ class TestSignalProcessorBuildDecision:
             suggested_direction=SignalDirection.SHORT,
             suggested_stop_loss=49000,
             suggested_tp1=51000,
-        )
+)
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
         assert decision.execute is False
         assert "direction conflict" in decision.reason.lower()
@@ -165,10 +165,11 @@ class TestSignalProcessorBuildDecision:
             },
         )())
 
-        conflict = await processor._check_position_conflict(decision, "user-1")
+        conflict_reason, conflicting_position = await processor._check_position_conflict(decision, "user-1")
 
-        assert conflict is not None
-        assert "conflicting position" in conflict.lower()
+        assert conflict_reason is not None
+        assert "conflicting position" in conflict_reason.lower()
+        assert conflicting_position is not None
 
     def test_reject_no_stop_loss(self, processor, sample_signal, sample_market):
         """Should reject when no valid stop loss for opening trade."""
@@ -203,7 +204,7 @@ class TestSignalProcessorBuildDecision:
             recommendation="execute",
             reasoning="Good setup",
             suggested_stop_loss=49000,
-            suggested_tp1=51000,
+            suggested_tp1=51500,
             tp1_qty_pct=100.0,
         )
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})

@@ -848,22 +848,154 @@ async def _call_model_by_id(model_id: str, system: str, user: str) -> tuple[str,
 def _local_rule_analysis(system: str, user: str) -> str:
     """
     Local rule-based fallback when no AI models are available.
-    Returns a conservative analysis JSON.
+
+    Analyzes the signal context using simple rules:
+    - Check signal price vs market context hints
+    - Apply conservative risk defaults
+    - Provide basic directional validation
+
+    Returns a JSON analysis based on extracted signal data.
     """
     import json
+    import re
+
+    # Try to extract signal data from user prompt
+    signal_price = 0.0
+    signal_direction = "long"
+
+    try:
+        # Extract price
+        price_match = re.search(r"Signal Price:\s*([\d.]+)", user)
+        if price_match:
+            signal_price = float(price_match.group(1))
+
+        # Extract direction
+        dir_match = re.search(r"Direction:\s*(\w+)", user)
+        if dir_match:
+            signal_direction = dir_match.group(1).lower()
+
+        # Extract ticker
+        ticker_match = re.search(r"Ticker:\s*(\w+)", user)
+        if ticker_match:
+            ticker_match.group(1).upper()
+
+        # Extract timeframe
+        tf_match = re.search(r"Timeframe:\s*(\w+)", user)
+        if tf_match:
+            tf_match.group(1)
+
+    except Exception:
+        pass
+
+    # Extract market context data
+    current_price = signal_price
+    price_change_24h = 0.0
+    rsi_1h = 50.0
+    atr_pct = 2.0
+
+    try:
+        # Current price
+        cp_match = re.search(r"Current Price:\s*([\d.]+)", user)
+        if cp_match:
+            current_price = float(cp_match.group(1))
+
+        # 24h change
+        ch_match = re.search(r"Price Change 24h:\s*([+-]?[\d.]+)%", user)
+        if ch_match:
+            price_change_24h = float(ch_match.group(1))
+
+        # RSI
+        rsi_match = re.search(r"RSI \(1h\):\s*([\d.]+)", user)
+        if rsi_match:
+            rsi_1h = float(rsi_match.group(1))
+
+        # ATR
+        atr_match = re.search(r"ATR%:\s*([\d.]+)%", user)
+        if atr_match:
+            atr_pct = float(atr_match.group(1))
+
+    except Exception:
+        pass
+
+    # Apply intelligent rules
+    warnings = ["Local fallback mode - AI API unavailable"]
+    recommendation = "hold"
+    confidence = 0.4
+    reasoning = "AI model unavailable. Applying local risk rules."
+
+    # Rule 1: Extreme RSI conditions
+    if signal_direction == "long" and rsi_1h > 75:
+        warnings.append(f"RSI overbought ({rsi_1h:.0f}) - cautious for LONG")
+        confidence = max(0.2, confidence - 0.1)
+    elif signal_direction == "short" and rsi_1h < 25:
+        warnings.append(f"RSI oversold ({rsi_1h:.0f}) - cautious for SHORT")
+        confidence = max(0.2, confidence - 0.1)
+
+    # Rule 2: Large 24h move - volatility warning
+    if abs(price_change_24h) > 5:
+        warnings.append(f"Large 24h move ({price_change_24h:+.1f}%) - elevated volatility")
+        confidence = max(0.2, confidence - 0.1)
+
+    # Rule 3: Price alignment check
+    if current_price > 0 and signal_price > 0:
+        price_diff_pct = abs(current_price - signal_price) / current_price * 100
+        if price_diff_pct > 2:
+            warnings.append(f"Signal price differs {price_diff_pct:.1f}% from market - verify data")
+
+    # Calculate conservative SL/TP based on ATR
+    suggested_stop_loss = None
+    suggested_tp1 = None
+
+    if signal_price > 0 and atr_pct > 0:
+        sl_distance = atr_pct * 1.5  # SL at 1.5×ATR
+
+        if signal_direction == "long":
+            suggested_stop_loss = round(signal_price * (1 - sl_distance / 100), 4)
+            suggested_tp1 = round(signal_price * (1 + atr_pct * 2.0 / 100), 4)  # TP at 2×ATR
+        else:
+            suggested_stop_loss = round(signal_price * (1 + sl_distance / 100), 4)
+            suggested_tp1 = round(signal_price * (1 - atr_pct * 2.0 / 100), 4)
+
+        # Only recommend execute if we have valid SL/TP
+        if suggested_stop_loss and suggested_tp1:
+            recommendation = "execute"
+            reasoning = (
+                f"Local fallback: Conservative SL/TP calculated from ATR ({atr_pct:.1f}%). "
+                f"SL={suggested_stop_loss}, TP={suggested_tp1}. "
+                f"Recommend manual review before execution."
+            )
+            confidence = 0.5
+            warnings.append("Conservative position sizing recommended")
+
+    # Adjust leverage based on volatility
+    recommended_leverage = 3.0
+    if atr_pct > 4.0:
+        recommended_leverage = 1.0
+        warnings.append("High volatility - use minimal leverage")
+    elif atr_pct > 2.5:
+        recommended_leverage = 2.0
+
     return json.dumps({
-        "confidence": 0.5,
-        "recommendation": "hold",
-        "reasoning": "Local rule fallback: No AI model available. Holding position for manual review.",
+        "confidence": confidence,
+        "recommendation": recommendation,
+        "reasoning": reasoning,
         "suggested_direction": None,
         "suggested_entry": None,
-        "suggested_stop_loss": None,
-        "suggested_take_profit": None,
-        "position_size_pct": 0.5,
-        "recommended_leverage": 1.0,
-        "risk_score": 0.5,
-        "market_condition": "unknown",
-        "warnings": ["Local fallback mode - manual review recommended"],
+        "suggested_stop_loss": suggested_stop_loss,
+        "suggested_take_profit": suggested_tp1,
+        "suggested_tp1": suggested_tp1,
+        "suggested_tp2": None,
+        "suggested_tp3": None,
+        "suggested_tp4": None,
+        "tp1_qty_pct": 100.0,
+        "tp2_qty_pct": 0.0,
+        "tp3_qty_pct": 0.0,
+        "tp4_qty_pct": 0.0,
+        "position_size_pct": 0.3,  # Conservative sizing in fallback
+        "recommended_leverage": recommended_leverage,
+        "risk_score": 0.6,
+        "market_condition": "volatile" if atr_pct > 3.0 else "normal",
+        "warnings": warnings,
     })
 
 

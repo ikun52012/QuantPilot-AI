@@ -459,16 +459,208 @@ async def detect_volatility_regime(ohlcv_data: list[list[float]], lookback: int 
     return regime_data
 
 
+async def fetch_orderbook_data(symbol: str, exchange: str = "binance") -> dict[str, Any]:
+    """
+    Fetch order book data for liquidity analysis.
+
+    Free sources:
+    - Binance public API
+    - OKX public API
+
+    Returns order book with bids and asks.
+    """
+    orderbook_data = {
+        "bids": [],
+        "asks": [],
+        "timestamp": None,
+        "spread_pct": 0.0,
+    }
+
+    symbol_normalized = symbol.upper().replace("/", "").replace(":", "")
+    if "/" not in symbol and ":" not in symbol:
+        symbol_normalized = f"{symbol_normalized}USDT"
+
+    async def _fetch():
+        urls = {
+            "binance": f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol_normalized}&limit=100",
+            "okx": f"https://www.okx.com/api/v5/market/books?instId={symbol_normalized}-USDT-SWAP",
+        }
+
+        for ex_name, url in urls.items():
+            if ex_name != exchange:
+                continue
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+
+                            if ex_name == "binance":
+                                bids = data.get("bids", [])
+                                asks = data.get("asks", [])
+                                orderbook_data["bids"] = [
+                                    {"price": float(b[0]), "amount": float(b[1])}
+                                    for b in bids[:50]
+                                ]
+                                orderbook_data["asks"] = [
+                                    {"price": float(a[0]), "amount": float(a[1])}
+                                    for a in asks[:50]
+                                ]
+                                orderbook_data["timestamp"] = data.get("E")
+
+                                if bids and asks:
+                                    best_bid = float(bids[0][0])
+                                    best_ask = float(asks[0][0])
+                                    mid = (best_bid + best_ask) / 2
+                                    if mid > 0:
+                                        orderbook_data["spread_pct"] = (best_ask - best_bid) / mid * 100
+
+                                return orderbook_data
+
+                            elif ex_name == "okx":
+                                books = data.get("data", [])
+                                if books:
+                                    book = books[0]
+                                    bids = book.get("bids", [])
+                                    asks = book.get("asks", [])
+                                    orderbook_data["bids"] = [
+                                        {"price": float(b[0]), "amount": float(b[4])}
+                                        for b in bids[:50]
+                                    ]
+                                    orderbook_data["asks"] = [
+                                        {"price": float(a[0]), "amount": float(a[4])}
+                                        for a in asks[:50]
+                                    ]
+                                    orderbook_data["timestamp"] = book.get("ts")
+                                    return orderbook_data
+
+            except Exception as e:
+                logger.warning(f"[EnhancedData] Failed to fetch orderbook from {ex_name}: {e}")
+
+        return orderbook_data
+
+    cache_key = f"orderbook_{symbol}"
+    return await _fetch_with_cache(cache_key, _fetch, ttl=5)
+
+
+async def fetch_recent_trades(symbol: str, exchange: str = "binance", limit: int = 100) -> list[dict]:
+    """
+    Fetch recent trades for sweep detection.
+
+    Free sources:
+    - Binance public API
+    - OKX public API
+
+    Returns list of recent trades.
+    """
+    symbol_normalized = symbol.upper().replace("/", "").replace(":", "")
+    if "/" not in symbol and ":" not in symbol:
+        symbol_normalized = f"{symbol_normalized}USDT"
+
+    async def _fetch():
+        trades = []
+        urls = {
+            "binance": f"https://fapi.binance.com/fapi/v1/trades?symbol={symbol_normalized}&limit={limit}",
+            "okx": f"https://www.okx.com/api/v5/market/trades?instId={symbol_normalized}-USDT-SWAP&limit={limit}",
+        }
+
+        for ex_name, url in urls.items():
+            if ex_name != exchange:
+                continue
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+
+                            if ex_name == "binance":
+                                trades = [
+                                    {
+                                        "price": float(t.get("p", 0)),
+                                        "amount": float(t.get("q", 0)),
+                                        "timestamp": float(t.get("T", 0)),
+                                        "side": "buy" if t.get("m") is False else "sell",
+                                    }
+                                    for t in data
+                                ]
+                                return trades
+
+                            elif ex_name == "okx":
+                                trade_data = data.get("data", [])
+                                trades = [
+                                    {
+                                        "price": float(t.get("px", 0)),
+                                        "amount": float(t.get("sz", 0)),
+                                        "timestamp": float(t.get("ts", 0)),
+                                        "side": t.get("side", "buy"),
+                                    }
+                                    for t in trade_data
+                                ]
+                                return trades
+
+            except Exception as e:
+                logger.warning(f"[EnhancedData] Failed to fetch trades from {ex_name}: {e}")
+
+        return trades
+
+    cache_key = f"trades_{symbol}"
+    return await _fetch_with_cache(cache_key, _fetch, ttl=5)
+
+
+async def analyze_liquidity_structure(
+    symbol: str,
+    current_price: float,
+    ohlcv_data: list[list[float]] | None = None,
+) -> dict[str, Any]:
+    """
+    Perform complete liquidity analysis for a symbol.
+
+    Combines:
+    - Order book depth analysis
+    - Recent trades for sweep detection
+    - OHLCV for support/resistance levels
+
+    Returns liquidity analysis data.
+    """
+    from liquidity_analyzer import analyze_liquidity, format_liquidity_for_ai
+
+    orderbook = await fetch_orderbook_data(symbol)
+    recent_trades = await fetch_recent_trades(symbol)
+
+    analysis = analyze_liquidity(
+        ticker=symbol,
+        current_price=current_price,
+        orderbook=orderbook,
+        recent_trades=recent_trades,
+        ohlcv=ohlcv_data,
+    )
+
+    return {
+        "analysis": analysis,
+        "formatted_text": format_liquidity_for_ai(analysis, "long", current_price),
+        "orderbook": orderbook,
+        "has_liquidity_data": bool(orderbook.get("bids") or orderbook.get("asks")),
+    }
+
+
 async def fetch_all_enhanced_data(symbol: str, ohlcv_data: list[list[float]] | None = None) -> dict[str, Any]:
     """
     Fetch all enhanced market data in parallel.
+    Includes liquidity analysis.
     """
+    from market_data import fetch_market_context
+
+    # Get current price first
+    market_ctx = await fetch_market_context(symbol)
+    current_price = float(market_ctx.current_price or 0)
+
     results = await asyncio.gather(
         fetch_liquidation_heatmap(symbol),
         fetch_long_short_ratio(symbol),
         fetch_basis_data(symbol),
         fetch_fear_greed_index(),
         check_macro_event_risk(),
+        analyze_liquidity_structure(symbol, current_price, ohlcv_data),
     )
 
     cvd_data = {}
@@ -486,4 +678,5 @@ async def fetch_all_enhanced_data(symbol: str, ohlcv_data: list[list[float]] | N
         "macro_event_reason": results[4][1],
         "cvd_divergence": cvd_data,
         "volatility_regime": regime_data,
+        "liquidity": results[5],
     }

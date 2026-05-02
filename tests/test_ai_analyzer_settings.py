@@ -173,8 +173,8 @@ def test_custom_exit_plan_preserves_zero_qty_override(monkeypatch):
             "risk": {"exit_management_mode": "custom"},
             "take_profit": {
                 "num_levels": 2,
-                "tp1_pct": 2.0,
-                "tp2_pct": 4.0,
+                "tp1_pct": 3.0,  # 3% above entry → R:R = 3%/1.5% = 2:1
+                "tp2_pct": 5.0,
                 "tp1_qty": 100.0,
                 "tp2_qty": 0.0,
             },
@@ -184,7 +184,7 @@ def test_custom_exit_plan_preserves_zero_qty_override(monkeypatch):
     assert decision.execute is True
     assert len(decision.take_profit_levels) == 1
     assert decision.take_profit_levels[0].qty_pct == 100.0
-    assert decision.take_profit_levels[0].price == 102.0
+    assert decision.take_profit_levels[0].price == 103.0  # entry * (1 + 3%)
 
 
 def test_paper_trailing_stop_price_preserves_zero_activation(monkeypatch):

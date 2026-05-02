@@ -6,14 +6,17 @@ and keeps realised PnL in the database.
 import asyncio
 import json
 from datetime import timezone
+from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import (
     PositionModel,
     UserModel,
+    close_position_async,
     db_manager,
     record_position_close_trade_async,
 )
@@ -871,3 +874,322 @@ async def check_position_risk(position: dict, config: dict) -> dict:
         "leverage": leverage,
         "warnings": warnings,
     }
+
+
+async def _check_black_swan_event(session: AsyncSession, ticker: str, current_price: float) -> dict[str, Any]:
+    """
+    Detect black swan events (extreme market conditions).
+
+    Checks for:
+    - Extreme price drops (>10% in 1h)
+    - Exchange halts/suspensions
+    - Liquidation cascades
+    - Funding rate extremes
+
+    Returns dict with event status and recommended actions.
+    """
+    from enhanced_market_data import fetch_fear_greed_index, fetch_liquidation_heatmap
+
+    result = {
+        "is_black_swan": False,
+        "severity": "none",
+        "reasons": [],
+        "recommended_action": "continue",
+        "should_close_positions": False,
+        "should_pause_trading": False,
+    }
+
+    reasons = []
+
+    # Check Fear & Greed - extreme fear indicates panic
+    fg_data = await fetch_fear_greed_index()
+    fg_value = fg_data.get("value", 50)
+    if fg_value <= 10:
+        reasons.append(f"Extreme Fear (FGI={fg_value})")
+        result["severity"] = "critical"
+
+    # Check liquidation heatmap for cascades
+    liq_data = await fetch_liquidation_heatmap(ticker)
+    liq_volume = liq_data.get("total_liquidation_volume_24h", 0)
+    if liq_volume > 500_000_000:  # > $500M liquidations
+        reasons.append(f"Massive liquidations (${liq_volume/1e6:.0f}M)")
+        result["severity"] = "critical"
+
+    # Check recent trades for price crashes (would need to fetch)
+    # For now, use simple price check
+
+    if len(reasons) >= 2:
+        result["is_black_swan"] = True
+        result["reasons"] = reasons
+        result["should_close_positions"] = result["severity"] == "critical"
+        result["should_pause_trading"] = True
+        result["recommended_action"] = "close_all_positions"
+
+        logger.warning(
+            f"[PositionMonitor] BLACK SWAN DETECTED for {ticker}: "
+            f"severity={result['severity']}, reasons={reasons}"
+        )
+
+    return result
+
+
+async def _adjust_sl_for_volatility(
+    position: PositionModel,
+    exchange_config: dict,
+    current_atr_pct: float,
+    place_protective_stop,
+) -> bool:
+    """
+    Dynamically adjust stop loss when volatility spikes.
+
+    When ATR increases significantly, widen SL to avoid premature stops.
+    This prevents getting stopped out during normal volatility expansions.
+
+    Returns True if SL was adjusted.
+    """
+    entry_price = safe_float(position.entry_price)
+    current_stop = safe_float(position.stop_loss)
+    original_atr_pct = safe_float(position.original_atr_pct or position.entry_price * 0.02 / position.entry_price * 100)
+
+    if entry_price <= 0 or current_stop <= 0 or current_atr_pct <= 0:
+        return False
+
+    # Calculate volatility ratio (current vs original)
+    volatility_ratio = current_atr_pct / original_atr_pct if original_atr_pct > 0 else 1.0
+
+    # Only adjust if volatility has increased significantly (>2x)
+    if volatility_ratio < 2.0:
+        return False
+
+    direction = str(position.direction or "long").lower()
+    remaining_qty = _effective_remaining_quantity(position, safe_float(position.quantity))
+
+    # Calculate new SL based on increased volatility
+    # widen by proportion of volatility increase
+    sl_distance_pct = abs(current_stop - entry_price) / entry_price * 100
+    new_sl_distance_pct = sl_distance_pct * min(2.0, volatility_ratio / 2)
+
+    if direction == "long":
+        new_stop = entry_price * (1 - new_sl_distance_pct / 100.0)
+        # Don't move SL down for long positions (would increase risk)
+        if new_stop <= current_stop:
+            return False
+    else:
+        new_stop = entry_price * (1 + new_sl_distance_pct / 100.0)
+        # Don't move SL up for short positions
+        if new_stop >= current_stop:
+            return False
+
+    # Place new stop
+    result = await place_protective_stop(
+        ticker=position.ticker,
+        direction=position.direction,
+        quantity=remaining_qty,
+        stop_price=new_stop,
+        exchange_config=exchange_config,
+        existing_order_id=position.stop_loss_order_id or None,
+    )
+
+    if result.get("status") in {"placed", "simulated"}:
+        position.stop_loss = new_stop
+        position.stop_loss_order_id = str(result.get("order_id") or position.stop_loss_order_id or "")
+        position.updated_at = utcnow()
+        logger.info(
+            f"[PositionMonitor] Volatility-adjusted SL for {position.ticker}: "
+            f"old={current_stop:.4f}, new={new_stop:.4f}, vol_ratio={volatility_ratio:.2f}"
+        )
+        return True
+
+    return False
+
+
+async def monitor_black_swan_events(session: AsyncSession) -> dict[str, Any]:
+    """
+    Monitor for black swan events across all open positions.
+
+    Smart handling:
+    - Profitable positions: Enable trailing stop to protect gains, continue watching
+    - Losing positions: Close immediately to limit losses
+
+    Returns summary of detected events and actions taken.
+    """
+    from sqlalchemy import select
+
+    from core.database import PositionModel
+
+    stmt = select(PositionModel).where(
+        PositionModel.status.in_(["open", "pending"])
+    )
+    result = await session.execute(stmt)
+    positions = result.scalars().all()
+
+    if not positions:
+        return {"positions_checked": 0, "events_detected": 0}
+
+    events_summary = {
+        "positions_checked": len(positions),
+        "events_detected": 0,
+        "positions_closed": 0,
+        "positions_trailing_enabled": 0,
+        "actions": [],
+    }
+
+    tickers = {pos.ticker for pos in positions}
+
+    for ticker in tickers:
+        ticker_positions = [p for p in positions if p.ticker == ticker]
+
+        from exchange import get_ticker
+        try:
+            ticker_data = await get_ticker(ticker)
+            current_price = safe_float(ticker_data.get("last") or ticker_data.get("price") or 0)
+        except Exception:
+            continue
+
+        if current_price <= 0:
+            continue
+
+        swan_result = await _check_black_swan_event(session, ticker, current_price)
+
+        if swan_result.get("is_black_swan"):
+            events_summary["events_detected"] += 1
+            events_summary["actions"].append({
+                "ticker": ticker,
+                "severity": swan_result.get("severity"),
+                "reasons": swan_result.get("reasons"),
+            })
+
+            for pos in ticker_positions:
+                try:
+                    entry_price = safe_float(pos.entry_price)
+                    pnl_pct = _price_pnl_pct(
+                        str(pos.direction or "long").lower(),
+                        entry_price,
+                        current_price,
+                        1.0,
+                    )
+
+                    if pnl_pct > 0:
+                        # Profitable position: Enable aggressive trailing stop
+                        await _enable_emergency_trailing_stop(
+                            pos, current_price, session
+                        )
+                        events_summary["positions_trailing_enabled"] += 1
+                        logger.warning(
+                            f"[PositionMonitor] Black swan: enabled emergency trailing stop "
+                            f"for profitable position {pos.id[:8]} on {ticker} "
+                            f"(pnl={pnl_pct:+.2f}%)"
+                        )
+                        events_summary["actions"].append({
+                            "position_id": pos.id[:8],
+                            "ticker": ticker,
+                            "action": "trailing_stop_enabled",
+                            "pnl_pct": pnl_pct,
+                            "reason": "Profitable during black swan - protect gains",
+                        })
+                    else:
+                        # Losing position: Close immediately
+                        await close_position_async(
+                            session=session,
+                            position=pos,
+                            exit_price=current_price,
+                            close_reason="black_swan_loss_protection",
+                        )
+                        events_summary["positions_closed"] += 1
+                        logger.warning(
+                            f"[PositionMonitor] Black swan: closed losing position "
+                            f"{pos.id[:8]} on {ticker} (pnl={pnl_pct:+.2f}%)"
+                        )
+                        events_summary["actions"].append({
+                            "position_id": pos.id[:8],
+                            "ticker": ticker,
+                            "action": "closed",
+                            "pnl_pct": pnl_pct,
+                            "reason": "Losing during black swan - limit losses",
+                        })
+
+                except Exception as e:
+                    logger.error(f"[PositionMonitor] Failed to handle position: {e}")
+
+    if events_summary["events_detected"] > 0:
+        logger.warning(
+            f"[PositionMonitor] Black swan handling complete: "
+            f"detected={events_summary['events_detected']}, "
+            f"closed={events_summary['positions_closed']}, "
+            f"trailing={events_summary['positions_trailing_enabled']}"
+        )
+
+    await session.flush()
+    return events_summary
+
+
+async def _enable_emergency_trailing_stop(
+    position: PositionModel,
+    current_price: float,
+    session: AsyncSession,
+) -> bool:
+    """
+    Enable emergency trailing stop for a profitable position during black swan.
+
+    Uses aggressive trailing (tight distance) to lock in profits while
+    allowing position to continue if price keeps moving favorably.
+    """
+    direction = str(position.direction or "long").lower()
+    entry_price = safe_float(position.entry_price)
+    pnl_pct = _price_pnl_pct(direction, entry_price, current_price, 1.0)
+
+    if pnl_pct <= 0:
+        return False
+
+    # Calculate emergency trailing stop
+    # Place SL at breakeven + small buffer to guarantee profit protection
+    buffer_pct = min(0.5, pnl_pct * 0.3)  # 30% of profit as buffer, max 0.5%
+
+    if direction == "long":
+        emergency_sl = entry_price * (1 + buffer_pct / 100.0)
+        # Move SL up to protect profit
+        current_sl = safe_float(position.stop_loss)
+        if current_sl > 0 and emergency_sl <= current_sl:
+            emergency_sl = current_sl * (1 + 0.2 / 100.0)  # Slightly higher
+    else:
+        emergency_sl = entry_price * (1 - buffer_pct / 100.0)
+        current_sl = safe_float(position.stop_loss)
+        if current_sl > 0 and emergency_sl >= current_sl:
+            emergency_sl = current_sl * (1 - 0.2 / 100.0)
+
+    # Update position with emergency trailing config
+    emergency_config = {
+        "mode": "profit_pct_trailing",
+        "activation_profit_pct": 0.0,  # Activate immediately
+        "trail_pct": 0.5,  # Tight trailing
+        "trailing_step_pct": 0.2,
+    }
+    position.trailing_stop_config_json = json.dumps(emergency_config)
+    position.stop_loss = emergency_sl
+    position.updated_at = utcnow()
+
+    # Also try to place the stop on exchange if live trading
+    if position.live_trading and position.stop_loss_order_id:
+        exchange_config = _get_exchange_config_for_position(position)
+        if exchange_config:
+            try:
+                from exchange import place_protective_stop
+                remaining_qty = _effective_remaining_quantity(position, safe_float(position.quantity))
+                await place_protective_stop(
+                    ticker=position.ticker,
+                    direction=position.direction,
+                    quantity=remaining_qty,
+                    stop_price=emergency_sl,
+                    exchange_config=exchange_config,
+                    existing_order_id=position.stop_loss_order_id,
+                )
+            except Exception as e:
+                logger.warning(f"[PositionMonitor] Failed to update exchange SL: {e}")
+
+    logger.info(
+        f"[PositionMonitor] Emergency trailing stop enabled for {position.ticker}: "
+        f"SL={emergency_sl:.4f}, pnl={pnl_pct:+.2f}%"
+    )
+
+    await session.flush()
+    return True

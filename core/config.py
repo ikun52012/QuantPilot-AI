@@ -225,6 +225,9 @@ class RiskConfig(BaseModel):
     fixed_position_size_usdt: float = 100.0
     # Risk ratio per trade (percentage of account to risk) - used when mode is 'risk_ratio'
     risk_per_trade_pct: float = 1.0
+    # Correlation risk limits
+    max_same_direction_positions: int = 5  # Max positions in same direction
+    max_correlated_exposure_pct: float = 50.0  # Max % of equity in one direction
 
     @field_validator('exit_management_mode')
     @classmethod
@@ -261,6 +264,8 @@ class RiskConfig(BaseModel):
             position_sizing_mode=os.getenv("POSITION_SIZING_MODE", "percentage"),
             fixed_position_size_usdt=float(os.getenv("FIXED_POSITION_SIZE_USDT", "100")),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
+            max_same_direction_positions=int(os.getenv("MAX_SAME_DIRECTION_POSITIONS", "5")),
+            max_correlated_exposure_pct=float(os.getenv("MAX_CORRELATED_EXPOSURE_PCT", "50.0")),
         )
 
 

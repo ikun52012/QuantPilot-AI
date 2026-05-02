@@ -16,6 +16,7 @@ from ai_analyzer import analyze_signal
 from core.config import settings
 from core.database import (
     PositionModel,
+    close_position_async,
     get_user_active_subscription,
     get_user_by_id,
     has_recent_webhook_event,
@@ -30,8 +31,15 @@ from core.metrics import (
 )
 from core.security import decrypt_settings_payload
 from core.trading_control import trading_allowed
-from core.utils.common import first_valid, position_symbol_key, resolve_limit_timeout_secs, safe_float
-from exchange import execute_trade
+from core.utils.common import (
+    first_valid,
+    loads_list,
+    position_symbol_key,
+    resolve_limit_timeout_secs,
+    safe_float,
+    safe_int,
+)
+from exchange import cancel_order, execute_trade
 from market_data import fetch_enhanced_market_context, fetch_market_context
 from models import (
     AIAnalysis,
@@ -54,6 +62,60 @@ from services.order_reconciler import record_order_event
 _WEBHOOK_LOCKS: dict[str, asyncio.Lock] = {}
 _WEBHOOK_LOCKS_GUARD = asyncio.Lock()
 _SENSITIVE_EVENT_KEY_PARTS = ("secret", "token", "password", "api_key", "api_secret")
+
+# Per-ticker locks for concurrent signal handling
+_TICKER_LOCKS: dict[str, asyncio.Lock] = {}
+_TICKER_LOCKS_GUARD = asyncio.Lock()
+_TICKER_LOCK_MAX_SIZE = 1000  # Maximum number of ticker locks to hold
+
+
+async def _ticker_lock(ticker: str, user_id: str | None = None) -> asyncio.Lock:
+    """Get or create a lock for a specific ticker to prevent concurrent conflicts.
+
+    This ensures that signals for the same ticker are processed sequentially,
+    preventing race conditions when two opposite signals arrive simultaneously.
+
+    Args:
+        ticker: The ticker symbol (e.g., "BTCUSDT")
+        user_id: Optional user ID for multi-user isolation
+
+    Returns:
+        asyncio.Lock for this ticker+user combination
+    """
+    scope = user_id or "admin"
+    key = f"{scope}:{ticker.upper().strip()}"
+
+    async with _TICKER_LOCKS_GUARD:
+        lock = _TICKER_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _TICKER_LOCKS[key] = lock
+
+            # Cleanup old locks if we exceed max size
+            if len(_TICKER_LOCKS) > _TICKER_LOCK_MAX_SIZE:
+                # Remove half the locks (oldest ones first by insertion order)
+                keys_to_remove = list(_TICKER_LOCKS.keys())[:_TICKER_LOCK_MAX_SIZE // 2]
+                for k in keys_to_remove:
+                    old_lock = _TICKER_LOCKS.get(k)
+                    if old_lock and not old_lock.locked():
+                        _TICKER_LOCKS.pop(k, None)
+
+        return lock
+
+
+async def _release_ticker_lock(ticker: str, user_id: str | None = None) -> None:
+    """Release a ticker lock after processing.
+
+    Note: Locks are automatically released when the async context exits,
+    but this function can be called to explicitly cleanup unused locks.
+    """
+    scope = user_id or "admin"
+    key = f"{scope}:{ticker.upper().strip()}"
+
+    async with _TICKER_LOCKS_GUARD:
+        lock = _TICKER_LOCKS.get(key)
+        if lock and not lock.locked():
+            _TICKER_LOCKS.pop(key, None)
 
 
 async def _fingerprint_lock(fingerprint: str) -> asyncio.Lock:
@@ -191,7 +253,25 @@ class SignalProcessor:
         """
         Process a webhook signal through the complete pipeline.
         Returns the result of the processing.
+
+        Uses per-ticker locks to prevent concurrent conflicts when
+        multiple signals arrive for the same ticker simultaneously.
         """
+        # Acquire ticker-specific lock to prevent concurrent conflicts
+        ticker_lock = await _ticker_lock(signal.ticker, user_id)
+
+        async with ticker_lock:
+            # Process signal within ticker lock context
+            return await self._process_signal_locked(signal, user_id, client_ip, raw_body)
+
+    async def _process_signal_locked(
+        self,
+        signal: TradingViewSignal,
+        user_id: str | None = None,
+        client_ip: str = "",
+        raw_body: dict | None = None,
+    ) -> dict:
+        """Internal signal processing with ticker lock already acquired."""
         # Compute fingerprint for deduplication
         fingerprint = compute_webhook_fingerprint(raw_body or signal.model_dump(), user_id)
         user_settings = await self._load_user_settings(user_id)
@@ -244,12 +324,33 @@ class SignalProcessor:
 
             # Step 5: Check for conflicting open positions
             if decision.execute:
-                conflict = await self._check_position_conflict(decision, user_id)
-                if conflict:
-                    decision.execute = False
-                    decision.reason = conflict
+                conflict_reason, conflicting_position = await self._check_position_conflict(
+                    decision, user_id, user_settings
+                )
+                if conflict_reason and conflicting_position:
+                    # Close existing position before opening reverse position
+                    close_result = await self._close_conflicting_position(
+                        conflicting_position, user_id, user_settings
+                    )
+                    if close_result.get("status") == "error":
+                        decision.execute = False
+                        decision.reason = f"Failed to close existing position: {close_result.get('reason')}"
+                    else:
+                        logger.info(
+                            f"[Signal] Reverse signal: closed existing {conflicting_position.direction} position "
+                            f"on {decision.ticker}, proceeding with {decision.direction.value} trade"
+                        )
+                    # Refresh session to clear closed position state
+                    await self.session.flush()
 
-            # Step 6: Execute trade
+            # Step 6: Check correlation risk (same-direction concentration)
+            if decision.execute:
+                correlation_risk = await self._check_correlation_risk(decision, user_id, user_settings)
+                if correlation_risk.get("exceeded"):
+                    decision.execute = False
+                    decision.reason = correlation_risk.get("reason")
+
+            # Step 7: Execute trade
             if decision.execute:
                 result = await self._execute_trade(decision, user_id, user_settings)
             else:
@@ -507,7 +608,7 @@ prefilter_result: PreFilterResult | None = None,
                 return decision
 
         if decision.execute:
-            self._apply_exit_plan(decision, signal, analysis, user_settings or {})
+            self._apply_exit_plan(decision, signal, analysis, market, user_settings or {})
             if signal.direction in {SignalDirection.LONG, SignalDirection.SHORT}:
                 if not decision.stop_loss:
                     decision.execute = False
@@ -516,6 +617,15 @@ prefilter_result: PreFilterResult | None = None,
                 if not decision.take_profit_levels:
                     decision.execute = False
                     decision.reason = "No valid take-profit target available for opening trade"
+                    return decision
+                # Validate R:R ratio
+                rr_valid, rr_reason = self._validate_risk_reward_ratio(
+                    decision.entry_price, decision.stop_loss,
+                    decision.take_profit_levels, signal.direction, user_settings or {}
+                )
+                if not rr_valid:
+                    decision.execute = False
+                    decision.reason = rr_reason
                     return decision
 
         # Set trailing stop
@@ -553,19 +663,34 @@ prefilter_result: PreFilterResult | None = None,
         decision: TradeDecision,
         signal: TradingViewSignal,
         analysis: AIAnalysis,
+        market: MarketContext,
         user_settings: dict,
     ) -> None:
-        """Apply either custom configured exits or validated AI-generated exits."""
+        """Apply either custom configured exits or validated AI-generated exits.
+
+        Enhanced validation:
+        - Minimum SL/TP distance (based on ATR or percentage)
+        - Maximum SL distance (prevent oversized risk)
+        - R:R ratio validation
+        """
         if signal.direction not in {SignalDirection.LONG, SignalDirection.SHORT}:
             return
 
         risk_cfg = user_settings.get("risk") or {}
         exit_mode = str(risk_cfg.get("exit_management_mode") or settings.risk.exit_management_mode)
+        atr_pct = safe_float(market.atr_pct, 0.0)
+
         if exit_mode == "custom":
-            self._apply_custom_exit_plan(decision, signal, user_settings)
+            self._apply_custom_exit_plan(decision, signal, user_settings, atr_pct)
             return
 
-        decision.stop_loss = self._valid_stop_loss(signal.direction, signal.price, analysis.suggested_stop_loss)
+        # AI-generated exits with strict validation
+        entry_price = float(signal.price or 0)
+        sl_price = self._valid_stop_loss(
+            signal.direction, entry_price, analysis.suggested_stop_loss,
+            atr_pct=atr_pct, user_settings=user_settings
+        )
+        decision.stop_loss = sl_price
 
         raw_levels = [
             (analysis.suggested_tp1, analysis.tp1_qty_pct),
@@ -574,12 +699,24 @@ prefilter_result: PreFilterResult | None = None,
             (analysis.suggested_tp4, analysis.tp4_qty_pct),
         ]
         max_levels = self._max_tp_levels(user_settings)
-        decision.take_profit_levels = self._build_take_profit_levels(signal.direction, signal.price, raw_levels, max_levels)
+        decision.take_profit_levels = self._build_take_profit_levels(
+            signal.direction, entry_price, raw_levels, max_levels,
+            atr_pct=atr_pct, sl_price=sl_price
+        )
         if decision.take_profit_levels:
             decision.take_profit = decision.take_profit_levels[0].price
 
-    def _apply_custom_exit_plan(self, decision: TradeDecision, signal: TradingViewSignal, user_settings: dict) -> None:
-        """Build fixed percentage SL/TP exits from admin configuration."""
+    def _apply_custom_exit_plan(
+        self,
+        decision: TradeDecision,
+        signal: TradingViewSignal,
+        user_settings: dict,
+        atr_pct: float = 0.0
+    ) -> None:
+        """Build fixed percentage SL/TP exits from admin configuration.
+
+        Also validates against minimum/maximum distance requirements.
+        """
         entry = float(signal.price or 0)
         if entry <= 0:
             return
@@ -587,10 +724,26 @@ prefilter_result: PreFilterResult | None = None,
         risk_cfg = user_settings.get("risk") or {}
         tp_cfg = user_settings.get("take_profit") or {}
         stop_pct = max(0.01, safe_float(first_valid(risk_cfg.get("custom_stop_loss_pct"), settings.risk.custom_stop_loss_pct), 0.0))
+
+        # Validate SL percentage against minimum requirements
+        min_sl_pct = self._get_min_sl_percentage(atr_pct, user_settings)
+        max_sl_pct = self._get_max_sl_percentage(user_settings)
+        if stop_pct < min_sl_pct:
+            logger.warning(f"[Signal] Custom SL {stop_pct}% below minimum {min_sl_pct}%, adjusting")
+            stop_pct = min_sl_pct
+        if stop_pct > max_sl_pct:
+            logger.warning(f"[Signal] Custom SL {stop_pct}% above maximum {max_sl_pct}%, adjusting")
+            stop_pct = max_sl_pct
+
         tp1_pct = safe_float(first_valid(tp_cfg.get("tp1_pct"), settings.take_profit.tp1_pct), settings.take_profit.tp1_pct)
         tp2_pct = safe_float(first_valid(tp_cfg.get("tp2_pct"), settings.take_profit.tp2_pct), settings.take_profit.tp2_pct)
         tp3_pct = safe_float(first_valid(tp_cfg.get("tp3_pct"), settings.take_profit.tp3_pct), settings.take_profit.tp3_pct)
         tp4_pct = safe_float(first_valid(tp_cfg.get("tp4_pct"), settings.take_profit.tp4_pct), settings.take_profit.tp4_pct)
+
+        # Validate TP percentages against minimum
+        min_tp_pct = self._get_min_tp_percentage(atr_pct, user_settings)
+        tp1_pct = max(min_tp_pct, tp1_pct)
+
         tp1_qty = safe_float(first_valid(tp_cfg.get("tp1_qty"), settings.take_profit.tp1_qty), settings.take_profit.tp1_qty)
         tp2_qty = safe_float(first_valid(tp_cfg.get("tp2_qty"), settings.take_profit.tp2_qty), settings.take_profit.tp2_qty)
         tp3_qty = safe_float(first_valid(tp_cfg.get("tp3_qty"), settings.take_profit.tp3_qty), settings.take_profit.tp3_qty)
@@ -618,6 +771,8 @@ prefilter_result: PreFilterResult | None = None,
             entry,
             raw_levels,
             self._max_tp_levels(user_settings),
+            atr_pct=atr_pct,
+            sl_price=decision.stop_loss,
         )
         if decision.take_profit_levels:
             decision.take_profit = decision.take_profit_levels[0].price
@@ -628,16 +783,37 @@ prefilter_result: PreFilterResult | None = None,
         entry: float,
         raw_levels: Sequence[tuple[float | None, float]],
         max_levels: int,
+        atr_pct: float = 0.0,
+        sl_price: float | None = None,
     ) -> list:
-        """Validate TP direction and cap cumulative close quantity to 100%."""
+        """Validate TP direction, distance, and cap cumulative close quantity to 100%.
+
+        Enhanced validation:
+        - Minimum TP distance (ATR-based or percentage floor)
+        - R:R ratio check (TP distance vs SL distance)
+        """
         from models import TakeProfitLevel
 
+        min_tp_pct = self._get_min_tp_percentage(atr_pct, {})
         levels = []
         remaining_pct = 100.0
+
         for price, qty_pct in raw_levels[:max_levels]:
-            price = self._valid_take_profit(direction, entry, price)
+            price = self._valid_take_profit(direction, entry, price, min_tp_pct=min_tp_pct)
             if not price:
                 continue
+            # Additional R:R validation if SL is provided
+            if sl_price and entry > 0:
+                tp_dist_pct = abs(price - entry) / entry * 100
+                sl_dist_pct = abs(sl_price - entry) / entry * 100
+                if sl_dist_pct > 0:
+                    rr_ratio = tp_dist_pct / sl_dist_pct
+                    if rr_ratio < 1.0:
+                        logger.warning(
+                            f"[Signal] TP at {price} has R:R {rr_ratio:.2f}:1, below minimum 1:1. "
+                            f"Skipping this TP level."
+                        )
+                        continue
             qty = max(0.0, min(float(qty_pct or 0.0), remaining_pct))
             if qty <= 0:
                 continue
@@ -656,7 +832,7 @@ prefilter_result: PreFilterResult | None = None,
                 levels.sort(key=lambda tp: tp.price, reverse=True)
 
         if not levels and raw_levels:
-            fallback = self._valid_take_profit(direction, entry, raw_levels[0][0])
+            fallback = self._valid_take_profit(direction, entry, raw_levels[0][0], min_tp_pct=min_tp_pct)
             if fallback:
                 levels.append(TakeProfitLevel(price=round(fallback, 8), qty_pct=100.0))
         return levels
@@ -667,7 +843,21 @@ prefilter_result: PreFilterResult | None = None,
         return max(1, min(int(tp_cfg.get("num_levels") or settings.take_profit.num_levels or 1), 4))
 
     @staticmethod
-    def _valid_stop_loss(direction: SignalDirection, entry: float, price: float | None) -> float | None:
+    def _valid_stop_loss(
+        direction: SignalDirection,
+        entry: float,
+        price: float | None,
+        atr_pct: float = 0.0,
+        user_settings: dict | None = None,
+    ) -> float | None:
+        """Validate stop loss with strict distance requirements.
+
+        Checks:
+        1. Basic direction (LONG: SL < entry, SHORT: SL > entry)
+        2. Minimum distance (at least 0.3% or 1.5×ATR)
+        3. Maximum distance (no more than 15%)
+        4. Not equal to entry price (would trigger immediately)
+        """
         try:
             value = float(price or 0)
             entry = float(entry or 0)
@@ -675,18 +865,52 @@ prefilter_result: PreFilterResult | None = None,
             return None
         if value <= 0 or entry <= 0:
             return None
-        # BUG FIX: Reject stop loss that equals entry price — it would trigger
-        # immediately and cause instant liquidation.
-        if value == entry:
+
+        # Reject SL that equals entry (immediate trigger)
+        if abs(value - entry) < entry * 0.0001:  # 0.01% tolerance
+            logger.warning(f"[Signal] SL {value} too close to entry {entry}, rejecting")
             return None
-        if direction == SignalDirection.LONG and value < entry:
-            return value
-        if direction == SignalDirection.SHORT and value > entry:
-            return value
-        return None
+
+        # Direction check
+        if direction == SignalDirection.LONG and value >= entry:
+            return None
+        if direction == SignalDirection.SHORT and value <= entry:
+            return None
+
+        # Distance validation
+        sl_dist_pct = abs(value - entry) / entry * 100
+        min_sl_pct = SignalProcessor._get_min_sl_percentage(atr_pct, user_settings or {})
+        max_sl_pct = SignalProcessor._get_max_sl_percentage(user_settings or {})
+
+        if sl_dist_pct < min_sl_pct:
+            logger.warning(
+                f"[Signal] SL distance {sl_dist_pct:.2f}% below minimum {min_sl_pct:.2f}% "
+                f"(entry={entry}, sl={value})"
+            )
+            return None
+
+        if sl_dist_pct > max_sl_pct:
+            logger.warning(
+                f"[Signal] SL distance {sl_dist_pct:.2f}% above maximum {max_sl_pct:.2f}% "
+                f"(entry={entry}, sl={value}), rejecting oversized risk"
+            )
+            return None
+
+        return value
 
     @staticmethod
-    def _valid_take_profit(direction: SignalDirection, entry: float, price: float | None) -> float | None:
+    def _valid_take_profit(
+        direction: SignalDirection,
+        entry: float,
+        price: float | None,
+        min_tp_pct: float = 0.0,
+    ) -> float | None:
+        """Validate take profit with minimum distance requirement.
+
+        Checks:
+        1. Basic direction (LONG: TP > entry, SHORT: TP < entry)
+        2. Minimum distance (at least 0.3% or min_tp_pct)
+        """
         try:
             value = float(price or 0)
             entry = float(entry or 0)
@@ -694,11 +918,227 @@ prefilter_result: PreFilterResult | None = None,
             return None
         if value <= 0 or entry <= 0:
             return None
-        if direction == SignalDirection.LONG and value > entry:
-            return value
-        if direction == SignalDirection.SHORT and value < entry:
-            return value
-        return None
+
+        # Direction check
+        if direction == SignalDirection.LONG and value <= entry:
+            return None
+        if direction == SignalDirection.SHORT and value >= entry:
+            return None
+
+        # Minimum distance check
+        tp_dist_pct = abs(value - entry) / entry * 100
+        if min_tp_pct <= 0:
+            min_tp_pct = 0.3  # Default 0.3% minimum
+
+        if tp_dist_pct < min_tp_pct:
+            logger.warning(
+                f"[Signal] TP distance {tp_dist_pct:.2f}% below minimum {min_tp_pct:.2f}% "
+                f"(entry={entry}, tp={value})"
+            )
+            return None
+
+        return value
+
+    @staticmethod
+    def _get_min_sl_percentage(atr_pct: float, user_settings: dict) -> float:
+        """Calculate minimum SL percentage based on ATR or config floor."""
+        risk_cfg = user_settings.get("risk") or {}
+        # Config override takes priority
+        config_min = safe_float(risk_cfg.get("min_stop_loss_pct"), 0.3)
+        # ATR-based minimum: 1.5×ATR (more dynamic)
+        atr_min = atr_pct * 1.5 if atr_pct > 0 else 0.3
+        return max(config_min, atr_min, 0.3)
+
+    @staticmethod
+    def _get_max_sl_percentage(user_settings: dict) -> float:
+        """Maximum allowed SL percentage to prevent oversized risk."""
+        risk_cfg = user_settings.get("risk") or {}
+        return safe_float(risk_cfg.get("max_stop_loss_pct"), 15.0)
+
+    @staticmethod
+    def _get_min_tp_percentage(atr_pct: float, user_settings: dict) -> float:
+        """Calculate minimum TP percentage based on ATR or config."""
+        tp_cfg = user_settings.get("take_profit") or {}
+        config_min = safe_float(tp_cfg.get("min_tp_pct"), 0.5)
+        atr_min = atr_pct * 1.0 if atr_pct > 0 else 0.5
+        return max(config_min, atr_min, 0.5)
+
+    def _validate_risk_reward_ratio(
+        self,
+        entry: float,
+        sl: float | None,
+        tp_levels: list,
+        direction: SignalDirection,
+        user_settings: dict,
+    ) -> tuple[bool, str]:
+        """Validate that the trade has acceptable risk/reward ratio.
+
+        Returns (is_valid, reason) tuple.
+        Checks:
+        - TP1 distance vs SL distance (minimum 1.5:1)
+        - Average TP distance vs SL distance (minimum 1.2:1)
+        """
+        if not sl or not tp_levels or entry <= 0:
+            return (False, "Missing SL or TP for R:R validation")
+
+        sl_dist_pct = abs(sl - entry) / entry * 100
+        if sl_dist_pct <= 0:
+            return (False, "Invalid SL distance")
+
+        risk_cfg = user_settings.get("risk") or {}
+        min_rr_ratio = safe_float(risk_cfg.get("min_risk_reward_ratio"), 1.5)
+
+        # Check TP1 (nearest target) R:R
+        tp1_dist_pct = abs(tp_levels[0].price - entry) / entry * 100
+        tp1_rr = tp1_dist_pct / sl_dist_pct
+
+        if tp1_rr < min_rr_ratio:
+            return (
+                False,
+                f"TP1 R:R ratio {tp1_rr:.2f}:1 below minimum {min_rr_ratio}:1 "
+                f"(TP1={tp_levels[0].price}, SL={sl}, entry={entry})"
+            )
+
+        # Check average TP R:R (weighted by qty_pct)
+        total_qty = sum(tp.qty_pct for tp in tp_levels)
+        avg_rr = 0.0
+        if total_qty > 0:
+            avg_tp_dist = sum(
+                abs(tp.price - entry) / entry * 100 * tp.qty_pct
+                for tp in tp_levels
+            ) / total_qty
+            avg_rr = avg_tp_dist / sl_dist_pct
+            min_avg_rr = safe_float(risk_cfg.get("min_avg_risk_reward_ratio"), 1.2)
+
+            if avg_rr < min_avg_rr:
+                return (
+                    False,
+                    f"Average TP R:R ratio {avg_rr:.2f}:1 below minimum {min_avg_rr}:1"
+                )
+
+        logger.info(
+            f"[Signal] R:R validation passed: TP1={tp1_rr:.2f}:1, "
+            f"avg={avg_rr:.2f}:1 (min={min_rr_ratio}:1)"
+        )
+        return (True, "")
+
+    async def _check_correlation_risk(
+        self,
+        decision: TradeDecision,
+        user_id: str | None,
+        user_settings: dict | None = None,
+    ) -> dict:
+        """
+        Check for correlation risk - too many positions in the same direction.
+
+        Prevents over-concentration in one direction (e.g., multiple LONG positions)
+        which would amplify losses if market moves against that direction.
+
+        Returns dict with:
+        - exceeded: bool - whether limit is exceeded
+        - reason: str - explanation
+        - current_exposure: dict - current position summary
+        """
+        result = {
+            "exceeded": False,
+            "reason": "",
+            "current_exposure": {
+                "long_positions": 0,
+                "short_positions": 0,
+                "long_notional_usdt": 0.0,
+                "short_notional_usdt": 0.0,
+            },
+        }
+
+        try:
+            stmt = select(PositionModel).where(PositionModel.status.in_(["open", "pending"]))
+            if user_id:
+                stmt = stmt.where(PositionModel.user_id == user_id)
+
+            db_result = await self.session.execute(stmt)
+            positions = list(db_result.scalars().all())
+
+            if not positions:
+                return result
+
+            # Count positions by direction
+            long_positions = []
+            short_positions = []
+
+            for pos in positions:
+                pos_dir = str(pos.direction or "long").lower()
+                entry = safe_float(pos.entry_price)
+                qty = safe_float(pos.remaining_quantity or pos.quantity)
+                safe_float(pos.leverage, 1.0)
+
+                notional = entry * qty if entry > 0 and qty > 0 else 0
+
+                if pos_dir == "long":
+                    long_positions.append({"ticker": pos.ticker, "notional": notional})
+                elif pos_dir == "short":
+                    short_positions.append({"ticker": pos.ticker, "notional": notional})
+
+            result["current_exposure"]["long_positions"] = len(long_positions)
+            result["current_exposure"]["short_positions"] = len(short_positions)
+            result["current_exposure"]["long_notional_usdt"] = sum(p["notional"] for p in long_positions)
+            result["current_exposure"]["short_notional_usdt"] = sum(p["notional"] for p in short_positions)
+
+            # Get correlation limits from settings
+            risk_cfg = (user_settings or {}).get("risk") or {}
+            max_same_direction_positions = safe_int(
+                first_valid(risk_cfg.get("max_same_direction_positions"), settings.risk.max_same_direction_positions),
+                5,
+            )
+            max_correlated_pct = safe_float(
+                first_valid(risk_cfg.get("max_correlated_exposure_pct"), settings.risk.max_correlated_exposure_pct),
+                50.0,
+            )
+
+            # Check if new position would exceed limits
+            new_direction = str(decision.direction.value or "long").lower()
+            if new_direction == "long":
+                current_count = len(long_positions)
+                current_notional = sum(p["notional"] for p in long_positions)
+            else:
+                current_count = len(short_positions)
+                current_notional = sum(p["notional"] for p in short_positions)
+
+            # Position count limit
+            if current_count >= max_same_direction_positions:
+                result["exceeded"] = True
+                result["reason"] = (
+                    f"Correlation risk: {current_count} {new_direction} positions already open "
+                    f"(max={max_same_direction_positions}). Adding more would over-concentrate risk."
+                )
+                logger.warning(f"[Signal] Correlation risk exceeded: {result['reason']}")
+                return result
+
+            # Notional exposure limit
+            equity = float(self._resolved_risk_settings(user_settings).get("account_equity_usdt") or 1000)
+            new_notional = decision.entry_price * decision.quantity if decision.entry_price and decision.quantity else 0
+            total_notional_after = current_notional + new_notional
+            exposure_pct = total_notional_after / equity * 100 if equity > 0 else 0
+
+            if exposure_pct > max_correlated_pct:
+                result["exceeded"] = True
+                result["reason"] = (
+                    f"Correlation risk: {new_direction} exposure would be {exposure_pct:.1f}% "
+                    f"of equity (max={max_correlated_pct}%). "
+                    f"Current={current_notional:.2f}USDT, New={new_notional:.2f}USDT, Equity={equity:.2f}USDT"
+                )
+                logger.warning(f"[Signal] Correlation risk exceeded: {result['reason']}")
+                return result
+
+            # Log correlation status
+            logger.info(
+                f"[Signal] Correlation check passed: {current_count + 1} {new_direction} positions "
+                f"(exposure={exposure_pct:.1f}%, max={max_correlated_pct}%)"
+            )
+
+        except Exception as e:
+            logger.warning(f"[Signal] Correlation check failed (allowing trade): {e}")
+
+        return result
 
     @staticmethod
     def _normalize_size_pct(size_pct: float) -> float:
@@ -1048,12 +1488,20 @@ prefilter_result: PreFilterResult | None = None,
         self,
         decision: TradeDecision,
         user_id: str | None,
-    ) -> str | None:
+        user_settings: dict | None = None,
+    ) -> tuple[str | None, PositionModel | None]:
         """
         Check for conflicting open positions on the same ticker.
-        Returns a rejection reason string, or None if no conflict.
+        Returns (rejection_reason, conflicting_position) tuple.
+
+        Checks BOTH:
+        1. Database tracked positions
+        2. Exchange actual positions (for live trading)
+
+        If opposite direction found, returns reason and the position to close.
         """
         try:
+            # Step 1: Check database positions
             stmt = select(PositionModel).where(PositionModel.status.in_(["open", "pending"]))
             if user_id:
                 stmt = stmt.where(PositionModel.user_id == user_id)
@@ -1065,27 +1513,208 @@ prefilter_result: PreFilterResult | None = None,
                 if position_symbol_key(pos.ticker) == target_key
             ]
 
-            if not open_positions:
-                return None
-
             direction = decision.direction.value if decision.direction else ""
+
+            # Check database positions for conflict
             for pos in open_positions:
                 pos_dir = (pos.direction or "").lower()
-                # Block opposite direction on same ticker
                 if (direction in ("long", "short") and pos_dir in ("long", "short")
                         and direction != pos_dir):
                     msg = (
                         f"Conflicting position: open {pos_dir} on {decision.ticker} "
-                        f"(id={pos.id[:8]}). Close it before opening {direction}."
+                        f"(id={pos.id[:8]}). Closing existing position before opening {direction}."
                     )
-                    logger.warning(f"[Signal] Position conflict: {msg}")
-                    return msg
+                    logger.warning(f"[Signal] Database position conflict detected: {msg}")
+                    return (msg, pos)
+
+            # Step 2: Check exchange actual positions (for live trading)
+            # This catches positions that might not be in database yet (concurrent signals)
+            live_trading = False
+            if user_settings:
+                exchange_cfg = (user_settings or {}).get("exchange") or {}
+                live_trading = bool(exchange_cfg.get("live_trading", False))
+
+            if live_trading:
+                from exchange import get_open_positions
+                exchange_config = self._build_exchange_config(user_id, user_settings)
+                try:
+                    exchange_positions = await get_open_positions(exchange_config)
+                    for ex_pos in exchange_positions:
+                        ex_symbol = position_symbol_key(ex_pos.get("symbol") or "")
+                        if ex_symbol != target_key:
+                            continue
+                        ex_side = str(ex_pos.get("side") or "").lower()
+                        excontracts = safe_float(ex_pos.get("contracts") or ex_pos.get("contractSize") or 0)
+                        if excontracts <= 0:
+                            continue
+
+                        # Map exchange side to position direction
+                        ex_dir = "long" if ex_side in ("long", "buy") else "short"
+                        if (direction in ("long", "short") and ex_dir in ("long", "short")
+                                and direction != ex_dir):
+                            msg = (
+                                f"Exchange position conflict: {ex_dir} {excontracts} contracts on {decision.ticker}. "
+                                f"Closing exchange position before opening {direction}."
+                            )
+                            logger.warning(f"[Signal] Exchange position conflict detected: {msg}")
+
+                            # Create a synthetic position model for closing
+                            # Use the first database position if exists, or create synthetic
+                            for pos in open_positions:
+                                if (pos.direction or "").lower() == ex_dir:
+                                    return (msg, pos)
+
+                            # No database position found, create synthetic position for closing
+                            synthetic_pos = PositionModel(
+                                id="exchange-sync",
+                                ticker=decision.ticker,
+                                direction=ex_dir,
+                                quantity=excontracts,
+                                entry_price=safe_float(ex_pos.get("entryPrice") or ex_pos.get("entry_price") or 0),
+                                status="open",
+                                live_trading=True,
+                            )
+                            return (msg, synthetic_pos)
+                except Exception as ex:
+                    logger.warning(f"[Signal] Failed to check exchange positions: {ex}")
 
             # Allow same-direction (scaling in)
-            return None
+            return (None, None)
         except Exception as e:
             logger.warning(f"[Signal] Position conflict check failed (allowing trade): {e}")
-            return None
+            return (None, None)
+
+    async def _close_conflicting_position(
+        self,
+        position: PositionModel,
+        user_id: str | None,
+        user_settings: dict | None = None,
+    ) -> dict:
+        """
+        Close an existing position and cancel its TP/SL orders.
+        Used for reverse signal handling (close opposite position before opening new).
+
+        Handles both:
+        - Database tracked positions (with proper ID)
+        - Synthetic positions from exchange (id="exchange-sync")
+        """
+        is_synthetic = position.id == "exchange-sync"
+        result = {
+            "status": "unknown",
+            "ticker": position.ticker,
+            "position_id": position.id[:8] if len(position.id) >= 8 else position.id,
+            "is_synthetic": is_synthetic,
+        }
+
+        # Build exchange config
+        exchange_config = self._build_exchange_config(user_id, user_settings)
+        exchange_config["live_trading"] = position.live_trading
+
+        try:
+            # Step 1: Cancel TP orders (only for non-synthetic positions with order IDs)
+            cancel_results = []
+            if not is_synthetic and hasattr(position, "take_profit_order_ids_json"):
+                tp_order_ids = loads_list(position.take_profit_order_ids_json)
+                for order_id in tp_order_ids:
+                    if order_id:
+                        cancel_result = await cancel_order(str(order_id), position.ticker, exchange_config)
+                        cancel_results.append(cancel_result)
+
+            # Step 2: Cancel SL order (only for non-synthetic positions)
+            if not is_synthetic and hasattr(position, "stop_loss_order_id") and position.stop_loss_order_id:
+                await cancel_order(str(position.stop_loss_order_id), position.ticker, exchange_config)
+
+            # Step 3: Close position on exchange (for live trading)
+            exit_price = float(position.entry_price or 0)
+            if position.live_trading and exchange_config.get("live_trading"):
+                from exchange import get_ticker
+                ticker_data = await get_ticker(position.ticker, exchange_config)
+                exit_price = safe_float(ticker_data.get("last") or position.last_price or position.entry_price)
+
+                # Build decision to close position
+                close_qty = float(position.remaining_quantity or position.quantity or 0)
+                if close_qty <= 0:
+                    close_qty = float(position.quantity or 0)
+
+                close_decision = TradeDecision(
+                    ticker=position.ticker,
+                    direction=SignalDirection.CLOSE_LONG if str(position.direction).lower() == "long" else SignalDirection.CLOSE_SHORT,
+                    quantity=close_qty,
+                    execute=True,
+                )
+                close_result = await execute_trade(close_decision, exchange_config)
+                if close_result.get("status") == "closed":
+                    exit_price = safe_float(close_result.get("exit_price") or exit_price)
+                    result["exchange_close"] = close_result
+                elif close_result.get("status") == "no_position":
+                    logger.info(f"[Signal] Position already closed on exchange: {position.ticker}")
+                    result["exchange_close"] = close_result
+                else:
+                    logger.warning(f"[Signal] Failed to close position on exchange: {close_result}")
+                    result["exchange_close_error"] = close_result
+                    if not is_synthetic:
+                        result["status"] = "error"
+                        result["reason"] = f"Failed to close on exchange: {close_result.get('reason')}"
+                        return result
+
+            # Step 4: Record close in database (only for non-synthetic positions)
+            if not is_synthetic and exit_price > 0:
+                try:
+                    await close_position_async(
+                        session=self.session,
+                        position=position,
+                        exit_price=exit_price,
+                        close_reason="reverse_signal",
+                    )
+                    await self.session.flush()
+                except Exception as db_err:
+                    logger.warning(f"[Signal] Failed to update database position: {db_err}")
+
+            result["status"] = "closed"
+            result["exit_price"] = exit_price
+            result["cancelled_tp_orders"] = len([r for r in cancel_results if r.get("status") in ("cancelled", "simulated")])
+            logger.info(
+                f"[Signal] ✅ Closed conflicting position {position.id[:8] if len(position.id) >= 8 else position.id} "
+                f"on {position.ticker} (exit={exit_price}, synthetic={is_synthetic})"
+            )
+
+        except Exception as e:
+            logger.error(f"[Signal] Failed to close conflicting position: {e}")
+            result["status"] = "error"
+            result["reason"] = str(e)
+
+        return result
+
+    def _build_exchange_config(self, user_id: str | None, user_settings: dict | None = None) -> dict:
+        """Build exchange configuration from user settings or defaults."""
+        exchange_config = {
+            "exchange": settings.exchange.name,
+            "api_key": settings.exchange.api_key,
+            "api_secret": settings.exchange.api_secret,
+            "password": settings.exchange.password,
+            "live_trading": settings.exchange.live_trading,
+            "sandbox_mode": settings.exchange.sandbox_mode,
+            "market_type": settings.exchange.market_type,
+            "default_order_type": settings.exchange.default_order_type,
+            "stop_loss_order_type": settings.exchange.stop_loss_order_type,
+            "limit_timeout_overrides": settings.exchange.limit_timeout_overrides,
+        }
+
+        if user_id and user_settings:
+            user_exchange = (user_settings or {}).get("exchange") or {}
+            exchange_config.update({
+                "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
+                "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else settings.exchange.api_key,
+                "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else settings.exchange.api_secret,
+                "password": user_exchange.get("password") if "password" in user_exchange else settings.exchange.password,
+                "live_trading": bool(user_exchange.get("live_trading", False)),
+                "sandbox_mode": bool(user_exchange.get("sandbox_mode", False)),
+                "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
+                "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
+                "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
+            })
+
+        return exchange_config
 
     async def _record_and_notify_blocked(
         self,
