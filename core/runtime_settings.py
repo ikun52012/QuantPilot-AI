@@ -242,6 +242,15 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.trailing_stop.trailing_step_pct = _to_float(
             trailing_stop.get("trailing_step_pct"), settings.trailing_stop.trailing_step_pct, 0, 100
         )
+        # Apply buffer settings for breakeven and step trailing
+        if "breakeven_buffer_pct" in trailing_stop:
+            settings.trailing_stop.breakeven_buffer_pct = _to_float(
+                trailing_stop.get("breakeven_buffer_pct"), 0.2, 0, 1.0
+            )
+        if "step_buffer_pct" in trailing_stop:
+            settings.trailing_stop.step_buffer_pct = _to_float(
+                trailing_stop.get("step_buffer_pct"), 0.3, 0, 2.0
+            )
 
 
 async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dict[str, Any]]:
@@ -487,6 +496,8 @@ async def save_trailing_stop_settings(session: AsyncSession, data: dict[str, Any
         "trail_pct": _to_float(data.get("trail_pct"), _to_float(current.get("trail_pct"), settings.trailing_stop.trail_pct), 0.1, 100),
         "activation_profit_pct": _to_float(data.get("activation_profit_pct"), _to_float(current.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct), 0, 100),
         "trailing_step_pct": _to_float(data.get("trailing_step_pct"), _to_float(current.get("trailing_step_pct"), settings.trailing_stop.trailing_step_pct), 0, 100),
+        "breakeven_buffer_pct": _to_float(data.get("breakeven_buffer_pct"), _to_float(current.get("breakeven_buffer_pct"), 0.2), 0, 1.0),
+        "step_buffer_pct": _to_float(data.get("step_buffer_pct"), _to_float(current.get("step_buffer_pct"), 0.3), 0, 2.0),
     }
     await _save_encrypted_dict(session, TRAILING_STOP_KEY, updated)
     apply_runtime_settings({"trailing_stop": updated})

@@ -1062,9 +1062,16 @@ function toggleTSFields() {
     if (descs[mode]) { dt.textContent = descs[mode]; d.style.display = 'flex'; }
 }
 async function saveTSSettings() {
-    const data = { mode:document.getElementById('set-ts-mode').value, trail_pct:readNumberInput('set-ts-trail-pct', 1.0), activation_profit_pct:readNumberInput('set-ts-activation', 1.0), trailing_step_pct:readNumberInput('set-ts-step', 0.5) };
+    const data = {
+        mode: document.getElementById('set-ts-mode').value,
+        trail_pct: readNumberInput('set-ts-trail-pct', 1.0),
+        activation_profit_pct: readNumberInput('set-ts-activation', 1.0),
+        trailing_step_pct: readNumberInput('set-ts-step', 0.5),
+        breakeven_buffer_pct: readNumberInput('set-ts-breakeven-buffer', 0.2),
+        step_buffer_pct: readNumberInput('set-ts-step-buffer', 0.3)
+    };
     await saveSettings('/api/settings/trailing-stop', data);
-    showToast(`Trailing stop: ${data.mode}`,'success','Trailing Stop Updated');
+    showToast(`Trailing stop: ${data.mode}`, 'success', 'Trailing Stop Updated');
 }
 
 // ─── Two-Factor Authentication (2FA) ───
