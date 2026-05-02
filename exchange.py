@@ -6,6 +6,7 @@ Enhanced with multi-TP and trailing-stop execution
 import asyncio
 import hashlib as _hashlib
 import inspect
+import math
 import threading as _threading
 import time
 from typing import Any
@@ -111,7 +112,13 @@ async def _create_exchange_order(
     price: float | None = None,
     params: dict[str, Any] | None = None,
 ) -> dict:
-    """Create an exchange order with small exchange-specific retries."""
+    """Create an exchange order with small exchange-specific retries.
+
+    Includes market precision and limits validation.
+    """
+    # Validate amount against market limits before placing order
+    amount = _validate_and_adjust_amount(exchange, symbol, amount)
+
     errors: list[str] = []
     for attempt_params in _order_create_attempts(exchange, side, params):
         try:
@@ -138,6 +145,95 @@ async def _create_exchange_order(
             if not (_exchange_id(exchange) == "okx" and _is_okx_pos_side_error(exc)):
                 break
     raise RuntimeError("; ".join(errors[-2:]) or f"Failed to create {order_type} order")
+
+
+def _validate_and_adjust_amount(exchange, symbol: str, amount: float) -> float:
+    """
+    Validate and adjust order amount against exchange market limits.
+
+    Handles:
+    - Minimum order amount (e.g., XAU requires min 1 unit)
+    - Maximum order amount (e.g., SHIB has max limit per order)
+    - Amount precision (e.g., some markets require integer amounts)
+
+    Returns adjusted amount that meets exchange requirements.
+    """
+    if amount <= 0:
+        return amount
+
+    try:
+        markets = exchange.load_markets()
+        market = markets.get(symbol)
+        if not isinstance(market, dict):
+            logger.warning(f"[Exchange] Market {symbol} not found, using original amount")
+            return amount
+
+        limits = market.get("limits", {})
+        precision = market.get("precision", {})
+
+        # Get limits
+        min_amount = float(limits.get("amount", {}).get("min", 0) or 0)
+        max_amount = float(limits.get("amount", {}).get("max", float("inf")) or float("inf"))
+        # Cost limits (order value) - useful for future order splitting logic
+        # min_cost = float(limits.get("cost", {}).get("min", 0) or 0)
+        # max_cost = float(limits.get("cost", {}).get("max", float("inf")) or float("inf"))
+
+        # Get precision
+        amount_precision = precision.get("amount")
+        if amount_precision is None:
+            # Try to infer from limits
+            amount_precision = 0
+        elif isinstance(amount_precision, int):
+            # Precision as decimal places (e.g., 2 means 0.01)
+            amount_precision = amount_precision
+        elif isinstance(amount_precision, float) and amount_precision > 0:
+            # Precision as step size (e.g., 0.001 means multiples of 0.001)
+            amount_precision = -int(round(math.log10(amount_precision)))
+
+        # Adjust for minimum amount
+        if min_amount > 0 and amount < min_amount:
+            logger.warning(
+                f"[Exchange] Amount {amount} < min_amount {min_amount} for {symbol}, "
+                f"adjusting to minimum"
+            )
+            amount = min_amount
+
+        # Adjust for maximum amount
+        if max_amount < float("inf") and amount > max_amount:
+            logger.warning(
+                f"[Exchange] Amount {amount} > max_amount {max_amount} for {symbol}, "
+                f"adjusting to maximum (splitting orders recommended)"
+            )
+            amount = max_amount
+
+        # Adjust for precision (round to valid precision)
+        if amount_precision >= 0:
+            # Decimal places precision
+            amount = round(amount, amount_precision)
+        else:
+            # Step size precision (round to nearest step)
+            step = 10 ** amount_precision
+            amount = round(amount / step) * step
+
+        # Additional check: OKX specific - some markets require integer amounts
+        exchange_id = _exchange_id(exchange)
+        if exchange_id == "okx":
+            # OKX XAU/USDT requires integer amounts (contracts)
+            if "XAU" in symbol.upper() or "GOLD" in symbol.upper():
+                amount = max(1, int(round(amount)))
+                logger.info(f"[Exchange] OKX Gold/XAU: adjusted amount to integer {amount}")
+
+        # Final validation
+        if amount <= 0:
+            logger.error(f"[Exchange] Adjusted amount is 0 for {symbol}, original was {amount}")
+            return min_amount if min_amount > 0 else 1
+
+        logger.debug(f"[Exchange] Amount validation: {symbol} original={amount}, adjusted={amount}, min={min_amount}, max={max_amount}, precision={amount_precision}")
+        return amount
+
+    except Exception as e:
+        logger.warning(f"[Exchange] Could not validate amount for {symbol}: {e}, using original")
+        return amount
 
 
 # ─────────────────────────────────────────────
