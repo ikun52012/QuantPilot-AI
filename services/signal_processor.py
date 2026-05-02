@@ -857,13 +857,16 @@ prefilter_result: PreFilterResult | None = None,
         atr_pct: float = 0.0,
         user_settings: dict | None = None,
     ) -> float | None:
-        """Validate stop loss with strict distance requirements.
+        """Validate stop loss with distance requirements.
 
         Checks:
         1. Basic direction (LONG: SL < entry, SHORT: SL > entry)
-        2. Minimum distance (at least 0.3% or 1.5×ATR)
-        3. Maximum distance (no more than 15%)
+        2. Minimum distance (adjusts SL if too close)
+        3. Maximum distance (rejects oversized risk)
         4. Not equal to entry price (would trigger immediately)
+
+        If SL distance is below minimum, auto-adjusts to minimum distance
+        instead of rejecting outright (to allow AI trades with tight stops).
         """
         try:
             value = float(price or 0)
@@ -889,12 +892,18 @@ prefilter_result: PreFilterResult | None = None,
         min_sl_pct = SignalProcessor._get_min_sl_percentage(atr_pct, user_settings or {})
         max_sl_pct = SignalProcessor._get_max_sl_percentage(user_settings or {})
 
+        # Auto-adjust if SL is too tight (don't reject outright)
         if sl_dist_pct < min_sl_pct:
             logger.warning(
-                f"[Signal] SL distance {sl_dist_pct:.2f}% below minimum {min_sl_pct:.2f}% "
-                f"(entry={entry}, sl={value})"
+                f"[Signal] SL distance {sl_dist_pct:.2f}% below minimum {min_sl_pct:.2f}%, "
+                f"auto-adjusting SL to minimum distance"
             )
-            return None
+            # Adjust SL to minimum distance
+            if direction == SignalDirection.LONG:
+                value = entry * (1 - min_sl_pct / 100.0)
+            else:
+                value = entry * (1 + min_sl_pct / 100.0)
+            sl_dist_pct = min_sl_pct
 
         if sl_dist_pct > max_sl_pct:
             logger.warning(
@@ -903,7 +912,7 @@ prefilter_result: PreFilterResult | None = None,
             )
             return None
 
-        return value
+        return round(value, 8)
 
     @staticmethod
     def _valid_take_profit(
@@ -916,7 +925,10 @@ prefilter_result: PreFilterResult | None = None,
 
         Checks:
         1. Basic direction (LONG: TP > entry, SHORT: TP < entry)
-        2. Minimum distance (at least 0.3% or min_tp_pct)
+        2. Minimum distance (auto-adjusts if too close)
+
+        If TP distance is below minimum, auto-adjusts to minimum distance
+        instead of rejecting outright.
         """
         try:
             value = float(price or 0)
@@ -932,7 +944,7 @@ prefilter_result: PreFilterResult | None = None,
         if direction == SignalDirection.SHORT and value >= entry:
             return None
 
-        # Minimum distance check
+        # Minimum distance check - auto-adjust if too tight
         tp_dist_pct = abs(value - entry) / entry * 100
         if min_tp_pct <= 0:
             min_tp_pct = 0.3  # Default 0.3% minimum
@@ -940,11 +952,15 @@ prefilter_result: PreFilterResult | None = None,
         if tp_dist_pct < min_tp_pct:
             logger.warning(
                 f"[Signal] TP distance {tp_dist_pct:.2f}% below minimum {min_tp_pct:.2f}% "
-                f"(entry={entry}, tp={value})"
+                f"(entry={entry}, tp={value}), auto-adjusting to minimum distance"
             )
-            return None
+            # Adjust TP to minimum distance
+            if direction == SignalDirection.LONG:
+                value = entry * (1 + min_tp_pct / 100.0)
+            else:
+                value = entry * (1 - min_tp_pct / 100.0)
 
-        return value
+        return round(value, 8)
 
     @staticmethod
     def _get_min_sl_percentage(atr_pct: float, user_settings: dict) -> float:
