@@ -1314,6 +1314,8 @@ prefilter_result: PreFilterResult | None = None,
         - percentage: AI suggests fraction of max_position_pct
         - fixed: Fixed USDT amount per trade
         - risk_ratio: Risk X% of account per trade (accounts for SL distance)
+
+        NEW: Automatically respects exchange market limits (min/max amount, min/max cost).
         """
         risk_settings = self._resolved_risk_settings(user_settings)
         equity = float(risk_settings["account_equity_usdt"])
@@ -1321,14 +1323,9 @@ prefilter_result: PreFilterResult | None = None,
         sizing_mode = risk_settings["position_sizing_mode"]
         leverage = max(1.0, float(leverage or 1.0))
 
-        # BUG FIX: Normalize size_pct FIRST, before any clamping.
-        # Previously, values like 50 (meaning 50%) were clamped to 1.0 (100%)
-        # before the >1 check could convert them.
         size_fraction = self._normalize_size_pct(size_pct)
 
         if sizing_mode == "fixed":
-            # Fixed USDT amount per trade - use exactly the configured amount
-            # size_fraction from AI should NOT reduce the fixed amount
             fixed_amount = float(risk_settings["fixed_position_size_usdt"])
             notional_value = fixed_amount * leverage
             logger.info(
@@ -1336,14 +1333,12 @@ prefilter_result: PreFilterResult | None = None,
             )
 
         elif sizing_mode == "risk_ratio":
-            # Risk X% of account per trade - requires valid stop loss
             risk_pct = float(risk_settings["risk_per_trade_pct"])
             sl_distance_pct = 0.0
             if decision and decision.stop_loss and self._has_valid_sl(price, decision.stop_loss):
                 sl_distance_pct = self._sl_distance_pct(decision.direction, price, decision.stop_loss)
 
             if not sl_distance_pct or sl_distance_pct <= 0:
-                # Risk ratio mode requires stop loss - fallback to percentage mode
                 logger.warning(
                     f"[PositionSize] risk_ratio mode requires valid stop loss, "
                     f"but SL distance is {sl_distance_pct}. Falling back to percentage mode."
@@ -1351,20 +1346,62 @@ prefilter_result: PreFilterResult | None = None,
                 margin_value = equity * (max_position / 100.0) * size_fraction
                 notional_value = margin_value * leverage
             else:
-                # Valid SL distance - calculate position size
                 risk_amount = equity * (risk_pct / 100.0)
                 notional_value = (risk_amount / (sl_distance_pct / 100.0)) * leverage
         else:
-            # Default: percentage mode
             margin_value = equity * (max_position / 100.0) * size_fraction
             notional_value = margin_value * leverage
 
-        # Calculate quantity
-        if price > 0:
-            quantity = notional_value / price
-            return float(round(quantity, 6))
+        # Calculate initial quantity
+        if price <= 0:
+            return 0.0
 
-        return 0.0
+        quantity = notional_value / price
+
+        # NEW: Apply exchange market limits
+        if decision and decision.ticker:
+            try:
+                from exchange import adjust_quantity_for_limits, get_market_limits
+
+                exchange_config = self._get_exchange_config(user_settings)
+                exchange_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
+                market_type = exchange_config.get("market_type") or settings.exchange.market_type
+
+                # Get market limits
+                limits = get_market_limits(exchange_id, decision.ticker, market_type)
+
+                if limits:
+                    # Adjust quantity to respect limits
+                    quantity = adjust_quantity_for_limits(quantity, price, limits)
+
+                    # Log the adjustment
+                    min_cost = limits.get("min_cost", 0)
+                    max_cost = limits.get("max_cost", float("inf"))
+                    if min_cost > 0 or max_cost < float("inf"):
+                        final_cost = quantity * price
+                        logger.info(
+                            f"[PositionSize] Exchange limits applied: "
+                            f"quantity={quantity:.6f}, cost={final_cost:.2f}USDT "
+                            f"(min_cost={min_cost}, max_cost={max_cost})"
+                        )
+            except Exception as e:
+                logger.warning(f"[PositionSize] Could not apply exchange limits: {e}")
+
+        return float(round(quantity, 6))
+
+    def _get_exchange_config(self, user_settings: dict | None = None) -> dict:
+        """Get exchange configuration from settings."""
+        config = {
+            "exchange": settings.exchange.name,
+            "market_type": settings.exchange.market_type,
+        }
+        if user_settings:
+            user_exchange = user_settings.get("exchange") or {}
+            config.update({
+                "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
+                "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
+            })
+        return config
 
     def _has_valid_sl(self, entry_price: float, stop_loss: float | None = None) -> bool:
         """Check if we have valid stop loss info for risk-based sizing."""

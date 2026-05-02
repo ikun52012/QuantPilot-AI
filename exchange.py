@@ -174,20 +174,14 @@ def _validate_and_adjust_amount(exchange, symbol: str, amount: float) -> float:
         # Get limits
         min_amount = float(limits.get("amount", {}).get("min", 0) or 0)
         max_amount = float(limits.get("amount", {}).get("max", float("inf")) or float("inf"))
-        # Cost limits (order value) - useful for future order splitting logic
-        # min_cost = float(limits.get("cost", {}).get("min", 0) or 0)
-        # max_cost = float(limits.get("cost", {}).get("max", float("inf")) or float("inf"))
 
         # Get precision
         amount_precision = precision.get("amount")
         if amount_precision is None:
-            # Try to infer from limits
             amount_precision = 0
         elif isinstance(amount_precision, int):
-            # Precision as decimal places (e.g., 2 means 0.01)
             amount_precision = amount_precision
         elif isinstance(amount_precision, float) and amount_precision > 0:
-            # Precision as step size (e.g., 0.001 means multiples of 0.001)
             amount_precision = -int(round(math.log10(amount_precision)))
 
         # Adjust for minimum amount
@@ -202,38 +196,205 @@ def _validate_and_adjust_amount(exchange, symbol: str, amount: float) -> float:
         if max_amount < float("inf") and amount > max_amount:
             logger.warning(
                 f"[Exchange] Amount {amount} > max_amount {max_amount} for {symbol}, "
-                f"adjusting to maximum (splitting orders recommended)"
+                f"adjusting to maximum"
             )
             amount = max_amount
 
         # Adjust for precision (round to valid precision)
         if amount_precision >= 0:
-            # Decimal places precision
             amount = round(amount, amount_precision)
         else:
-            # Step size precision (round to nearest step)
             step = 10 ** amount_precision
             amount = round(amount / step) * step
 
         # Additional check: OKX specific - some markets require integer amounts
         exchange_id = _exchange_id(exchange)
         if exchange_id == "okx":
-            # OKX XAU/USDT requires integer amounts (contracts)
             if "XAU" in symbol.upper() or "GOLD" in symbol.upper():
                 amount = max(1, int(round(amount)))
                 logger.info(f"[Exchange] OKX Gold/XAU: adjusted amount to integer {amount}")
 
-        # Final validation
         if amount <= 0:
-            logger.error(f"[Exchange] Adjusted amount is 0 for {symbol}, original was {amount}")
+            logger.error(f"[Exchange] Adjusted amount is 0 for {symbol}")
             return min_amount if min_amount > 0 else 1
 
-        logger.debug(f"[Exchange] Amount validation: {symbol} original={amount}, adjusted={amount}, min={min_amount}, max={max_amount}, precision={amount_precision}")
+        logger.debug(f"[Exchange] Amount validation: {symbol} adjusted={amount}, min={min_amount}, max={max_amount}")
         return amount
 
     except Exception as e:
-        logger.warning(f"[Exchange] Could not validate amount for {symbol}: {e}, using original")
+        logger.warning(f"[Exchange] Could not validate amount for {symbol}: {e}")
         return amount
+
+
+def get_market_limits(exchange_id: str, symbol: str, market_type: str = "contract") -> dict:
+    """
+    Get market limits for a symbol without creating full exchange instance.
+
+    Returns dict with:
+    - min_amount: Minimum order quantity
+    - max_amount: Maximum order quantity
+    - min_cost: Minimum order value (USDT)
+    - max_cost: Maximum order value (USDT)
+    - amount_precision: Decimal places for quantity
+    - price_precision: Decimal places for price
+
+    This is used during position size calculation to respect exchange limits.
+    """
+    if not _CCXT_AVAILABLE:
+        return {}
+
+    try:
+        # Create temporary exchange instance just to fetch markets
+        exchange = _get_or_create_exchange(
+            exchange_id=exchange_id,
+            api_key=None,
+            api_secret=None,
+            password="",
+            live=False,
+            sandbox=False,
+            market_type=market_type,
+        )
+
+        markets = exchange.load_markets()
+        market = markets.get(symbol)
+
+        if not isinstance(market, dict):
+            logger.warning(f"[Exchange] Market {symbol} not found in {exchange_id}")
+            return {}
+
+        limits = market.get("limits", {})
+        precision = market.get("precision", {})
+
+        # Parse limits
+        min_amount = float(limits.get("amount", {}).get("min", 0) or 0)
+        max_amount = float(limits.get("amount", {}).get("max", float("inf")) or float("inf"))
+        min_cost = float(limits.get("cost", {}).get("min", 0) or 0)
+        max_cost = float(limits.get("cost", {}).get("max", float("inf")) or float("inf"))
+
+        # Parse precision
+        amount_precision_raw = precision.get("amount")
+        price_precision_raw = precision.get("price")
+
+        amount_precision = 0
+        if amount_precision_raw is not None:
+            if isinstance(amount_precision_raw, int):
+                amount_precision = amount_precision_raw
+            elif isinstance(amount_precision_raw, float) and amount_precision_raw > 0:
+                amount_precision = -int(round(math.log10(amount_precision_raw)))
+
+        price_precision = 0
+        if price_precision_raw is not None:
+            if isinstance(price_precision_raw, int):
+                price_precision = price_precision_raw
+            elif isinstance(price_precision_raw, float) and price_precision_raw > 0:
+                price_precision = -int(round(math.log10(price_precision_raw)))
+
+        # OKX specific: XAU/GOLD requires integer amounts
+        if exchange_id.lower() == "okx":
+            if "XAU" in symbol.upper() or "GOLD" in symbol.upper():
+                min_amount = max(1, int(min_amount) if min_amount > 0 else 1)
+                amount_precision = 0  # Integer only
+
+        result = {
+            "min_amount": min_amount,
+            "max_amount": max_amount,
+            "min_cost": min_cost,
+            "max_cost": max_cost,
+            "amount_precision": amount_precision,
+            "price_precision": price_precision,
+            "symbol": symbol,
+            "exchange": exchange_id,
+        }
+
+        logger.debug(
+            f"[Exchange] Market limits for {symbol}: "
+            f"min_amount={min_amount}, max_amount={max_amount}, "
+            f"min_cost={min_cost}, max_cost={max_cost}"
+        )
+        return result
+
+    except Exception as e:
+        logger.warning(f"[Exchange] Could not get market limits for {symbol} on {exchange_id}: {e}")
+        return {}
+
+
+def adjust_quantity_for_limits(
+    quantity: float,
+    price: float,
+    limits: dict,
+) -> float:
+    """
+    Adjust quantity to respect exchange market limits.
+
+    Args:
+        quantity: Original calculated quantity
+        price: Entry price
+        limits: Market limits dict from get_market_limits()
+
+    Returns:
+        Adjusted quantity that meets all exchange requirements
+    """
+    if quantity <= 0 or price <= 0 or not limits:
+        return quantity
+
+    min_amount = limits.get("min_amount", 0)
+    max_amount = limits.get("max_amount", float("inf"))
+    min_cost = limits.get("min_cost", 0)
+    max_cost = limits.get("max_cost", float("inf"))
+    amount_precision = limits.get("amount_precision", 0)
+
+    # Calculate order value (cost)
+    current_cost = quantity * price
+
+    adjustments = []
+
+    # Check minimum cost (order value)
+    if min_cost > 0 and current_cost < min_cost:
+        min_qty_for_cost = min_cost / price
+        if min_qty_for_cost > quantity:
+            quantity = min_qty_for_cost
+            adjustments.append(f"cost_min: increased to {min_cost} USDT")
+
+    # Check maximum cost (order value)
+    if max_cost < float("inf") and current_cost > max_cost:
+        max_qty_for_cost = max_cost / price
+        if max_qty_for_cost < quantity:
+            quantity = max_qty_for_cost
+            adjustments.append(f"cost_max: reduced to {max_cost} USDT")
+
+    # Check minimum amount (quantity)
+    if min_amount > 0 and quantity < min_amount:
+        quantity = min_amount
+        adjustments.append(f"amount_min: increased to {min_amount}")
+
+    # Check maximum amount (quantity)
+    if max_amount < float("inf") and quantity > max_amount:
+        quantity = max_amount
+        adjustments.append(f"amount_max: reduced to {max_amount}")
+
+    # Apply precision
+    if amount_precision >= 0:
+        quantity = round(quantity, amount_precision)
+    else:
+        step = 10 ** amount_precision
+        quantity = round(quantity / step) * step
+
+    # OKX Gold/XAU: force integer
+    if "XAU" in limits.get("symbol", "").upper() or "GOLD" in limits.get("symbol", "").upper():
+        quantity = max(1, int(round(quantity)))
+
+    # Final check
+    if quantity <= 0:
+        logger.error("[Exchange] Adjusted quantity is 0, falling back to minimum")
+        return max(min_amount, min_cost / price) if min_amount > 0 or min_cost > 0 else 1
+
+    if adjustments:
+        logger.info(
+            f"[Exchange] Quantity adjusted for limits: "
+            f"original={quantity}, final={quantity}, adjustments: {', '.join(adjustments)}"
+        )
+
+    return quantity
 
 
 # ─────────────────────────────────────────────
