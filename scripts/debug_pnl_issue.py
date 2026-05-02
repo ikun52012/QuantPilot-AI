@@ -4,7 +4,7 @@ Diagnostic script to check the pnl_pct issue for COINUSDT.P and LINKUSDT.P.
 
 This script checks:
 1. TradeModel records for these tickers
-2. PositionModel records for these tickers  
+2. PositionModel records for these tickers
 3. The actual pnl_pct values stored
 4. The order_status of each record
 """
@@ -15,9 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import select
-from core.database import db_manager, TradeModel, PositionModel
 from datetime import datetime, timedelta
+
+from sqlalchemy import select
+
+from core.database import PositionModel, TradeModel, db_manager
 
 
 def utcnow():
@@ -26,19 +28,19 @@ def utcnow():
 
 async def diagnose_pnl_issue():
     """Check COINUSDT.P and LINKUSDT.P records."""
-    
+
     # Initialize database manager
     await db_manager.init()
-    
+
     tickers_to_check = ["COINUSDT.P", "LINKUSDT.P"]
     cutoff = utcnow() - timedelta(days=7)  # Last 7 days
-    
+
     async with db_manager.async_session_factory() as session:
         for ticker in tickers_to_check:
             print(f"\n{'='*60}")
             print(f"Checking {ticker}")
             print(f"{'='*60}\n")
-            
+
             # Check TradeModel records
             print("TradeModel Records:")
             print("-" * 60)
@@ -50,7 +52,7 @@ async def diagnose_pnl_issue():
                 .limit(5)
             )
             trades = result.scalars().all()
-            
+
             if not trades:
                 print(f"No TradeModel records found for {ticker} in the last 7 days\n")
             else:
@@ -61,7 +63,7 @@ async def diagnose_pnl_issue():
                     print(f"Order Status: {t.order_status}")
                     print(f"PnL Pct: {t.pnl_pct}%")  # ← THIS IS THE KEY FIELD
                     print(f"Execute: {t.execute}")
-                    
+
                     # Parse payload to see what's stored
                     import json
                     try:
@@ -69,7 +71,7 @@ async def diagnose_pnl_issue():
                         signal = payload.get("signal", {})
                         analysis = payload.get("analysis", {})
                         result_data = payload.get("result", {})
-                        
+
                         print(f"Signal Price: {signal.get('price')}")
                         print(f"AI Confidence: {analysis.get('confidence')}")
                         print(f"AI Recommendation: {analysis.get('recommendation')}")
@@ -79,9 +81,9 @@ async def diagnose_pnl_issue():
                         print(f"Result Order ID: {result_data.get('order_id')}")
                     except Exception as e:
                         print(f"Payload parsing error: {e}")
-                    
+
                     print("-" * 60)
-            
+
             # Check PositionModel records
             print("\nPositionModel Records:")
             print("-" * 60)
@@ -93,7 +95,7 @@ async def diagnose_pnl_issue():
                 .limit(5)
             )
             positions = result.scalars().all()
-            
+
             if not positions:
                 print(f"No open PositionModel records for {ticker}\n")
             else:
@@ -109,7 +111,7 @@ async def diagnose_pnl_issue():
                     print(f"Realized PnL Pct: {p.realized_pnl_pct}%")  # ← Partial TP hits
                     print(f"PnL Pct: {p.pnl_pct}%")  # ← Should be 0 for open positions
                     print(f"Stop Loss: {p.stop_loss}")
-                    
+
                     # Calculate expected unrealized PnL
                     if p.last_price and p.entry_price:
                         if p.direction == "long":
@@ -117,9 +119,9 @@ async def diagnose_pnl_issue():
                         else:
                             expected_pnl = ((p.entry_price - p.last_price) / p.entry_price) * 100 * p.leverage
                         print(f"Expected Current PnL: {expected_pnl:.2f}%")
-                    
+
                     print("-" * 60)
-    
+
     print("\n" + "=" * 60)
     print("Diagnosis Complete")
     print("=" * 60)
