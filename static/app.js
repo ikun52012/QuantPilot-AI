@@ -989,7 +989,30 @@ async function saveExchangeSettings() { await saveSettings('/api/settings/exchan
     stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market',
     limit_timeout_overrides: timeoutOverridesFromInputs('set')
 }, 'btn-save-exchange'); }
-async function saveAISettings() { const provider = document.getElementById('set-ai-provider').value; await saveSettings('/api/settings/ai', { provider, api_key:document.getElementById('set-ai-key').value, temperature:readNumberInput('set-ai-temp', 0.3), max_tokens:readNumberInput('set-ai-tokens', 1000, value => parseInt(value, 10)), custom_system_prompt:document.getElementById('set-ai-prompt').value||'', custom_provider_enabled:document.getElementById('set-custom-provider-enabled')?.checked||false, custom_provider_name:document.getElementById('set-custom-provider-name')?.value||'custom', custom_provider_model:document.getElementById('set-custom-provider-model')?.value||'', custom_provider_api_url:document.getElementById('set-custom-provider-url')?.value||'', openrouter_enabled: provider === 'openrouter', openrouter_model: document.getElementById('set-openrouter-model')?.value || 'openai/gpt-5.5', mistral_model: document.getElementById('set-mistral-model')?.value || 'mistral-large-latest', openai_model: document.getElementById('set-openai-model')?.value || 'gpt-5.5', anthropic_model: document.getElementById('set-anthropic-model')?.value || 'claude-opus-4-7', deepseek_model: document.getElementById('set-deepseek-model')?.value || 'deepseek-v4-pro' }, 'btn-save-ai'); }
+async function saveAISettings() {
+    const provider = document.getElementById('set-ai-provider').value;
+    const customProviderName = document.getElementById('set-custom-provider-name')?.value || 'custom';
+    const isCustomProvider = provider === 'custom' || provider === customProviderName.toLowerCase();
+    
+    await saveSettings('/api/settings/ai', {
+        provider,
+        api_key: document.getElementById('set-ai-key').value,
+        temperature: readNumberInput('set-ai-temp', 0.3),
+        max_tokens: readNumberInput('set-ai-tokens', 1000, value => parseInt(value, 10)),
+        custom_system_prompt: document.getElementById('set-ai-prompt').value || '',
+        custom_provider_enabled: isCustomProvider || document.getElementById('set-custom-provider-enabled')?.checked || false,
+        custom_provider_name: customProviderName,
+        custom_provider_model: document.getElementById('set-custom-provider-model')?.value || '',
+        custom_provider_api_url: document.getElementById('set-custom-provider-url')?.value || '',
+        custom_provider_api_key: isCustomProvider ? document.getElementById('set-ai-key').value : '',
+        openrouter_enabled: provider === 'openrouter',
+        openrouter_model: document.getElementById('set-openrouter-model')?.value || 'openai/gpt-5.5',
+        mistral_model: document.getElementById('set-mistral-model')?.value || 'mistral-large-latest',
+        openai_model: document.getElementById('set-openai-model')?.value || 'gpt-5.5',
+        anthropic_model: document.getElementById('set-anthropic-model')?.value || 'claude-opus-4-7',
+        deepseek_model: document.getElementById('set-deepseek-model')?.value || 'deepseek-v4-pro'
+    }, 'btn-save-ai');
+}
 async function saveTelegramSettings() { await saveSettings('/api/settings/telegram', { bot_token:document.getElementById('set-tg-token').value, chat_id:document.getElementById('set-tg-chat').value }); }
 async function saveRiskSettings() {
     const exitMode = document.querySelector('input[name="exit-management-mode"]:checked')?.value || 'ai';

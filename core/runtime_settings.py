@@ -154,6 +154,12 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
             settings.ai.openrouter_api_key = api_key
         else:
             settings.ai.custom_provider_api_key = api_key
+
+        # Also explicitly set custom_provider_api_key if provided separately
+        custom_api_key = str(ai.get("custom_provider_api_key") or "")
+        if custom_api_key:
+            settings.ai.custom_provider_api_key = custom_api_key
+
         settings.ai.temperature = _to_float(ai.get("temperature"), settings.ai.temperature, 0, 2)
         settings.ai.max_tokens = _to_int(ai.get("max_tokens"), settings.ai.max_tokens, 100, 4000)
         settings.ai.custom_system_prompt = str(ai.get("custom_system_prompt") or "")
@@ -404,6 +410,7 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
         "custom_provider_name": _coalesce_str(data.get("custom_provider_name"), current.get("custom_provider_name"), settings.ai.custom_provider_name, default="custom"),
         "custom_provider_model": _coalesce_str(data.get("custom_provider_model"), current.get("custom_provider_model"), default=""),
         "custom_provider_api_url": _coalesce_str(data.get("custom_provider_api_url"), current.get("custom_provider_api_url"), default=""),
+        "custom_provider_api_key": _coalesce_str(data.get("custom_provider_api_key"), current.get("custom_provider_api_key"), settings.ai.custom_provider_api_key),
         "openrouter_enabled": _to_bool(data.get("openrouter_enabled"), _to_bool(current.get("openrouter_enabled"), settings.ai.openrouter_enabled)),
         "openrouter_model": _coalesce_str(data.get("openrouter_model"), current.get("openrouter_model"), settings.ai.openrouter_model),
         "openrouter_site_url": _coalesce_str(data.get("openrouter_site_url"), current.get("openrouter_site_url"), settings.ai.openrouter_site_url),
