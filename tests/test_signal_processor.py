@@ -536,29 +536,40 @@ class TestValidStopLoss:
     """Tests for stop loss validation."""
 
     def test_valid_long_stop_loss(self):
-        """Long SL must be below entry."""
-        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 95)
+        """Long SL must be below entry (within timeframe limits)."""
+        # Use 1D timeframe which allows up to 10% SL distance
+        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 95, timeframe="1D")
         assert result == 95
 
     def test_invalid_long_stop_loss(self):
         """Long SL above entry is invalid."""
-        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 105)
+        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 105, timeframe="1D")
         assert result is None
 
     def test_valid_short_stop_loss(self):
-        """Short SL must be above entry."""
-        result = SignalProcessor._valid_stop_loss(SignalDirection.SHORT, 100, 105)
+        """Short SL must be above entry (within timeframe limits)."""
+        # Use 1D timeframe which allows up to 10% SL distance
+        result = SignalProcessor._valid_stop_loss(SignalDirection.SHORT, 100, 105, timeframe="1D")
         assert result == 105
 
     def test_invalid_short_stop_loss(self):
         """Short SL below entry is invalid."""
-        result = SignalProcessor._valid_stop_loss(SignalDirection.SHORT, 100, 95)
+        result = SignalProcessor._valid_stop_loss(SignalDirection.SHORT, 100, 95, timeframe="1D")
         assert result is None
 
     def test_zero_stop_loss(self):
         """Zero stop loss is invalid."""
-        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 0)
+        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 0, timeframe="1D")
         assert result is None
+
+    def test_timeframe_limits_sl_distance(self):
+        """15m timeframe has tighter SL limits than 1D."""
+        # 5% SL on 15m timeframe (max 2%) should be rejected
+        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 95, timeframe="15")
+        assert result is None
+        # Same 5% SL on 1D timeframe (max 10%) should be accepted
+        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 95, timeframe="1D")
+        assert result == 95
 
 
 class TestValidTakeProfit:

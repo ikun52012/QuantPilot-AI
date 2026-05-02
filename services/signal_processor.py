@@ -686,9 +686,10 @@ prefilter_result: PreFilterResult | None = None,
 
         # AI-generated exits with strict validation
         entry_price = float(signal.price or 0)
+        timeframe = str(signal.timeframe or "60")
         sl_price = self._valid_stop_loss(
             signal.direction, entry_price, analysis.suggested_stop_loss,
-            atr_pct=atr_pct, user_settings=user_settings
+            atr_pct=atr_pct, user_settings=user_settings, timeframe=timeframe
         )
         decision.stop_loss = sl_price
 
@@ -701,7 +702,7 @@ prefilter_result: PreFilterResult | None = None,
         max_levels = self._max_tp_levels(user_settings)
         decision.take_profit_levels = self._build_take_profit_levels(
             signal.direction, entry_price, raw_levels, max_levels,
-            atr_pct=atr_pct, sl_price=sl_price, user_settings=user_settings
+            atr_pct=atr_pct, sl_price=sl_price, user_settings=user_settings, timeframe=timeframe
         )
         if decision.take_profit_levels:
             decision.take_profit = decision.take_profit_levels[0].price
@@ -721,13 +722,14 @@ prefilter_result: PreFilterResult | None = None,
         if entry <= 0:
             return
 
+        timeframe = str(signal.timeframe or "60")
         risk_cfg = user_settings.get("risk") or {}
         tp_cfg = user_settings.get("take_profit") or {}
         stop_pct = max(0.01, safe_float(first_valid(risk_cfg.get("custom_stop_loss_pct"), settings.risk.custom_stop_loss_pct), 0.0))
 
         # Validate SL percentage against minimum requirements
-        min_sl_pct = self._get_min_sl_percentage(atr_pct, user_settings)
-        max_sl_pct = self._get_max_sl_percentage(user_settings)
+        min_sl_pct = self._get_min_sl_percentage(atr_pct, user_settings, timeframe)
+        max_sl_pct = self._get_max_sl_percentage(user_settings, timeframe)
         if stop_pct < min_sl_pct:
             logger.warning(f"[Signal] Custom SL {stop_pct}% below minimum {min_sl_pct}%, adjusting")
             stop_pct = min_sl_pct
@@ -741,7 +743,7 @@ prefilter_result: PreFilterResult | None = None,
         tp4_pct = safe_float(first_valid(tp_cfg.get("tp4_pct"), settings.take_profit.tp4_pct), settings.take_profit.tp4_pct)
 
         # Validate TP percentages against minimum
-        min_tp_pct = self._get_min_tp_percentage(atr_pct, user_settings)
+        min_tp_pct = self._get_min_tp_percentage(atr_pct, user_settings, timeframe)
         tp1_pct = max(min_tp_pct, tp1_pct)
 
         tp1_qty = safe_float(first_valid(tp_cfg.get("tp1_qty"), settings.take_profit.tp1_qty), settings.take_profit.tp1_qty)
@@ -774,6 +776,7 @@ prefilter_result: PreFilterResult | None = None,
             atr_pct=atr_pct,
             sl_price=decision.stop_loss,
             user_settings=user_settings,
+            timeframe=timeframe,
         )
         if decision.take_profit_levels:
             decision.take_profit = decision.take_profit_levels[0].price
@@ -787,16 +790,20 @@ prefilter_result: PreFilterResult | None = None,
         atr_pct: float = 0.0,
         sl_price: float | None = None,
         user_settings: dict | None = None,
+        timeframe: str = "60",
     ) -> list:
         """Validate TP direction, distance, and cap cumulative close quantity to 100%.
 
         Enhanced validation:
         - Minimum TP distance (ATR-based or percentage floor)
+        - Maximum TP distance (timeframe-based, warns if exceeded)
         - R:R ratio check (TP distance vs SL distance)
         """
         from models import TakeProfitLevel
+        from timeframe_exits import get_max_tp_for_timeframe
 
-        min_tp_pct = self._get_min_tp_percentage(atr_pct, user_settings or {})
+        min_tp_pct = self._get_min_tp_percentage(atr_pct, user_settings or {}, timeframe)
+        max_tp_pct = get_max_tp_for_timeframe(timeframe)
 
         # Get min R:R ratio from settings
         risk_cfg = (user_settings or {}).get("risk") or {}
@@ -806,7 +813,7 @@ prefilter_result: PreFilterResult | None = None,
         remaining_pct = 100.0
 
         for price, qty_pct in raw_levels[:max_levels]:
-            price = self._valid_take_profit(direction, entry, price, min_tp_pct=min_tp_pct)
+            price = self._valid_take_profit(direction, entry, price, min_tp_pct=min_tp_pct, max_tp_pct=max_tp_pct)
             if not price:
                 continue
             # Additional R:R validation if SL is provided
@@ -839,7 +846,7 @@ prefilter_result: PreFilterResult | None = None,
                 levels.sort(key=lambda tp: tp.price, reverse=True)
 
         if not levels and raw_levels:
-            fallback = self._valid_take_profit(direction, entry, raw_levels[0][0], min_tp_pct=min_tp_pct)
+            fallback = self._valid_take_profit(direction, entry, raw_levels[0][0], min_tp_pct=min_tp_pct, max_tp_pct=max_tp_pct)
             if fallback:
                 levels.append(TakeProfitLevel(price=round(fallback, 8), qty_pct=100.0))
         return levels
@@ -856,6 +863,7 @@ prefilter_result: PreFilterResult | None = None,
         price: float | None,
         atr_pct: float = 0.0,
         user_settings: dict | None = None,
+        timeframe: str = "60",
     ) -> float | None:
         """Validate stop loss with distance requirements.
 
@@ -887,10 +895,10 @@ prefilter_result: PreFilterResult | None = None,
         if direction == SignalDirection.SHORT and value <= entry:
             return None
 
-        # Distance validation
+        # Distance validation with timeframe-aware limits
         sl_dist_pct = abs(value - entry) / entry * 100
-        min_sl_pct = SignalProcessor._get_min_sl_percentage(atr_pct, user_settings or {})
-        max_sl_pct = SignalProcessor._get_max_sl_percentage(user_settings or {})
+        min_sl_pct = SignalProcessor._get_min_sl_percentage(atr_pct, user_settings or {}, timeframe)
+        max_sl_pct = SignalProcessor._get_max_sl_percentage(user_settings or {}, timeframe)
 
         # Auto-adjust if SL is too tight (don't reject outright)
         if sl_dist_pct < min_sl_pct:
@@ -920,12 +928,14 @@ prefilter_result: PreFilterResult | None = None,
         entry: float,
         price: float | None,
         min_tp_pct: float = 0.0,
+        max_tp_pct: float = 0.0,
     ) -> float | None:
-        """Validate take profit with minimum distance requirement.
+        """Validate take profit with minimum/maximum distance requirement.
 
         Checks:
         1. Basic direction (LONG: TP > entry, SHORT: TP < entry)
         2. Minimum distance (auto-adjusts if too close)
+        3. Maximum distance (warns if too far, but allows)
 
         If TP distance is below minimum, auto-adjusts to minimum distance
         instead of rejecting outright.
@@ -949,6 +959,12 @@ prefilter_result: PreFilterResult | None = None,
         if min_tp_pct <= 0:
             min_tp_pct = 0.3  # Default 0.3% minimum
 
+        if max_tp_pct > 0 and tp_dist_pct > max_tp_pct:
+            logger.warning(
+                f"[Signal] TP distance {tp_dist_pct:.2f}% above suggested max {max_tp_pct:.2f}% "
+                f"(entry={entry}, tp={value}), may be hard to reach for this timeframe"
+            )
+
         if tp_dist_pct < min_tp_pct:
             logger.warning(
                 f"[Signal] TP distance {tp_dist_pct:.2f}% below minimum {min_tp_pct:.2f}% "
@@ -963,28 +979,41 @@ prefilter_result: PreFilterResult | None = None,
         return round(value, 8)
 
     @staticmethod
-    def _get_min_sl_percentage(atr_pct: float, user_settings: dict) -> float:
-        """Calculate minimum SL percentage based on ATR or config floor."""
+    def _get_min_sl_percentage(atr_pct: float, user_settings: dict, timeframe: str = "60") -> float:
+        """Calculate minimum SL percentage based on ATR, config, and timeframe."""
+        from timeframe_exits import get_min_sl_for_timeframe
+
         risk_cfg = user_settings.get("risk") or {}
-        # Config override takes priority
-        config_min = safe_float(risk_cfg.get("min_stop_loss_pct"), 0.3)
-        # ATR-based minimum: 1.5×ATR (more dynamic)
-        atr_min = atr_pct * 1.5 if atr_pct > 0 else 0.3
-        return max(config_min, atr_min, 0.3)
+        # Timeframe-based minimum (most important for realistic exits)
+        tf_min = get_min_sl_for_timeframe(timeframe)
+        # Config override can tighten but not loosen
+        config_min = safe_float(risk_cfg.get("min_stop_loss_pct"), tf_min)
+        # ATR-based minimum (dynamic volatility adjustment)
+        atr_min = atr_pct * 1.2 if atr_pct > 0 else tf_min
+        # Return the most restrictive minimum
+        return max(tf_min, config_min, atr_min, 0.15)
 
     @staticmethod
-    def _get_max_sl_percentage(user_settings: dict) -> float:
-        """Maximum allowed SL percentage to prevent oversized risk."""
+    def _get_max_sl_percentage(user_settings: dict, timeframe: str = "60") -> float:
+        """Maximum allowed SL percentage based on timeframe."""
+        from timeframe_exits import get_max_sl_for_timeframe
+
         risk_cfg = user_settings.get("risk") or {}
-        return safe_float(risk_cfg.get("max_stop_loss_pct"), 15.0)
+        tf_max = get_max_sl_for_timeframe(timeframe)
+        config_max = safe_float(risk_cfg.get("max_stop_loss_pct"), tf_max)
+        # Use the more restrictive (smaller) max
+        return min(tf_max, config_max)
 
     @staticmethod
-    def _get_min_tp_percentage(atr_pct: float, user_settings: dict) -> float:
-        """Calculate minimum TP percentage based on ATR or config."""
+    def _get_min_tp_percentage(atr_pct: float, user_settings: dict, timeframe: str = "60") -> float:
+        """Calculate minimum TP percentage based on ATR, config, and timeframe."""
+        from timeframe_exits import get_min_tp_for_timeframe
+
         tp_cfg = user_settings.get("take_profit") or {}
-        config_min = safe_float(tp_cfg.get("min_tp_pct"), 0.5)
-        atr_min = atr_pct * 1.0 if atr_pct > 0 else 0.5
-        return max(config_min, atr_min, 0.5)
+        tf_min = get_min_tp_for_timeframe(timeframe)
+        config_min = safe_float(tp_cfg.get("min_tp_pct"), tf_min)
+        atr_min = atr_pct * 0.8 if atr_pct > 0 else tf_min
+        return max(tf_min, config_min, atr_min, 0.2)
 
     def _validate_risk_reward_ratio(
         self,

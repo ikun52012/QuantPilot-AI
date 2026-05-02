@@ -469,6 +469,10 @@ When market data is limited:
             "but AI stop-loss and take-profit prices will be ignored."
         )
 
+    # Add timeframe-specific SL/TP guidance
+    from timeframe_exits import format_timeframe_exit_instructions
+    timeframe_instruction = format_timeframe_exit_instructions(str(signal.timeframe or "60"))
+
     return f"""Analyze this trading signal:
 
 ## Signal
@@ -499,6 +503,8 @@ When market data is limited:
 {tp_section}
 {ts_section}
 {prefilter_section}
+
+{timeframe_instruction}
 
 {exit_instruction_text}
 
