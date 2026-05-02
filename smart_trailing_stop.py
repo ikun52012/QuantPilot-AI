@@ -58,8 +58,14 @@ def select_smart_trailing_stop(
     Returns:
         TrailingStopDecision with recommended mode and reasoning
     """
+    # Parameter validation and clamping
+    confidence = max(0.0, min(1.0, float(confidence or 0.5)))
+    risk_score = max(0.0, min(1.0, float(risk_score or 0.5)))
+    num_tp_levels = max(1, min(4, int(num_tp_levels or 4)))
+    atr_pct = max(0.0, float(atr_pct or 0.0))
+
     # User override takes priority
-    if user_override and user_override.lower() != "none":
+    if user_override and user_override.lower() not in {"none", "", "auto"}:
         return TrailingStopDecision(
             mode=TrailingStopRecommendation(user_override.lower()),
             reasoning="User explicitly configured this trailing stop mode",
@@ -71,6 +77,24 @@ def select_smart_trailing_stop(
     condition = str(market_condition or "").lower().strip()
     strength = str(trend_strength or "moderate").lower().strip()
     tf = str(timeframe or "60").lower().strip()
+
+    # SPECIAL CASE: Single TP mode (num_tp_levels == 1)
+    # Step_trailing reduces to breakeven_on_tp1 since there's no TP2 to move to
+    if num_tp_levels == 1:
+        if condition in {"trending_up", "trending_down"} and strength == "strong" and confidence >= 0.8:
+            return TrailingStopDecision(
+                mode=TrailingStopRecommendation.NONE,
+                reasoning="Single TP + strong trend + high confidence: let profit run",
+                expected_benefit="Maximize single TP target capture",
+                risk_reduction_pct=0.0,
+            )
+        else:
+            return TrailingStopDecision(
+                mode=TrailingStopRecommendation.BREAKEVEN_ON_TP1,
+                reasoning="Single TP mode: step_trailing reduces to breakeven protection",
+                expected_benefit="Zero risk after TP1 hit, protect capital",
+                risk_reduction_pct=100.0,
+            )
 
     # Decision logic based on market analysis
 

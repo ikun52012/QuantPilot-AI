@@ -44,6 +44,24 @@ class TrailingStopConfig(BaseModel):
     # For PROFIT_PCT_TRAILING: trailing step once activated
     trailing_step_pct: float = Field(default=0.5, ge=0.1, le=10.0,
                                       description="Trailing step % after activation")
+    # NEW: Buffer for breakeven/step trailing to avoid immediate re-trigger
+    breakeven_buffer_pct: float = Field(default=0.2, ge=0.0, le=1.0,
+                                          description="Buffer above entry for breakeven SL")
+    step_buffer_pct: float = Field(default=0.3, ge=0.0, le=2.0,
+                                    description="Buffer below TP level for step trailing")
+
+
+class TrailingStopHistory(BaseModel):
+    """Record of trailing stop adjustment events."""
+    position_id: str
+    trigger_type: str  # "tp1_hit", "tp2_hit", "tp3_hit", "tp4_hit", "manual", "volatility"
+    old_sl: float
+    new_sl: float
+    trigger_price: float
+    profit_locked_pct: float = 0.0
+    timestamp: datetime = Field(default_factory=utcnow)
+    success: bool = True
+    reasoning: str = ""
 
 
 # ─────────────────────────────────────────────

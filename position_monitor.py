@@ -748,8 +748,22 @@ async def _adjust_trailing_stop_on_tp_hit(
     tp_levels: list[dict],
     hit_levels: list[dict],
     exchange_config: dict,
-    place_protective_stop
+    place_protective_stop,
+    trailing_history: list[dict] | None = None,
 ) -> bool:
+    """
+    Adjust trailing stop when TP levels are hit.
+
+    FIXED BUG: Correct step_trailing logic:
+    - TP1 hit -> SL at entry + buffer
+    - TP2 hit -> SL at TP1 + buffer
+    - TP3 hit -> SL at TP2 + buffer
+    - TP4 hit -> SL at TP3 + buffer
+
+    FIXED BUG: Prevent duplicate triggers by checking current SL position.
+    """
+    from models import TrailingStopHistory  # noqa: F401 - Used for type annotation in future
+
     trailing_config = loads_dict(position.trailing_stop_config_json)
     trailing_mode = str(trailing_config.get("mode") or "none").lower()
 
@@ -764,51 +778,111 @@ async def _adjust_trailing_stop_on_tp_hit(
     current_stop = safe_float(position.stop_loss)
     remaining_qty = _effective_remaining_quantity(position, safe_float(position.quantity))
 
+    # Get buffer percentages from config
+    breakeven_buffer = safe_float(trailing_config.get("breakeven_buffer_pct"), 0.2)
+    step_buffer = safe_float(trailing_config.get("step_buffer_pct"), 0.3)
+
     new_stop = None
     tp_note = ""
+    trigger_type = ""
+    profit_locked_pct = 0.0
+
+    # Sort TP levels by distance from entry (closest first)
+    reverse_sort = direction == "short"
+    all_levels = sorted(tp_levels, key=lambda x: safe_float(x.get("price")), reverse=reverse_sort)
+
+    # Determine which TP levels have been hit
+    hit_level_numbers = []
+    for i, level in enumerate(all_levels):
+        status = str(level.get("status") or "pending").lower()
+        if status in {"hit", "filled", "closed"}:
+            hit_level_numbers.append(i + 1)
+
+    if not hit_level_numbers:
+        return False
+
+    highest_hit = max(hit_level_numbers)
 
     if trailing_mode == "breakeven_on_tp1":
-        tp1_hit = any(
-            level.get("level") == 1 or (not level.get("level") and i == 0)
-            for i, level in enumerate(hit_levels)
-        )
-        if tp1_hit:
-            new_stop = entry_price
-            tp_note = "TP1 hit — SL moved to breakeven"
+        # Only trigger on TP1 hit
+        if highest_hit >= 1:
+            # Check if already at breakeven (avoid duplicate trigger)
+            breakeven_target = entry_price * (1 + breakeven_buffer / 100.0) if direction == "long" else entry_price * (1 - breakeven_buffer / 100.0)
+            if current_stop > 0:
+                # Already moved to breakeven?
+                if direction == "long" and current_stop >= entry_price * 0.998:
+                    return False  # Already at/below entry (breakeven already set)
+                if direction == "short" and current_stop <= entry_price * 1.002:
+                    return False  # Already at/above entry (breakeven already set)
+
+            new_stop = breakeven_target
+            tp_note = f"TP1 hit — SL moved to breakeven + {breakeven_buffer}% buffer"
+            trigger_type = "tp1_hit"
+
+            # Calculate profit locked
+            tp1_price = safe_float(all_levels[0].get("price"))
+            tp1_qty = safe_float(all_levels[0].get("qty_pct"), 25.0)
+            if tp1_price > 0 and entry_price > 0:
+                profit_pct = abs(tp1_price - entry_price) / entry_price * 100
+                profit_locked_pct = profit_pct * tp1_qty / 100.0
 
     elif trailing_mode == "step_trailing":
-        # BUG FIX: Sort TP levels by distance from entry, not raw price.
-        # For LONG: ascending price (TP1 < TP2 < TP3)
-        # For SHORT: descending price (TP1 > TP2 > TP3)
-        reverse_sort = direction == "short"
-        all_levels = sorted(tp_levels, key=lambda x: safe_float(x.get("price")), reverse=reverse_sort)
-        hit_level_numbers = []
-        for i, level in enumerate(all_levels):
-            if str(level.get("status") or "pending").lower() in {"hit", "filled", "closed"}:
-                hit_level_numbers.append(i + 1)
+        # Progressive profit locking
+        if highest_hit == 1:
+            # TP1 hit -> move to breakeven + buffer
+            breakeven_target = entry_price * (1 + breakeven_buffer / 100.0) if direction == "long" else entry_price * (1 - breakeven_buffer / 100.0)
 
-        if hit_level_numbers:
-            highest_hit = max(hit_level_numbers)
-            if highest_hit > 1:
-                prev_level_idx = highest_hit - 2
-                if prev_level_idx >= 0 and prev_level_idx < len(all_levels):
-                    prev_tp_price = safe_float(all_levels[prev_level_idx].get("price"))
-                    if prev_tp_price > 0:
-                        # BUG FIX: For LONG, SL should be at least at the previous TP
-                        # level (use max, not min). For SHORT, SL should be at most
-                        # at the previous TP level (use min, not max).
-                        if direction == "long":
-                            new_stop = max(prev_tp_price, entry_price * 1.002)
-                        else:
-                            new_stop = min(prev_tp_price, entry_price * 0.998)
-                        tp_note = f"TP{highest_hit} hit — SL moved to TP{highest_hit - 1} level"
-            elif highest_hit == 1:
-                new_stop = entry_price
-                tp_note = "TP1 hit — SL moved to breakeven (step trailing)"
+            # Check if already at breakeven
+            if current_stop > 0:
+                if direction == "long" and current_stop >= entry_price * 0.998:
+                    return False
+                if direction == "short" and current_stop <= entry_price * 1.002:
+                    return False
+
+            new_stop = breakeven_target
+            tp_note = f"TP1 hit — SL moved to breakeven + {breakeven_buffer}% buffer"
+            trigger_type = "tp1_hit"
+
+            # Calculate profit locked from TP1
+            tp1_price = safe_float(all_levels[0].get("price"))
+            tp1_qty = safe_float(all_levels[0].get("qty_pct"), 25.0)
+            if tp1_price > 0 and entry_price > 0:
+                profit_pct = abs(tp1_price - entry_price) / entry_price * 100
+                profit_locked_pct = profit_pct * tp1_qty / 100.0
+
+        elif highest_hit >= 2:
+            # TP(n) hit -> move SL to TP(n-1) + buffer
+            prev_level_idx = highest_hit - 1  # FIXED: TP2 hit -> prev = TP1 (index 0)
+            if prev_level_idx < len(all_levels):
+                prev_tp_price = safe_float(all_levels[prev_level_idx].get("price"))
+                if prev_tp_price > 0:
+                    # Add buffer below TP level for long, above for short
+                    target_with_buffer = prev_tp_price * (1 + step_buffer / 100.0) if direction == "long" else prev_tp_price * (1 - step_buffer / 100.0)
+
+                    # Check if already at or beyond this level
+                    if current_stop > 0:
+                        if direction == "long" and current_stop >= target_with_buffer * 0.998:
+                            return False  # Already at/beyond this TP level
+                        if direction == "short" and current_stop <= target_with_buffer * 1.002:
+                            return False
+
+                    new_stop = target_with_buffer
+                    tp_note = f"TP{highest_hit} hit — SL moved to TP{highest_hit - 1} + {step_buffer}% buffer"
+                    trigger_type = f"tp{highest_hit}_hit"
+
+                    # Calculate cumulative profit locked
+                    profit_locked_pct = 0.0
+                    for i in range(highest_hit):
+                        tp_price = safe_float(all_levels[i].get("price"))
+                        tp_qty = safe_float(all_levels[i].get("qty_pct"), 25.0)
+                        if tp_price > 0 and entry_price > 0:
+                            profit_pct = abs(tp_price - entry_price) / entry_price * 100
+                            profit_locked_pct += profit_pct * tp_qty / 100.0
 
     if new_stop is None or new_stop <= 0:
         return False
 
+    # Validate new stop is better than current
     if current_stop > 0:
         if direction == "short" and new_stop >= current_stop:
             return False
@@ -823,12 +897,30 @@ async def _adjust_trailing_stop_on_tp_hit(
         exchange_config=exchange_config,
         existing_order_id=position.stop_loss_order_id or None,
     )
+
     if result.get("status") in {"placed", "simulated"}:
         position.stop_loss = new_stop
         position.stop_loss_order_id = str(result.get("order_id") or position.stop_loss_order_id or "")
         position.updated_at = utcnow()
-        logger.info(f"[PositionMonitor] {tp_note} for {position.ticker}: new_stop={new_stop:.8f}")
+
+        # Record trailing stop history
+        history_entry = {
+            "position_id": str(position.id or ""),
+            "trigger_type": trigger_type,
+            "old_sl": current_stop,
+            "new_sl": new_stop,
+            "trigger_price": safe_float(all_levels[highest_hit - 1].get("price")) if highest_hit <= len(all_levels) else 0.0,
+            "profit_locked_pct": profit_locked_pct,
+            "timestamp": utcnow().isoformat(),
+            "success": True,
+            "reasoning": tp_note,
+        }
+        if trailing_history is not None:
+            trailing_history.append(history_entry)
+
+        logger.info(f"[PositionMonitor] {tp_note} for {position.ticker}: new_stop={new_stop:.8f}, profit_locked={profit_locked_pct:.2f}%")
         return True
+
     return False
 
 

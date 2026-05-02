@@ -586,7 +586,8 @@ async def run_pre_filter_async(
             "thresholds": {"long_max": rsi_long_max, "short_min": rsi_short_min},
         }
         if not rsi_ok:
-            reasons.append(f"RSI extreme: {market.rsi_1h:.1f} conflicts with {signal.direction.value}")
+            soft_fail_reasons.append(f"RSI extreme: {market.rsi_1h:.1f} conflicts with {signal.direction.value} (soft fail)")
+            checks["rsi_extreme"]["soft_fail"] = True
             _record_filter_block("rsi_extreme", ticker)
     elif not has_rsi_data:
         checks["rsi_extreme"] = {"passed": True, "missing_data": True, "note": "No RSI data available"}
@@ -637,7 +638,8 @@ async def run_pre_filter_async(
             "thresholds": {"long_min": ob_long_min, "short_max": ob_short_max},
         }
         if not ob_ok:
-            reasons.append(f"Orderbook imbalance {market.orderbook_imbalance:.2f} against {signal.direction.value}")
+            soft_fail_reasons.append(f"Orderbook imbalance {market.orderbook_imbalance:.2f} against {signal.direction.value} (soft fail)")
+            checks["orderbook_imbalance"]["soft_fail"] = True
             _record_filter_block("orderbook_imbalance", ticker)
     elif not has_orderbook_data:
         checks["orderbook_imbalance"] = {"passed": True, "missing_data": True, "note": "No orderbook data available"}
@@ -792,7 +794,8 @@ async def run_pre_filter_async(
                 "last_choch": structure.last_choch,
             }
             if not structure_ok:
-                reasons.append(f"HTF structure {structure.trend} conflicts (no CHoCH)")
+                soft_fail_reasons.append(f"HTF structure {structure.trend} conflicts (no CHoCH) (soft fail)")
+                checks["market_structure"]["soft_fail"] = True
                 _record_filter_block("market_structure", ticker)
     except Exception as e:
         checks["market_structure"] = {"passed": True, "note": f"Skip: {e}"}
