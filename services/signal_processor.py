@@ -956,7 +956,8 @@ prefilter_result: PreFilterResult | None = None,
             return
 
         # AI-generated exits with strict validation
-        entry_price = float(signal.price or 0)
+        # BUG FIX: Use decision.entry_price (may be modified by AI) instead of signal.price
+        entry_price = float(decision.entry_price or signal.price or 0)
         timeframe = str(signal.timeframe or "60")
         sl_price = self._valid_stop_loss(
             signal.direction, entry_price, analysis.suggested_stop_loss,
@@ -989,7 +990,8 @@ prefilter_result: PreFilterResult | None = None,
 
         Also validates against minimum/maximum distance requirements.
         """
-        entry = float(signal.price or 0)
+        # BUG FIX: Use decision.entry_price (may be modified by AI) instead of signal.price
+        entry = float(decision.entry_price or signal.price or 0)
         if entry <= 0:
             return
 

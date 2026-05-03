@@ -509,8 +509,10 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             )
 
             ohlcv_15m = await _safe_fetch_ohlcv(exchange, symbol, "15m", 50)
+            ohlcv_30m = await _safe_fetch_ohlcv(exchange, symbol, "30m", 30)
             context_any = cast(Any, context)
             context_any._ohlcv_15m = ohlcv_15m
+            context_any._ohlcv_30m = ohlcv_30m
             context_any._ohlcv_1h = ohlcv_1h
             context_any._ohlcv_4h = ohlcv_4h
             context_any._market_data_source = exchange_id

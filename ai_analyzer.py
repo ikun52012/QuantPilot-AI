@@ -1321,22 +1321,24 @@ async def analyze_signal(
 
         ohlcv_4h = getattr(market, "_ohlcv_4h", None) or []
         ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
+        ohlcv_30m = getattr(market, "_ohlcv_30m", None) or []
         ohlcv_15m = getattr(market, "_ohlcv_15m", None) or []
 
         htf_ctx = analyze_smc_single_tf(ohlcv_4h, "4h", market.current_price) if len(ohlcv_4h) >= 5 else None
         mtf_ctx = analyze_smc_single_tf(ohlcv_1h, "1h", market.current_price) if len(ohlcv_1h) >= 5 else None
+        stf_ctx = analyze_smc_single_tf(ohlcv_30m, "30m", market.current_price) if len(ohlcv_30m) >= 5 else None
         ltf_ctx = analyze_smc_single_tf(ohlcv_15m, "15m", market.current_price) if len(ohlcv_15m) >= 5 else None
 
         direction = signal.direction.value if signal.direction else "long"
-        confluence = find_confluence_zones(htf_ctx, mtf_ctx, ltf_ctx, direction, market.current_price)
+        confluence = find_confluence_zones(htf_ctx, mtf_ctx, stf_ctx, ltf_ctx, direction, market.current_price)
 
-        mtf_smc = MultiTimeframeSMC(htf=htf_ctx, mtf=mtf_ctx, ltf=ltf_ctx, confluence_zones=confluence)
+        mtf_smc = MultiTimeframeSMC(htf=htf_ctx, mtf=mtf_ctx, stf=stf_ctx, ltf=ltf_ctx, confluence_zones=confluence)
         smc_text = format_smc_for_ai(mtf_smc, direction, market.current_price)
 
         logger.info(
             f"[AI/SMC] {signal.ticker}: "
-            f"FVGs={sum(len(c.fvgs) for c in [htf_ctx, mtf_ctx, ltf_ctx] if c)}, "
-            f"OBs={sum(len(c.order_blocks) for c in [htf_ctx, mtf_ctx, ltf_ctx] if c)}, "
+            f"FVGs={sum(len(c.fvgs) for c in [htf_ctx, mtf_ctx, stf_ctx, ltf_ctx] if c)}, "
+            f"OBs={sum(len(c.order_blocks) for c in [htf_ctx, mtf_ctx, stf_ctx, ltf_ctx] if c)}, "
             f"Confluences={len(confluence)}"
         )
     except Exception as e:

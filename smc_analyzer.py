@@ -14,7 +14,6 @@ original TradingView signal price is suboptimal.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 
 def _ohlcv_value(candle, index: int, key: str) -> float:
@@ -133,6 +132,7 @@ class MultiTimeframeSMC:
     """SMC analysis across multiple timeframes."""
     htf: SMCContext | None = None   # Higher timeframe (4h)
     mtf: SMCContext | None = None   # Medium timeframe (1h)
+    stf: SMCContext | None = None   # Sub-medium timeframe (30m)
     ltf: SMCContext | None = None   # Lower timeframe (15m)
     confluence_zones: list[dict] = field(default_factory=list)
 
@@ -401,20 +401,23 @@ def calculate_premium_discount(
 
 
 def find_confluence_zones(
-    htf,
-    mtf,
-    ltf=None,
+    htf_ctx: SMCContext | None,
+    mtf_ctx: SMCContext | None,
+    stf_ctx: SMCContext | None = None,
+    ltf_ctx: SMCContext | None = None,
     direction: str = "long",
     current_price: float = 0.0,
 ) -> list[dict]:
-    """Find zones where multiple timeframe SMC levels overlap (confluence).
+    """Find zones where multiple timeframe levels overlap (highest probability entries).
 
-    These are the highest-probability entry zones.
+    Supports both new API (SMCContext objects) and legacy API (list of dicts).
+    Legacy API: find_confluence_zones(fvg_zones: list, ob_zones: list) -> list[dict]
     """
-    if isinstance(htf, list) and isinstance(mtf, list) and ltf is None:
-        compat_zones: list[dict[str, Any]] = []
-        for a in htf:
-            for b in mtf:
+    # Legacy API support: if first two args are lists and rest are missing
+    if isinstance(htf_ctx, list) and isinstance(mtf_ctx, list) and stf_ctx is None and ltf_ctx is None and direction == "long" and current_price == 0.0:
+        compat_zones: list[dict] = []
+        for a in htf_ctx:
+            for b in mtf_ctx:
                 if a.get("type") != b.get("type"):
                     continue
                 overlap_top = min(float(a.get("high", 0.0)), float(b.get("high", 0.0)))
@@ -428,10 +431,11 @@ def find_confluence_zones(
                     })
         return compat_zones
 
-    zones: list[dict[str, Any]] = []
-    all_levels: list[dict[str, Any]] = []
+    # New API: SMCContext objects
+    zones: list[dict] = []
+    all_levels: list[dict] = []
 
-    for ctx, tf_label in [(htf, "HTF"), (mtf, "MTF"), (ltf, "LTF")]:
+    for ctx, tf_label in [(htf_ctx, "HTF"), (mtf_ctx, "MTF"), (stf_ctx, "STF"), (ltf_ctx, "LTF")]:
         if not ctx:
             continue
 
@@ -560,7 +564,7 @@ def format_smc_for_ai(mtf_smc: MultiTimeframeSMC, direction: str, current_price:
     """Format SMC analysis into a text block for the AI system prompt."""
     lines = ["## Smart Money Concepts (Multi-Timeframe Analysis)"]
 
-    for label, ctx in [("4H (HTF)", mtf_smc.htf), ("1H (MTF)", mtf_smc.mtf), ("15M (LTF)", mtf_smc.ltf)]:
+    for label, ctx in [("4H (HTF)", mtf_smc.htf), ("1H (MTF)", mtf_smc.mtf), ("30M (STF)", mtf_smc.stf), ("15M (LTF)", mtf_smc.ltf)]:
         if not ctx:
             continue
         lines.append(f"\n### {label}")
