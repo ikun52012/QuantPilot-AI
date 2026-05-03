@@ -32,10 +32,13 @@ _AI_TIMEOUT = httpx.Timeout(
     pool=settings.ai.pool_timeout_secs,
 )
 
+# Global semaphore to limit concurrent AI API calls
+_AI_SEMAPHORE = asyncio.Semaphore(settings.ai.max_concurrent_calls)
+
 # ─────────────────────────────────────────────
 # AI analysis result cache (#18)
 # ─────────────────────────────────────────────
-_AI_CACHE_TTL = 30
+_AI_CACHE_TTL = 60
 _AI_CACHE_MAX_SIZE = 500
 _AI_CACHE: dict[str, tuple[float, "AIAnalysis"]] = {}
 _AI_CACHE_LOCK = asyncio.Lock()
@@ -537,34 +540,36 @@ async def _with_retry(coro_factory: Callable[[], Awaitable[str]], label: str) ->
     """
     Execute an async coroutine factory with exponential-backoff retry.
     Retries on rate-limit, server errors, and transient network failures.
+    Uses global semaphore to limit concurrent AI API calls.
     """
-    last_exc: Exception = RuntimeError(f"[AI/{label}] No attempts made (_AI_MAX_RETRIES={_AI_MAX_RETRIES})")
-    for attempt in range(max(_AI_MAX_RETRIES, 1)):
-        try:
-            return await coro_factory()
-        except httpx.HTTPStatusError as exc:
-            last_exc = exc
-            if exc.response.status_code in _RETRYABLE_STATUS_CODES and attempt < _AI_MAX_RETRIES - 1:
-                delay = _AI_BASE_DELAY * (2 ** attempt)
-                logger.warning(
-                    f"[AI/{label}] HTTP {exc.response.status_code}, "
-                    f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_AI_MAX_RETRIES})"
-                )
-                await asyncio.sleep(delay)
-            else:
-                raise
-        except httpx.NetworkError as exc:
-            last_exc = exc
-            if attempt < _AI_MAX_RETRIES - 1:
-                delay = _AI_BASE_DELAY * (2 ** attempt)
-                logger.warning(
-                    f"[AI/{label}] Network error, "
-                    f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_AI_MAX_RETRIES})"
-                )
-                await asyncio.sleep(delay)
-            else:
-                raise
-    raise last_exc  # unreachable but satisfies type checkers
+    async with _AI_SEMAPHORE:
+        last_exc: Exception = RuntimeError(f"[AI/{label}] No attempts made (_AI_MAX_RETRIES={_AI_MAX_RETRIES})")
+        for attempt in range(max(_AI_MAX_RETRIES, 1)):
+            try:
+                return await coro_factory()
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if exc.response.status_code in _RETRYABLE_STATUS_CODES and attempt < _AI_MAX_RETRIES - 1:
+                    delay = _AI_BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        f"[AI/{label}] HTTP {exc.response.status_code}, "
+                        f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_AI_MAX_RETRIES})"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+            except httpx.NetworkError as exc:
+                last_exc = exc
+                if attempt < _AI_MAX_RETRIES - 1:
+                    delay = _AI_BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        f"[AI/{label}] Network error, "
+                        f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_AI_MAX_RETRIES})"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+        raise last_exc  # unreachable but satisfies type checkers
 
 
 # ─────────────────────────────────────────────

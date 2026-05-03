@@ -16,7 +16,7 @@ from core.security import get_secure_api_key
 from exchange import _CCXT_AVAILABLE, _get_or_create_exchange, _resolve_symbol, ccxt
 from models import MarketContext
 
-_MARKET_CACHE_TTL = 30
+_MARKET_CACHE_TTL = 60
 _MARKET_CACHE_MAX_SIZE = 500
 _PUBLIC_MARKET_DATA_FALLBACKS = ("okx", "bitget", "gate", "coinbase")
 _market_cache: OrderedDict[str, tuple[float, MarketContext]] = OrderedDict()

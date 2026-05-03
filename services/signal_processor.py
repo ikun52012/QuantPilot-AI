@@ -66,7 +66,11 @@ _SENSITIVE_EVENT_KEY_PARTS = ("secret", "token", "password", "api_key", "api_sec
 # Per-ticker locks for concurrent signal handling
 _TICKER_LOCKS: dict[str, asyncio.Lock] = {}
 _TICKER_LOCKS_GUARD = asyncio.Lock()
-_TICKER_LOCK_MAX_SIZE = 1000  # Maximum number of ticker locks to hold
+_TICKER_LOCK_MAX_SIZE = 1000
+
+# Per-ticker pending signal count for queue backpressure
+_TICKER_PENDING: dict[str, int] = {}
+_TICKER_PENDING_GUARD = asyncio.Lock()  # Maximum number of ticker locks to hold
 
 
 async def _ticker_lock(ticker: str, user_id: str | None = None) -> asyncio.Lock:
@@ -101,6 +105,38 @@ async def _ticker_lock(ticker: str, user_id: str | None = None) -> asyncio.Lock:
                         _TICKER_LOCKS.pop(k, None)
 
         return lock
+
+
+async def _check_ticker_queue_limit(ticker: str, user_id: str | None = None) -> bool:
+    """Check if ticker queue has room for another signal.
+
+    Returns:
+        True if queue has room, False if queue is full
+    """
+    scope = user_id or "admin"
+    key = f"{scope}:{ticker.upper().strip()}"
+    limit = settings.ai.signal_queue_limit
+
+    async with _TICKER_PENDING_GUARD:
+        current = _TICKER_PENDING.get(key, 0)
+        if current >= limit:
+            logger.warning(
+                f"[SignalProcessor] Ticker {ticker} queue full: "
+                f"{current}/{limit} pending signals, rejecting new signal"
+            )
+            return False
+        _TICKER_PENDING[key] = current + 1
+        return True
+
+
+async def _release_ticker_queue_slot(ticker: str, user_id: str | None = None) -> None:
+    """Release a ticker queue slot after signal processing completes."""
+    scope = user_id or "admin"
+    key = f"{scope}:{ticker.upper().strip()}"
+
+    async with _TICKER_PENDING_GUARD:
+        current = _TICKER_PENDING.get(key, 0)
+        _TICKER_PENDING[key] = max(0, current - 1)
 
 
 async def _release_ticker_lock(ticker: str, user_id: str | None = None) -> None:
@@ -199,13 +235,26 @@ class SignalProcessor:
 
         Uses per-ticker locks to prevent concurrent conflicts when
         multiple signals arrive for the same ticker simultaneously.
+        Implements queue backpressure to limit pending signals per ticker.
         """
+        # Check queue limit before acquiring lock
+        if not await _check_ticker_queue_limit(signal.ticker, user_id):
+            return {
+                "status": "rejected",
+                "reason": f"Queue full for {signal.ticker} - too many pending signals",
+                "queue_limit": settings.ai.signal_queue_limit,
+            }
+
         # Acquire ticker-specific lock to prevent concurrent conflicts
         ticker_lock = await _ticker_lock(signal.ticker, user_id)
 
-        async with ticker_lock:
-            # Process signal within ticker lock context
-            return await self._process_signal_locked(signal, user_id, client_ip, raw_body)
+        try:
+            async with ticker_lock:
+                # Process signal within ticker lock context
+                return await self._process_signal_locked(signal, user_id, client_ip, raw_body)
+        finally:
+            # Always release queue slot when done
+            await _release_ticker_queue_slot(signal.ticker, user_id)
 
     async def _process_signal_locked(
         self,

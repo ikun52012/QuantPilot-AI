@@ -51,10 +51,12 @@ class AIConfig(BaseModel):
     max_tokens: int = 1000
     custom_system_prompt: str = ""
     connect_timeout_secs: float = 10.0
-    read_timeout_secs: float = 90.0
+    read_timeout_secs: float = 60.0
     write_timeout_secs: float = 30.0
     pool_timeout_secs: float = 10.0
     max_retries: int = 3
+    max_concurrent_calls: int = 5
+    signal_queue_limit: int = 10
     voting_enabled: bool = False
     voting_models: list[str] = Field(default_factory=list)
     voting_weights: dict[str, float] = Field(default_factory=dict)
