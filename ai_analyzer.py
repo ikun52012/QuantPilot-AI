@@ -271,6 +271,8 @@ def _analysis_config_signature(user_settings: dict | None = None) -> str:
         "custom_provider_name": settings.ai.custom_provider_name,
         "custom_provider_model": settings.ai.custom_provider_model,
         "custom_provider_api_url": settings.ai.custom_provider_api_url,
+        "temperature": settings.ai.temperature,
+        "max_tokens": settings.ai.max_tokens,
         "voting_enabled": settings.ai.voting_enabled,
         "voting_models": settings.ai.voting_models,
         "voting_weights": settings.ai.voting_weights,

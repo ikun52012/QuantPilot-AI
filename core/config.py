@@ -423,7 +423,6 @@ class Settings(BaseModel):
     jwt_algorithm: str = "HS256"
     jwt_expiry_hours: int = 24
     cookie_secure: str = "auto"
-    webhook_hmac_secret: str = ""
 
     app_encryption_key: str = ""
 
@@ -516,7 +515,6 @@ class Settings(BaseModel):
             json_logs=os.getenv("JSON_LOGS", "false").lower() == "true",
             jwt_secret=os.getenv("JWT_SECRET", ""),
             cookie_secure=os.getenv("COOKIE_SECURE", "auto"),
-            webhook_hmac_secret=os.getenv("WEBHOOK_HMAC_SECRET", ""),
             app_encryption_key=os.getenv("APP_ENCRYPTION_KEY", ""),
             default_admin_username=os.getenv("DEFAULT_ADMIN_USERNAME", "admin"),
             default_admin_email=os.getenv("DEFAULT_ADMIN_EMAIL", "admin@localhost"),

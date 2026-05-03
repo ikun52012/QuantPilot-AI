@@ -337,6 +337,60 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
             if strategy in {"weighted", "consensus", "best_confidence"}:
                 settings.ai.voting_strategy = strategy
 
+        # Reload AI settings saved via /api/admin/ai/provider-config
+        # These are saved directly to admin_settings but need reload on restart
+        openrouter_enabled_raw = await get_admin_setting(session, "openrouter_enabled", "")
+        if openrouter_enabled_raw:
+            try:
+                enabled = json.loads(openrouter_enabled_raw)
+                if isinstance(enabled, bool):
+                    settings.ai.openrouter_enabled = enabled
+            except Exception:
+                pass
+
+        custom_provider_enabled_raw = await get_admin_setting(session, "custom_ai_provider_enabled", "")
+        if custom_provider_enabled_raw:
+            try:
+                enabled = json.loads(custom_provider_enabled_raw)
+                if isinstance(enabled, bool):
+                    settings.ai.custom_provider_enabled = enabled
+            except Exception:
+                pass
+
+        custom_provider_name_raw = await get_admin_setting(session, "custom_ai_provider_name", "")
+        if custom_provider_name_raw:
+            settings.ai.custom_provider_name = str(custom_provider_name_raw).strip()
+
+        custom_provider_model_raw = await get_admin_setting(session, "custom_ai_model", "")
+        if custom_provider_model_raw:
+            settings.ai.custom_provider_model = str(custom_provider_model_raw).strip()
+
+        custom_provider_api_url_raw = await get_admin_setting(session, "custom_ai_api_url", "")
+        if custom_provider_api_url_raw:
+            settings.ai.custom_provider_api_url = str(custom_provider_api_url_raw).strip()
+
+        custom_provider_api_key_raw = await get_admin_setting(session, "custom_ai_api_key", "")
+        if custom_provider_api_key_raw:
+            settings.ai.custom_provider_api_key = str(custom_provider_api_key_raw).strip()
+
+        ai_temperature_raw = await get_admin_setting(session, "ai_temperature", "")
+        if ai_temperature_raw:
+            try:
+                temp = float(ai_temperature_raw)
+                if 0 <= temp <= 2:
+                    settings.ai.temperature = temp
+            except Exception:
+                pass
+
+        ai_max_tokens_raw = await get_admin_setting(session, "ai_max_tokens", "")
+        if ai_max_tokens_raw:
+            try:
+                tokens = int(ai_max_tokens_raw)
+                if 100 <= tokens <= 4000:
+                    settings.ai.max_tokens = tokens
+            except Exception:
+                pass
+
         external_keys_raw = await get_admin_setting(session, "external_api_keys", "")
         if external_keys_raw:
             try:

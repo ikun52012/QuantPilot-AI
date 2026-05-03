@@ -512,7 +512,8 @@ function closeSidebar() {
 }
 
 function switchPage(page) {
-    if (!isAdmin() && (page === 'backtest' || page === 'admin')) {
+    // Block non-admin from admin-only pages
+    if (!isAdmin() && (page === 'backtest' || page === 'admin' || page === 'settings' || page === 'dashboard' || page === 'positions' || page === 'history' || page === 'analytics')) {
         page = 'user';
     }
     document.querySelectorAll('.nav-item').forEach(n => { n.classList.remove('active'); n.removeAttribute('aria-current'); });
@@ -997,6 +998,16 @@ async function saveAISettings() {
     const votingModelsText = document.getElementById('voting-models')?.value || '';
     const votingModels = votingModelsText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
 
+    // Parse voting weights from textarea (format: model_id: weight)
+    const votingWeightsText = document.getElementById('voting-weight-models')?.value || '';
+    const votingWeights = {};
+    votingWeightsText.split('\n').forEach(line => {
+        const parts = line.split(':').map(p => p.trim());
+        if (parts.length >= 2 && parts[0]) {
+            votingWeights[parts[0]] = parseFloat(parts[1]) || 1.0;
+        }
+    });
+
     await saveSettings('/api/settings/ai', {
         provider,
         api_key: document.getElementById('set-ai-key').value,
@@ -1016,6 +1027,7 @@ async function saveAISettings() {
         deepseek_model: document.getElementById('set-deepseek-model')?.value || 'deepseek-v4-pro',
         voting_enabled: document.getElementById('voting-enabled')?.checked || false,
         voting_models: votingModels,
+        voting_weights: votingWeights,
         voting_strategy: document.getElementById('voting-strategy')?.value || 'weighted'
     }, 'btn-save-ai');
 }
@@ -1072,9 +1084,7 @@ async function saveTSSettings() {
         mode: document.getElementById('set-ts-mode').value,
         trail_pct: readNumberInput('set-ts-trail-pct', 1.0),
         activation_profit_pct: readNumberInput('set-ts-activation', 1.0),
-        trailing_step_pct: readNumberInput('set-ts-step', 0.5),
-        breakeven_buffer_pct: readNumberInput('set-ts-breakeven-buffer', 0.2),
-        step_buffer_pct: readNumberInput('set-ts-step-buffer', 0.3)
+        trailing_step_pct: readNumberInput('set-ts-step', 0.5)
     };
     await saveSettings('/api/settings/trailing-stop', data);
     showToast(`Trailing stop: ${data.mode}`, 'success', 'Trailing Stop Updated');

@@ -355,7 +355,7 @@ Access from mobile:
 
 ## 🛡️ Security Features
 
-- **HMAC Verification**: Production mode requires webhook signature
+- **Webhook Security**: Production mode requires strong payload secret
 - **JWT Session Cookies**: HTTP-only session cookies with CSRF protection
 - **Rate Limiting**: IP-based sliding window protection
 - **CSRF Tokens**: Double-submit cookie validation

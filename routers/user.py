@@ -840,6 +840,16 @@ async def save_take_profit_settings(
         "tp4_qty": req.tp4_qty,
     }
 
+    # Validate total TP quantity sum <= 100%
+    total_qty = sum([
+        req.tp1_qty if req.num_levels >= 1 else 0,
+        req.tp2_qty if req.num_levels >= 2 else 0,
+        req.tp3_qty if req.num_levels >= 3 else 0,
+        req.tp4_qty if req.num_levels >= 4 else 0,
+    ])
+    if total_qty > 100:
+        raise HTTPException(400, f"Total TP close percentage ({total_qty}%) exceeds 100%")
+
     await _save_user_settings(db, db_user, current)
 
     return {"status": "ok"}
@@ -965,6 +975,7 @@ async def test_telegram(
     user: dict = Depends(get_current_user),
 ):
     """Send a test Telegram notification using the current runtime settings."""
+    _require_admin(user)
     if not settings.telegram.bot_token or not settings.telegram.chat_id:
         raise HTTPException(400, "Telegram bot token or chat ID is not configured")
     from notifier import send_telegram

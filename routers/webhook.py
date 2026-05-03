@@ -2,9 +2,9 @@
 Signal Server - Webhook Router
 Handles TradingView webhook signals.
 
-Security layers:
-1. HMAC signature (optional, for enhanced security)
-2. Payload secret (required, TradingView compatible)
+Security:
+- Payload secret (required, TradingView compatible)
+- Primary security relies on the 'secret' field in JSON payload
 
 Processing:
 - Returns 202 Accepted immediately to prevent TradingView timeout
@@ -24,7 +24,7 @@ from core.database import db_manager, get_admin_setting, get_db
 from core.request_utils import client_ip as get_client_ip
 from core.security import is_placeholder_webhook_secret
 from models import TradingViewSignal
-from services.signal_processor import SignalProcessor, verify_webhook_signature
+from services.signal_processor import SignalProcessor
 
 router = APIRouter(prefix="", tags=["webhook"])
 
@@ -41,11 +41,10 @@ async def webhook(
     Supports both admin webhook secret and per-user secrets.
 
     TradingView Compatibility:
-    TradingView does NOT support HMAC signature headers.
-    It only sends the 'secret' field in JSON payload.
+    TradingView only sends the 'secret' field in JSON payload.
+    It does NOT support HMAC signature headers.
 
     Security:
-    - HMAC signature is optional (extra security layer for other integrations)
     - Payload secret is REQUIRED (primary security for TradingView)
     - In live_trading mode, payload secret must be strong (not placeholder)
 
@@ -60,18 +59,6 @@ async def webhook(
     except json.JSONDecodeError as err:
         logger.error(f"[Webhook] Invalid JSON: {err}")
         raise HTTPException(400, "Invalid JSON payload") from err
-
-    signature = (
-        request.headers.get("x-tvss-signature", "") or
-        request.headers.get("x-signal-signature", "") or
-        request.headers.get("x-webhook-signature", "")
-    )
-    if signature:
-        if not verify_webhook_signature(raw_body, signature):
-            logger.warning("[Webhook] Invalid HMAC signature (signature was present but invalid)")
-            raise HTTPException(401, "Invalid HMAC signature")
-    else:
-        logger.debug("[Webhook] No HMAC signature header (TradingView compatibility mode)")
 
     secret = body.get("secret", "").strip()
     if not secret:

@@ -177,63 +177,6 @@ def compute_webhook_fingerprint(body: dict, user_id: str | None = None) -> str:
 
 
 # ─────────────────────────────────────────────
-# Webhook Signature Verification
-# ─────────────────────────────────────────────
-
-def verify_webhook_signature(request_body: bytes, signature: str) -> bool:
-    """
-    Verify webhook HMAC signature.
-
-    TradingView Compatibility:
-    TradingView does NOT support sending HMAC signature headers.
-    It only sends the 'secret' field in JSON payload.
-
-    Security policy:
-    - HMAC signature verification is OPTIONAL (extra security layer)
-    - Primary security is the JSON payload 'secret' field (validated in webhook.py)
-    - If HMAC secret configured AND signature present: must verify
-    - If HMAC secret configured BUT no signature: allow (TradingView compatibility)
-    - If no HMAC secret configured: allow (rely on payload secret)
-
-    Returns True to allow request to proceed for payload secret validation.
-    Returns False ONLY when signature is present but invalid.
-    """
-    hmac_secret = settings.webhook_hmac_secret.strip()
-
-    # No HMAC secret configured - rely on payload secret validation
-    if not hmac_secret:
-        logger.debug("[Webhook] HMAC secret not configured, relying on payload secret")
-        return True
-
-    # HMAC secret configured but no signature header
-    # This is normal for TradingView (it doesn't support HMAC headers)
-    # Allow request to proceed - payload secret will be validated in webhook.py
-    if not signature:
-        logger.info(
-            "[Webhook] HMAC secret configured but no signature header. "
-            "TradingView compatibility mode: proceeding with payload secret validation."
-        )
-        return True
-
-    # HMAC secret configured AND signature present - must verify
-    import hmac as hmac_module
-    digest = hmac_module.new(hmac_secret.encode("utf-8"), request_body, hashlib.sha256).hexdigest()
-    expected = f"sha256={digest}"
-
-    valid = (
-        hmac_module.compare_digest(signature, expected) or
-        hmac_module.compare_digest(signature, digest)
-    )
-
-    if not valid:
-        logger.warning("[Security] Webhook HMAC signature verification failed")
-        return False
-
-    logger.info("[Webhook] HMAC signature verified successfully")
-    return True
-
-
-# ─────────────────────────────────────────────
 # Signal Processing Pipeline
 # ─────────────────────────────────────────────
 
@@ -1346,8 +1289,14 @@ prefilter_result: PreFilterResult | None = None,
                 margin_value = equity * (max_position / 100.0) * size_fraction
                 notional_value = margin_value * leverage
             else:
+                # Risk-based sizing: position size where hitting SL loses exactly risk_amount
+                # NOT multiplied by leverage - leverage affects margin, not risk-based size
                 risk_amount = equity * (risk_pct / 100.0)
-                notional_value = (risk_amount / (sl_distance_pct / 100.0)) * leverage
+                notional_value = risk_amount / (sl_distance_pct / 100.0)
+                logger.info(
+                    f"[PositionSize] risk_ratio mode: equity={equity}USDT, risk_pct={risk_pct}%, "
+                    f"SL_distance={sl_distance_pct}% -> notional={notional_value}USDT (risk_amount={risk_amount}USDT)"
+                )
         else:
             margin_value = equity * (max_position / 100.0) * size_fraction
             notional_value = margin_value * leverage

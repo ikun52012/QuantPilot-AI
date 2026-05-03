@@ -5,10 +5,11 @@ Creates and configures the FastAPI application instance.
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from core.auth import require_admin
 from core.cache import cache
 from core.config import settings
 from core.database import db_manager
@@ -223,7 +224,7 @@ def _setup_utility_routes(app: FastAPI):
         return await metrics_endpoint()
 
     @app.get("/stats")
-    async def get_stats():
+    async def get_stats(admin: dict = Depends(require_admin)):
         from sqlalchemy import select
 
         from core.database import TradeModel, WebhookEventModel

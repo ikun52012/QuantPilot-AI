@@ -14,7 +14,10 @@ from typing import Any
 from loguru import logger
 
 from core.config import settings
+from core.utils.common import safe_float as _safe_float_common
 from models import SignalDirection, TradeDecision, TrailingStopMode
+
+safe_float = _safe_float_common
 
 try:
     import ccxt
@@ -91,12 +94,26 @@ def _okx_position_side(side: str) -> str:
     return "long" if str(side).lower() == "buy" else "short"
 
 
-def _order_create_attempts(exchange, side: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def _order_create_attempts(exchange, side: str, params: dict[str, Any] | None = None, position_side: str | None = None) -> list[dict[str, Any]]:
     base = dict(params or {})
     if _exchange_id(exchange) != "okx":
         return [base]
 
-    pos_side = _okx_position_side(side)
+    # For OKX hedge mode, posSide should match the POSITION being operated on
+    # - Opening LONG: side=buy, position_side=long (or derived from side)
+    # - Opening SHORT: side=sell, position_side=short
+    # - Closing LONG: side=sell, position_side=long (NOT short!)
+    # - Closing SHORT: side=buy, position_side=short (NOT long!)
+    # - TP/SL for LONG: side=sell, position_side=long
+    # - TP/SL for SHORT: side=buy, position_side=short
+
+    # If position_side is explicitly provided (close/TP/SL), use it
+    # Otherwise derive from order side (open orders)
+    if position_side:
+        pos_side = position_side.lower()
+    else:
+        pos_side = _okx_position_side(side)
+
     return [
         {**base, "tdMode": base.get("tdMode") or "cross"},
         {**base, "tdMode": base.get("tdMode") or "cross", "posSide": pos_side},
@@ -111,16 +128,22 @@ async def _create_exchange_order(
     amount: float,
     price: float | None = None,
     params: dict[str, Any] | None = None,
+    position_side: str | None = None,
 ) -> dict:
     """Create an exchange order with small exchange-specific retries.
 
     Includes market precision and limits validation.
+
+    Args:
+        position_side: For OKX hedge mode, the actual position side ('long' or 'short').
+                       Required for close/TP/SL orders to target correct position.
+                       Optional for open orders (derived from side).
     """
     # Validate amount against market limits before placing order
     amount = _validate_and_adjust_amount(exchange, symbol, amount)
 
     errors: list[str] = []
-    for attempt_params in _order_create_attempts(exchange, side, params):
+    for attempt_params in _order_create_attempts(exchange, side, params, position_side):
         try:
             if price is None:
                 return await asyncio.to_thread(
@@ -831,9 +854,9 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         elif decision.direction in [SignalDirection.SHORT]:
             side = "sell"
         elif decision.direction == SignalDirection.CLOSE_LONG:
-            return await _close_position(exchange, symbol, "sell")
+            return await _close_position(exchange, symbol, position_side="long")
         elif decision.direction == SignalDirection.CLOSE_SHORT:
-            return await _close_position(exchange, symbol, "buy")
+            return await _close_position(exchange, symbol, position_side="short")
         else:
             return {"status": "error", "reason": f"Unknown direction: {decision.direction}"}
 
@@ -867,19 +890,33 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
         order_id = order.get("id", "unknown")
         order_status = order.get("status", "unknown")
-        logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status})")
+        actual_filled_qty = safe_float(order.get("filled") or 0)
+        if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
+            actual_filled_qty = safe_float(order.get("amount") or decision.quantity)
+        actual_avg_price = safe_float(order.get("average") or order.get("price") or decision.entry_price or 0)
+        logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status}, filled={actual_filled_qty})")
 
-        result_status = "pending" if order_type == "limit" and order_status in {"open", "new"} else "filled"
+        result_status = (
+            "pending" if order_type == "limit" and order_status in {"open", "new"} and actual_filled_qty == 0
+            else "filled" if order_status in {"closed", "filled"} or actual_filled_qty > 0
+            else "error"
+        )
+        if result_status == "error":
+            logger.warning(f"[Exchange] Order status '{order_status}' treated as error")
+            return {"status": "error", "reason": f"Order failed with status: {order_status}", "order_id": order_id}
+
         result = {
             "status": result_status,
             "order_id": order_id,
             "symbol": symbol,
             "side": side,
-            "quantity": decision.quantity,
-            "entry_price": order.get("average") or order.get("price") or decision.entry_price,
+            "quantity": actual_filled_qty if actual_filled_qty > 0 else decision.quantity,
+            "requested_quantity": decision.quantity,
+            "entry_price": actual_avg_price if actual_avg_price > 0 else decision.entry_price,
             "sandbox_mode": sandbox_mode,
             "order_type": order_type,
             "exchange_order_status": order_status,
+            "filled_quantity": actual_filled_qty,
         }
         if leverage:
             result["recommended_leverage"] = leverage
@@ -893,28 +930,37 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             }
 
         # ── Multi Take-Profit Orders ──
-        if decision.take_profit_levels:
+        # Only place TP/SL for filled quantity
+        # For pending limit orders, wait until filled (no protective orders yet)
+        if result_status == "pending" and order_type == "limit":
+            logger.info("[Exchange] Limit order pending, skipping TP/SL/trailing until filled")
+            return result
+
+        tp_qty = actual_filled_qty if actual_filled_qty > 0 else decision.quantity
+        pos_side_for_orders = "long" if side == "buy" else "short"
+        if decision.take_profit_levels and tp_qty > 0:
             tp_orders = await _place_multi_tp_orders(
-                exchange, symbol, side, decision.quantity, decision.take_profit_levels
+                exchange, symbol, side, tp_qty, decision.take_profit_levels, position_side=pos_side_for_orders
             )
             result["take_profit_orders"] = tp_orders
-        elif decision.take_profit:
+        elif decision.take_profit and tp_qty > 0:
             # Fallback: single TP order
             try:
                 tp_side = "sell" if side == "buy" else "buy"
                 tp_order = await _create_conditional_order(
-                    exchange, symbol, "take_profit", tp_side, decision.quantity, decision.take_profit
+                    exchange, symbol, "take_profit", tp_side, tp_qty, decision.take_profit, pos_side_for_orders
                 )
                 result["take_profit_order_id"] = tp_order.get("id")
-                logger.info(f"[Exchange] ✅ Take-profit set at {decision.take_profit}")
+                logger.info(f"[Exchange] ✅ Take-profit set at {decision.take_profit} (qty={tp_qty})")
             except Exception as e:
                 logger.error(f"[Exchange] Failed to set take-profit: {e}")
                 result["take_profit_error"] = str(e)
 
         # ── Stop-Loss / Trailing Stop ──
         trailing_mode = decision.trailing_stop.mode if decision.trailing_stop else TrailingStopMode.NONE
+        sl_qty = actual_filled_qty if actual_filled_qty > 0 else decision.quantity
 
-        if trailing_mode == TrailingStopMode.MOVING:
+        if trailing_mode == TrailingStopMode.MOVING and sl_qty > 0:
             # Place a trailing stop order
             try:
                 sl_side = "sell" if side == "buy" else "buy"
@@ -925,40 +971,41 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     symbol=symbol,
                     order_type="trailing_stop_market",
                     side=sl_side,
-                    amount=decision.quantity,
+                    amount=sl_qty,
                     params={
                         "callbackRate": callback_rate,
                         "closePosition": False,
                     },
+                    position_side=pos_side_for_orders,
                 )
                 result["trailing_stop_order_id"] = ts_order.get("id")
                 result["trailing_stop_mode"] = "moving"
                 result["trailing_pct"] = trail_pct
-                logger.info(f"[Exchange] ✅ Moving trailing stop set: {trail_pct}%")
+                logger.info(f"[Exchange] ✅ Moving trailing stop set: {trail_pct}% (qty={sl_qty})")
             except Exception as e:
                 logger.error(f"[Exchange] Failed to set trailing stop: {e}")
                 result["trailing_stop_error"] = str(e)
                 # Fallback to regular stop-loss
-                if decision.stop_loss:
-                    await _place_stop_loss(exchange, symbol, side, decision.quantity, decision.stop_loss, result)
+                if decision.stop_loss and sl_qty > 0:
+                    await _place_stop_loss(exchange, symbol, side, sl_qty, decision.stop_loss, result, position_side=pos_side_for_orders)
 
         elif trailing_mode in (TrailingStopMode.BREAKEVEN_ON_TP1,
                                 TrailingStopMode.STEP_TRAILING,
                                 TrailingStopMode.PROFIT_PCT_TRAILING):
             # These modes require active monitoring; place initial SL now
-            if decision.stop_loss:
-                await _place_stop_loss(exchange, symbol, side, decision.quantity, decision.stop_loss, result)
+            if decision.stop_loss and sl_qty > 0:
+                await _place_stop_loss(exchange, symbol, side, sl_qty, decision.stop_loss, result, position_side=pos_side_for_orders)
             result["trailing_stop_mode"] = trailing_mode.value
             result["trailing_pct"] = decision.trailing_stop.trail_pct if decision.trailing_stop else 0
             result["trailing_activation_profit_pct"] = decision.trailing_stop.activation_profit_pct if decision.trailing_stop else 0
             result["trailing_stop_note"] = (
                 "Initial SL placed. Trailing adjustments handled by position monitor."
             )
-            logger.info(f"[Exchange] ⚡ Trailing mode '{trailing_mode.value}' active — initial SL placed")
+            logger.info(f"[Exchange] ⚡ Trailing mode '{trailing_mode.value}' active — initial SL placed (qty={sl_qty})")
         else:
             # No trailing: standard stop-loss
-            if decision.stop_loss:
-                await _place_stop_loss(exchange, symbol, side, decision.quantity, decision.stop_loss, result)
+            if decision.stop_loss and sl_qty > 0:
+                await _place_stop_loss(exchange, symbol, side, sl_qty, decision.stop_loss, result, position_side=pos_side_for_orders)
 
         return result
 
@@ -973,21 +1020,33 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         return {"status": "error", "reason": f"Order execution failed: {e}"}
 
 
-async def _place_stop_loss(exchange, symbol, side, quantity, stop_price, result):
-    """Place a standard stop-loss order."""
+async def _place_stop_loss(exchange, symbol, side, quantity, stop_price, result, position_side: str | None = None):
+    """Place a standard stop-loss order.
+
+    Args:
+        side: The entry order side (buy for long, sell for short)
+        position_side: For OKX hedge mode, the position being protected.
+    """
     try:
         sl_side = "sell" if side == "buy" else "buy"
-        sl_order = await _create_conditional_order(exchange, symbol, "stop_loss", sl_side, quantity, stop_price)
+        pos_side = position_side or ("long" if side == "buy" else "short")
+        sl_order = await _create_conditional_order(exchange, symbol, "stop_loss", sl_side, quantity, stop_price, pos_side)
         result["stop_loss_order_id"] = sl_order.get("id")
-        logger.info(f"[Exchange] ✅ Stop-loss set at {stop_price}")
+        logger.info(f"[Exchange] ✅ Stop-loss set at {stop_price} (qty={quantity}, position_side={pos_side})")
     except Exception as e:
         logger.error(f"[Exchange] Failed to set stop-loss: {e}")
         result["stop_loss_error"] = "Failed to set stop-loss order"
 
 
-async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
-    """Place multiple take-profit orders at different price levels."""
+async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels, position_side: str | None = None):
+    """Place multiple take-profit orders at different price levels.
+
+    Args:
+        side: The entry order side (buy for long, sell for short)
+        position_side: For OKX hedge mode, the position being protected.
+    """
     tp_side = "sell" if side == "buy" else "buy"
+    pos_side = position_side or ("long" if side == "buy" else "short")
     tp_results = []
 
     for i, tp in enumerate(tp_levels):
@@ -996,7 +1055,7 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
             continue
         try:
             tp_order = await _create_conditional_order(
-                exchange, symbol, "take_profit", tp_side, round(tp_qty, 6), tp.price
+                exchange, symbol, "take_profit", tp_side, round(tp_qty, 6), tp.price, pos_side
             )
             tp_results.append({
                 "level": i + 1,
@@ -1005,8 +1064,9 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels):
                 "qty_pct": tp.qty_pct,
                 "order_id": tp_order.get("id"),
                 "status": "placed",
+                "position_side": pos_side,
             })
-            logger.info(f"[Exchange] ✅ TP{i+1} set at {tp.price} ({tp.qty_pct}% = {tp_qty})")
+            logger.info(f"[Exchange] ✅ TP{i+1} set at {tp.price} ({tp.qty_pct}% = {tp_qty}, position_side={pos_side})")
         except Exception as e:
             logger.error(f"[Exchange] Failed to set TP{i+1}: {e}")
             tp_results.append({
@@ -1047,8 +1107,14 @@ def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: floa
     return candidates
 
 
-async def _create_conditional_order(exchange, symbol: str, kind: str, side: str, amount: float, trigger_price: float) -> dict:
-    """Try exchange-specific conditional order formats before failing."""
+async def _create_conditional_order(exchange, symbol: str, kind: str, side: str, amount: float, trigger_price: float, position_side: str | None = None) -> dict:
+    """Try exchange-specific conditional order formats before failing.
+
+    Args:
+        position_side: For OKX hedge mode, the position being protected ('long' or 'short').
+                       For LONG position TP/SL: side=sell, position_side=long
+                       For SHORT position TP/SL: side=buy, position_side=short
+    """
     exchange_id = _exchange_id(exchange)
     errors = []
     for order_type, params in _conditional_order_attempts(exchange_id, kind, trigger_price):
@@ -1060,6 +1126,7 @@ async def _create_conditional_order(exchange, symbol: str, kind: str, side: str,
                 side=side,
                 amount=amount,
                 params=params,
+                position_side=position_side,
             )
         except Exception as exc:
             errors.append(f"{order_type}: {exc}")
@@ -1145,6 +1212,7 @@ async def place_protective_stop(
             exchange_config.get("market_type") or settings.exchange.market_type,
         )
         side = "sell" if str(direction).lower() == SignalDirection.LONG.value else "buy"
+        pos_side_for_sl = "long" if str(direction).lower() in ("long", SignalDirection.LONG.value) else "short"
         cancelled_order_id = ""
         if existing_order_id:
             cancel_result = await _cancel_exchange_order(exchange, symbol, str(existing_order_id))
@@ -1156,8 +1224,8 @@ async def place_protective_stop(
                     "stop_price": stop_price,
                 }
             cancelled_order_id = str(cancel_result.get("order_id") or existing_order_id)
-        order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price)
-        result = {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price}
+        order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price, pos_side_for_sl)
+        result = {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price, "position_side": pos_side_for_sl}
         if cancelled_order_id:
             result["replaced_order_id"] = cancelled_order_id
         return result
@@ -1166,25 +1234,44 @@ async def place_protective_stop(
         return {"status": "error", "reason": str(e)}
 
 
-async def _close_position(exchange: ccxt.Exchange, symbol: str, side: str) -> dict:
-    """Close an existing position."""
+async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: str | None = None) -> dict:
+    """Close an existing position.
+
+    Args:
+        position_side: For hedge mode exchanges (OKX), specify 'long' or 'short'.
+                       If None, closes first found position (may be wrong in hedge mode).
+    """
     try:
         positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
         for pos in positions:
-            if pos["symbol"] == symbol and float(pos.get("contracts", 0)) > 0:
-                amount = float(pos["contracts"])
-                order = await _create_exchange_order(
-                    exchange,
-                    symbol=symbol,
-                    order_type="market",
-                    side=side,
-                    amount=amount,
-                    params={"reduceOnly": True},
-                )
-                logger.info(f"[Exchange] ✅ Position closed: {order.get('id')}")
-                exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
-                return {"status": "closed", "order_id": order.get("id"), "exit_price": exit_price}
-        return {"status": "no_position", "reason": "No open position to close"}
+            if pos["symbol"] != symbol:
+                continue
+            contracts = float(pos.get("contracts", 0))
+            if contracts <= 0:
+                continue
+
+            # In hedge mode, filter by position side
+            pos_side = str(pos.get("side", "")).lower()
+            if position_side and pos_side and position_side.lower() not in pos_side:
+                continue
+
+            amount = contracts
+            # Close order side is opposite of position side
+            close_side = "sell" if pos_side in ("long", "") else "buy"
+
+            order = await _create_exchange_order(
+                exchange,
+                symbol=symbol,
+                order_type="market",
+                side=close_side,
+                amount=amount,
+                params={"reduceOnly": True},
+                position_side=pos_side if pos_side else None,
+            )
+            logger.info(f"[Exchange] ✅ Position closed: {order.get('id')} (side={pos_side or 'net'})")
+            exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
+            return {"status": "closed", "order_id": order.get("id"), "exit_price": exit_price, "position_side": pos_side}
+        return {"status": "no_position", "reason": f"No open {position_side or ''} position to close"}
     except Exception as e:
         logger.error(f"[Exchange] Failed to close position: {e}")
         return {"status": "error", "reason": "Failed to close position"}

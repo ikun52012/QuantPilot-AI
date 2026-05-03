@@ -6,7 +6,7 @@ import pytest
 
 import pre_filter
 from models import AIAnalysis, MarketContext, PreFilterResult, SignalDirection, TradeDecision, TradingViewSignal
-from services.signal_processor import SignalProcessor, compute_webhook_fingerprint, verify_webhook_signature
+from services.signal_processor import SignalProcessor, compute_webhook_fingerprint
 
 
 class TestWebhookFingerprint:
@@ -57,26 +57,6 @@ class TestWebhookFingerprint:
         fp1 = compute_webhook_fingerprint(body1)
         fp2 = compute_webhook_fingerprint(body2)
         assert fp1 == fp2
-
-
-class TestWebhookSignature:
-    """Tests for webhook signature verification."""
-
-    @patch("services.signal_processor.settings")
-    def test_verify_signature_no_secret(self, mock_settings):
-        """Should allow when no HMAC secret configured (dev mode)."""
-        mock_settings.exchange.live_trading = False
-        mock_settings.webhook_hmac_secret = ""
-        with patch("os.getenv", return_value=""):
-            assert verify_webhook_signature(b"test", "") is True
-
-    @patch("services.signal_processor.settings")
-    def test_verify_signature_live_trading_no_secret(self, mock_settings):
-        """Should still allow payload-secret validation when no HMAC secret exists."""
-        mock_settings.exchange.live_trading = True
-        mock_settings.webhook_hmac_secret = ""
-        with patch("os.getenv", return_value=""):
-            assert verify_webhook_signature(b"test", "") is True
 
 
 class TestSignalProcessorBuildDecision:

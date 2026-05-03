@@ -12,7 +12,7 @@ from core.database import OrderEventModel
 from core.utils.datetime import utcnow
 
 CONFIRMED_STATUSES = {"filled", "closed", "simulated", "confirmed"}
-FAILED_STATUSES = {"error", "failed", "rejected", "cancelled"}
+FAILED_STATUSES = {"error", "failed", "rejected", "cancelled", "canceled", "expired"}
 
 
 def _safe_dump(value: Any) -> Any:

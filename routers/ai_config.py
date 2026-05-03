@@ -167,8 +167,12 @@ async def update_voting_config(
         else:
             logger.warning(f"[AI Config] Invalid model ID format: {model_id}")
 
-    if not valid_models:
-        raise HTTPException(400, "No valid models specified")
+    if not valid_models and req.enabled:
+        raise HTTPException(400, "No valid models specified when voting is enabled")
+
+    # Allow empty models when voting is being disabled
+    if not valid_models and not req.enabled:
+        logger.info("[AI Config] Voting disabled with empty model list")
 
     # Validate strategy
     if req.strategy not in ["weighted", "consensus", "best_confidence"]:

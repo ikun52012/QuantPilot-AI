@@ -1251,8 +1251,19 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
     exchange_config = entry.get("exchange_config") or {}
 
     entry_price = _safe_float(order_details.get("entry_price") or entry.get("entry_price"))
-    quantity = _safe_float(order_details.get("quantity") or entry.get("quantity"))
+    quantity = _safe_float(
+        order_details.get("filled_quantity")
+        or order_details.get("quantity")
+        or entry.get("quantity")
+    )
+    requested_quantity = _safe_float(order_details.get("requested_quantity") or quantity)
     opened_at = _db_datetime(entry.get("timestamp") or utcnow())
+
+    if quantity > 0 and requested_quantity > 0 and quantity != requested_quantity:
+        logger.info(
+            f"[Database] Exchange adjusted quantity for {ticker}: "
+            f"requested={requested_quantity}, filled={quantity}"
+        )
 
     # Opening a new position
     if direction in {"long", "short"} and entry_price > 0:

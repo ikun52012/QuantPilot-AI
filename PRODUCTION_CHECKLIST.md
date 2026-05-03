@@ -3,7 +3,7 @@
 ## Security (Critical)
 
 - [ ] Set a strong `JWT_SECRET` (at least 48 random characters)
-- [ ] Set `WEBHOOK_HMAC_SECRET` for webhook signature verification
+- [ ] Set strong `WEBHOOK_SECRET` for webhook payload authentication
 - [ ] Change `POSTGRES_PASSWORD` and `REDIS_PASSWORD` from defaults
 - [ ] Change the admin password immediately after first login
 - [ ] Set `COOKIE_SECURE=force` when behind HTTPS

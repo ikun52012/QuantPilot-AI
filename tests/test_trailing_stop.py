@@ -245,8 +245,8 @@ async def test_place_protective_stop_replaces_existing_order(monkeypatch):
         cancel_calls.append((exchange, symbol, order_id))
         return {"status": "cancelled", "order_id": order_id, "symbol": symbol}
 
-    async def fake_create(exchange, symbol, kind, side, amount, trigger_price):
-        create_calls.append((exchange, symbol, kind, side, amount, trigger_price))
+    async def fake_create(exchange, symbol, kind, side, amount, trigger_price, position_side=None):
+        create_calls.append((exchange, symbol, kind, side, amount, trigger_price, position_side))
         return {"id": "stop-new"}
 
     monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: fake_exchange)
@@ -267,7 +267,7 @@ async def test_place_protective_stop_replaces_existing_order(monkeypatch):
     assert result["order_id"] == "stop-new"
     assert result["replaced_order_id"] == "stop-old"
     assert cancel_calls == [(fake_exchange, "TRB/USDT:USDT", "stop-old")]
-    assert create_calls == [(fake_exchange, "TRB/USDT:USDT", "stop_loss", "sell", 1.5, 99.0)]
+    assert create_calls == [(fake_exchange, "TRB/USDT:USDT", "stop_loss", "sell", 1.5, 99.0, "long")]
 
 
 @pytest.mark.asyncio

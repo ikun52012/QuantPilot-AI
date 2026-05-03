@@ -473,14 +473,59 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                 )
 
             elif order_status in {"canceled", "cancelled", "expired", "rejected"}:
-                # Order expired/cancelled - close position as failed
-                position.status = "closed"
-                position.close_reason = "limit_order_expired"
-                position.closed_at = utcnow()
-                position.updated_at = utcnow()
-                logger.warning(f"[PositionMonitor] Limit order {order_status} for {position.ticker}, position closed")
+                filled_amount = safe_float(order.get("filled") or 0)
+                filled_price = safe_float(order.get("average") or order.get("price"))
+
+                if filled_amount > 0 and filled_price > 0:
+                    position.status = "open"
+                    position.quantity = filled_amount
+                    position.remaining_quantity = filled_amount
+                    if filled_price > 0:
+                        position.entry_price = filled_price
+                        position.last_price = filled_price
+                    filled_cost = safe_float(order.get("cost") or 0)
+                    if filled_cost > 0 and position.leverage > 0:
+                        position.margin = filled_cost / position.leverage
+                    elif filled_amount > 0 and filled_price > 0 and position.leverage > 0:
+                        position.margin = (filled_amount * filled_price) / position.leverage
+                    position.updated_at = utcnow()
+                    logger.warning(
+                        f"[PositionMonitor] Limit order {order_status} with partial fill for {position.ticker}: "
+                        f"qty={filled_amount}, price={filled_price}, position remains open"
+                    )
+                else:
+                    position.status = "closed"
+                    position.close_reason = "limit_order_expired"
+                    position.closed_at = utcnow()
+                    position.updated_at = utcnow()
+                    logger.warning(f"[PositionMonitor] Limit order {order_status} for {position.ticker}, position closed")
 
             elif order_status in {"open", "new"}:
+                # Check for partial fills first
+                filled_amount = safe_float(order.get("filled") or 0)
+                filled_price = safe_float(order.get("average") or order.get("price"))
+
+                if filled_amount > 0 and filled_price > 0:
+                    # Partially filled - update position with filled amount
+                    if position.status == "pending":
+                        position.status = "open"
+                    position.quantity = filled_amount
+                    position.remaining_quantity = filled_amount
+                    if filled_price > 0:
+                        position.entry_price = filled_price
+                        position.last_price = filled_price
+                    filled_cost = safe_float(order.get("cost") or 0)
+                    if filled_cost > 0 and position.leverage > 0:
+                        position.margin = filled_cost / position.leverage
+                    elif filled_amount > 0 and filled_price > 0 and position.leverage > 0:
+                        position.margin = (filled_amount * filled_price) / position.leverage
+                    position.updated_at = utcnow()
+                    logger.info(
+                        f"[PositionMonitor] Limit order partially filled for {position.ticker}: "
+                        f"qty={filled_amount}, price={filled_price}, position remains open"
+                    )
+                    return
+
                 # Check if order has exceeded timeout
                 created_at = order.get("timestamp")
                 if created_at:
@@ -574,6 +619,7 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
     tp_order_ids = set(loads_list(position.take_profit_order_ids_json))
     tp_levels = loads_list(position.take_profit_json)
     hit_levels = []
+    total_filled_qty_pct = 0.0
 
     for order in orders:
         order_id = str(order.get("id") or "")
@@ -583,25 +629,50 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
             continue
 
         order_price = safe_float(order.get("average") or order.get("price"))
+        order_filled_qty = safe_float(order.get("filled") or 0)
+        order_remaining_qty = safe_float(order.get("remaining") or 0)
+
         for i, level in enumerate(tp_levels):
             level_price = safe_float(level.get("price"))
             level_status = str(level.get("status") or "pending").lower()
             if level_status in {"hit", "filled", "closed"}:
                 continue
             if abs(order_price - level_price) / level_price < 0.001:
-                hit_levels.append({
+                level_qty_pct = safe_float(level.get("qty_pct"), 100.0)
+
+                hit_info = {
                     "level": i + 1,
                     "price": level_price,
-                    "qty_pct": safe_float(level.get("qty_pct"), 100.0),
+                    "qty_pct": level_qty_pct,
                     "status": "hit",
                     "order_id": order_id,
-                })
+                    "filled_qty": order_filled_qty,
+                    "remaining_qty": order_remaining_qty,
+                }
+                hit_levels.append(hit_info)
+
+                if order_filled_qty > 0 and safe_float(position.quantity) > 0:
+                    actual_filled_pct = (order_filled_qty / safe_float(position.quantity)) * 100
+                    hit_info["actual_filled_pct"] = actual_filled_pct
+                    total_filled_qty_pct += actual_filled_pct
+
                 level["status"] = "hit"
                 level["hit_at"] = utcnow().isoformat()
+                level["filled_qty"] = order_filled_qty
                 break
 
     if hit_levels:
         position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
+
+        if total_filled_qty_pct > 0 and safe_float(position.remaining_quantity) > 0:
+            current_remaining = safe_float(position.remaining_quantity)
+            filled_qty_total = (total_filled_qty_pct / 100.0) * safe_float(position.quantity)
+            new_remaining = max(0, current_remaining - filled_qty_total)
+            position.remaining_quantity = new_remaining
+            logger.info(
+                f"[PositionMonitor] TP partial fills: {total_filled_qty_pct:.1f}% filled, "
+                f"remaining_qty updated from {current_remaining} to {new_remaining}"
+            )
 
     return hit_levels
 
@@ -663,7 +734,9 @@ def _order_matches_position_close(position: PositionModel, order: dict) -> bool:
 
 
 def _order_has_close_status(order: dict) -> bool:
-    return str(order.get("status") or "").lower() in {"closed", "filled"}
+    status = str(order.get("status") or "").lower()
+    filled = safe_float(order.get("filled") or 0)
+    return status in {"closed", "filled"} or (status in {"open", "new", "partial"} and filled > 0)
 
 
 def _symbols_match(left: str, right: str) -> bool:
