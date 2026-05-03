@@ -181,11 +181,22 @@ async def _cached_analyze_smc_single_tf(
     timeframe: str,
     current_price: float,
     signal_direction: str,
+    atr_pct: float = 0.0,  # P1-R1: Add ATR parameter for dynamic zones
 ) -> Any:
-    """Analyze SMC for single timeframe with caching (P1-5)."""
+    """Analyze SMC for single timeframe with caching (P1-5).
+
+    P1-R1: Pass atr_pct to enable dynamic premium/discount zones.
+    P2-O4: Dynamic TTL based on ATR volatility.
+    """
     from smc_analyzer import analyze_smc_single_tf
 
-    if not ohlcv or len(ohlcv) < 5:
+    # P2-R4: Dynamic OHLCV length threshold based on timeframe
+    # detect_market_structure requires: 7 candles for 1h/30m/15m/5m, 11 for 4h/daily
+    tf_minutes = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+    tf_mins = tf_minutes.get(timeframe, 60)
+    min_length = 11 if tf_mins >= 240 else 7  # 4h/daily need 11, others need 7
+
+    if not ohlcv or len(ohlcv) < min_length:
         return None
 
     ohlcv_sig = _ohlcv_signature(ohlcv)
@@ -196,10 +207,22 @@ async def _cached_analyze_smc_single_tf(
         return _reconstruct_smc_context(cached_dict, timeframe)
 
     # Perform actual analysis
-    smc_ctx = analyze_smc_single_tf(ohlcv, timeframe, current_price, signal_direction)
+    # P1-R1: Pass atr_pct to enable dynamic premium/discount zones
+    smc_ctx = analyze_smc_single_tf(ohlcv, timeframe, current_price, signal_direction, atr_pct)
 
-    # Cache the result
-    await _set_cached_smc(ticker, timeframe, ohlcv_sig, smc_ctx)
+    # P2-O4: Dynamic TTL based on ATR volatility
+    # High volatility (>3% ATR): Shorter TTL (60s) for fresher structure
+    # Low volatility (<1% ATR): Longer TTL (180s) for stable structure
+    # Normal volatility: Base TTL (120s)
+    if atr_pct > 3.0:
+        dynamic_ttl = 60
+    elif atr_pct < 1.0:
+        dynamic_ttl = 180
+    else:
+        dynamic_ttl = 120
+
+    # Cache the result with dynamic TTL
+    await _set_cached_smc(ticker, timeframe, ohlcv_sig, smc_ctx, ttl=dynamic_ttl)
 
     return smc_ctx
 
@@ -1511,11 +1534,16 @@ async def analyze_signal(
 
         direction = signal.direction.value if signal.direction else "long"
 
+        # P1-R1: Get ATR percentage for dynamic premium/discount zones
+        atr_pct = market.atr_pct or 0.0
+
         # P1-5: Analyze each timeframe with caching for performance
-        htf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_htf, selected_tfs['htf'], market.current_price, direction) if len(ohlcv_htf) >= 5 else None
-        mtf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_mtf, selected_tfs['mtf'], market.current_price, direction) if len(ohlcv_mtf) >= 5 else None
-        stf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_stf, selected_tfs['stf'], market.current_price, direction) if len(ohlcv_stf) >= 5 else None
-        ltf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_ltf, selected_tfs['ltf'], market.current_price, direction) if len(ohlcv_ltf) >= 5 else None
+        # P1-R1: Pass atr_pct to enable dynamic zones based on volatility
+        # P2-R4: Use minimum threshold 7 (all TFs need at least 7 candles)
+        htf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_htf, selected_tfs['htf'], market.current_price, direction, atr_pct) if len(ohlcv_htf) >= 7 else None
+        mtf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_mtf, selected_tfs['mtf'], market.current_price, direction, atr_pct) if len(ohlcv_mtf) >= 7 else None
+        stf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_stf, selected_tfs['stf'], market.current_price, direction, atr_pct) if len(ohlcv_stf) >= 7 else None
+        ltf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_ltf, selected_tfs['ltf'], market.current_price, direction, atr_pct) if len(ohlcv_ltf) >= 7 else None
 
         # Find confluence zones
         confluence = find_confluence_zones(htf_ctx, mtf_ctx, stf_ctx, ltf_ctx, direction, market.current_price)

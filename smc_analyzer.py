@@ -89,10 +89,19 @@ def select_timeframes_for_signal(signal_timeframe: str) -> dict[str, str]:
 
 
 def _ohlcv_value(candle, index: int, key: str) -> float:
-    """Read OHLCV values from either list-based or dict-based candle input."""
+    """Read OHLCV values from either list-based or dict-based candle input.
+
+    P2-R3: Added IndexError protection for short lists.
+    """
     if isinstance(candle, dict):
         return float(candle.get(key, 0.0) or 0.0)
-    return float(candle[index])
+    # P2-R3: Check if index exists before accessing
+    try:
+        if len(candle) <= index:
+            return 0.0  # Return 0.0 if index out of bounds
+        return float(candle[index])
+    except (IndexError, TypeError, ValueError):
+        return 0.0  # Fallback for any access error
 
 
 # ─────────────────────────────────────────────
@@ -123,6 +132,110 @@ def calculate_fvg_effectiveness_score(fvg_age: int, max_age: int = 100) -> float
         return 0.9 - ((fvg_age - 20) * 0.01)  # 0.6-0.9
     else:
         return max(0.3, 0.6 - ((fvg_age - 50) * 0.01))  # 0.3-0.6
+
+
+def update_fvg_fill_state(fvg: FVG, current_price: float) -> FVG:
+    """P2-M1: Update FVG fill percentage dynamically based on current price.
+
+    This method should be called before each analysis or trade decision
+    to get the current fill state of a FVG.
+
+    Args:
+        fvg: The FVG object to update
+        current_price: Current market price
+
+    Returns:
+        Updated FVG object with current fill_percentage and filled status
+    """
+    fvg_size = fvg.top - fvg.bottom
+    if fvg_size <= 0 or current_price <= 0:
+        return fvg  # No update if invalid
+
+    # Calculate fill percentage
+    if fvg.type == "bullish":
+        # Bullish FVG: filled when price drops below bottom
+        if current_price <= fvg.bottom:
+            fvg.filled = True
+            fvg.fill_percentage = 100.0
+        elif current_price < fvg.top:
+            # Partially filled
+            fvg.filled = False
+            fvg.fill_percentage = round((current_price - fvg.bottom) / fvg_size * 100, 2)
+        else:
+            # Price above FVG, not filled
+            fvg.filled = False
+            fvg.fill_percentage = 0.0
+    else:
+        # Bearish FVG: filled when price rises above top
+        if current_price >= fvg.top:
+            fvg.filled = True
+            fvg.fill_percentage = 100.0
+        elif current_price > fvg.bottom:
+            # Partially filled
+            fvg.filled = False
+            fvg.fill_percentage = round((fvg.top - current_price) / fvg_size * 100, 2)
+        else:
+            # Price below FVG, not filled
+            fvg.filled = False
+            fvg.fill_percentage = 0.0
+
+    return fvg
+
+
+def update_ob_mitigation_state(ob: OrderBlock, current_price: float, recent_prices: list[float] | None = None) -> OrderBlock:
+    """P2-M2: Update OB mitigation status based on price touches.
+
+    OB lifecycle: untested -> partial -> mitigated -> broken
+
+    This method should be called before each analysis to track OB validity.
+
+    Args:
+        ob: The OrderBlock object to update
+        current_price: Current market price
+        recent_prices: List of recent prices (last 10-20 candles) to check for touches
+
+    Returns:
+        Updated OrderBlock with mitigation_status, mitigation_count, last_mitigation_price
+    """
+    ob_range = ob.high - ob.low
+    if ob_range <= 0 or current_price <= 0:
+        return ob  # No update if invalid
+
+    # Check if price is within OB range
+    price_in_ob = ob.low <= current_price <= ob.high
+
+    if not price_in_ob:
+        # Price outside OB - check if OB is broken
+        if ob.type == "bullish":
+            # Bullish OB broken if price drops below OB low
+            if current_price < ob.low:
+                ob.mitigation_status = "broken"
+        else:
+            # Bearish OB broken if price rises above OB high
+            if current_price > ob.high:
+                ob.mitigation_status = "broken"
+        return ob
+
+    # Price is within OB range - update mitigation state
+    if ob.mitigation_status == "untested":
+        # First touch
+        ob.mitigation_status = "partial"
+        ob.mitigation_count = 1
+        ob.last_mitigation_price = current_price
+    elif ob.mitigation_status == "partial":
+        # Additional touches
+        ob.mitigation_count += 1
+        ob.last_mitigation_price = current_price
+        # Check if fully mitigated (3+ touches or deep penetration)
+        penetration_depth = abs(current_price - ob.midpoint) / ob_range
+        if ob.mitigation_count >= 3 or penetration_depth > 0.7:
+            ob.mitigation_status = "mitigated"
+    elif ob.mitigation_status == "mitigated":
+        # Already mitigated, just update count
+        ob.mitigation_count += 1
+        ob.last_mitigation_price = current_price
+
+    return ob
 
 
 def calculate_ob_effectiveness_score(ob_age: int, ob_strength: float, max_age: int = 80) -> float:
@@ -229,7 +342,12 @@ def calculate_break_strength(
             sustainability_score = 0.5
 
     # Volume confirmation (higher volume = stronger break)
-    avg_volume = sum(_ohlcv_value(c, 5, "volume") for c in ohlcv[-10:]) / 10 if len(ohlcv) >= 10 else break_volume
+    # P1-R2: Use available candles if len < 10, avoid using single candle volume as avg
+    volume_window = min(10, len(ohlcv))
+    if volume_window >= 2:
+        avg_volume = sum(_ohlcv_value(c, 5, "volume") for c in ohlcv[-volume_window:]) / volume_window
+    else:
+        avg_volume = 1.0  # Fallback to neutral value when insufficient data
     if avg_volume > 0:
         volume_factor = min(1.5, break_volume / avg_volume) / 1.5  # Normalize to 0-1
     else:
@@ -1029,16 +1147,19 @@ def analyze_smc_single_tf(
     timeframe: str,
     current_price: float = 0.0,
     signal_direction: str = "long",
+    atr_pct: float = 0.0,  # P1-R1: Add ATR parameter for dynamic premium/discount zones
 ) -> SMCContext:
     """Run full SMC analysis on a single timeframe's OHLCV data.
 
     NEW: Includes risk score, entry timing score, and timing recommendation.
+    P1-R1: ATR-based dynamic premium/discount zones (ENH-3 now active).
     """
     structure = detect_market_structure(ohlcv, timeframe)
     fvgs = detect_fvgs(ohlcv, timeframe, current_price)
     obs = detect_order_blocks(ohlcv, timeframe)
 
-    premium_data = calculate_premium_discount(structure.swing_highs, structure.swing_lows)
+    # P1-R1: Pass atr_pct to enable dynamic zones based on volatility
+    premium_data = calculate_premium_discount(structure.swing_highs, structure.swing_lows, atr_pct)
     if isinstance(premium_data, dict):
         premium = premium_data.get("premium", 0.0)
         discount = premium_data.get("discount", 0.0)
