@@ -36,11 +36,13 @@ _START_TIME = time.time()
 async def check_database() -> HealthCheckResult:
     """Check database connection."""
     try:
+        from sqlalchemy import text
+
         from core.database import db_manager
 
         start = time.time()
         async with db_manager.async_session_factory() as session:
-            result = await session.execute("SELECT 1")
+            result = await session.execute(text("SELECT 1"))
             result.scalar()
 
         latency = (time.time() - start) * 1000
@@ -59,22 +61,35 @@ async def check_database() -> HealthCheckResult:
 async def check_redis() -> HealthCheckResult:
     """Check Redis connection."""
     try:
-        from core.middleware import rate_limit_middleware
+        from core.cache import cache
 
-        if not rate_limit_middleware._redis_client:
+        redis_obj = getattr(cache, "_redis", None)
+        if not redis_obj:
             return HealthCheckResult(
                 status="degraded",
-                error="Redis not configured, using in-memory rate limiting",
+                error="Redis not configured, using in-memory cache",
+            )
+
+        if not redis_obj.is_connected():
+            return HealthCheckResult(
+                status="degraded",
+                error="Redis not connected",
             )
 
         start = time.time()
-        await rate_limit_middleware._redis_client.ping()
-        latency = (time.time() - start) * 1000
-
-        return HealthCheckResult(
-            status="healthy",
-            latency_ms=latency,
-        )
+        client = await redis_obj._get_client()
+        if client:
+            await client.ping()
+            latency = (time.time() - start) * 1000
+            return HealthCheckResult(
+                status="healthy",
+                latency_ms=latency,
+            )
+        else:
+            return HealthCheckResult(
+                status="degraded",
+                error="Redis client unavailable",
+            )
     except Exception as e:
         logger.warning(f"[Health] Redis check failed: {e}")
         return HealthCheckResult(
@@ -90,7 +105,7 @@ async def check_exchange_api() -> HealthCheckResult:
 
         start = time.time()
         exchange = _get_or_create_exchange(
-            settings.exchange.default,
+            settings.exchange.name,
             settings.exchange.api_key,
             settings.exchange.api_secret,
             sandbox_mode=settings.exchange.sandbox_mode,
@@ -119,19 +134,7 @@ async def check_ai_api() -> HealthCheckResult:
 
         provider = settings.ai.provider.lower()
 
-        if provider == "groq":
-            if not settings.ai.groq_api_key:
-                return HealthCheckResult(
-                    status="degraded",
-                    error="Groq API key not configured",
-                )
-        elif provider == "together":
-            if not settings.ai.together_api_key:
-                return HealthCheckResult(
-                    status="degraded",
-                    error="Together API key not configured",
-                )
-        elif provider == "deepseek":
+        if provider == "deepseek":
             if not settings.ai.deepseek_api_key:
                 return HealthCheckResult(
                     status="degraded",
@@ -142,6 +145,24 @@ async def check_ai_api() -> HealthCheckResult:
                 return HealthCheckResult(
                     status="degraded",
                     error="OpenAI API key not configured",
+                )
+        elif provider == "anthropic":
+            if not settings.ai.anthropic_api_key:
+                return HealthCheckResult(
+                    status="degraded",
+                    error="Anthropic API key not configured",
+                )
+        elif provider == "mistral":
+            if not settings.ai.mistral_api_key:
+                return HealthCheckResult(
+                    status="degraded",
+                    error="Mistral API key not configured",
+                )
+        elif provider == "openrouter":
+            if not settings.ai.openrouter_api_key:
+                return HealthCheckResult(
+                    status="degraded",
+                    error="OpenRouter API key not configured",
                 )
 
         return HealthCheckResult(
@@ -177,9 +198,9 @@ async def check_position_monitor() -> HealthCheckResult:
 async def check_websocket_connections() -> HealthCheckResult:
     """Check WebSocket connections count."""
     try:
-        from routers.websocket import connection_manager
+        from routers.websocket import manager
 
-        active_count = len(connection_manager.active_connections)
+        active_count = len(manager.active_connections)
         return HealthCheckResult(
             status="healthy",
             details={"active_connections": active_count},

@@ -81,8 +81,13 @@ class MarketDataWebSocketManager:
             return True
 
         try:
-            symbol = _resolve_symbol(ticker)
-            exchange_name = getattr(settings.exchange, "default", "okx").lower()
+            exchange_name = getattr(settings.exchange, "name", "okx").lower()
+            exchange = _get_or_create_exchange(
+                exchange_name,
+                api_key="",
+                api_secret="",
+            )
+            symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
 
             ws_url = self._get_ws_url(exchange_name, symbol)
             if not ws_url:
@@ -144,7 +149,7 @@ class MarketDataWebSocketManager:
                 parsed = self._parse_ws_data(data, ticker)
                 if parsed:
                     self._data[ticker] = parsed
-                    self._last_update[ticker] = time.time()
+                    self._last_update[ticker] = time.monotonic()
 
                     # Update market cache directly
                     await self._update_market_cache(ticker, parsed)
@@ -211,7 +216,7 @@ class MarketDataWebSocketManager:
                     price_change_pct_24h=data.get("change_pct", 0),
                 )
 
-            _market_cache[ticker] = (time.time(), context)
+            _market_cache[ticker] = (time.monotonic(), context)
             _market_cache.move_to_end(ticker)
 
             # Cleanup
@@ -223,7 +228,7 @@ class MarketDataWebSocketManager:
     def get_latest_data(self, ticker: str) -> dict | None:
         """Get latest WebSocket data for ticker."""
         if ticker in self._last_update:
-            if time.time() - self._last_update[ticker] < 30:
+            if time.monotonic() - self._last_update[ticker] < 30:
                 return self._data.get(ticker)
         return None
 

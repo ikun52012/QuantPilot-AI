@@ -21,6 +21,7 @@ from routers.ai_config import router as ai_config_router
 from routers.auth import router as auth_router
 from routers.backtest import router as backtest_router
 from routers.chart import router as chart_router
+from routers.health import router as health_router
 from routers.i18n import router as i18n_router
 from routers.social import router as social_router
 from routers.strategies import router as strategies_router
@@ -282,6 +283,7 @@ def create_app() -> FastAPI:
     app.include_router(strategy_editor_router)
     app.include_router(social_router)
     app.include_router(i18n_router)
+    app.include_router(health_router)
 
     # API v1 aliases
     for router in [

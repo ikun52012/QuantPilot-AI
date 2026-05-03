@@ -459,8 +459,9 @@ class SignalProcessor:
 
                 # Optimization 2: Check confidence for interval skip
                 skip_interval = False
-                if result.get("status") == "executed":
-                    analysis_confidence = result.get("analysis", {}).get("confidence", 0.0)
+                if result.get("status") in ("filled", "simulated"):
+                    analysis_data = result.get("analysis", {})
+                    analysis_confidence = analysis_data.get("confidence", 0.0) if isinstance(analysis_data, dict) else 0.0
                     if analysis_confidence >= settings.ai.priority_skip_interval_confidence_threshold:
                         skip_interval = True
                         logger.info(
@@ -584,6 +585,10 @@ class SignalProcessor:
                 reason=result.get("reason", ""),
                 payload=raw_body or signal.model_dump(),
             )
+
+            # Add analysis to result for skip_interval check
+            if analysis:
+                result["analysis"] = analysis.model_dump()
 
             return result
 
