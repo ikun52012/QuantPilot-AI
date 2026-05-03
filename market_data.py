@@ -1,8 +1,10 @@
 """
 QuantPilot AI - Market Data Fetcher
 Fetches real-time market data from the exchange via ccxt.
+Includes WebSocket streaming for real-time updates (Optimization 6).
 """
 import asyncio
+import json
 import os
 import time
 from collections import OrderedDict
@@ -22,6 +24,217 @@ _PUBLIC_MARKET_DATA_FALLBACKS = ("okx", "bitget", "gate", "coinbase")
 _market_cache: OrderedDict[str, tuple[float, MarketContext]] = OrderedDict()
 _market_cache_locks: dict[str, asyncio.Lock] = {}
 _market_cache_locks_guard = asyncio.Lock()
+
+# WebSocket streaming state (Optimization 6)
+_ws_connections: dict[str, Any] = {}
+_ws_data_buffer: dict[str, dict] = {}
+_ws_subscribers: dict[str, list[asyncio.Queue]] = {}
+_ws_manager_task: asyncio.Task | None = None
+
+
+class MarketDataWebSocketManager:
+    """Manage WebSocket connections for real-time market data (Optimization 6)."""
+
+    def __init__(self):
+        self._running = False
+        self._connections: dict[str, Any] = {}
+        self._data: dict[str, dict] = {}
+        self._last_update: dict[str, float] = {}
+
+    async def start(self):
+        """Start WebSocket manager background task."""
+        if not settings.ai.websocket_market_data_enabled:
+            logger.debug("[MarketWS] WebSocket market data disabled in config")
+            return
+
+        if self._running:
+            return
+
+        self._running = True
+        logger.info("[MarketWS] WebSocket market data manager started")
+
+    async def stop(self):
+        """Stop WebSocket manager and close all connections."""
+        self._running = False
+        for ticker, conn in self._connections.items():
+            try:
+                if conn:
+                    await conn.close()
+            except Exception as e:
+                logger.warning(f"[MarketWS] Failed to close connection for {ticker}: {e}")
+        self._connections.clear()
+        logger.info("[MarketWS] WebSocket manager stopped")
+
+    async def subscribe_ticker(self, ticker: str) -> bool:
+        """Subscribe to real-time updates for a ticker.
+
+        Returns True if WebSocket subscription is active,
+        False if using REST API fallback.
+        """
+        if not settings.ai.websocket_market_data_enabled:
+            return False
+
+        if not self._running:
+            await self.start()
+
+        if ticker in self._connections:
+            return True
+
+        try:
+            symbol = _resolve_symbol(ticker)
+            exchange_name = getattr(settings.exchange, "default", "okx").lower()
+
+            ws_url = self._get_ws_url(exchange_name, symbol)
+            if not ws_url:
+                logger.debug(f"[MarketWS] No WebSocket URL for {exchange_name}")
+                return False
+
+            conn = await self._connect_ws(ws_url, ticker, symbol)
+            if conn:
+                self._connections[ticker] = conn
+                logger.info(f"[MarketWS] Subscribed to {ticker} via WebSocket")
+                return True
+        except Exception as e:
+            logger.warning(f"[MarketWS] Failed to subscribe {ticker}: {e}")
+
+        return False
+
+    def _get_ws_url(self, exchange: str, symbol: str) -> str | None:
+        """Get WebSocket URL for exchange."""
+        ws_urls = {
+            "okx": "wss://ws.okx.com:8443/ws/v5/public",
+            "binance": f"wss://stream.binance.com:9443/ws/{symbol.lower()}@ticker",
+            "bitget": "wss://ws.bitget.com/v2/ws/public",
+            "gate": f"wss://api.gateio.ws/ws/v4/{symbol.lower()}",
+        }
+        return ws_urls.get(exchange)
+
+    async def _connect_ws(self, url: str, ticker: str, symbol: str):
+        """Connect to WebSocket and handle messages."""
+        try:
+            import websockets
+            conn = await websockets.connect(url, ping_interval=30, ping_timeout=10)
+
+            # Subscribe to ticker channel
+            if "okx" in url:
+                subscribe_msg = {
+                    "op": "subscribe",
+                    "args": [{"channel": "tickers", "instId": symbol}]
+                }
+                await conn.send(json.dumps(subscribe_msg))
+
+            # Start message handler
+            asyncio.create_task(self._handle_messages(conn, ticker))
+            return conn
+        except ImportError:
+            logger.warning("[MarketWS] websockets package not installed, using REST fallback")
+            return None
+        except Exception as e:
+            logger.warning(f"[MarketWS] Connection failed: {e}")
+            return None
+
+    async def _handle_messages(self, conn, ticker: str):
+        """Handle incoming WebSocket messages."""
+        try:
+            while self._running:
+                msg = await conn.recv()
+                data = json.loads(msg)
+
+                # Parse ticker data based on exchange format
+                parsed = self._parse_ws_data(data, ticker)
+                if parsed:
+                    self._data[ticker] = parsed
+                    self._last_update[ticker] = time.time()
+
+                    # Update market cache directly
+                    await self._update_market_cache(ticker, parsed)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"[MarketWS] Message handler error for {ticker}: {e}")
+
+    def _parse_ws_data(self, data: dict, ticker: str) -> dict | None:
+        """Parse WebSocket data into standardized format."""
+        # OKX format
+        if "data" in data and isinstance(data["data"], list):
+            for item in data["data"]:
+                if "instId" in item:
+                    return {
+                        "price": float(item.get("last", 0)),
+                        "high": float(item.get("high24h", 0)),
+                        "low": float(item.get("low24h", 0)),
+                        "volume": float(item.get("vol24h", 0)),
+                        "change_pct": float(item.get("change24h", 0)),
+                    }
+
+        # Binance format
+        if "p" in data:
+            return {
+                "price": float(data.get("p", 0)),
+                "high": float(data.get("h", 0)),
+                "low": float(data.get("l", 0)),
+                "volume": float(data.get("v", 0)),
+                "change_pct": float(data.get("P", 0)),
+            }
+
+        return None
+
+    async def _update_market_cache(self, ticker: str, data: dict):
+        """Update market cache with WebSocket data."""
+        global _market_cache
+
+        # Get existing cache entry or create minimal context
+        async with _market_cache_locks_guard:
+            lock = _market_cache_locks.get(ticker)
+            if lock is None:
+                lock = asyncio.Lock()
+                _market_cache_locks[ticker] = lock
+
+        async with lock:
+            existing = _market_cache.get(ticker)
+            if existing:
+                _, context = existing
+                # Update with new data
+                context.current_price = data.get("price", context.current_price)
+                context.high_24h = data.get("high", context.high_24h)
+                context.low_24h = data.get("low", context.low_24h)
+                context.volume_24h = data.get("volume", context.volume_24h)
+                context.price_change_pct_24h = data.get("change_pct", context.price_change_pct_24h)
+            else:
+                # Create minimal context
+                context = MarketContext(
+                    ticker=ticker,
+                    current_price=data.get("price", 0),
+                    high_24h=data.get("high", 0),
+                    low_24h=data.get("low", 0),
+                    volume_24h=data.get("volume", 0),
+                    price_change_pct_24h=data.get("change_pct", 0),
+                )
+
+            _market_cache[ticker] = (time.time(), context)
+            _market_cache.move_to_end(ticker)
+
+            # Cleanup
+            while len(_market_cache) > _MARKET_CACHE_MAX_SIZE:
+                _market_cache.popitem(last=False)
+
+        logger.debug(f"[MarketWS] Updated cache for {ticker}: price={data.get('price')}")
+
+    def get_latest_data(self, ticker: str) -> dict | None:
+        """Get latest WebSocket data for ticker."""
+        if ticker in self._last_update:
+            if time.time() - self._last_update[ticker] < 30:
+                return self._data.get(ticker)
+        return None
+
+
+# Global WebSocket manager instance
+_ws_manager = MarketDataWebSocketManager()
+
+
+async def get_ws_market_manager() -> MarketDataWebSocketManager:
+    """Get global WebSocket manager instance."""
+    return _ws_manager
 
 
 def _to_float(value: object, default: float = 0.0) -> float:
@@ -136,10 +349,24 @@ async def _get_cache_lock(ticker: str) -> asyncio.Lock:
 async def fetch_market_context(ticker: str) -> MarketContext:
     """
     Fetch comprehensive market context for AI analysis.
-    Results are cached per ticker for up to 30 s to avoid hammering the exchange
-    on rapid consecutive signals for the same symbol.
+
+    Priority (Optimization 6):
+    1. WebSocket real-time data (if available and fresh)
+    2. Cache (if fresh within TTL)
+    3. REST API fetch
+
+    Results are cached per ticker for up to 60 s.
     """
     now = time.monotonic()
+
+    # Optimization 6: Check WebSocket data first
+    ws_data = _ws_manager.get_latest_data(ticker)
+    if ws_data and ws_data.get("price", 0) > 0:
+        logger.debug(f"[MarketData] Using WebSocket data for {ticker}")
+        # WebSocket data is already updating cache, return from cache
+        entry = _market_cache.get(ticker)
+        if entry:
+            return entry[1]
 
     lock = await _get_cache_lock(ticker)
     async with lock:
@@ -148,6 +375,9 @@ async def fetch_market_context(ticker: str) -> MarketContext:
             _market_cache.move_to_end(ticker)
             logger.debug(f"[MarketData] Cache hit for {ticker}")
             return entry[1]
+
+        # Try WebSocket subscription for future updates
+        await _ws_manager.subscribe_ticker(ticker)
 
         context = await _fetch_market_context_live(ticker)
 

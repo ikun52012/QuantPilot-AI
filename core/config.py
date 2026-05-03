@@ -59,6 +59,19 @@ class AIConfig(BaseModel):
     signal_queue_limit: int = 50
     global_processing_semaphore: int = 5
     signal_processing_interval_secs: float = 1.0
+    dynamic_interval_enabled: bool = True
+    dynamic_interval_high_load_threshold: float = 30.0
+    dynamic_interval_high_load_multiplier: float = 2.0
+    priority_skip_interval_confidence_threshold: float = 0.85
+    dynamic_cache_ttl_enabled: bool = True
+    dynamic_cache_ttl_base: int = 60
+    dynamic_cache_ttl_high_volatility_multiplier: float = 0.5
+    dynamic_cache_ttl_low_volatility_multiplier: float = 2.0
+    batch_signals_enabled: bool = True
+    batch_signals_window_secs: float = 5.0
+    batch_signals_max_count: int = 3
+    prefetch_market_data: bool = True
+    websocket_market_data_enabled: bool = False
     voting_enabled: bool = False
     voting_models: list[str] = Field(default_factory=list)
     voting_weights: dict[str, float] = Field(default_factory=dict)

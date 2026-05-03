@@ -79,6 +79,57 @@ _GLOBAL_PROCESSING_GUARD = asyncio.Lock()
 _LAST_SIGNAL_PROCESS_TIME: float = 0.0
 _PROCESSING_INTERVAL_SEMAPHORE = asyncio.Lock()
 
+# Dynamic interval tracking (Optimization 1)
+_AI_RESPONSE_TIMES: list[float] = []
+_AI_RESPONSE_TIMES_GUARD = asyncio.Lock()
+_AI_RESPONSE_TIMES_MAX_SAMPLES = 20
+
+# Batch processing state (Optimization 4)
+_PENDING_BATCH_SIGNALS: dict[str, list[tuple[TradingViewSignal, float, dict | None]]] = {}
+_BATCH_SIGNALS_GUARD = asyncio.Lock()
+
+# Prefetch market data cache (Optimization 5)
+_PREFETCHED_MARKET_DATA: dict[str, tuple[float, MarketContext]] = {}
+_PREFETCH_GUARD = asyncio.Lock()
+
+
+async def _track_ai_response_time(response_time: float) -> None:
+    """Track AI response time for dynamic interval adjustment."""
+    async with _AI_RESPONSE_TIMES_GUARD:
+        _AI_RESPONSE_TIMES.append(response_time)
+        if len(_AI_RESPONSE_TIMES) > _AI_RESPONSE_TIMES_MAX_SAMPLES:
+            _AI_RESPONSE_TIMES.pop(0)
+
+
+async def _get_avg_ai_response_time() -> float:
+    """Get average AI response time from recent samples."""
+    async with _AI_RESPONSE_TIMES_GUARD:
+        if not _AI_RESPONSE_TIMES:
+            return 0.0
+        return sum(_AI_RESPONSE_TIMES) / len(_AI_RESPONSE_TIMES)
+
+
+async def _get_dynamic_interval() -> float:
+    """Calculate dynamic interval based on AI load (Optimization 1).
+
+    High load (>30s avg response) -> double interval
+    Normal load -> use base interval
+    """
+    if not settings.ai.dynamic_interval_enabled:
+        return settings.ai.signal_processing_interval_secs
+
+    avg_time = await _get_avg_ai_response_time()
+    base_interval = settings.ai.signal_processing_interval_secs
+
+    if avg_time > settings.ai.dynamic_interval_high_load_threshold:
+        dynamic_interval = base_interval * settings.ai.dynamic_interval_high_load_multiplier
+        logger.info(
+            f"[SignalProcessor] High AI load detected (avg={avg_time:.1f}s), "
+            f"increasing interval: {base_interval:.1f}s -> {dynamic_interval:.1f}s"
+        )
+        return dynamic_interval
+    return base_interval
+
 
 async def _get_global_semaphore() -> asyncio.Semaphore:
     """Get or create global processing semaphore (lazy init)."""
@@ -89,10 +140,18 @@ async def _get_global_semaphore() -> asyncio.Semaphore:
         return _GLOBAL_PROCESSING_SEMAPHORE
 
 
-async def _wait_processing_interval() -> None:
-    """Wait for processing interval after completing a signal."""
+async def _wait_processing_interval(skip_interval: bool = False) -> None:
+    """Wait for processing interval after completing a signal (Optimization 1 & 2).
+
+    Args:
+        skip_interval: If True, skip waiting (for high-confidence signals)
+    """
     global _LAST_SIGNAL_PROCESS_TIME
-    interval = settings.ai.signal_processing_interval_secs
+    if skip_interval:
+        logger.debug("[SignalProcessor] Skipping interval (high confidence signal)")
+        return
+
+    interval = await _get_dynamic_interval()
     if interval <= 0:
         return
 
@@ -103,7 +162,89 @@ async def _wait_processing_interval() -> None:
             wait_time = interval - elapsed
             logger.debug(f"[SignalProcessor] Waiting {wait_time:.1f}s before next signal")
             await asyncio.sleep(wait_time)
-        _LAST_SIGNAL_PROCESS_TIME = _time.time()  # Maximum number of ticker locks to hold
+        _LAST_SIGNAL_PROCESS_TIME = _time.time()
+
+
+async def _prefetch_market_data_async(ticker: str) -> MarketContext | None:
+    """Prefetch market data before acquiring semaphore (Optimization 5).
+
+    This allows market data fetch to happen in parallel with other signals,
+    reducing overall latency when semaphore is acquired.
+    """
+    if not settings.ai.prefetch_market_data:
+        return None
+
+    cache_key = ticker.upper().strip()
+    now = _time.time()
+
+    async with _PREFETCH_GUARD:
+        cached = _PREFETCHED_MARKET_DATA.get(cache_key)
+        if cached and (now - cached[0]) < 30:
+            logger.debug(f"[SignalProcessor] Using prefetched market data for {ticker}")
+            return cached[1]
+
+    try:
+        enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
+        if enhanced_filters:
+            market = await fetch_enhanced_market_context(ticker)
+        else:
+            market = await fetch_market_context(ticker)
+
+        async with _PREFETCH_GUARD:
+            _PREFETCHED_MARKET_DATA[cache_key] = (now, market)
+            if len(_PREFETCHED_MARKET_DATA) > 100:
+                oldest_key = next(iter(_PREFETCHED_MARKET_DATA))
+                _PREFETCHED_MARKET_DATA.pop(oldest_key)
+
+        return market
+    except Exception as e:
+        logger.warning(f"[SignalProcessor] Prefetch market data failed for {ticker}: {e}")
+        return None
+
+
+async def _check_batch_signals(ticker: str, signal: TradingViewSignal, raw_body: dict | None) -> bool:
+    """Check if signal should be batched with similar pending signals (Optimization 4).
+
+    Returns True if signal was batched (should not process individually).
+    """
+    if not settings.ai.batch_signals_enabled:
+        return False
+
+    key = ticker.upper().strip()
+    now = _time.time()
+
+    async with _BATCH_SIGNALS_GUARD:
+        pending = _PENDING_BATCH_SIGNALS.get(key, [])
+
+        expired = [(s, t, b) for s, t, b in pending if now - t > settings.ai.batch_signals_window_secs]
+        for s, t, b in expired:
+            pending.remove((s, t, b))
+
+        same_direction = [
+            (s, t, b) for s, t, b in pending
+            if s.direction == signal.direction
+        ]
+
+        if len(same_direction) >= settings.ai.batch_signals_max_count:
+            logger.info(
+                f"[SignalProcessor] Batch triggered for {ticker} {signal.direction.value}: "
+                f"{len(same_direction) + 1} signals within {settings.ai.batch_signals_window_secs}s window"
+            )
+            for s, t, b in same_direction:
+                pending.remove((s, t, b))
+            _PENDING_BATCH_SIGNALS[key] = pending
+            return False
+
+        pending.append((signal, now, raw_body))
+        _PENDING_BATCH_SIGNALS[key] = pending
+
+        if len(same_direction) >= 1:
+            logger.debug(
+                f"[SignalProcessor] Signal batching pending for {ticker}: "
+                f"{len(same_direction) + 1}/{settings.ai.batch_signals_max_count} same-direction signals"
+            )
+
+        return False
 
 
 async def _ticker_lock(ticker: str, user_id: str | None = None) -> asyncio.Lock:
@@ -266,20 +407,33 @@ class SignalProcessor:
         Process a webhook signal through the complete pipeline.
         Returns the result of the processing.
 
-        Architecture:
-        - Global semaphore limits max concurrent signals (default 5)
-        - Per-ticker lock prevents same-ticker position conflicts
-        - Processing interval (1s) adds delay between signals
-        - Signal queue backpressure for extreme load
+        Architecture (6 Optimizations):
+        1. Dynamic interval based on AI load
+        2. Priority skip interval for high-confidence signals
+        3. Prefetch market data before semaphore
+        4. Batch similar signals (same ticker+direction)
+        5. Global semaphore (5 concurrent max)
+        6. Per-ticker lock prevents conflicts
 
         Flow:
-        1. Check global queue limit
-        2. Acquire global semaphore (waits if 5 signals already processing)
-        3. Acquire per-ticker lock (waits if same ticker processing)
-        4. Process signal
-        5. Wait processing interval
-        6. Release semaphore and lock
+        1. Prefetch market data (parallel optimization)
+        2. Check batch signals
+        3. Check queue limit
+        4. Acquire global semaphore (waits if 5 processing)
+        5. Acquire ticker lock (waits if same ticker)
+        6. Process signal with prefetched market data
+        7. Check confidence for interval skip
+        8. Wait dynamic interval
+        9. Release semaphore and lock
         """
+        # Optimization 5: Prefetch market data BEFORE acquiring semaphore
+        prefetched_market = await _prefetch_market_data_async(signal.ticker)
+
+        # Optimization 4: Check batch signals
+        batched = await _check_batch_signals(signal.ticker, signal, raw_body)
+        if batched:
+            return {"status": "batched", "reason": "Signal added to batch queue"}
+
         # Check queue limit first (fast rejection for extreme load)
         if not await _check_ticker_queue_limit(signal.ticker, user_id):
             return {
@@ -298,11 +452,24 @@ class SignalProcessor:
 
             try:
                 async with ticker_lock:
-                    # Process signal
-                    result = await self._process_signal_locked(signal, user_id, client_ip, raw_body)
+                    # Process signal with prefetched market data
+                    result = await self._process_signal_locked(
+                        signal, user_id, client_ip, raw_body, prefetched_market=prefetched_market
+                    )
 
-                # Wait processing interval before releasing semaphore
-                await _wait_processing_interval()
+                # Optimization 2: Check confidence for interval skip
+                skip_interval = False
+                if result.get("status") == "executed":
+                    analysis_confidence = result.get("analysis", {}).get("confidence", 0.0)
+                    if analysis_confidence >= settings.ai.priority_skip_interval_confidence_threshold:
+                        skip_interval = True
+                        logger.info(
+                            f"[SignalProcessor] High confidence signal ({analysis_confidence:.2f}) "
+                            f"skips interval for faster next signal"
+                        )
+
+                # Optimization 1: Wait dynamic interval
+                await _wait_processing_interval(skip_interval=skip_interval)
 
                 return result
             finally:
@@ -315,8 +482,13 @@ class SignalProcessor:
         user_id: str | None = None,
         client_ip: str = "",
         raw_body: dict | None = None,
+        prefetched_market: MarketContext | None = None,
     ) -> dict:
-        """Internal signal processing with ticker lock already acquired."""
+        """Internal signal processing with ticker lock already acquired.
+
+        Args:
+            prefetched_market: Pre-fetched market data (Optimization 5)
+        """
         # Compute fingerprint for deduplication
         fingerprint = compute_webhook_fingerprint(raw_body or signal.model_dump(), user_id)
         user_settings = await self._load_user_settings(user_id)
@@ -341,8 +513,12 @@ class SignalProcessor:
         await notify_signal_received(signal.ticker, signal.direction.value, signal.price)
 
         try:
-            # Step 1: Fetch market context
-            enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
+            # Step 1: Fetch market context (use prefetched if available)
+            if prefetched_market:
+                market = prefetched_market
+                logger.debug(f"[SignalProcessor] Using prefetched market data for {signal.ticker}")
+            else:
+                enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
             if enhanced_filters:
                 market = await fetch_enhanced_market_context(signal.ticker)
             else:
@@ -552,6 +728,9 @@ prefilter_result: PreFilterResult | None = None,
         analysis = await analyze_signal(signal, market, scoped_user_settings)
 
         latency = time.time() - start
+        # Optimization 1: Track AI response time for dynamic interval
+        await _track_ai_response_time(latency)
+
         record_ai_analysis(
             settings.ai.provider,
             analysis.recommendation,

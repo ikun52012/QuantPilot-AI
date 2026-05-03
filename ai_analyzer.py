@@ -36,12 +36,56 @@ _AI_TIMEOUT = httpx.Timeout(
 _AI_SEMAPHORE = asyncio.Semaphore(settings.ai.max_concurrent_calls)
 
 # ─────────────────────────────────────────────
-# AI analysis result cache (#18)
+# AI analysis result cache (#18) with dynamic TTL (Optimization 3)
 # ─────────────────────────────────────────────
-_AI_CACHE_TTL = 60
+_AI_CACHE_BASE_TTL = 60
 _AI_CACHE_MAX_SIZE = 500
-_AI_CACHE: dict[str, tuple[float, "AIAnalysis"]] = {}
+_AI_CACHE: dict[str, tuple[float, float, "AIAnalysis"]] = {}  # (timestamp, ttl, analysis)
 _AI_CACHE_LOCK = asyncio.Lock()
+_VOLATILITY_TRACKER: dict[str, float] = {}  # ticker -> recent volatility pct
+_VOLATILITY_TRACKER_LOCK = asyncio.Lock()
+
+
+async def _update_volatility_tracker(ticker: str, market: MarketContext) -> float:
+    """Update volatility tracker for dynamic TTL calculation (Optimization 3)."""
+    volatility_pct = 0.0
+    if market.current_price > 0 and market.high_24h > 0 and market.low_24h > 0:
+        volatility_pct = abs(market.high_24h - market.low_24h) / market.current_price * 100
+
+    async with _VOLATILITY_TRACKER_LOCK:
+        _VOLATILITY_TRACKER[ticker] = volatility_pct
+        if len(_VOLATILITY_TRACKER) > 200:
+            oldest = next(iter(_VOLATILITY_TRACKER))
+            _VOLATILITY_TRACKER.pop(oldest)
+
+    return volatility_pct
+
+
+async def _get_dynamic_cache_ttl(ticker: str) -> float:
+    """Calculate dynamic cache TTL based on market volatility (Optimization 3).
+
+    High volatility (>5%) -> shorter TTL (30s) for fresher analysis
+    Low volatility (<2%) -> longer TTL (120s) for better cache hit rate
+    Normal volatility -> base TTL (60s)
+    """
+    if not settings.ai.dynamic_cache_ttl_enabled:
+        return _AI_CACHE_BASE_TTL
+
+    async with _VOLATILITY_TRACKER_LOCK:
+        volatility = _VOLATILITY_TRACKER.get(ticker, 0.0)
+
+    base_ttl = settings.ai.dynamic_cache_ttl_base
+
+    if volatility > 5.0:
+        dynamic_ttl = base_ttl * settings.ai.dynamic_cache_ttl_high_volatility_multiplier
+        logger.debug(f"[AI/Cache] High volatility {ticker} ({volatility:.1f}%): TTL={dynamic_ttl:.0f}s")
+        return dynamic_ttl
+    elif volatility < 2.0:
+        dynamic_ttl = base_ttl * settings.ai.dynamic_cache_ttl_low_volatility_multiplier
+        logger.debug(f"[AI/Cache] Low volatility {ticker} ({volatility:.1f}%): TTL={dynamic_ttl:.0f}s")
+        return dynamic_ttl
+
+    return base_ttl
 
 
 def _ai_cache_key(
@@ -85,11 +129,14 @@ async def _get_cached_analysis(
     timeframe: str = "",
     config_signature: str = "",
 ) -> AIAnalysis | None:
+    """Get cached analysis with dynamic TTL support."""
     key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature)
     async with _AI_CACHE_LOCK:
         entry = _AI_CACHE.get(key)
-        if entry and (_time.monotonic() - entry[0]) < _AI_CACHE_TTL:
-            return entry[1]
+        if entry:
+            timestamp, ttl, analysis = entry
+            if (_time.monotonic() - timestamp) < ttl:
+                return analysis
     return None
 
 
@@ -101,13 +148,18 @@ async def _set_cached_analysis(
     timeframe: str = "",
     config_signature: str = "",
 ) -> None:
+    """Set cached analysis with dynamic TTL based on volatility."""
     key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature)
+    ttl = await _get_dynamic_cache_ttl(ticker)
+
     async with _AI_CACHE_LOCK:
-        _AI_CACHE[key] = (_time.monotonic(), analysis)
+        _AI_CACHE[key] = (_time.monotonic(), ttl, analysis)
+
         now = _time.monotonic()
-        stale = [k for k, (ts, _) in _AI_CACHE.items() if now - ts > _AI_CACHE_TTL]
+        stale = [k for k, (ts, t, _) in _AI_CACHE.items() if now - ts > t]
         for k in stale:
             del _AI_CACHE[k]
+
         while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:
             oldest_key = min(_AI_CACHE.keys(), key=lambda k: _AI_CACHE[k][0])
             del _AI_CACHE[oldest_key]
@@ -1232,10 +1284,13 @@ async def analyze_signal(
     """
     Send signal + market context to LLM and parse the response.
     Includes multi-timeframe SMC/FVG analysis for optimal entry detection.
-    Results are cached for 30s per ticker+direction+price_bucket+timeframe.
+    Results are cached with dynamic TTL based on market volatility (Optimization 3).
 
     Voting mode: If voting_enabled, calls multiple models concurrently and aggregates.
     """
+    # Optimization 3: Update volatility tracker for dynamic TTL
+    await _update_volatility_tracker(signal.ticker, market)
+
     price_bucket = _price_to_bucket(market.current_price) if market.current_price > 0 else ""
     timeframe = str(signal.timeframe or "")
     config_signature = _analysis_config_signature(user_settings)
