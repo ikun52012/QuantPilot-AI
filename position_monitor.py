@@ -630,10 +630,12 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         _GHOST_POSITION_TRACKER[position.id] = ghost_entry
 
         if ghost_entry["fail_count"] >= _MAX_GHOST_THRESHOLD:
-            logger.warning(
-                f"[PositionMonitor] GHOST POSITION: {position.id[:8]} on {position.ticker} "
-                f"not found on exchange after {ghost_entry['fail_count']} attempts - forcing close"
-            )
+            last_check_time = ghost_entry.get("last_check")
+            if last_check_time and (utcnow() - last_check_time).total_seconds() >= _GHOST_CHECK_INTERVAL_SECS:
+                logger.warning(
+                    f"[PositionMonitor] GHOST POSITION: {position.id[:8]} on {position.ticker} "
+                    f"not found on exchange after {ghost_entry['fail_count']} attempts - forcing close"
+                )
             ticker = await get_ticker(position.ticker, exchange_config)
             exit_price = safe_float(ticker.get("last") or position.last_price or position.entry_price)
             if exit_price > 0:
@@ -732,9 +734,21 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
             filled_qty_total = (total_filled_qty_pct / 100.0) * safe_float(position.quantity)
             new_remaining = max(0, current_remaining - filled_qty_total)
             position.remaining_quantity = new_remaining
+
+            entry_price = safe_float(position.entry_price)
+            leverage = safe_float(position.leverage, 1.0)
+            if entry_price > 0:
+                for hit in hit_levels:
+                    tp_price = safe_float(hit.get("price"))
+                    if tp_price > 0:
+                        tp_pnl_pct = _price_pnl_pct(position.direction, entry_price, tp_price, leverage)
+                        weight = safe_float(hit.get("actual_filled_pct") or hit.get("qty_pct"), 100.0) / 100.0
+                        position.realized_pnl_pct = round(safe_float(position.realized_pnl_pct) + (tp_pnl_pct * weight), 6)
+
             logger.info(
                 f"[PositionMonitor] TP partial fills: {total_filled_qty_pct:.1f}% filled, "
-                f"remaining_qty updated from {current_remaining} to {new_remaining}"
+                f"remaining_qty updated from {current_remaining} to {new_remaining}, "
+                f"realized_pnl_pct={position.realized_pnl_pct:.2f}%"
             )
 
     return hit_levels
@@ -759,14 +773,32 @@ async def _find_recent_close_order(position: PositionModel, exchange_config: dic
     order_ids = set(loads_list(position.take_profit_order_ids_json))
     if position.stop_loss_order_id:
         order_ids.add(position.stop_loss_order_id)
+
+    remaining_qty = safe_float(position.remaining_quantity or position.quantity)
+    opened_qty = safe_float(position.quantity)
+
     for order in orders:
         if str(order.get("id") or "") in order_ids and _order_has_close_status(order):
+            filled_qty = safe_float(order.get("filled") or 0)
+            if filled_qty > 0 and remaining_qty > 0:
+                filled_pct = (filled_qty / opened_qty) * 100 if opened_qty > 0 else 100
+                if filled_pct >= 90:
+                    return order
+                else:
+                    return None
             return order
     if order_ids:
         return None
 
     for order in orders:
         if _order_matches_position_close(position, order):
+            filled_qty = safe_float(order.get("filled") or 0)
+            if filled_qty > 0 and remaining_qty > 0:
+                filled_pct = (filled_qty / opened_qty) * 100 if opened_qty > 0 else 100
+                if filled_pct >= 90:
+                    return order
+                else:
+                    return None
             return order
     return None
 
@@ -825,13 +857,14 @@ def _update_unrealized(position: PositionModel, mark_price: float) -> None:
     leverage = safe_float(position.leverage, 1.0)
     open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, leverage)
     entry_price = safe_float(position.entry_price)
+    remaining_weight = remaining_qty / opened_qty if opened_qty > 0 else 1.0
     if entry_price > 0 and remaining_qty > 0:
         margin_used = (entry_price * remaining_qty) / leverage
         position.unrealized_pnl_usdt = round(margin_used * (open_pnl / 100.0), 8)
     else:
         position.unrealized_pnl_usdt = 0.0
     position.last_price = mark_price
-    position.current_pnl_pct = round(safe_float(position.realized_pnl_pct) + open_pnl, 6)
+    position.current_pnl_pct = round(safe_float(position.realized_pnl_pct) + open_pnl * remaining_weight, 6)
     position.updated_at = utcnow()
 
 

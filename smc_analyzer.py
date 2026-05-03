@@ -624,18 +624,16 @@ def detect_market_structure(
     if hh and hl:
         structure.trend = "bullish"
         structure.last_bos = "bullish_bos"
-        # NEW: Calculate break strength (P0-1 FIX)
-        if len(swing_lows) >= 2:
+        if len(swing_highs) >= 2:
             structure.break_strength = calculate_break_strength(
-                ohlcv, swing_lows[-2].index, "low", True, timeframe
+                ohlcv, swing_highs[-2].index, "high", True, timeframe
             )
     elif lh and ll:
         structure.trend = "bearish"
         structure.last_bos = "bearish_bos"
-        # NEW: Calculate break strength (P0-1 FIX)
-        if len(swing_highs) >= 2:
+        if len(swing_lows) >= 2:
             structure.break_strength = calculate_break_strength(
-                ohlcv, swing_highs[-2].index, "high", True, timeframe
+                ohlcv, swing_lows[-2].index, "low", True, timeframe
             )
     else:
         structure.trend = "ranging"
@@ -650,14 +648,12 @@ def detect_market_structure(
 
         if was_bullish and ll:
             structure.last_choch = "bearish_choch"
-            # NEW: Calculate CHoCH break strength (P0-1 FIX)
             if len(swing_lows) >= 2:
                 structure.break_strength = calculate_break_strength(
                     ohlcv, swing_lows[-2].index, "low", False, timeframe
                 )
         elif was_bearish and hh:
             structure.last_choch = "bullish_choch"
-            # NEW: Calculate CHoCH break strength (P0-1 FIX)
             if len(swing_highs) >= 2:
                 structure.break_strength = calculate_break_strength(
                     ohlcv, swing_highs[-2].index, "high", False, timeframe

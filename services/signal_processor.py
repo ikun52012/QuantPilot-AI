@@ -516,12 +516,11 @@ class SignalProcessor:
 
         try:
             # Step 1: Fetch market context (use prefetched if available)
+            enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
             if prefetched_market:
                 market = prefetched_market
                 logger.debug(f"[SignalProcessor] Using prefetched market data for {signal.ticker}")
-            else:
-                enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
-            if enhanced_filters:
+            elif enhanced_filters:
                 market = await fetch_enhanced_market_context(signal.ticker)
             else:
                 market = await fetch_market_context(signal.ticker)
@@ -1989,8 +1988,8 @@ prefilter_result: PreFilterResult | None = None,
             # Allow same-direction (scaling in)
             return (None, None)
         except Exception as e:
-            logger.warning(f"[Signal] Position conflict check failed (allowing trade): {e}")
-            return (None, None)
+            logger.error(f"[Signal] Position conflict check failed: {e}")
+            return (f"Position conflict check failed: {e}", None)
 
     async def _close_conflicting_position(
         self,
@@ -2126,14 +2125,16 @@ prefilter_result: PreFilterResult | None = None,
             exchange_config["live_trading"] = position.live_trading
 
             # Step 1: Cancel limit entry order on exchange
-            if position.live_trading and position.exchange_order_id:
+            if position.live_trading and position.entry_order_id:
                 from exchange import cancel_order
-                cancel_result = await cancel_order(str(position.exchange_order_id), position.ticker, exchange_config)
+                cancel_result = await cancel_order(str(position.entry_order_id), position.ticker, exchange_config)
                 result["exchange_cancel"] = cancel_result
 
                 if cancel_result.get("status") not in ("cancelled", "simulated"):
                     logger.warning(f"[Signal] Failed to cancel pending order on exchange: {cancel_result}")
-                    # Still proceed to mark as cancelled in DB
+                    result["status"] = "error"
+                    result["reason"] = f"Exchange cancellation failed: {cancel_result.get('reason', 'unknown')}"
+                    return result
 
             # Step 2: Cancel TP orders if any
             if hasattr(position, "take_profit_order_ids_json") and position.take_profit_order_ids_json:
@@ -2164,14 +2165,7 @@ prefilter_result: PreFilterResult | None = None,
             logger.error(f"[Signal] Failed to cancel pending position: {e}")
             result["status"] = "error"
             result["reason"] = str(e)
-            # Still mark as cancelled in DB even if exchange cancel failed
-            try:
-                position.status = "cancelled"
-                position.closed_at = datetime.now(timezone.utc)
-                position.close_reason = f"cancelled_error: {str(e)}"
-                await self.session.flush()
-            except Exception:
-                pass
+            return result
 
         return result
 

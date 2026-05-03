@@ -361,7 +361,7 @@ async def test_partial_take_profit_recalculates_remaining_pnl_metrics(monkeypatc
     assert stats["partials"] == 1
     assert position.remaining_quantity == pytest.approx(0.5)
     assert position.realized_pnl_pct == pytest.approx(5.0)
-    assert position.current_pnl_pct == pytest.approx(13.0)
+    assert position.current_pnl_pct == pytest.approx(9.0)
     assert position.unrealized_pnl_usdt == pytest.approx(4.0)
 
 

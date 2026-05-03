@@ -92,7 +92,7 @@ def _ohlcv_signature(ohlcv: list[list], samples: int = 5) -> str:
     return hashlib.md5("|".join(signature_data).encode()).hexdigest()[:16]
 
 
-async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str) -> dict[str, Any] | None:
+async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, cache_key: str) -> dict[str, Any] | None:
     """Get cached SMC analysis result if available and not expired.
 
     BUG-4 FIX: Also clean expired entries during reads.
@@ -115,7 +115,7 @@ async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str) -> dict[s
     return None
 
 
-async def _set_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, smc_ctx: Any, ttl: float = _SMC_CACHE_BASE_TTL) -> None:
+async def _set_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, smc_ctx: Any, cache_key: str, ttl: float = _SMC_CACHE_BASE_TTL) -> None:
     """Cache SMC analysis result with TTL."""
     cache_key = f"{ticker}:{timeframe}:{ohlcv_sig}"
 
@@ -204,8 +204,13 @@ async def _cached_analyze_smc_single_tf(
 
     ohlcv_sig = _ohlcv_signature(ohlcv)
 
-    # Try to get cached result
-    cached_dict = await _get_cached_smc(ticker, timeframe, ohlcv_sig)
+    atr_bucket = "high" if atr_pct > 3.0 else "low" if atr_pct < 1.0 else "normal"
+    price_bucket = int(current_price / 100) if current_price > 0 else 0
+    direction_bucket = signal_direction.lower()[:4]
+
+    cache_key = f"{ticker}:{timeframe}:{ohlcv_sig}:{direction_bucket}:{price_bucket}:{atr_bucket}"
+
+    cached_dict = await _get_cached_smc(ticker, timeframe, ohlcv_sig, cache_key)
     if cached_dict:
         return _reconstruct_smc_context(cached_dict, timeframe)
 
@@ -225,7 +230,7 @@ async def _cached_analyze_smc_single_tf(
         dynamic_ttl = 120
 
     # Cache the result with dynamic TTL
-    await _set_cached_smc(ticker, timeframe, ohlcv_sig, smc_ctx, ttl=dynamic_ttl)
+    await _set_cached_smc(ticker, timeframe, ohlcv_sig, smc_ctx, cache_key, ttl=dynamic_ttl)
 
     return smc_ctx
 
@@ -1760,13 +1765,38 @@ def _parse_response(raw: str) -> AIAnalysis:
 
         confidence = _clamp(_float_or_default(data.get("confidence", 0.5), 0.5), 0.0, 1.0)
         risk_score = _clamp(_float_or_default(data.get("risk_score", 0.5), 0.5), 0.0, 1.0)
-        position_size_pct = _clamp(_float_or_default(data.get("position_size_pct", 1.0), 1.0), 0.0, 1.0)
-        recommended_leverage = max(0.0, _float_or_default(data.get("recommended_leverage", 1.0), 1.0))
+        position_size_pct = _clamp(_float_or_default(data.get("position_size_pct", 1.0), 1.0), 0.0, 100.0)
+        recommended_leverage = max(1.0, min(50.0, _float_or_default(data.get("recommended_leverage", 1.0), 1.0)))
+
+        tp_sum = sum([
+            _float_or_default(data.get("tp1_qty_pct", 0), 0),
+            _float_or_default(data.get("tp2_qty_pct", 0), 0),
+            _float_or_default(data.get("tp3_qty_pct", 0), 0),
+            _float_or_default(data.get("tp4_qty_pct", 0), 0),
+        ])
+        if tp_sum > 100:
+            logger.warning(f"[AI] TP sum {tp_sum}% exceeds 100%, capping")
+            tp_sum_cap_factor = 100.0 / tp_sum
+            data["tp1_qty_pct"] = _float_or_default(data.get("tp1_qty_pct", 0), 0) * tp_sum_cap_factor
+            data["tp2_qty_pct"] = _float_or_default(data.get("tp2_qty_pct", 0), 0) * tp_sum_cap_factor
+            data["tp3_qty_pct"] = _float_or_default(data.get("tp3_qty_pct", 0), 0) * tp_sum_cap_factor
+            data["tp4_qty_pct"] = _float_or_default(data.get("tp4_qty_pct", 0), 0) * tp_sum_cap_factor
+
+        reasoning = str(data.get("reasoning", ""))
+        if recommendation == "execute" and confidence < 0.4:
+            logger.warning(f"[AI] Execute recommendation with low confidence {confidence}, forcing reject")
+            recommendation = "reject"
+            reasoning = f"[AI SAFETY] Confidence {confidence:.2f} below execute threshold 0.4. Original: {reasoning}"
+
+        if recommendation in ("execute", "modify") and not _optional_float(data.get("suggested_stop_loss")):
+            logger.warning("[AI] Execute/modify without stop loss, forcing reject")
+            recommendation = "reject"
+            reasoning = f"[AI SAFETY] Missing stop loss for execute/modify. Original: {reasoning}"
 
         return AIAnalysis(
             confidence=confidence,
             recommendation=recommendation,
-            reasoning=str(data.get("reasoning", "")),
+            reasoning=reasoning,
             suggested_direction=suggested_direction,
             suggested_entry=_optional_float(data.get("suggested_entry")),
             suggested_stop_loss=_optional_float(data.get("suggested_stop_loss")),

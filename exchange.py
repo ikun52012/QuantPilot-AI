@@ -373,7 +373,7 @@ def adjust_quantity_for_limits(
 
     if price <= 0.0001:
         logger.warning(f"[Exchange] Invalid price {price}, skipping cost-based adjustments")
-        return quantity, adjustments
+        return quantity
 
     # Check minimum cost (order value)
     if min_cost > 0 and current_cost < min_cost:
@@ -915,8 +915,27 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "pending" if order_type == "limit" and order_status in {"open", "new"} and actual_filled_qty == 0
             else "partial" if is_partial_fill
             else "filled" if order_status in {"closed", "filled"} or actual_filled_qty > 0
+            else "ambiguous" if order_status in {"open", "new"} and order_type == "market"
             else "error"
         )
+        if result_status == "ambiguous":
+            logger.warning(f"[Exchange] Market order returned status={order_status}, may fill later. Waiting 3s...")
+            await asyncio.sleep(3)
+            try:
+                order = await asyncio.to_thread(exchange.fetch_order, order_id, symbol)
+                order_status = order.get("status", "unknown")
+                actual_filled_qty = safe_float(order.get("filled") or 0)
+                result_status = (
+                    "filled" if order_status in {"closed", "filled"} or actual_filled_qty > 0
+                    else "partial" if actual_filled_qty > 0 and actual_filled_qty < requested_qty
+                    else "error"
+                )
+                if result_status == "error":
+                    logger.error(f"[Exchange] Market order still not filled after wait: {order_status}")
+                    return {"status": "error", "reason": f"Market order ambiguous after 3s: {order_status}", "order_id": order_id}
+            except Exception as e:
+                logger.error(f"[Exchange] Failed to re-fetch order: {e}")
+                return {"status": "error", "reason": f"Cannot verify market order fill: {e}", "order_id": order_id}
         if result_status == "error":
             logger.warning(f"[Exchange] Order status '{order_status}' treated as error")
             return {"status": "error", "reason": f"Order failed with status: {order_status}", "order_id": order_id}
@@ -960,6 +979,9 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 exchange, symbol, side, tp_qty, decision.take_profit_levels, position_side=pos_side_for_orders
             )
             result["take_profit_orders"] = tp_orders
+            failed_tps = [tp for tp in tp_orders if tp.get("status") == "error"]
+            if failed_tps:
+                result["take_profit_error"] = f"Multi-TP failed: {len(failed_tps)}/{len(decision.take_profit_levels)} levels failed"
         elif decision.take_profit and tp_qty > 0:
             # Fallback: single TP order
             try:
@@ -1026,7 +1048,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
         # ── Protection Failure Check ──
         # If entry succeeded but SL/TP failed, close position for safety
-        if result.get("status") in ("filled", "pending") and (result.get("stop_loss_error") or result.get("take_profit_error")):
+        if result.get("status") in ("filled", "partial", "pending") and (result.get("stop_loss_error") or result.get("take_profit_error")):
             protection_errors = []
             if result.get("stop_loss_error"):
                 protection_errors.append(f"SL: {result['stop_loss_error']}")
@@ -1041,7 +1063,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 )
                 try:
                     close_result = await _close_position(
-                        exchange, symbol, position_side=pos_side_for_orders
+                        exchange, symbol, position_side=pos_side_for_orders, close_quantity=actual_filled_qty
                     )
                     if close_result.get("status") == "closed":
                         return {
@@ -1322,12 +1344,14 @@ async def place_protective_stop(
         return {"status": "error", "reason": str(e)}
 
 
-async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: str | None = None) -> dict:
+async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: str | None = None, close_quantity: float | None = None) -> dict:
     """Close an existing position.
 
     Args:
         position_side: For hedge mode exchanges (OKX), specify 'long' or 'short'.
                        If None, closes first found position (may be wrong in hedge mode).
+        close_quantity: If specified, only close this quantity (for partial rollback).
+                        If None, close entire position.
     """
     try:
         positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
@@ -1353,7 +1377,8 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                 continue
 
             amount = abs(contracts)
-            # Close order side is opposite of position side
+            if close_quantity and close_quantity > 0:
+                amount = min(amount, close_quantity)
             close_side = "sell" if pos_side == "long" else "buy"
 
             order = await _create_exchange_order(
