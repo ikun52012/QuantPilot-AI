@@ -1315,31 +1315,55 @@ async def analyze_signal(
         from smc_analyzer import (
             MultiTimeframeSMC,
             analyze_smc_single_tf,
+            check_htf_structure_conflict,
             find_confluence_zones,
             format_smc_for_ai,
+            select_timeframes_for_signal,
         )
 
-        ohlcv_4h = getattr(market, "_ohlcv_4h", None) or []
-        ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
-        ohlcv_30m = getattr(market, "_ohlcv_30m", None) or []
-        ohlcv_15m = getattr(market, "_ohlcv_15m", None) or []
-
-        htf_ctx = analyze_smc_single_tf(ohlcv_4h, "4h", market.current_price) if len(ohlcv_4h) >= 5 else None
-        mtf_ctx = analyze_smc_single_tf(ohlcv_1h, "1h", market.current_price) if len(ohlcv_1h) >= 5 else None
-        stf_ctx = analyze_smc_single_tf(ohlcv_30m, "30m", market.current_price) if len(ohlcv_30m) >= 5 else None
-        ltf_ctx = analyze_smc_single_tf(ohlcv_15m, "15m", market.current_price) if len(ohlcv_15m) >= 5 else None
+        # P0-3: Dynamic timeframe selection based on signal timeframe
+        selected_tfs = select_timeframes_for_signal(str(signal.timeframe or "60"))
+        ohlcv_htf = getattr(market, f"_ohlcv_{selected_tfs['htf']}", None) or []
+        ohlcv_mtf = getattr(market, f"_ohlcv_{selected_tfs['mtf']}", None) or []
+        ohlcv_stf = getattr(market, f"_ohlcv_{selected_tfs['stf']}", None) or []
+        ohlcv_ltf = getattr(market, f"_ohlcv_{selected_tfs['ltf']}", None) or []
 
         direction = signal.direction.value if signal.direction else "long"
+
+        # Analyze each timeframe with signal direction for risk scoring
+        htf_ctx = analyze_smc_single_tf(ohlcv_htf, selected_tfs['htf'], market.current_price, direction) if len(ohlcv_htf) >= 5 else None
+        mtf_ctx = analyze_smc_single_tf(ohlcv_mtf, selected_tfs['mtf'], market.current_price, direction) if len(ohlcv_mtf) >= 5 else None
+        stf_ctx = analyze_smc_single_tf(ohlcv_stf, selected_tfs['stf'], market.current_price, direction) if len(ohlcv_stf) >= 5 else None
+        ltf_ctx = analyze_smc_single_tf(ohlcv_ltf, selected_tfs['ltf'], market.current_price, direction) if len(ohlcv_ltf) >= 5 else None
+
+        # Find confluence zones
         confluence = find_confluence_zones(htf_ctx, mtf_ctx, stf_ctx, ltf_ctx, direction, market.current_price)
 
-        mtf_smc = MultiTimeframeSMC(htf=htf_ctx, mtf=mtf_ctx, stf=stf_ctx, ltf=ltf_ctx, confluence_zones=confluence)
+        # P0-2: HTF structure conflict check
+        htf_conflict, htf_conflict_type, htf_risk_penalty = check_htf_structure_conflict(htf_ctx, direction)
+
+        # Calculate overall risk score
+        overall_risk = sum(ctx.risk_score for ctx in [htf_ctx, mtf_ctx, stf_ctx, ltf_ctx] if ctx) / 4.0 if any([htf_ctx, mtf_ctx, stf_ctx, ltf_ctx]) else 0.5
+        overall_risk += htf_risk_penalty
+
+        mtf_smc = MultiTimeframeSMC(
+            htf=htf_ctx,
+            mtf=mtf_ctx,
+            stf=stf_ctx,
+            ltf=ltf_ctx,
+            confluence_zones=confluence,
+            overall_risk_score=round(min(1.0, overall_risk), 2),
+            htf_conflict=htf_conflict,
+            htf_conflict_type=htf_conflict_type,
+        )
         smc_text = format_smc_for_ai(mtf_smc, direction, market.current_price)
 
         logger.info(
             f"[AI/SMC] {signal.ticker}: "
-            f"FVGs={sum(len(c.fvgs) for c in [htf_ctx, mtf_ctx, stf_ctx, ltf_ctx] if c)}, "
+            f"TFs={selected_tfs}, FVGs={sum(len(c.fvgs) for c in [htf_ctx, mtf_ctx, stf_ctx, ltf_ctx] if c)}, "
             f"OBs={sum(len(c.order_blocks) for c in [htf_ctx, mtf_ctx, stf_ctx, ltf_ctx] if c)}, "
-            f"Confluences={len(confluence)}"
+            f"Confluences={len(confluence)}, Risk={mtf_smc.overall_risk_score:.2f}, "
+            f"HTF_Conflict={htf_conflict}"
         )
     except Exception as e:
         logger.warning(f"[AI/SMC] SMC analysis failed, proceeding without: {e}")

@@ -10,10 +10,80 @@ Provides multi-timeframe structural analysis for optimal entry detection:
 
 These concepts are used by the AI to suggest better entry prices when the
 original TradingView signal price is suboptimal.
+
+OPTIMIZATIONS:
+  - Timeframe weights (HTF priority over LTF)
+  - FVG/OB aging decay (freshness scoring)
+  - Structure break strength analysis
+  - Structure risk scoring system
+  - Entry timing optimization
+  - Confluence zone quality classification
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+# ─────────────────────────────────────────────
+# Timeframe weights and priority system (P0-1)
+# ─────────────────────────────────────────────
+
+TIMEFRAME_WEIGHTS = {
+    "4h": 3.0,   # HTF - Highest weight, structure conflicts should reject signals
+    "1d": 4.0,   # Daily - Even higher for position trading
+    "1h": 2.0,   # MTF - Medium weight, confirms HTF structure
+    "30m": 1.5,  # STF - Sub-medium, fills gap between 1h and 15m
+    "15m": 1.0,  # LTF - Lower timeframe, precise entry but shouldn't override HTF
+    "5m": 0.8,   # Very low timeframe, only for scalping
+}
+
+TIMEFRAME_LABELS = {
+    "4h": "HTF",
+    "1d": "HTF",
+    "1h": "MTF",
+    "30m": "STF",
+    "15m": "LTF",
+    "5m": "VLTF",
+}
+
+
+def get_timeframe_weight(timeframe: str) -> float:
+    """Get weight for a timeframe."""
+    return TIMEFRAME_WEIGHTS.get(timeframe, 1.0)
+
+
+def get_timeframe_label(timeframe: str) -> str:
+    """Get label (HTF/MTF/STF/LTF) for a timeframe."""
+    return TIMEFRAME_LABELS.get(timeframe, "MTF")
+
+
+# ─────────────────────────────────────────────
+# Dynamic timeframe selection (P0-3)
+# ─────────────────────────────────────────────
+
+def select_timeframes_for_signal(signal_timeframe: str) -> dict[str, str]:
+    """Select appropriate SMC analysis timeframes based on signal timeframe.
+
+    Scalping (<=15m): Use smaller timeframes for precision
+    Swing (1h-4h): Use current configuration
+    Position (>4h): Use larger timeframes for macro view
+    """
+    tf_minutes = {
+        "1": 1, "5": 5, "15": 15, "30": 30,
+        "60": 60, "240": 240, "D": 1440, "1D": 1440, "W": 10080, "1W": 10080,
+    }
+
+    normalized_tf = str(signal_timeframe).upper().replace("M", "").replace("MIN", "")
+    signal_minutes = tf_minutes.get(normalized_tf, 60)
+
+    if signal_minutes <= 15:
+        # Scalping: Use 1h as HTF, 5m as LTF
+        return {"htf": "1h", "mtf": "30m", "stf": "15m", "ltf": "5m"}
+    elif signal_minutes <= 240:
+        # Swing trading: Current configuration
+        return {"htf": "4h", "mtf": "1h", "stf": "30m", "ltf": "15m"}
+    else:
+        # Position trading: Use daily as HTF
+        return {"htf": "1d", "mtf": "4h", "stf": "1h", "ltf": "30m"}
 
 
 def _ohlcv_value(candle, index: int, key: str) -> float:
@@ -21,6 +91,138 @@ def _ohlcv_value(candle, index: int, key: str) -> float:
     if isinstance(candle, dict):
         return float(candle.get(key, 0.0) or 0.0)
     return float(candle[index])
+
+
+# ─────────────────────────────────────────────
+# Aging and effectiveness scoring (P1-5)
+# ─────────────────────────────────────────────
+
+def calculate_fvg_effectiveness_score(fvg_age: int, max_age: int = 100) -> float:
+    """Calculate FVG effectiveness score based on age.
+
+    Fresh FVG (< 20 candles) = High effectiveness (0.9-1.0)
+    Medium age (20-50 candles) = Medium effectiveness (0.6-0.9)
+    Old FVG (> 50 candles) = Low effectiveness (0.3-0.6)
+
+    Args:
+        fvg_age: Number of candles since FVG formation
+        max_age: Maximum age before FVG considered stale
+
+    Returns:
+        Effectiveness score (0.3-1.0)
+    """
+    if fvg_age < 0:
+        return 1.0
+
+    # Age decay: exponential decay
+    if fvg_age < 20:
+        return 1.0 - (fvg_age * 0.005)  # 0.995-1.0
+    elif fvg_age < 50:
+        return 0.9 - ((fvg_age - 20) * 0.01)  # 0.6-0.9
+    else:
+        return max(0.3, 0.6 - ((fvg_age - 50) * 0.01))  # 0.3-0.6
+
+
+def calculate_ob_effectiveness_score(ob_age: int, ob_strength: float, max_age: int = 80) -> float:
+    """Calculate Order Block effectiveness score based on age and strength.
+
+    Args:
+        ob_age: Number of candles since OB formation
+        ob_strength: Initial OB strength (0-1)
+        max_age: Maximum age before OB considered stale
+
+    Returns:
+        Effectiveness score (0.2-1.0)
+    """
+    if ob_age < 0:
+        return ob_strength
+
+    # Age decay similar to FVG but slightly more aggressive
+    age_factor = calculate_fvg_effectiveness_score(ob_age, max_age)
+
+    # Combine age and strength
+    return round(ob_strength * age_factor, 2)
+
+
+# ─────────────────────────────────────────────
+# Structure break strength analysis (P1-6)
+# ─────────────────────────────────────────────
+
+def calculate_break_strength(
+    ohlcv: list[list],
+    swing_point_index: int,
+    swing_type: str,
+    is_bos: bool,
+    timeframe: str = "1h"
+) -> float:
+    """Calculate structure break strength (0-1).
+
+    Strong break (>0.7): Large momentum, high confidence
+    Moderate break (0.4-0.7): Average momentum
+    Weak break (<0.4): Low momentum, questionable
+
+    Args:
+        ohlcv: OHLCV data
+        swing_point_index: Index of swing point
+        swing_type: "high" or "low"
+        is_bos: True for BOS, False for CHoCH
+        timeframe: Timeframe string
+
+    Returns:
+        Break strength score (0-1)
+    """
+    if swing_point_index + 1 >= len(ohlcv):
+        return 0.5
+
+    # Get swing point price
+    swing_candle = ohlcv[swing_point_index]
+    swing_price = _ohlcv_value(swing_candle, 2, "high") if swing_type == "high" else _ohlcv_value(swing_candle, 3, "low")
+
+    # Get break candle
+    break_candle = ohlcv[swing_point_index + 1]
+    break_high = _ohlcv_value(break_candle, 2, "high")
+    break_low = _ohlcv_value(break_candle, 3, "low")
+    _ohlcv_value(break_candle, 4, "close")
+    break_volume = _ohlcv_value(break_candle, 5, "volume")
+
+    # Calculate swing candle range
+    swing_range = _ohlcv_value(swing_candle, 2, "high") - _ohlcv_value(swing_candle, 3, "low")
+    if swing_range <= 0:
+        swing_range = abs(swing_price) * 0.01
+
+    # Calculate break magnitude
+    if is_bos:
+        # BOS: How far price broke beyond swing point
+        if swing_type == "high":
+            # Bullish BOS: broke above swing high
+            break_magnitude = break_high - swing_price
+        else:
+            # Bearish BOS: broke below swing low
+            break_magnitude = swing_price - break_low
+    else:
+        # CHoCH: Strength of reversal
+        # Measure how strong the opposite move is
+        if swing_type == "high":
+            # Bearish CHoCH: broke below swing high, measure downside momentum
+            break_magnitude = swing_price - break_low
+        else:
+            # Bullish CHoCH: broke above swing low, measure upside momentum
+            break_magnitude = break_high - swing_price
+
+    # Normalize to 0-1 based on swing range
+    magnitude_score = min(1.0, abs(break_magnitude) / swing_range)
+
+    # Volume confirmation (higher volume = stronger break)
+    avg_volume = sum(_ohlcv_value(c, 5, "volume") for c in ohlcv[-10:]) / 10 if len(ohlcv) >= 10 else break_volume
+    if avg_volume > 0:
+        volume_factor = min(1.5, break_volume / avg_volume) / 1.5  # Normalize to 0-1
+    else:
+        volume_factor = 0.5
+
+    # Combine magnitude and volume
+    strength = round((magnitude_score * 0.7 + volume_factor * 0.3), 2)
+
+    return max(0.2, min(1.0, strength))
 
 
 def _structure_dict(structure: MarketStructure) -> dict:
@@ -73,6 +275,7 @@ class FVG(CompatDictMixin):
     timeframe: str      # e.g. "1h", "4h", "15m"
     candle_index: int   # index in the OHLCV array
     filled: bool = False
+    effectiveness: float = 1.0  # NEW: Age-based effectiveness score (0.3-1.0)
 
 
 @dataclass
@@ -85,6 +288,7 @@ class OrderBlock(CompatDictMixin):
     timeframe: str
     candle_index: int
     strength: float = 0.0  # 0-1 based on impulse magnitude
+    effectiveness: float = 0.5  # NEW: Age+strength effectiveness score (0.2-1.0)
 
 
 @dataclass
@@ -94,6 +298,7 @@ class StructurePoint:
     price: float
     index: int
     timeframe: str
+    break_strength: float = 0.5  # NEW: Strength of the break at this point (0-1)
 
 
 @dataclass
@@ -104,6 +309,7 @@ class MarketStructure:
     last_choch: str | None = None # "bullish_choch" or "bearish_choch"
     swing_highs: list[StructurePoint] = field(default_factory=list)
     swing_lows: list[StructurePoint] = field(default_factory=list)
+    break_strength: float = 0.5  # NEW: Overall structure break strength
 
     def get(self, key: str, default=None):
         if key == "type":
@@ -125,16 +331,22 @@ class SMCContext:
     premium_zone: float = 0.0   # price above which is "premium"
     discount_zone: float = 0.0  # price below which is "discount"
     equilibrium: float = 0.0    # midpoint
+    risk_score: float = 0.5  # NEW: Structure-based risk score (0-1, higher = more risky)
+    entry_timing_score: float = 0.7  # NEW: Entry timing quality (0-1, higher = better timing)
+    timing_recommendation: str = ""  # NEW: Entry timing recommendation text
 
 
 @dataclass
 class MultiTimeframeSMC:
     """SMC analysis across multiple timeframes."""
-    htf: SMCContext | None = None   # Higher timeframe (4h)
-    mtf: SMCContext | None = None   # Medium timeframe (1h)
-    stf: SMCContext | None = None   # Sub-medium timeframe (30m)
-    ltf: SMCContext | None = None   # Lower timeframe (15m)
+    htf: SMCContext | None = None   # Higher timeframe (4h/1d)
+    mtf: SMCContext | None = None   # Medium timeframe (1h/4h)
+    stf: SMCContext | None = None   # Sub-medium timeframe (30m/1h)
+    ltf: SMCContext | None = None   # Lower timeframe (15m/30m)
     confluence_zones: list[dict] = field(default_factory=list)
+    overall_risk_score: float = 0.5  # NEW: Combined risk score across all timeframes
+    htf_conflict: bool = False  # NEW: HTF structure conflicts with signal direction
+    htf_conflict_type: str = ""  # NEW: Type of HTF conflict if any
 
 
 # ─────────────────────────────────────────────
@@ -247,17 +459,25 @@ def detect_fvgs(
 
     A Bullish FVG: candle[i-1].high < candle[i+1].low  (gap up)
     A Bearish FVG: candle[i-1].low > candle[i+1].high  (gap down)
+
+    NEW: Includes effectiveness scoring based on age.
     """
     fvgs: list[FVG] = []
 
     if len(ohlcv) < 3:
         return fvgs
 
+    total_candles = len(ohlcv)
+
     for i in range(1, len(ohlcv) - 1):
         prev_high = _ohlcv_value(ohlcv[i - 1], 2, "high")
         prev_low = _ohlcv_value(ohlcv[i - 1], 3, "low")
         next_high = _ohlcv_value(ohlcv[i + 1], 2, "high")
         next_low = _ohlcv_value(ohlcv[i + 1], 3, "low")
+
+        # Calculate age (distance from current candle)
+        fvg_age = total_candles - i - 1
+        effectiveness = calculate_fvg_effectiveness_score(fvg_age)
 
         # Bullish FVG: gap between prev candle high and next candle low
         if prev_high < next_low:
@@ -272,6 +492,7 @@ def detect_fvgs(
                 timeframe=timeframe,
                 candle_index=i,
                 filled=filled,
+                effectiveness=effectiveness,
             ))
 
         # Bearish FVG: gap between prev candle low and next candle high
@@ -287,6 +508,7 @@ def detect_fvgs(
                 timeframe=timeframe,
                 candle_index=i,
                 filled=filled,
+                effectiveness=effectiveness,
             ))
 
     # Return only unfilled FVGs, most recent first
@@ -304,11 +526,15 @@ def detect_order_blocks(
 
     Bullish OB: last bearish candle before a strong bullish move
     Bearish OB: last bullish candle before a strong bearish move
+
+    NEW: Includes effectiveness scoring based on age and strength.
     """
     obs: list[OrderBlock] = []
 
     if len(ohlcv) < 4:
         return obs
+
+    total_candles = len(ohlcv)
 
     for i in range(1, len(ohlcv) - 2):
         open_i = _ohlcv_value(ohlcv[i], 1, "open")
@@ -325,11 +551,15 @@ def detect_order_blocks(
 
         mid_price = (high_i + low_i) / 2 if (high_i + low_i) > 0 else 1
 
+        # Calculate age
+        ob_age = total_candles - i - 1
+
         # Bullish OB: bearish candle followed by strong bullish impulse
         if is_bearish_candle:
             impulse_pct = (next_high - high_i) / mid_price * 100
             if impulse_pct >= min_impulse_pct:
                 strength = min(1.0, impulse_pct / 3.0)
+                effectiveness = calculate_ob_effectiveness_score(ob_age, strength)
                 obs.append(OrderBlock(
                     type="bullish",
                     high=high_i,
@@ -338,6 +568,7 @@ def detect_order_blocks(
                     timeframe=timeframe,
                     candle_index=i,
                     strength=round(strength, 3),
+                    effectiveness=effectiveness,
                 ))
 
         # Bearish OB: bullish candle followed by strong bearish impulse
@@ -345,6 +576,7 @@ def detect_order_blocks(
             impulse_pct = (low_i - next_low) / mid_price * 100
             if impulse_pct >= min_impulse_pct:
                 strength = min(1.0, impulse_pct / 3.0)
+                effectiveness = calculate_ob_effectiveness_score(ob_age, strength)
                 obs.append(OrderBlock(
                     type="bearish",
                     high=high_i,
@@ -353,6 +585,7 @@ def detect_order_blocks(
                     timeframe=timeframe,
                     candle_index=i,
                     strength=round(strength, 3),
+                    effectiveness=effectiveness,
                 ))
 
     return obs[-max_results:]
@@ -499,15 +732,41 @@ def find_confluence_zones(
             overlap_top = min(a["top"], b["top"])
             overlap_bottom = max(a["bottom"], b["bottom"])
             if overlap_top > overlap_bottom:
+                # NEW: Calculate confluence strength using timeframe weights
+                tf_weight_a = get_timeframe_weight(a["timeframe"])
+                tf_weight_b = get_timeframe_weight(b["timeframe"])
+                base_strength = "high" if any(x["tf"] == "HTF" for x in [a, b]) else "medium"
+
+                # NEW: Add effectiveness scores to sources
+                sources = [
+                    {
+                        "type": a["type"],
+                        "tf": a["tf"],
+                        "timeframe": a["timeframe"],
+                        "weight": tf_weight_a,
+                        "effectiveness": a.get("effectiveness", 1.0),
+                    },
+                    {
+                        "type": b["type"],
+                        "tf": b["tf"],
+                        "timeframe": b["timeframe"],
+                        "weight": tf_weight_b,
+                        "effectiveness": b.get("effectiveness", 1.0),
+                    },
+                ]
+
+                # NEW: Calculate weighted effectiveness
+                total_weight = tf_weight_a + tf_weight_b
+                avg_effectiveness = (a.get("effectiveness", 1.0) * tf_weight_a + b.get("effectiveness", 1.0) * tf_weight_b) / total_weight
+
                 zones.append({
                     "confluence_top": round(overlap_top, 8),
                     "confluence_bottom": round(overlap_bottom, 8),
                     "confluence_midpoint": round((overlap_top + overlap_bottom) / 2, 8),
-                    "sources": [
-                        {"type": a["type"], "tf": a["tf"], "timeframe": a["timeframe"]},
-                        {"type": b["type"], "tf": b["tf"], "timeframe": b["timeframe"]},
-                    ],
-                    "strength": "high" if any(x["tf"] == "HTF" for x in [a, b]) else "medium",
+                    "sources": sources,
+                    "strength": base_strength,
+                    "weighted_strength": round(total_weight / 4.0, 2),  # NEW: normalized weight score
+                    "effectiveness": round(avg_effectiveness, 2),  # NEW: weighted effectiveness
                 })
 
     # Also include standalone HTF levels as they're significant on their own
@@ -535,8 +794,12 @@ def analyze_smc_single_tf(
     ohlcv: list[list],
     timeframe: str,
     current_price: float = 0.0,
+    signal_direction: str = "long",
 ) -> SMCContext:
-    """Run full SMC analysis on a single timeframe's OHLCV data."""
+    """Run full SMC analysis on a single timeframe's OHLCV data.
+
+    NEW: Includes risk score, entry timing score, and timing recommendation.
+    """
     structure = detect_market_structure(ohlcv, timeframe)
     fvgs = detect_fvgs(ohlcv, timeframe, current_price)
     obs = detect_order_blocks(ohlcv, timeframe)
@@ -549,6 +812,12 @@ def analyze_smc_single_tf(
     else:
         premium, discount, equilibrium = premium_data
 
+    # NEW: Calculate structure risk score
+    risk_score = calculate_structure_risk_score(structure, fvgs, obs, signal_direction, current_price, premium, discount)
+
+    # NEW: Calculate entry timing score
+    timing_score, timing_recommendation = calculate_entry_timing_score(current_price, fvgs, obs, premium, discount)
+
     return SMCContext(
         timeframe=timeframe,
         fvgs=fvgs,
@@ -557,25 +826,232 @@ def analyze_smc_single_tf(
         premium_zone=premium,
         discount_zone=discount,
         equilibrium=equilibrium,
+        risk_score=risk_score,
+        entry_timing_score=timing_score,
+        timing_recommendation=timing_recommendation,
     )
 
 
+# ─────────────────────────────────────────────
+# Structure risk scoring (P2-7)
+# ─────────────────────────────────────────────
+
+def calculate_structure_risk_score(
+    structure: MarketStructure | None,
+    fvgs: list[FVG],
+    obs: list[OrderBlock],
+    signal_direction: str,
+    current_price: float,
+    premium_zone: float,
+    discount_zone: float,
+) -> float:
+    """Calculate structure-based risk score (0-1, higher = more risky).
+
+    Risk factors:
+    - Structure trend conflict (+0.4)
+    - No FVG/OB support (+0.2)
+    - Trading in premium/discount zone against optimal (+0.15)
+    - Weak structure break (+0.1)
+    """
+    risk = 0.0
+
+    # Structure trend conflict (highest risk)
+    if structure and structure.trend != "ranging":
+        if signal_direction == "long" and structure.trend == "bearish":
+            risk += 0.4 if not structure.last_choch else 0.2  # CHoCH reduces conflict risk
+        elif signal_direction == "short" and structure.trend == "bullish":
+            risk += 0.4 if not structure.last_choch else 0.2
+
+    # No SMC support zones
+    has_support = False
+    for fvg in fvgs:
+        if (fvg.type == "bullish" and signal_direction == "long") or \
+           (fvg.type == "bearish" and signal_direction == "short"):
+            has_support = True
+            break
+    if not has_support:
+        for ob in obs:
+            if (ob.type == "bullish" and signal_direction == "long") or \
+               (ob.type == "bearish" and signal_direction == "short"):
+                has_support = True
+                break
+
+    if not has_support:
+        risk += 0.2
+
+    # Premium/Discount zone risk
+    if current_price > 0 and premium_zone > 0 and discount_zone > 0:
+        if signal_direction == "long" and current_price > premium_zone:
+            risk += 0.15  # Buying in premium zone (expensive)
+        elif signal_direction == "short" and current_price < discount_zone:
+            risk += 0.15  # Selling in discount zone (cheap)
+
+    # Weak structure break (if BOS/CHoCH detected)
+    if structure and structure.break_strength < 0.4:
+        risk += 0.1
+
+    return round(min(1.0, risk), 2)
+
+
+# ─────────────────────────────────────────────
+# Entry timing scoring (P2-8)
+# ─────────────────────────────────────────────
+
+def calculate_entry_timing_score(
+    current_price: float,
+    fvgs: list[FVG],
+    obs: list[OrderBlock],
+    premium_zone: float,
+    discount_zone: float,
+    atr_pct: float = 1.0,
+) -> tuple[float, str]:
+    """Calculate entry timing quality score (0-1, higher = better timing).
+
+    Returns:
+        (timing_score, recommendation_text)
+
+    Excellent (0.9-1.0): Price at FVG/OB zone or discount/premium zone
+    Good (0.7-0.9): Price within 1 ATR of optimal zone
+    Fair (0.5-0.7): Price within 2 ATR of optimal zone
+    Poor (<0.5): Price far from optimal zone, recommend reject or tight stops
+    """
+    if current_price <= 0:
+        return 0.7, "No price data available, default medium timing score"
+
+    # Find nearest relevant FVG/OB
+    nearest_zone_distance_pct = 100.0  # Initialize with large value
+    zone_type = ""
+
+    for fvg in fvgs:
+        distance_to_mid = abs(current_price - fvg.midpoint) / current_price * 100
+        if distance_to_mid < nearest_zone_distance_pct:
+            nearest_zone_distance_pct = distance_to_mid
+            zone_type = fvg.type + " FVG"
+
+    for ob in obs:
+        distance_to_mid = abs(current_price - ob.midpoint) / current_price * 100
+        if distance_to_mid < nearest_zone_distance_pct:
+            nearest_zone_distance_pct = distance_to_mid
+            zone_type = ob.type + " OB"
+
+    # Check discount/premium zone alignment
+    if discount_zone > 0 and premium_zone > 0:
+        # Long signal: check if in discount zone
+        if current_price < discount_zone:
+            distance_to_discount = abs(current_price - discount_zone) / current_price * 100
+            if distance_to_discount < nearest_zone_distance_pct:
+                nearest_zone_distance_pct = distance_to_discount
+                zone_type = "Discount zone"
+        # Short signal: check if in premium zone
+        elif current_price > premium_zone:
+            distance_to_premium = abs(current_price - premium_zone) / current_price * 100
+            if distance_to_premium < nearest_zone_distance_pct:
+                nearest_zone_distance_pct = distance_to_premium
+                zone_type = "Premium zone"
+
+    # Calculate score based on distance (normalized by ATR)
+    distance_atr = nearest_zone_distance_pct / atr_pct if atr_pct > 0 else nearest_zone_distance_pct
+
+    if distance_atr < 0.5:
+        return 0.95, f"Excellent entry - price at {zone_type} (within 0.5 ATR), optimal timing for limit or market order"
+    elif distance_atr < 1.0:
+        return 0.8, f"Good entry - price near {zone_type} (within 1 ATR), good timing for immediate or limit order"
+    elif distance_atr < 2.0:
+        return 0.6, f"Fair entry - price within 2 ATR of {zone_type}, recommend limit order at target zone"
+    elif distance_atr < 3.0:
+        return 0.4, f"Poor timing - price {distance_atr:.1f} ATR from {zone_type}, tight stops required or wait for better price"
+    else:
+        return 0.2, f"Very poor timing - price far from any SMC zone ({distance_atr:.1f} ATR), strong reject recommended"
+
+
+# ─────────────────────────────────────────────
+# HTF structure validation (P0-2)
+# ─────────────────────────────────────────────
+
+def check_htf_structure_conflict(
+    htf_ctx: SMCContext | None,
+    signal_direction: str,
+) -> tuple[bool, str, float]:
+    """Check if HTF structure conflicts with signal direction.
+
+    Returns:
+        (has_conflict, conflict_type, risk_penalty)
+
+    Critical conflicts:
+    - HTF bearish + LONG signal without CHoCH = high risk
+    - HTF bullish + SHORT signal without CHoCH = high risk
+
+    Args:
+        htf_ctx: Higher timeframe SMC context
+        signal_direction: Signal direction ("long" or "short")
+
+    Returns:
+        Tuple of (conflict_exists, conflict_description, risk_penalty_0-1)
+    """
+    if not htf_ctx or not htf_ctx.structure:
+        return False, "", 0.0
+
+    structure = htf_ctx.structure
+    htf_trend = structure.trend
+    has_choch = structure.last_choch is not None and structure.last_choch != ""
+
+    # No conflict if ranging or aligned
+    if htf_trend == "ranging":
+        return False, "HTF ranging - no trend direction conflict", 0.0
+
+    if signal_direction == "long" and htf_trend == "bullish":
+        return False, "HTF bullish trend aligned with LONG signal", 0.0
+
+    if signal_direction == "short" and htf_trend == "bearish":
+        return False, "HTF bearish trend aligned with SHORT signal", 0.0
+
+    # Check for conflicts
+    if signal_direction == "long" and htf_trend == "bearish":
+        if has_choch:
+            return True, "HTF bearish but CHoCH detected - reversal possibility, moderate risk", 0.25
+        else:
+            return True, "HTF BEARISH TREND WITHOUT CHoCH - LONG signal trades against trend, HIGH RISK", 0.45
+
+    if signal_direction == "short" and htf_trend == "bullish":
+        if has_choch:
+            return True, "HTF bullish but CHoCH detected - reversal possibility, moderate risk", 0.25
+        else:
+            return True, "HTF BULLISH TREND WITHOUT CHoCH - SHORT signal trades against trend, HIGH RISK", 0.45
+
+    return False, "", 0.0
+
+
 def format_smc_for_ai(mtf_smc: MultiTimeframeSMC, direction: str, current_price: float) -> str:
-    """Format SMC analysis into a text block for the AI system prompt."""
+    """Format SMC analysis into a text block for the AI system prompt.
+
+    NEW: Includes risk scores, timing scores, HTF conflict warnings, and effectiveness.
+    """
     lines = ["## Smart Money Concepts (Multi-Timeframe Analysis)"]
+
+    # NEW: HTF structure conflict warning (P0-2)
+    if mtf_smc.htf_conflict:
+        lines.append("\n### ⚠️ HTF STRUCTURE WARNING")
+        lines.append(f"- **{mtf_smc.htf_conflict_type}**")
+        lines.append(f"- Overall Risk Score: {mtf_smc.overall_risk_score:.2f} (higher = more risky)")
+        if mtf_smc.overall_risk_score >= 0.4:
+            lines.append("- **HIGH RISK TRADE** - Consider rejecting or using very tight stops")
 
     for label, ctx in [("4H (HTF)", mtf_smc.htf), ("1H (MTF)", mtf_smc.mtf), ("30M (STF)", mtf_smc.stf), ("15M (LTF)", mtf_smc.ltf)]:
         if not ctx:
             continue
         lines.append(f"\n### {label}")
 
+        # NEW: Display risk and timing scores
+        lines.append(f"- Risk Score: {ctx.risk_score:.2f} (0-1, higher = risky)")
+        lines.append(f"- Entry Timing: {ctx.entry_timing_score:.2f} ({ctx.timing_recommendation})")
+
         if ctx.structure:
             s = ctx.structure
             lines.append(f"- Market Structure: {s.trend.upper()}")
             if s.last_bos:
-                lines.append(f"- Last BOS: {s.last_bos}")
+                lines.append(f"- Last BOS: {s.last_bos} (strength: {s.break_strength:.2f})")
             if s.last_choch:
-                lines.append(f"- CHoCH detected: {s.last_choch}")
+                lines.append(f"- CHoCH detected: {s.last_choch} (strength: {s.break_strength:.2f})")
 
         if ctx.equilibrium > 0:
             lines.append(f"- Premium Zone: above {ctx.premium_zone:.2f}")
@@ -591,20 +1067,37 @@ def format_smc_for_ai(mtf_smc: MultiTimeframeSMC, direction: str, current_price:
         if ctx.fvgs:
             lines.append(f"- Unfilled FVGs ({len(ctx.fvgs)}):")
             for fvg in ctx.fvgs[-3:]:
-                lines.append(f"  • {fvg.type.upper()} FVG: {fvg.bottom:.2f} - {fvg.top:.2f} (mid: {fvg.midpoint:.2f})")
+                eff_text = f"effectiveness: {fvg.effectiveness:.2f}" if fvg.effectiveness < 1.0 else "fresh"
+                lines.append(f"  • {fvg.type.upper()} FVG: {fvg.bottom:.2f} - {fvg.top:.2f} (mid: {fvg.midpoint:.2f}, {eff_text})")
 
         if ctx.order_blocks:
             lines.append(f"- Order Blocks ({len(ctx.order_blocks)}):")
             for ob in ctx.order_blocks[-2:]:
-                lines.append(f"  • {ob.type.upper()} OB: {ob.low:.2f} - {ob.high:.2f} (strength: {ob.strength:.2f})")
+                eff_text = f"effectiveness: {ob.effectiveness:.2f}" if ob.effectiveness < ob.strength else f"strength: {ob.strength:.2f}"
+                lines.append(f"  • {ob.type.upper()} OB: {ob.low:.2f} - {ob.high:.2f} ({eff_text})")
 
     if mtf_smc.confluence_zones:
         lines.append("\n### Confluence Zones (Multi-TF Overlap)")
         for i, zone in enumerate(mtf_smc.confluence_zones[:3], 1):
             sources = " + ".join(f"{s['type']}({s['tf']})" for s in zone["sources"])
+
+            # NEW: Enhanced quality classification (P2-9)
+            weighted_strength = zone.get("weighted_strength", 1.0)
+            effectiveness = zone.get("effectiveness", 1.0)
+
+            if weighted_strength >= 1.5 and effectiveness >= 0.7:
+                quality_text = "⭐ HIGH PROBABILITY (HTF+MTF overlap, fresh zones)"
+            elif weighted_strength >= 1.0 and effectiveness >= 0.6:
+                quality_text = "✓ GOOD ENTRY (solid confluence)"
+            elif zone["strength"] == "high":
+                quality_text = "○ FAIR ENTRY (HTF zone, moderate effectiveness)"
+            else:
+                quality_text = "• ACCEPTABLE ENTRY (LTF confluence, use tight stops)"
+
             lines.append(
                 f"  {i}. {zone['confluence_bottom']:.2f} - {zone['confluence_top']:.2f} "
-                f"(mid: {zone['confluence_midpoint']:.2f}) [{zone['strength']}] — {sources}"
+                f"(mid: {zone['confluence_midpoint']:.2f}, eff: {effectiveness:.2f}) "
+                f"— {quality_text} — {sources}"
             )
 
     return "\n".join(lines)

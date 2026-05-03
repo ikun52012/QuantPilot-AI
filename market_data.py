@@ -411,16 +411,17 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
 
             fetch_results = cast(
-                tuple[object, object, object, object],
+                tuple[object, object, object, object, object],
                 await asyncio.gather(
                 asyncio.to_thread(exchange.fetch_ticker, symbol),
-                asyncio.to_thread(exchange.fetch_ohlcv, symbol, "1h", None, 30),
-                asyncio.to_thread(exchange.fetch_ohlcv, symbol, "4h", None, 10),
+                asyncio.to_thread(exchange.fetch_ohlcv, symbol, "1h", None, 100),  # P1-4: Extended to 100 candles
+                asyncio.to_thread(exchange.fetch_ohlcv, symbol, "4h", None, 100),  # P1-4: Extended to 100 candles
+                asyncio.to_thread(exchange.fetch_ohlcv, symbol, "30m", None, 60),  # P1-4: Extended to 60 candles
                 asyncio.to_thread(exchange.fetch_order_book, symbol, 20),
                 return_exceptions=True,
                 ),
             )
-            ticker_result, ohlcv_1h_result, ohlcv_4h_result, orderbook_result = fetch_results
+            ticker_result, ohlcv_1h_result, ohlcv_4h_result, ohlcv_30m_result, orderbook_result = fetch_results
 
             if isinstance(ticker_result, Exception):
                 logger.warning(f"[MarketData] {exchange_id} ticker fetch failed for {ticker}: {ticker_result}")
