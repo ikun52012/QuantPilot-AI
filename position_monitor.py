@@ -34,12 +34,14 @@ from core.utils.common import (
 )
 from core.utils.datetime import utcnow
 
-# Backward-compatible aliases used by older tests and imports.
 _safe_float = safe_float
 _loads_list = loads_list
 _loads_dict = loads_dict
 
 _position_monitor_lock = asyncio.Lock()
+_GHOST_POSITION_TRACKER: dict[str, dict[str, Any]] = {}
+_MAX_GHOST_THRESHOLD = 5
+_GHOST_CHECK_INTERVAL_SECS = 3600
 
 
 def _position_limit_timeout_secs(position: PositionModel) -> float:
@@ -597,13 +599,13 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
     stats = {"updated": 0, "partials": 0, "closed": 0, "adjusted": 0}
 
-    # Check pending limit orders first
     await _check_pending_limit_orders(session, position, exchange_config)
 
     exchange_positions = await get_open_positions(exchange_config)
     match = _find_exchange_position(position, exchange_positions)
 
     if match:
+        _GHOST_POSITION_TRACKER.pop(position.id, None)
         mark_price = safe_float(match.get("mark_price") or match.get("markPrice") or match.get("entry_price"))
         if mark_price > 0:
             _update_unrealized(position, mark_price)
@@ -622,6 +624,31 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
     order = await _find_recent_close_order(position, exchange_config, get_recent_orders)
     if not order:
+        ghost_entry = _GHOST_POSITION_TRACKER.get(position.id, {"fail_count": 0, "last_check": utcnow()})
+        ghost_entry["fail_count"] += 1
+        ghost_entry["last_check"] = utcnow()
+        _GHOST_POSITION_TRACKER[position.id] = ghost_entry
+
+        if ghost_entry["fail_count"] >= _MAX_GHOST_THRESHOLD:
+            logger.warning(
+                f"[PositionMonitor] GHOST POSITION: {position.id[:8]} on {position.ticker} "
+                f"not found on exchange after {ghost_entry['fail_count']} attempts - forcing close"
+            )
+            ticker = await get_ticker(position.ticker, exchange_config)
+            exit_price = safe_float(ticker.get("last") or position.last_price or position.entry_price)
+            if exit_price > 0:
+                await record_position_close_trade_async(
+                    session=session,
+                    position=position,
+                    exit_price=exit_price,
+                    close_reason="ghost_position_auto_close",
+                    order_status="ghost_closed",
+                    order_details={"fail_count": ghost_entry["fail_count"]},
+                )
+                _GHOST_POSITION_TRACKER.pop(position.id, None)
+                stats["closed"] += 1
+                return stats
+
         ticker = await get_ticker(position.ticker, exchange_config)
         mark_price = safe_float(ticker.get("last") or position.last_price)
         if mark_price > 0:
@@ -795,12 +822,11 @@ def _close_reason_for_order(position: PositionModel, order: dict | None) -> str:
 def _update_unrealized(position: PositionModel, mark_price: float) -> None:
     opened_qty = max(safe_float(position.quantity), 0.0)
     remaining_qty = _effective_remaining_quantity(position, opened_qty)
-    remaining_weight = min(1.0, max(0.0, remaining_qty / opened_qty)) if opened_qty > 0 else 1.0
     leverage = safe_float(position.leverage, 1.0)
-    open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, leverage) * remaining_weight
+    open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, leverage)
     entry_price = safe_float(position.entry_price)
-    if entry_price > 0 and opened_qty > 0 and remaining_qty > 0:
-        margin_used = (entry_price * opened_qty) / leverage
+    if entry_price > 0 and remaining_qty > 0:
+        margin_used = (entry_price * remaining_qty) / leverage
         position.unrealized_pnl_usdt = round(margin_used * (open_pnl / 100.0), 8)
     else:
         position.unrealized_pnl_usdt = 0.0

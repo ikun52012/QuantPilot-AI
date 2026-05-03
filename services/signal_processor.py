@@ -270,11 +270,11 @@ async def _ticker_lock(ticker: str, user_id: str | None = None) -> asyncio.Lock:
             lock = asyncio.Lock()
             _TICKER_LOCKS[key] = lock
 
-            # Cleanup old locks if we exceed max size
             if len(_TICKER_LOCKS) > _TICKER_LOCK_MAX_SIZE:
-                # Remove half the locks (oldest ones first by insertion order)
                 keys_to_remove = list(_TICKER_LOCKS.keys())[:_TICKER_LOCK_MAX_SIZE // 2]
                 for k in keys_to_remove:
+                    if k == key:
+                        continue
                     old_lock = _TICKER_LOCKS.get(k)
                     if old_lock and not old_lock.locked():
                         _TICKER_LOCKS.pop(k, None)
@@ -2068,13 +2068,22 @@ prefilter_result: PreFilterResult | None = None,
             # Step 4: Record close in database (only for non-synthetic positions)
             if not is_synthetic and exit_price > 0:
                 try:
-                    await close_position_async(
-                        session=self.session,
-                        position=position,
-                        exit_price=exit_price,
-                        close_reason="reverse_signal",
+                    locked_result = await self.session.execute(
+                        select(PositionModel)
+                        .where(PositionModel.id == position.id)
+                        .with_for_update()
                     )
-                    await self.session.flush()
+                    locked_position = locked_result.scalar_one_or_none()
+                    if locked_position and locked_position.status == "open":
+                        await close_position_async(
+                            session=self.session,
+                            position=locked_position,
+                            exit_price=exit_price,
+                            close_reason="reverse_signal",
+                        )
+                        await self.session.flush()
+                    elif locked_position and locked_position.status != "open":
+                        logger.info(f"[Signal] Position {position.id[:8]} already closed by concurrent operation")
                 except Exception as db_err:
                     logger.warning(f"[Signal] Failed to update database position: {db_err}")
 
