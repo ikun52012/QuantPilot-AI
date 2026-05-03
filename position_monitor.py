@@ -201,7 +201,7 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
         user = await session.get(UserModel, position.user_id)
         if user:
             try:
-                raw = json.loads(user.settings_json or "{}")
+                raw = loads_dict(user.settings_json)
                 user_settings = decrypt_settings_payload(raw)
                 exchange = (user_settings or {}).get("exchange") or {}
                 config.update({
@@ -990,7 +990,8 @@ async def _adjust_trailing_stop_on_tp_hit(
 
         elif highest_hit >= 2:
             # TP(n) hit -> move SL to TP(n-1) + buffer
-            prev_level_idx = highest_hit - 1  # FIXED: TP2 hit -> prev = TP1 (index 0)
+            # highest_hit=2 (TP2 hit) -> prev_level_idx=0 (TP1)
+            prev_level_idx = highest_hit - 2
             if prev_level_idx < len(all_levels):
                 prev_tp_price = safe_float(all_levels[prev_level_idx].get("price"))
                 if prev_tp_price > 0:

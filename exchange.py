@@ -1294,7 +1294,7 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
             if pos["symbol"] != symbol:
                 continue
             contracts = float(pos.get("contracts", 0))
-            if contracts <= 0:
+            if contracts == 0:
                 continue
 
             # In hedge mode, filter by position side
@@ -1302,12 +1302,18 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
             if not pos_side:
                 pos_info = pos.get("info") or {}
                 pos_side = str(pos_info.get("posSide") or "").lower()
+
+            # For net mode (no posSide), infer direction from contracts sign
+            if not pos_side:
+                pos_side = "long" if contracts > 0 else "short"
+                contracts = abs(contracts)
+
             if position_side and pos_side and position_side.lower() not in pos_side:
                 continue
 
-            amount = contracts
+            amount = abs(contracts)
             # Close order side is opposite of position side
-            close_side = "sell" if pos_side in ("long", "") else "buy"
+            close_side = "sell" if pos_side == "long" else "buy"
 
             order = await _create_exchange_order(
                 exchange,

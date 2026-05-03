@@ -1169,12 +1169,20 @@ async def close_position_async(
 
 
 async def update_user_balance(session: AsyncSession, user_id: str, delta_usdt: float) -> float:
-    """Update user balance by adding delta (positive for profit, negative for loss)."""
-    user = await session.get(UserModel, user_id)
+    """Update user balance by adding delta (positive for profit, negative for loss).
+    Uses row-level locking to prevent race conditions during concurrent updates."""
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(UserModel)
+        .where(UserModel.id == user_id)
+        .with_for_update()
+    )
+    user = result.scalar_one_or_none()
     if user:
         current_balance = _safe_float(user.balance_usdt, 0.0)
         new_balance = round(current_balance + delta_usdt, 2)
-        user.balance_usdt = max(0.0, new_balance)  # Prevent negative balance
+        user.balance_usdt = max(0.0, new_balance)
         return user.balance_usdt
     return 0.0
 
