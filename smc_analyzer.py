@@ -268,7 +268,8 @@ def calculate_break_strength(
     swing_point_index: int,
     swing_type: str,
     is_bos: bool,
-    timeframe: str = "1h"
+    timeframe: str = "1h",
+    break_index: int | None = None,
 ) -> float:
     """Calculate structure break strength (0-1).
 
@@ -282,11 +283,14 @@ def calculate_break_strength(
         swing_type: "high" or "low"
         is_bos: True for BOS, False for CHoCH
         timeframe: Timeframe string
+        break_index: Index of the candle/swing that actually broke structure.
 
     Returns:
         Break strength score (0-1)
     """
-    if swing_point_index + 1 >= len(ohlcv):
+    if break_index is None:
+        break_index = swing_point_index + 1
+    if break_index >= len(ohlcv) or break_index < 0:
         return 0.5
 
     # Get swing point price
@@ -294,7 +298,7 @@ def calculate_break_strength(
     swing_price = _ohlcv_value(swing_candle, 2, "high") if swing_type == "high" else _ohlcv_value(swing_candle, 3, "low")
 
     # Get break candle
-    break_candle = ohlcv[swing_point_index + 1]
+    break_candle = ohlcv[break_index]
     break_high = _ohlcv_value(break_candle, 2, "high")
     break_low = _ohlcv_value(break_candle, 3, "low")
     break_close = _ohlcv_value(break_candle, 4, "close")  # BUG-2 FIX: Use close to determine if break sustained
@@ -316,27 +320,26 @@ def calculate_break_strength(
             break_magnitude = swing_price - break_low
     else:
         # CHoCH: Strength of reversal
-        # Measure how strong the opposite move is
         if swing_type == "high":
-            # Bearish CHoCH: broke below swing high, measure downside momentum
-            break_magnitude = swing_price - break_low
-        else:
-            # Bullish CHoCH: broke above swing low, measure upside momentum
+            # Bullish CHoCH: broke above previous high
             break_magnitude = break_high - swing_price
+        else:
+            # Bearish CHoCH: broke below previous low
+            break_magnitude = swing_price - break_low
 
     # Normalize to 0-1 based on swing range
     magnitude_score = min(1.0, abs(break_magnitude) / swing_range)
 
     # BUG-2 FIX: Add sustainability score - did close sustain beyond swing point?
     if swing_type == "high":
-        # For high swing, close should be above swing for bullish, below for bearish
-        if (is_bos and break_close > swing_price) or (not is_bos and break_close < swing_price):
+        # High breaks are bullish for BOS and bullish CHoCH.
+        if break_close > swing_price:
             sustainability_score = 1.0  # Close sustained the break
         else:
             sustainability_score = 0.5  # Break but close didn't sustain (potentially false break)
     else:
-        # For low swing, close should be below swing for bullish BOS (up), above for bearish CHoCH
-        if (is_bos and break_close < swing_price) or (not is_bos and break_close > swing_price):
+        # Low breaks are bearish for BOS and bearish CHoCH.
+        if break_close < swing_price:
             sustainability_score = 1.0
         else:
             sustainability_score = 0.5
@@ -626,14 +629,14 @@ def detect_market_structure(
         structure.last_bos = "bullish_bos"
         if len(swing_highs) >= 2:
             structure.break_strength = calculate_break_strength(
-                ohlcv, swing_highs[-2].index, "high", True, timeframe
+                ohlcv, swing_highs[-2].index, "high", True, timeframe, break_index=swing_highs[-1].index
             )
     elif lh and ll:
         structure.trend = "bearish"
         structure.last_bos = "bearish_bos"
         if len(swing_lows) >= 2:
             structure.break_strength = calculate_break_strength(
-                ohlcv, swing_lows[-2].index, "low", True, timeframe
+                ohlcv, swing_lows[-2].index, "low", True, timeframe, break_index=swing_lows[-1].index
             )
     else:
         structure.trend = "ranging"
@@ -650,13 +653,13 @@ def detect_market_structure(
             structure.last_choch = "bearish_choch"
             if len(swing_lows) >= 2:
                 structure.break_strength = calculate_break_strength(
-                    ohlcv, swing_lows[-2].index, "low", False, timeframe
+                    ohlcv, swing_lows[-2].index, "low", False, timeframe, break_index=swing_lows[-1].index
                 )
         elif was_bearish and hh:
             structure.last_choch = "bullish_choch"
             if len(swing_highs) >= 2:
                 structure.break_strength = calculate_break_strength(
-                    ohlcv, swing_highs[-2].index, "high", False, timeframe
+                    ohlcv, swing_highs[-2].index, "high", False, timeframe, break_index=swing_highs[-1].index
                 )
 
     return structure

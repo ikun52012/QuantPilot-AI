@@ -166,6 +166,9 @@ class TradeModel(Base):
 class WebhookEventModel(Base):
     """Webhook event log model."""
     __tablename__ = "webhook_events"
+    __table_args__ = (
+        Index("idx_webhook_fingerprint_created", "fingerprint", "created_at", unique=False),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), nullable=True, index=True)
@@ -1207,6 +1210,7 @@ async def record_position_close_trade_async(
         closed_at=now,
     )
     direction = "close_long" if str(position.direction).lower() == "long" else "close_short"
+    close_quantity = position.remaining_quantity if position.remaining_quantity and position.remaining_quantity > 0 else position.quantity
     payload = {
         "position_id": position.id,
         "open_trade_id": position.open_trade_id,
@@ -1214,7 +1218,9 @@ async def record_position_close_trade_async(
         "direction": direction,
         "entry_price": position.entry_price,
         "exit_price": exit_price,
-        "quantity": position.quantity,
+        "quantity": close_quantity,
+        "original_quantity": position.quantity,
+        "remaining_quantity": position.remaining_quantity,
         "pnl_pct": pnl_pct,
         "close_reason": close_reason,
         "order_details": order_details or {},
@@ -1452,20 +1458,35 @@ async def record_webhook_event(
     payload: dict,
 ) -> WebhookEventModel:
     """Record a webhook event."""
-    event = WebhookEventModel(
-        user_id=user_id,
-        fingerprint=fingerprint,
-        ticker=ticker,
-        direction=direction,
-        status=status,
-        status_code=status_code,
-        reason=reason,
-        client_ip=client_ip,
-        payload_json=json.dumps(payload, default=str),
-    )
-    session.add(event)
-    await session.flush()
-    return event
+    try:
+        event = WebhookEventModel(
+            user_id=user_id,
+            fingerprint=fingerprint,
+            ticker=ticker,
+            direction=direction,
+            status=status,
+            status_code=status_code,
+            reason=reason,
+            client_ip=client_ip,
+            payload_json=json.dumps(payload, default=str),
+        )
+        session.add(event)
+        await session.flush()
+        return event
+    except Exception as e:
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            result = await session.execute(
+                select(WebhookEventModel).where(WebhookEventModel.fingerprint == fingerprint).order_by(WebhookEventModel.created_at.desc()).limit(1)
+            )
+            existing = result.scalar_one_or_none()
+            if existing:
+                existing.status = status
+                existing.status_code = status_code
+                existing.reason = reason
+                existing.payload_json = json.dumps(payload, default=str)
+                await session.flush()
+                return existing
+        raise
 
 
 async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, window_secs: int = 300) -> bool:

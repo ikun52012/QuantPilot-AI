@@ -2,6 +2,7 @@
 import pytest
 
 from smc_analyzer import (
+    calculate_break_strength,
     calculate_premium_discount,
     detect_fvgs,
     detect_market_structure,
@@ -101,6 +102,46 @@ class TestDetectMarketStructure:
     def test_empty_swing_points(self):
         structure = detect_market_structure([], 100)
         assert structure.get("type") == "none"
+
+
+class TestBreakStrength:
+    def test_bullish_choch_uses_high_break_direction(self):
+        candles = [
+            [0, 95, 98, 92, 96, 100],
+            [1, 96, 100, 90, 94, 100],
+            [2, 94, 99, 93, 98, 100],
+            [3, 98, 106, 97, 105, 300],
+        ]
+
+        strength = calculate_break_strength(candles, 1, "high", False, break_index=3)
+
+        assert strength > 0.7
+
+    def test_bearish_choch_uses_low_break_direction(self):
+        candles = [
+            [0, 105, 108, 102, 106, 100],
+            [1, 106, 110, 100, 108, 100],
+            [2, 108, 109, 101, 102, 100],
+            [3, 102, 103, 94, 95, 300],
+        ]
+
+        strength = calculate_break_strength(candles, 1, "low", False, break_index=3)
+
+        assert strength > 0.7
+
+    def test_break_strength_uses_actual_break_index(self):
+        candles = [
+            [0, 95, 98, 92, 96, 100],
+            [1, 96, 100, 90, 94, 100],
+            [2, 94, 101, 93, 99, 100],
+            [3, 99, 108, 98, 107, 300],
+        ]
+
+        immediate_strength = calculate_break_strength(candles, 1, "high", True)
+        actual_strength = calculate_break_strength(candles, 1, "high", True, break_index=3)
+
+        assert actual_strength > immediate_strength
+        assert actual_strength > 0.7
 
 
 class TestCalculatePremiumDiscount:

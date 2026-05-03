@@ -1,13 +1,17 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from ai_analyzer import (
     _AI_CACHE,
+    _SMC_CACHE,
     _analysis_config_signature,
     _build_user_prompt,
+    _cached_analyze_smc_single_tf,
     _get_cached_analysis,
     _get_effective_system_prompt,
+    _parse_response,
     _set_cached_analysis,
 )
 from core.config import settings
@@ -200,3 +204,74 @@ def test_paper_trailing_stop_price_preserves_zero_activation(monkeypatch):
     new_stop = _paper_trailing_stop_price(position, 100.0)
 
     assert new_stop == pytest.approx(99.0)
+
+
+@pytest.mark.asyncio
+async def test_smc_cache_isolated_by_direction(monkeypatch):
+    _SMC_CACHE.clear()
+
+    def fake_analyze_smc_single_tf(ohlcv, timeframe, current_price, signal_direction, atr_pct):
+        return SimpleNamespace(
+            timeframe=timeframe,
+            fvgs=[],
+            order_blocks=[],
+            structure=None,
+            premium_zone=0.0,
+            discount_zone=0.0,
+            equilibrium=0.0,
+            risk_score=0.5,
+            entry_timing_score=0.5,
+            timing_recommendation=signal_direction,
+        )
+
+    ohlcv = [[i, 100 + i, 102 + i, 99 + i, 101 + i, 1000] for i in range(8)]
+    monkeypatch.setattr("smc_analyzer.analyze_smc_single_tf", fake_analyze_smc_single_tf)
+
+    long_ctx = await _cached_analyze_smc_single_tf("BTCUSDT", ohlcv, "1h", 108.0, "long", 0.5)
+    short_ctx = await _cached_analyze_smc_single_tf("BTCUSDT", ohlcv, "1h", 108.0, "short", 0.5)
+
+    assert long_ctx.timing_recommendation == "long"
+    assert short_ctx.timing_recommendation == "short"
+    assert len(_SMC_CACHE) == 2
+
+    _SMC_CACHE.clear()
+
+
+def test_parse_response_clamps_position_size_to_model_limit():
+    result = _parse_response(json.dumps({"confidence": 0.8, "recommendation": "hold", "position_size_pct": 10}))
+
+    assert result.position_size_pct == 1.0
+
+
+def test_parse_response_rejects_low_confidence_modify():
+    result = _parse_response(json.dumps({
+        "confidence": 0.3,
+        "recommendation": "modify",
+        "suggested_stop_loss": 95.0,
+        "reasoning": "maybe",
+    }))
+
+    assert result.recommendation == "reject"
+    assert "below execute threshold" in result.reasoning
+
+
+def test_parse_response_caps_tp_sum_after_negative_sanitization():
+    result = _parse_response(json.dumps({
+        "confidence": 0.8,
+        "recommendation": "hold",
+        "tp1_qty_pct": 100,
+        "tp2_qty_pct": 100,
+        "tp3_qty_pct": -100,
+        "tp4_qty_pct": 0,
+    }))
+
+    assert result.tp1_qty_pct + result.tp2_qty_pct + result.tp3_qty_pct + result.tp4_qty_pct == pytest.approx(100.0)
+
+
+def test_parse_response_rejects_nonfinite_stop_loss():
+    result = _parse_response(
+        '{"confidence":0.8,"recommendation":"execute","suggested_stop_loss":NaN,"reasoning":"bad sl"}'
+    )
+
+    assert result.recommendation == "reject"
+    assert result.suggested_stop_loss is None

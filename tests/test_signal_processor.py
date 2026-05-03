@@ -1,10 +1,13 @@
 """Tests for signal processing pipeline."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import pre_filter
+from core.database import PositionModel
+from core.utils.datetime import utcnow
 from models import AIAnalysis, MarketContext, PreFilterResult, SignalDirection, TradeDecision, TradingViewSignal
 from services.signal_processor import SignalProcessor, compute_webhook_fingerprint
 
@@ -576,3 +579,107 @@ class TestValidTakeProfit:
         """Short TP above entry is invalid."""
         result = SignalProcessor._valid_take_profit(SignalDirection.SHORT, 100, 110)
         assert result is None
+
+
+class _FakeScalarResult:
+    def __init__(self, items):
+        self._items = items
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._items
+
+
+class TestPositionConflictSafety:
+    @pytest.mark.asyncio
+    async def test_pending_cancel_error_blocks_conflict_check(self, monkeypatch):
+        pending = PositionModel(
+            id="pending-short",
+            user_id="user-1",
+            ticker="BTCUSDT",
+            direction="short",
+            status="pending",
+            entry_price=100.0,
+            quantity=1.0,
+            opened_at=utcnow(),
+            live_trading=True,
+            entry_order_id="entry-short",
+        )
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[_FakeScalarResult([pending]), _FakeScalarResult([])])
+        processor = SignalProcessor(session=session)
+        monkeypatch.setattr(
+            processor,
+            "_cancel_pending_position",
+            AsyncMock(return_value={"status": "error", "reason": "Exchange cancellation failed"}),
+        )
+
+        reason, position = await processor._check_position_conflict(
+            TradeDecision(execute=True, direction=SignalDirection.LONG, ticker="BTCUSDT"),
+            "user-1",
+            {"exchange": {"live_trading": False}},
+        )
+
+        assert position is None
+        assert reason == "Exchange cancellation failed"
+
+    @pytest.mark.asyncio
+    async def test_conflict_reason_without_position_rejects_before_execution(self, monkeypatch):
+        processor = SignalProcessor(session=AsyncMock())
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        execute_trade = AsyncMock(return_value={"status": "filled"})
+
+        monkeypatch.setattr("services.signal_processor.record_signal_received", lambda *args, **kwargs: None)
+        monkeypatch.setattr("services.signal_processor.notify_signal_received", AsyncMock())
+        monkeypatch.setattr(processor, "_load_user_settings", AsyncMock(return_value={}))
+        monkeypatch.setattr(processor, "_reserve_webhook_event", AsyncMock(return_value=SimpleNamespace()))
+        monkeypatch.setattr(processor, "_run_prefilter", AsyncMock(return_value=PreFilterResult(passed=True)))
+        monkeypatch.setattr(
+            processor,
+            "_run_ai_analysis",
+            AsyncMock(return_value=AIAnalysis(
+                confidence=0.8,
+                recommendation="execute",
+                reasoning="ok",
+                suggested_stop_loss=95.0,
+                suggested_tp1=110.0,
+            )),
+        )
+        monkeypatch.setattr(
+            processor,
+            "_build_trade_decision",
+            lambda *args, **kwargs: TradeDecision(
+                execute=True,
+                direction=SignalDirection.LONG,
+                ticker="BTCUSDT",
+                entry_price=100.0,
+                quantity=1.0,
+            ),
+        )
+        monkeypatch.setattr(
+            processor,
+            "_check_position_conflict",
+            AsyncMock(return_value=("Position conflict check failed: database unavailable", None)),
+        )
+        monkeypatch.setattr(processor, "_execute_trade", execute_trade)
+
+        result = await processor._process_signal_locked(
+            signal,
+            user_id="user-1",
+            prefetched_market=MarketContext(ticker="BTCUSDT", current_price=100.0),
+        )
+
+        assert result["status"] == "rejected"
+        assert "Position conflict check failed" in result["reason"]
+        execute_trade.assert_not_awaited()

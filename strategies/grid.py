@@ -221,8 +221,15 @@ class GridEngine:
 
                 if config.quantity_per_grid > 0:
                     quantity = config.quantity_per_grid
-                else:
+                elif config.total_capital_usdt > 0:
                     quantity = config.total_capital_usdt / config.grid_count / price
+                else:
+                    logger.warning(f"[Grid] Zero quantity for arithmetic grid at price {price:.4f}")
+                    continue
+
+                if quantity <= 0:
+                    logger.warning(f"[Grid] Invalid quantity {quantity:.6f} at price {price:.4f}")
+                    continue
 
                 levels.append(GridLevel(
                     price=round(price, 8),
@@ -243,8 +250,15 @@ class GridEngine:
 
                 if config.quantity_per_grid > 0:
                     quantity = config.quantity_per_grid
-                else:
+                elif config.total_capital_usdt > 0:
                     quantity = config.total_capital_usdt / config.grid_count / price
+                else:
+                    logger.warning(f"[Grid] Zero quantity for geometric grid at price {price:.4f}")
+                    continue
+
+                if quantity <= 0:
+                    logger.warning(f"[Grid] Invalid quantity {quantity:.6f} at price {price:.4f}")
+                    continue
 
                 levels.append(GridLevel(
                     price=round(price, 8),

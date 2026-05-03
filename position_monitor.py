@@ -624,18 +624,23 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
     order = await _find_recent_close_order(position, exchange_config, get_recent_orders)
     if not order:
-        ghost_entry = _GHOST_POSITION_TRACKER.get(position.id, {"fail_count": 0, "last_check": utcnow()})
+        now = utcnow()
+        ghost_entry = _GHOST_POSITION_TRACKER.get(position.id)
+        if not ghost_entry:
+            ghost_entry = {"fail_count": 0, "first_missing_at": now, "last_check": now}
         ghost_entry["fail_count"] += 1
-        ghost_entry["last_check"] = utcnow()
+        ghost_entry.setdefault("first_missing_at", ghost_entry.get("last_check", now))
+        ghost_entry["last_check"] = now
         _GHOST_POSITION_TRACKER[position.id] = ghost_entry
 
-        if ghost_entry["fail_count"] >= _MAX_GHOST_THRESHOLD:
-            last_check_time = ghost_entry.get("last_check")
-            if last_check_time and (utcnow() - last_check_time).total_seconds() >= _GHOST_CHECK_INTERVAL_SECS:
-                logger.warning(
-                    f"[PositionMonitor] GHOST POSITION: {position.id[:8]} on {position.ticker} "
-                    f"not found on exchange after {ghost_entry['fail_count']} attempts - forcing close"
-                )
+        missing_since = ghost_entry.get("first_missing_at", now)
+        missing_elapsed = (now - missing_since).total_seconds() if missing_since else 0.0
+        if ghost_entry["fail_count"] >= _MAX_GHOST_THRESHOLD and missing_elapsed >= _GHOST_CHECK_INTERVAL_SECS:
+            logger.warning(
+                f"[PositionMonitor] GHOST POSITION: {position.id[:8]} on {position.ticker} "
+                f"not found on exchange after {ghost_entry['fail_count']} attempts over "
+                f"{missing_elapsed:.0f}s - forcing close"
+            )
             ticker = await get_ticker(position.ticker, exchange_config)
             exit_price = safe_float(ticker.get("last") or position.last_price or position.entry_price)
             if exit_price > 0:
@@ -729,8 +734,9 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
     if hit_levels:
         position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
 
-        if total_filled_qty_pct > 0 and safe_float(position.remaining_quantity) > 0:
-            current_remaining = safe_float(position.remaining_quantity)
+        opened_qty = safe_float(position.quantity)
+        current_remaining = _effective_remaining_quantity(position, opened_qty)
+        if total_filled_qty_pct > 0 and current_remaining > 0:
             filled_qty_total = (total_filled_qty_pct / 100.0) * safe_float(position.quantity)
             new_remaining = max(0, current_remaining - filled_qty_total)
             position.remaining_quantity = new_remaining
@@ -770,22 +776,28 @@ def _find_exchange_position(position: PositionModel, exchange_positions: list[di
 
 async def _find_recent_close_order(position: PositionModel, exchange_config: dict, get_recent_orders) -> dict | None:
     orders = await get_recent_orders(position.ticker, 50, exchange_config)
-    order_ids = set(loads_list(position.take_profit_order_ids_json))
+    tp_order_ids = [str(order_id) for order_id in loads_list(position.take_profit_order_ids_json) if order_id]
+    tp_levels = loads_list(position.take_profit_json)
+    order_ids = set()
+    for index, order_id in enumerate(tp_order_ids):
+        level = tp_levels[index] if index < len(tp_levels) and isinstance(tp_levels[index], dict) else {}
+        level_status = str(level.get("status") or "pending").lower()
+        if level_status not in {"hit", "filled", "closed"}:
+            order_ids.add(order_id)
     if position.stop_loss_order_id:
         order_ids.add(position.stop_loss_order_id)
 
     remaining_qty = safe_float(position.remaining_quantity or position.quantity)
-    opened_qty = safe_float(position.quantity)
 
     for order in orders:
         if str(order.get("id") or "") in order_ids and _order_has_close_status(order):
             filled_qty = safe_float(order.get("filled") or 0)
             if filled_qty > 0 and remaining_qty > 0:
-                filled_pct = (filled_qty / opened_qty) * 100 if opened_qty > 0 else 100
+                filled_pct = (filled_qty / remaining_qty) * 100
                 if filled_pct >= 90:
                     return order
                 else:
-                    return None
+                    continue
             return order
     if order_ids:
         return None
@@ -794,11 +806,11 @@ async def _find_recent_close_order(position: PositionModel, exchange_config: dic
         if _order_matches_position_close(position, order):
             filled_qty = safe_float(order.get("filled") or 0)
             if filled_qty > 0 and remaining_qty > 0:
-                filled_pct = (filled_qty / opened_qty) * 100 if opened_qty > 0 else 100
+                filled_pct = (filled_qty / remaining_qty) * 100
                 if filled_pct >= 90:
                     return order
                 else:
-                    return None
+                    continue
             return order
     return None
 
@@ -1004,7 +1016,7 @@ async def _adjust_trailing_stop_on_tp_hit(
         # Only trigger on TP1 hit
         if highest_hit >= 1:
             # Check if already at breakeven (avoid duplicate trigger)
-            breakeven_target = entry_price * (1 + breakeven_buffer / 100.0) if direction == "long" else entry_price * (1 - breakeven_buffer / 100.0)
+            breakeven_target = entry_price * (1 + breakeven_buffer / 100.0) if direction == "short" else entry_price * (1 - breakeven_buffer / 100.0)
             if current_stop > 0:
                 # Already moved to breakeven?
                 if direction == "long" and current_stop >= entry_price * 0.998:
@@ -1027,7 +1039,7 @@ async def _adjust_trailing_stop_on_tp_hit(
         # Progressive profit locking
         if highest_hit == 1:
             # TP1 hit -> move to breakeven + buffer
-            breakeven_target = entry_price * (1 + breakeven_buffer / 100.0) if direction == "long" else entry_price * (1 - breakeven_buffer / 100.0)
+            breakeven_target = entry_price * (1 + breakeven_buffer / 100.0) if direction == "short" else entry_price * (1 - breakeven_buffer / 100.0)
 
             # Check if already at breakeven
             if current_stop > 0:
@@ -1054,8 +1066,8 @@ async def _adjust_trailing_stop_on_tp_hit(
             if prev_level_idx < len(all_levels):
                 prev_tp_price = safe_float(all_levels[prev_level_idx].get("price"))
                 if prev_tp_price > 0:
-                    # Add buffer below TP level for long, above for short
-                    target_with_buffer = prev_tp_price * (1 + step_buffer / 100.0) if direction == "long" else prev_tp_price * (1 - step_buffer / 100.0)
+                    # Add buffer above TP(n-1) for short, below for long
+                    target_with_buffer = prev_tp_price * (1 + step_buffer / 100.0) if direction == "short" else prev_tp_price * (1 - step_buffer / 100.0)
 
                     # Check if already at or beyond this level
                     if current_stop > 0:

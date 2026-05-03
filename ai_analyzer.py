@@ -6,6 +6,7 @@ This is the brain of the system.
 import asyncio
 import hashlib
 import json
+import math
 import time as _time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
@@ -97,7 +98,6 @@ async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, cache_key
 
     BUG-4 FIX: Also clean expired entries during reads.
     """
-    cache_key = f"{ticker}:{timeframe}:{ohlcv_sig}"
     lock = await _get_smc_cache_lock()  # BUG-1 FIX: Lazy init
     async with lock:
         # BUG-4 FIX: Clean expired entries during reads
@@ -117,8 +117,6 @@ async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, cache_key
 
 async def _set_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, smc_ctx: Any, cache_key: str, ttl: float = _SMC_CACHE_BASE_TTL) -> None:
     """Cache SMC analysis result with TTL."""
-    cache_key = f"{ticker}:{timeframe}:{ohlcv_sig}"
-
     # Convert SMCContext to dict for caching
     smc_dict = {
         "timeframe": smc_ctx.timeframe,
@@ -205,7 +203,7 @@ async def _cached_analyze_smc_single_tf(
     ohlcv_sig = _ohlcv_signature(ohlcv)
 
     atr_bucket = "high" if atr_pct > 3.0 else "low" if atr_pct < 1.0 else "normal"
-    price_bucket = int(current_price / 100) if current_price > 0 else 0
+    price_bucket = _price_to_bucket(current_price) if current_price > 0 else ""
     direction_bucket = signal_direction.lower()[:4]
 
     cache_key = f"{ticker}:{timeframe}:{ohlcv_sig}:{direction_bucket}:{price_bucket}:{atr_bucket}"
@@ -1405,13 +1403,24 @@ async def _aggregate_voting_results_async(
             )
             return result
         else:
-            return AIAnalysis(
-                confidence=0.3,
-                recommendation="reject",
-                reasoning=f"Consensus failed: only {execute_votes}/{len(analyses)} vote execute. Majority required.",
-                risk_score=0.7,
-                warnings=["Voting consensus not reached"],
+            non_execute_votes = {}
+            for a in analyses:
+                rec = a.recommendation
+                if rec != "execute":
+                    non_execute_votes[rec] = non_execute_votes.get(rec, 0) + 1
+            if non_execute_votes:
+                final_rec = max(non_execute_votes, key=lambda key: non_execute_votes[key])
+            else:
+                final_rec = "hold"
+            best_idx = max(range(len(analyses)), key=lambda i: analyses[i].confidence)
+            result = analyses[best_idx]
+            result.recommendation = final_rec
+            result.reasoning = f"Consensus failed: only {execute_votes}/{len(analyses)} vote execute. Majority is {final_rec}. {result.reasoning}"
+            result.warnings = ["Voting consensus not reached"] + result.warnings
+            logger.info(
+                f"[AI/Voting] Consensus failed: {execute_votes}/{len(analyses)} vote execute, falling back to {final_rec}"
             )
+            return result
 
     if strategy == "weighted":
         total_weight = sum(weights.get(mid, 1.0) for mid in model_ids)
@@ -1698,7 +1707,8 @@ def _parse_response(raw: str) -> AIAnalysis:
     try:
         def _float_or_default(value: Any, default: float) -> float:
             try:
-                return float(value)
+                parsed = float(value)
+                return parsed if math.isfinite(parsed) else default
             except (TypeError, ValueError):
                 return default
 
@@ -1709,7 +1719,8 @@ def _parse_response(raw: str) -> AIAnalysis:
             if value is None or value == "":
                 return None
             try:
-                return float(value)
+                parsed = float(value)
+                return parsed if math.isfinite(parsed) else None
             except (TypeError, ValueError):
                 return None
 
@@ -1765,30 +1776,32 @@ def _parse_response(raw: str) -> AIAnalysis:
 
         confidence = _clamp(_float_or_default(data.get("confidence", 0.5), 0.5), 0.0, 1.0)
         risk_score = _clamp(_float_or_default(data.get("risk_score", 0.5), 0.5), 0.0, 1.0)
-        position_size_pct = _clamp(_float_or_default(data.get("position_size_pct", 1.0), 1.0), 0.0, 100.0)
+        position_size_pct = _clamp(_float_or_default(data.get("position_size_pct", 1.0), 1.0), 0.0, 1.0)
         recommended_leverage = max(1.0, min(50.0, _float_or_default(data.get("recommended_leverage", 1.0), 1.0)))
 
-        tp_sum = sum([
-            _float_or_default(data.get("tp1_qty_pct", 0), 0),
-            _float_or_default(data.get("tp2_qty_pct", 0), 0),
-            _float_or_default(data.get("tp3_qty_pct", 0), 0),
-            _float_or_default(data.get("tp4_qty_pct", 0), 0),
-        ])
-        if tp_sum > 100:
+        tp_qty_pcts = [
+            _clamp(_float_or_default(data.get("tp1_qty_pct", 25.0), 25.0), 0.0, 100.0),
+            _clamp(_float_or_default(data.get("tp2_qty_pct", 25.0), 25.0), 0.0, 100.0),
+            _clamp(_float_or_default(data.get("tp3_qty_pct", 0.0), 0.0), 0.0, 100.0),
+            _clamp(_float_or_default(data.get("tp4_qty_pct", 0.0), 0.0), 0.0, 100.0),
+        ]
+        tp_sum = sum(tp_qty_pcts)
+        if tp_sum == 0:
+            tp_qty_pcts = [25.0, 25.0, 25.0, 25.0]
+        elif tp_sum > 100:
             logger.warning(f"[AI] TP sum {tp_sum}% exceeds 100%, capping")
             tp_sum_cap_factor = 100.0 / tp_sum
-            data["tp1_qty_pct"] = _float_or_default(data.get("tp1_qty_pct", 0), 0) * tp_sum_cap_factor
-            data["tp2_qty_pct"] = _float_or_default(data.get("tp2_qty_pct", 0), 0) * tp_sum_cap_factor
-            data["tp3_qty_pct"] = _float_or_default(data.get("tp3_qty_pct", 0), 0) * tp_sum_cap_factor
-            data["tp4_qty_pct"] = _float_or_default(data.get("tp4_qty_pct", 0), 0) * tp_sum_cap_factor
+            tp_qty_pcts = [value * tp_sum_cap_factor for value in tp_qty_pcts]
+            data["tp1_qty_pct"], data["tp2_qty_pct"], data["tp3_qty_pct"], data["tp4_qty_pct"] = tp_qty_pcts
 
         reasoning = str(data.get("reasoning", ""))
-        if recommendation == "execute" and confidence < 0.4:
+        if recommendation in ("execute", "modify") and confidence < 0.4:
             logger.warning(f"[AI] Execute recommendation with low confidence {confidence}, forcing reject")
             recommendation = "reject"
             reasoning = f"[AI SAFETY] Confidence {confidence:.2f} below execute threshold 0.4. Original: {reasoning}"
 
-        if recommendation in ("execute", "modify") and not _optional_float(data.get("suggested_stop_loss")):
+        suggested_stop_loss = _optional_float(data.get("suggested_stop_loss"))
+        if recommendation in ("execute", "modify") and (suggested_stop_loss is None or suggested_stop_loss <= 0):
             logger.warning("[AI] Execute/modify without stop loss, forcing reject")
             recommendation = "reject"
             reasoning = f"[AI SAFETY] Missing stop loss for execute/modify. Original: {reasoning}"
@@ -1799,7 +1812,7 @@ def _parse_response(raw: str) -> AIAnalysis:
             reasoning=reasoning,
             suggested_direction=suggested_direction,
             suggested_entry=_optional_float(data.get("suggested_entry")),
-            suggested_stop_loss=_optional_float(data.get("suggested_stop_loss")),
+            suggested_stop_loss=suggested_stop_loss,
             suggested_take_profit=_optional_float(data.get("suggested_take_profit")),
             suggested_tp1=_optional_float(data.get("suggested_tp1")),
             suggested_tp2=_optional_float(data.get("suggested_tp2")),

@@ -5,11 +5,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.database import PositionModel
+from core.utils.datetime import utcnow
 from exchange import place_protective_stop
 from position_monitor import (
+    _GHOST_POSITION_TRACKER,
+    _MAX_GHOST_THRESHOLD,
     _adjust_trailing_stop_on_tp_hit,
     _check_pending_limit_orders,
     _find_exchange_position,
+    _find_recent_close_order,
     _hit_take_profit_levels,
     _loads_dict,
     _loads_list,
@@ -17,6 +21,7 @@ from position_monitor import (
     _paper_trailing_stop_price,
     _position_limit_timeout_secs,
     _price_pnl_pct,
+    _reconcile_exchange_position,
     _reconcile_paper_position,
     _safe_float,
 )
@@ -363,6 +368,83 @@ async def test_partial_take_profit_recalculates_remaining_pnl_metrics(monkeypatc
     assert position.realized_pnl_pct == pytest.approx(5.0)
     assert position.current_pnl_pct == pytest.approx(9.0)
     assert position.unrealized_pnl_usdt == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+async def test_find_recent_close_order_skips_already_hit_partial_tp():
+    position = PositionModel(
+        id="pos-close-scan",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=0.5,
+        opened_at=utcnow(),
+        take_profit_order_ids_json=json.dumps(["tp1", "tp2"]),
+        take_profit_json=json.dumps([
+            {"level": 1, "price": 110.0, "qty_pct": 50, "status": "hit"},
+            {"level": 2, "price": 120.0, "qty_pct": 50, "status": "pending"},
+        ]),
+        stop_loss_order_id="sl1",
+    )
+
+    async def fake_recent_orders(*args, **kwargs):
+        return [
+            {"id": "tp1", "status": "closed", "filled": 0.5, "average": 110.0, "side": "sell"},
+            {"id": "sl1", "status": "closed", "filled": 0.5, "average": 104.0, "side": "sell"},
+        ]
+
+    order = await _find_recent_close_order(position, {}, fake_recent_orders)
+
+    assert order["id"] == "sl1"
+
+
+@pytest.mark.asyncio
+async def test_ghost_position_close_waits_for_interval(monkeypatch):
+    position = PositionModel(
+        id="ghost-wait",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        opened_at=utcnow(),
+        last_price=101.0,
+    )
+    _GHOST_POSITION_TRACKER[position.id] = {
+        "fail_count": _MAX_GHOST_THRESHOLD - 1,
+        "first_missing_at": utcnow(),
+        "last_check": utcnow(),
+    }
+
+    async def fake_open_positions(*args, **kwargs):
+        return []
+
+    async def fake_recent_orders(*args, **kwargs):
+        return []
+
+    async def fake_ticker(*args, **kwargs):
+        return {"last": 101.0}
+
+    close_recorder = AsyncMock()
+    monkeypatch.setattr("exchange.get_open_positions", fake_open_positions)
+    monkeypatch.setattr("exchange.get_recent_orders", fake_recent_orders)
+    monkeypatch.setattr("exchange.get_ticker", fake_ticker)
+    monkeypatch.setattr("position_monitor.record_position_close_trade_async", close_recorder)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    stats = await _reconcile_exchange_position(FakeSession(), position, {"live_trading": True})
+
+    assert stats["closed"] == 0
+    close_recorder.assert_not_awaited()
+    assert _GHOST_POSITION_TRACKER[position.id]["fail_count"] == _MAX_GHOST_THRESHOLD
+
+    _GHOST_POSITION_TRACKER.pop(position.id, None)
 
 
 def test_paper_trailing_stop_price_activates_for_moving_mode():

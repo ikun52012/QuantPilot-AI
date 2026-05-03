@@ -5,7 +5,7 @@ import pytest
 
 import exchange as exchange_module
 from core.config import settings
-from models import AIAnalysis, MarketContext, SignalDirection, TradeDecision, TradingViewSignal
+from models import AIAnalysis, MarketContext, SignalDirection, TakeProfitLevel, TradeDecision, TradingViewSignal
 from services.signal_processor import SignalProcessor
 
 
@@ -365,3 +365,74 @@ async def test_exchange_query_paths_preserve_explicit_empty_credentials(
 
     assert result[expected_key] == expected_value
     _assert_empty_credentials(captured)
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_rolls_back_partial_fill_when_protection_fails(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr(exchange_module, "_get_or_create_exchange", lambda **kwargs: SimpleNamespace(options={"defaultType": "future"}))
+    monkeypatch.setattr(
+        exchange_module,
+        "_create_exchange_order",
+        AsyncMock(return_value={"id": "entry-1", "status": "open", "filled": 0.5, "average": 100.0}),
+    )
+    monkeypatch.setattr(exchange_module, "_create_conditional_order", AsyncMock(side_effect=RuntimeError("protect fail")))
+    close_position = AsyncMock(return_value={"status": "closed", "order_id": "close-1", "exit_price": 99.0})
+    monkeypatch.setattr(exchange_module, "_close_position", close_position)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            take_profit=110.0,
+            stop_loss=95.0,
+            order_type="market",
+        ),
+        _user_exchange_config(),
+    )
+
+    assert result["status"] == "error"
+    assert result["rollback_success"] is True
+    assert close_position.await_args.kwargs["close_quantity"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_rolls_back_when_multi_tp_reports_failed(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr(exchange_module, "_get_or_create_exchange", lambda **kwargs: SimpleNamespace(options={"defaultType": "future"}))
+    monkeypatch.setattr(
+        exchange_module,
+        "_create_exchange_order",
+        AsyncMock(return_value={"id": "entry-1", "status": "closed", "filled": 1.0, "average": 100.0}),
+    )
+    monkeypatch.setattr(
+        exchange_module,
+        "_place_multi_tp_orders",
+        AsyncMock(return_value=[{"level": 1, "status": "failed", "error": "rejected"}]),
+    )
+    close_position = AsyncMock(return_value={"status": "closed", "order_id": "close-1", "exit_price": 99.0})
+    monkeypatch.setattr(exchange_module, "_close_position", close_position)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            take_profit_levels=[TakeProfitLevel(price=110.0, qty_pct=100.0)],
+            order_type="market",
+        ),
+        _user_exchange_config(),
+    )
+
+    assert result["status"] == "error"
+    assert result["rollback_success"] is True
+    assert "Multi-TP failed" in result["protection_errors"][0]

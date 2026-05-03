@@ -96,7 +96,14 @@ def _okx_position_side(side: str) -> str:
 
 def _order_create_attempts(exchange, side: str, params: dict[str, Any] | None = None, position_side: str | None = None) -> list[dict[str, Any]]:
     base = dict(params or {})
-    if _exchange_id(exchange) != "okx":
+    exchange_id = _exchange_id(exchange)
+
+    if exchange_id == "bybit" and position_side:
+        pos_idx = "1" if position_side.lower() == "long" else "2"
+        base["positionIdx"] = pos_idx
+        return [base]
+
+    if exchange_id != "okx":
         return [base]
 
     # For OKX hedge mode, posSide should match the POSITION being operated on
@@ -129,6 +136,7 @@ async def _create_exchange_order(
     price: float | None = None,
     params: dict[str, Any] | None = None,
     position_side: str | None = None,
+    allow_amount_increase: bool = True,
 ) -> dict:
     """Create an exchange order with small exchange-specific retries.
 
@@ -140,7 +148,12 @@ async def _create_exchange_order(
                        Optional for open orders (derived from side).
     """
     # Validate amount against market limits before placing order
+    requested_amount = amount
     amount = _validate_and_adjust_amount(exchange, symbol, amount)
+    if not allow_amount_increase and amount > requested_amount:
+        raise ValueError(
+            f"Adjusted close amount {amount} exceeds requested rollback amount {requested_amount}"
+        )
 
     errors: list[str] = []
     for attempt_params in _order_create_attempts(exchange, side, params, position_side):
@@ -453,7 +466,7 @@ def _get_or_create_exchange(
     Includes health check to evict stale/unhealthy connections.
     """
     eid = (exchange_id or settings.exchange.name).lower().strip()
-    cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:8]
+    cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:16]
     sb = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
     market_key = str(market_type or settings.exchange.market_type or "contract").lower().strip()
     cache_key = f"{eid}:{sb}:{market_key}:{cred_hash}"
@@ -499,7 +512,24 @@ def _get_or_create_exchange(
                     except Exception:
                         pass
                 else:
-                    return existing
+                    try:
+                        close = getattr(existing, "close", None)
+                        if close:
+                            close()
+                    except Exception:
+                        pass
+                    _exchange_pool.pop(cache_key, None)
+                    _exchange_pool_health.pop(cache_key, None)
+                    logger.info(f"[Exchange] Health check failed, rebuilding instance for {cache_key}")
+                    return _get_or_create_exchange(
+                        exchange_id=exchange_id,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        password=password,
+                        live=live,
+                        sandbox=sandbox,
+                        market_type=market_type,
+                    )
         else:
             return existing
 
@@ -898,13 +928,12 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         order_status = order.get("status", "unknown")
         actual_filled_qty = safe_float(order.get("filled") or 0)
         requested_qty = safe_float(decision.quantity or 0)
+        if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
+            actual_filled_qty = safe_float(order.get("amount") or decision.quantity)
         is_partial_fill = (
             actual_filled_qty > 0
             and actual_filled_qty < requested_qty
-            and order_status not in {"closed", "filled"}
         )
-        if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
-            actual_filled_qty = safe_float(order.get("amount") or decision.quantity)
         actual_avg_price = safe_float(order.get("average") or order.get("price") or decision.entry_price or 0)
         logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status}, filled={actual_filled_qty}/{requested_qty})")
 
@@ -925,14 +954,26 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 order = await asyncio.to_thread(exchange.fetch_order, order_id, symbol)
                 order_status = order.get("status", "unknown")
                 actual_filled_qty = safe_float(order.get("filled") or 0)
+                if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
+                    actual_filled_qty = safe_float(order.get("amount") or decision.quantity)
+                is_partial_fill = (
+                    actual_filled_qty > 0
+                    and actual_filled_qty < requested_qty
+                )
                 result_status = (
-                    "filled" if order_status in {"closed", "filled"} or actual_filled_qty > 0
-                    else "partial" if actual_filled_qty > 0 and actual_filled_qty < requested_qty
+                    "partial" if is_partial_fill
+                    else "filled" if order_status in {"closed", "filled"} or actual_filled_qty > 0
                     else "error"
                 )
                 if result_status == "error":
                     logger.error(f"[Exchange] Market order still not filled after wait: {order_status}")
-                    return {"status": "error", "reason": f"Market order ambiguous after 3s: {order_status}", "order_id": order_id}
+                    cancel_result = await _cancel_exchange_order(exchange, symbol, str(order_id))
+                    return {
+                        "status": "error",
+                        "reason": f"Market order ambiguous after 3s: {order_status}",
+                        "order_id": order_id,
+                        "cancel_result": cancel_result,
+                    }
             except Exception as e:
                 logger.error(f"[Exchange] Failed to re-fetch order: {e}")
                 return {"status": "error", "reason": f"Cannot verify market order fill: {e}", "order_id": order_id}
@@ -979,7 +1020,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 exchange, symbol, side, tp_qty, decision.take_profit_levels, position_side=pos_side_for_orders
             )
             result["take_profit_orders"] = tp_orders
-            failed_tps = [tp for tp in tp_orders if tp.get("status") == "error"]
+            failed_tps = [tp for tp in tp_orders if tp.get("status") in {"error", "failed"}]
             if failed_tps:
                 result["take_profit_error"] = f"Multi-TP failed: {len(failed_tps)}/{len(decision.take_profit_levels)} levels failed"
         elif decision.take_profit and tp_qty > 0:
@@ -1048,15 +1089,28 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
         # ── Protection Failure Check ──
         # If entry succeeded but SL/TP failed, close position for safety
-        if result.get("status") in ("filled", "partial", "pending") and (result.get("stop_loss_error") or result.get("take_profit_error")):
+        trailing_unprotected = result.get("trailing_stop_error") and not result.get("stop_loss_order_id")
+        if result.get("status") in ("filled", "partial", "pending") and (
+            result.get("stop_loss_error") or result.get("take_profit_error") or trailing_unprotected
+):
             protection_errors = []
             if result.get("stop_loss_error"):
                 protection_errors.append(f"SL: {result['stop_loss_error']}")
             if result.get("take_profit_error"):
                 protection_errors.append(f"TP: {result['take_profit_error']}")
+            if trailing_unprotected:
+                protection_errors.append(f"Trailing: {result['trailing_stop_error']}")
 
-            if result.get("status") == "filled":
+            if result.get("status") in ("filled", "partial"):
                 # Entry already filled - must close position
+                # CRITICAL FIX: Cancel any remaining unfilled portion first
+                if is_partial_fill and result.get("order_id"):
+                    try:
+                        cancel_result = await _cancel_exchange_order(exchange, symbol, str(result.get("order_id")))
+                        logger.info(f"[Exchange] Cancelled unfilled entry portion: {cancel_result}")
+                    except Exception as cancel_err:
+                        logger.warning(f"[Exchange] Failed to cancel unfilled entry portion: {cancel_err}")
+
                 logger.warning(
                     f"[Exchange] Protection orders failed for filled entry. "
                     f"Closing position {symbol} for safety. Errors: {protection_errors}"
@@ -1389,6 +1443,7 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                 amount=amount,
                 params={"reduceOnly": True},
                 position_side=pos_side if pos_side else None,
+                allow_amount_increase=False,
             )
             logger.info(f"[Exchange] ✅ Position closed: {order.get('id')} (side={pos_side or 'net'})")
             exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
@@ -1722,6 +1777,7 @@ async def get_recent_orders(symbol: str | None = None, limit: int = 50, exchange
                 "amount": o.get("amount"),
                 "cost": o.get("cost"),
                 "filled": o.get("filled"),
+                "remaining": o.get("remaining", max(0, (o.get("amount") or 0) - (o.get("filled") or 0))),
                 "status": o.get("status"),
                 "timestamp": o.get("timestamp"),
                 "datetime": o.get("datetime"),

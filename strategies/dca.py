@@ -464,7 +464,7 @@ class DCAEngine:
         position.entries.append(entry)
         position.total_quantity += new_quantity
         position.total_capital_usdt += new_capital
-        position.entries_remaining -= 1
+        position.entries_remaining = max(0, position.entries_remaining - 1)
 
         total_qty = position.total_quantity
 

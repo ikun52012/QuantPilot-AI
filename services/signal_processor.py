@@ -229,12 +229,13 @@ async def _check_batch_signals(ticker: str, signal: TradingViewSignal, raw_body:
         if len(same_direction) >= settings.ai.batch_signals_max_count:
             logger.info(
                 f"[SignalProcessor] Batch triggered for {ticker} {signal.direction.value}: "
-                f"{len(same_direction) + 1} signals within {settings.ai.batch_signals_window_secs}s window"
+                f"{len(same_direction) + 1} signals within {settings.ai.batch_signals_window_secs}s window. "
+                f"Skipping individual processing."
             )
             for s, t, b in same_direction:
                 pending.remove((s, t, b))
             _PENDING_BATCH_SIGNALS[key] = pending
-            return False
+            return True
 
         pending.append((signal, now, raw_body))
         _PENDING_BATCH_SIGNALS[key] = pending
@@ -427,9 +428,6 @@ class SignalProcessor:
         8. Wait dynamic interval
         9. Release semaphore and lock
         """
-        # Optimization 5: Prefetch market data BEFORE acquiring semaphore
-        prefetched_market = await _prefetch_market_data_async(signal.ticker)
-
         # Optimization 4: Check batch signals
         batched = await _check_batch_signals(signal.ticker, signal, raw_body)
         if batched:
@@ -442,6 +440,9 @@ class SignalProcessor:
                 "reason": f"Queue full for {signal.ticker} - too many pending signals",
                 "queue_limit": settings.ai.signal_queue_limit,
             }
+
+        # Optimization 5: Prefetch market data AFTER queue limit check
+        prefetched_market = await _prefetch_market_data_async(signal.ticker)
 
         # Get global processing semaphore
         global_sem = await _get_global_semaphore()
@@ -549,7 +550,10 @@ class SignalProcessor:
                 conflict_reason, conflicting_position = await self._check_position_conflict(
                     decision, user_id, user_settings
                 )
-                if conflict_reason and conflicting_position:
+                if conflict_reason and not conflicting_position:
+                    decision.execute = False
+                    decision.reason = conflict_reason
+                elif conflict_reason and conflicting_position:
                     # Close existing position before opening reverse position
                     close_result = await self._close_conflicting_position(
                         conflicting_position, user_id, user_settings
@@ -596,13 +600,15 @@ class SignalProcessor:
             logger.error(f"[Signal] Processing error: {e}")
             await notify_error(str(e))
 
-            self._update_reserved_event(
-                reservation,
-                status="error",
-                status_code=500,
-                reason=str(e),
-                payload=raw_body or signal.model_dump(),
-            )
+            if reservation:
+                self._update_reserved_event(
+                    reservation,
+                    status="error",
+                    status_code=500,
+                    reason=str(e),
+                    payload=raw_body or signal.model_dump(),
+                )
+                await self.session.commit()
 
             return {"status": "error", "reason": str(e)}
 
@@ -1899,6 +1905,8 @@ prefilter_result: PreFilterResult | None = None,
 
             # Cancel pending orders of opposite direction
             for pending_pos in pending_positions:
+                if getattr(pending_pos, "status", None) != "pending":
+                    continue
                 pending_dir = (pending_pos.direction or "").lower()
                 if (direction in ("long", "short") and pending_dir in ("long", "short")
                         and direction != pending_dir):
@@ -1907,7 +1915,9 @@ prefilter_result: PreFilterResult | None = None,
                         f"[Signal] Cancelling pending {pending_dir} order on {decision.ticker} "
                         f"(id={pending_pos.id[:8]}) before opening {direction}"
                     )
-                    await self._cancel_pending_position(pending_pos, user_id, user_settings)
+                    cancel_result = await self._cancel_pending_position(pending_pos, user_id, user_settings)
+                    if cancel_result.get("status") == "error":
+                        return (cancel_result.get("reason") or "Failed to cancel conflicting pending order", None)
 
             # Step 2: Check database OPEN positions (FIX: only status="open")
             stmt = select(PositionModel).where(PositionModel.status == "open")
@@ -1936,10 +1946,13 @@ prefilter_result: PreFilterResult | None = None,
 
             # Step 2: Check exchange actual positions (for live trading)
             # This catches positions that might not be in database yet (concurrent signals)
-            live_trading = False
+            # FIX: Use settings.exchange.live_trading as fallback, not hardcoded False
+            live_trading = bool(settings.exchange.live_trading)
             if user_settings:
                 exchange_cfg = (user_settings or {}).get("exchange") or {}
-                live_trading = bool(exchange_cfg.get("live_trading", False))
+                user_live = exchange_cfg.get("live_trading")
+                if user_live is not None:
+                    live_trading = bool(user_live)
 
             if live_trading:
                 from exchange import get_open_positions
@@ -2186,13 +2199,15 @@ prefilter_result: PreFilterResult | None = None,
 
         if user_id and user_settings:
             user_exchange = (user_settings or {}).get("exchange") or {}
+            user_live = user_exchange.get("live_trading")
+            user_sandbox = user_exchange.get("sandbox_mode")
             exchange_config.update({
                 "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
                 "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else settings.exchange.api_key,
                 "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else settings.exchange.api_secret,
                 "password": user_exchange.get("password") if "password" in user_exchange else settings.exchange.password,
-                "live_trading": bool(user_exchange.get("live_trading", False)),
-                "sandbox_mode": bool(user_exchange.get("sandbox_mode", False)),
+                "live_trading": bool(user_live if user_live is not None else settings.exchange.live_trading),
+                "sandbox_mode": bool(user_sandbox if user_sandbox is not None else settings.exchange.sandbox_mode),
                 "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
                 "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
                 "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
