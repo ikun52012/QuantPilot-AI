@@ -27,14 +27,16 @@ async def _on_startup():
     """Initialize all services on application startup."""
     logger.info("=" * 50)
     logger.info(f"QuantPilot AI v{settings.app_version} starting...")
-    logger.info(f"   AI Provider: {settings.ai.provider}")
-    logger.info(f"   Exchange: {settings.exchange.name}")
-    logger.info(f"   Live Trading: {'YES' if settings.exchange.live_trading else 'NO (Paper)'}")
-    logger.info(f"   Exchange Sandbox: {'YES' if settings.exchange.sandbox_mode else 'NO'}")
     logger.info(f"   Database: {settings.database.url.split('@')[-1] if '@' in settings.database.url else settings.database.url}")
     logger.info("=" * 50)
 
     await _init_database()
+
+    logger.info(f"   AI Provider: {settings.ai.provider}")
+    logger.info(f"   Exchange: {settings.exchange.name}")
+    logger.info(f"   Live Trading: {'YES' if settings.exchange.live_trading else 'NO (Paper)'}")
+    logger.info(f"   Exchange Sandbox: {'YES' if settings.exchange.sandbox_mode else 'NO'}")
+
     await _init_cache()
     await _init_scheduler()
     await _restore_strategies()

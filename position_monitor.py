@@ -472,6 +472,8 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     f"qty={filled_amount}, price={filled_price}, cost={filled_cost}, margin={position.margin}"
                 )
 
+                await _create_protective_orders_for_position(position, exchange, symbol, filled_amount)
+
             elif order_status in {"canceled", "cancelled", "expired", "rejected"}:
                 filled_amount = safe_float(order.get("filled") or 0)
                 filled_price = safe_float(order.get("average") or order.get("price"))
@@ -493,6 +495,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         f"[PositionMonitor] Limit order {order_status} with partial fill for {position.ticker}: "
                         f"qty={filled_amount}, price={filled_price}, position remains open"
                     )
+                    await _create_protective_orders_for_position(position, exchange, symbol, filled_amount)
                 else:
                     position.status = "closed"
                     position.close_reason = "limit_order_expired"
@@ -554,6 +557,50 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
         logger.warning(f"[PositionMonitor] Limit order not found on exchange for {position.ticker}")
     except Exception as e:
         logger.debug(f"[PositionMonitor] Error checking limit order for {position.ticker}: {e}")
+
+
+async def _create_protective_orders_for_position(position: PositionModel, exchange, symbol: str, filled_qty: float) -> None:
+    """Create TP/SL orders for a position that just filled from a pending limit order."""
+    if filled_qty <= 0:
+        return
+
+    side = "buy" if str(position.direction or "").lower() == "long" else "sell"
+    tp_side = "sell" if side == "buy" else "buy"
+    pos_side = "long" if side == "buy" else "short"
+
+    tp_ids_json = str(position.take_profit_order_ids_json or "")
+    if not tp_ids_json or tp_ids_json in ("", "[]", "null"):
+        tp_levels = loads_list(position.take_profit_json)
+        if tp_levels:
+            from exchange import _create_conditional_order as _cco
+            tp_ids = []
+            for i, tp in enumerate(tp_levels):
+                tp_price = safe_float(tp.get("price"))
+                tp_qty_pct = safe_float(tp.get("qty_pct"), 100.0)
+                if tp_price <= 0:
+                    continue
+                tp_qty = filled_qty * (tp_qty_pct / 100.0)
+                if tp_qty <= 0:
+                    continue
+                try:
+                    tp_order = await _cco(exchange, symbol, "take_profit", tp_side, round(tp_qty, 6), tp_price, pos_side)
+                    tp_ids.append(str(tp_order.get("id") or ""))
+                    logger.info(f"[PositionMonitor] TP{i+1} created for filled limit: price={tp_price}")
+                except Exception as e:
+                    logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
+            if tp_ids:
+                position.take_profit_order_ids_json = json.dumps(tp_ids, ensure_ascii=False)
+
+    if not position.stop_loss_order_id:
+        sl_price = safe_float(position.stop_loss)
+        if sl_price > 0:
+            from exchange import _create_conditional_order as _cco
+            try:
+                sl_order = await _cco(exchange, symbol, "stop_loss", tp_side, filled_qty, sl_price, pos_side)
+                position.stop_loss_order_id = str(sl_order.get("id") or "")
+                logger.info(f"[PositionMonitor] SL created for filled limit: price={sl_price}")
+            except Exception as e:
+                logger.error(f"[PositionMonitor] Failed to create SL for filled limit: {e}")
 
 
 async def _reconcile_exchange_position(session, position: PositionModel, exchange_config: dict) -> dict:
@@ -625,7 +672,7 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
         order_id = str(order.get("id") or "")
         if order_id not in tp_order_ids:
             continue
-        if not _order_has_close_status(order):
+        if str(order.get("status") or "").lower() not in {"closed", "filled"}:
             continue
 
         order_price = safe_float(order.get("average") or order.get("price"))

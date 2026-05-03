@@ -1251,7 +1251,10 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                 continue
 
             # In hedge mode, filter by position side
-            pos_side = str(pos.get("side", "")).lower()
+            pos_side = str(pos.get("side", "") or "").lower()
+            if not pos_side:
+                pos_info = pos.get("info") or {}
+                pos_side = str(pos_info.get("posSide") or "").lower()
             if position_side and pos_side and position_side.lower() not in pos_side:
                 continue
 

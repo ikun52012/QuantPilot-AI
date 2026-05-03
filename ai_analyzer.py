@@ -766,8 +766,12 @@ async def _call_custom(system: str, user: str, model: str | None = None) -> str:
                 "max_tokens": settings.ai.max_tokens,
             }
 
+            url = settings.ai.custom_provider_api_url.rstrip("/")
+            if not url.endswith("/chat/completions"):
+                url += "/chat/completions"
+
             resp = await client.post(
-                settings.ai.custom_provider_api_url,
+                url,
                 headers={
                     "Authorization": f"Bearer {settings.ai.custom_provider_api_key}",
                     "Content-Type": "application/json",

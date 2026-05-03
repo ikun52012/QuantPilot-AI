@@ -141,19 +141,20 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
     ai = runtime.get("ai") or {}
     if ai:
         settings.ai.provider = _normalize_ai_provider(ai.get("provider"))
-        api_key = str(ai.get("api_key") or "")
-        if settings.ai.provider == "openai":
-            settings.ai.openai_api_key = api_key
-        elif settings.ai.provider == "anthropic":
-            settings.ai.anthropic_api_key = api_key
-        elif settings.ai.provider == "deepseek":
-            settings.ai.deepseek_api_key = api_key
-        elif settings.ai.provider == "mistral":
-            settings.ai.mistral_api_key = api_key
-        elif settings.ai.provider == "openrouter":
-            settings.ai.openrouter_api_key = api_key
-        else:
-            settings.ai.custom_provider_api_key = api_key
+        api_key = str(ai.get("api_key") or "").strip()
+        if api_key:
+            if settings.ai.provider == "openai":
+                settings.ai.openai_api_key = api_key
+            elif settings.ai.provider == "anthropic":
+                settings.ai.anthropic_api_key = api_key
+            elif settings.ai.provider == "deepseek":
+                settings.ai.deepseek_api_key = api_key
+            elif settings.ai.provider == "mistral":
+                settings.ai.mistral_api_key = api_key
+            elif settings.ai.provider == "openrouter":
+                settings.ai.openrouter_api_key = api_key
+            else:
+                settings.ai.custom_provider_api_key = api_key
 
         # Also explicitly set custom_provider_api_key if provided separately
         custom_api_key = str(ai.get("custom_provider_api_key") or "")
@@ -465,7 +466,7 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
     provider = _normalize_ai_provider(first_valid(data.get("provider"), current.get("provider")))
     updated = {
         "provider": provider,
-        "api_key": _coalesce_str(data.get("api_key"), current.get("api_key"), _current_ai_key(provider)),
+        "api_key": str(data.get("api_key")).strip() if "api_key" in data and str(data.get("api_key")).strip() else _coalesce_str(current.get("api_key"), _current_ai_key(provider)),
         "temperature": _to_float(data.get("temperature"), _to_float(current.get("temperature"), settings.ai.temperature), 0, 2),
         "max_tokens": _to_int(data.get("max_tokens"), _to_int(current.get("max_tokens"), settings.ai.max_tokens), 100, 4000),
         "custom_system_prompt": str(data.get("custom_system_prompt") if data.get("custom_system_prompt") is not None else current.get("custom_system_prompt", "")),
@@ -473,7 +474,7 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
         "custom_provider_name": _coalesce_str(data.get("custom_provider_name"), current.get("custom_provider_name"), settings.ai.custom_provider_name, default="custom"),
         "custom_provider_model": _coalesce_str(data.get("custom_provider_model"), current.get("custom_provider_model"), default=""),
         "custom_provider_api_url": _coalesce_str(data.get("custom_provider_api_url"), current.get("custom_provider_api_url"), default=""),
-        "custom_provider_api_key": _coalesce_str(data.get("custom_provider_api_key"), current.get("custom_provider_api_key"), settings.ai.custom_provider_api_key),
+        "custom_provider_api_key": str(data.get("custom_provider_api_key")).strip() if "custom_provider_api_key" in data and str(data.get("custom_provider_api_key")).strip() else _coalesce_str(current.get("custom_provider_api_key"), settings.ai.custom_provider_api_key),
         "openrouter_enabled": _to_bool(data.get("openrouter_enabled"), _to_bool(current.get("openrouter_enabled"), settings.ai.openrouter_enabled)),
         "openrouter_model": _coalesce_str(data.get("openrouter_model"), current.get("openrouter_model"), settings.ai.openrouter_model),
         "openrouter_site_url": _coalesce_str(data.get("openrouter_site_url"), current.get("openrouter_site_url"), settings.ai.openrouter_site_url),
