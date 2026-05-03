@@ -1007,6 +1007,53 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             if decision.stop_loss and sl_qty > 0:
                 await _place_stop_loss(exchange, symbol, side, sl_qty, decision.stop_loss, result, position_side=pos_side_for_orders)
 
+        # ── Protection Failure Check ──
+        # If entry succeeded but SL/TP failed, close position for safety
+        if result.get("status") in ("filled", "pending") and result.get("stop_loss_error") or result.get("take_profit_error"):
+            protection_errors = []
+            if result.get("stop_loss_error"):
+                protection_errors.append(f"SL: {result['stop_loss_error']}")
+            if result.get("take_profit_error"):
+                protection_errors.append(f"TP: {result['take_profit_error']}")
+
+            if result.get("status") == "filled":
+                # Entry already filled - must close position
+                logger.warning(
+                    f"[Exchange] Protection orders failed for filled entry. "
+                    f"Closing position {symbol} for safety. Errors: {protection_errors}"
+                )
+                try:
+                    close_result = await _close_position(
+                        exchange, symbol, position_side=pos_side_for_orders
+                    )
+                    if close_result.get("status") == "closed":
+                        return {
+                            "status": "error",
+                            "reason": "Entry filled but protection failed - position closed for safety",
+                            "entry_order_id": result.get("order_id"),
+                            "close_order_id": close_result.get("order_id"),
+                            "exit_price": close_result.get("exit_price"),
+                            "protection_errors": protection_errors,
+                            "rollback_success": True,
+                        }
+                    else:
+                        logger.error(f"[Exchange] CRITICAL: Failed to rollback unprotected position: {close_result}")
+                        result["status"] = "partial_protection"
+                        result["protection_errors"] = protection_errors
+                        result["warning"] = "CRITICAL: Position opened but SL/TP failed - MANUAL STOP LOSS REQUIRED"
+                        return result
+                except Exception as rollback_err:
+                    logger.error(f"[Exchange] CRITICAL: Rollback exception: {rollback_err}")
+                    result["status"] = "partial_protection"
+                    result["protection_errors"] = protection_errors
+                    result["warning"] = "CRITICAL: Rollback failed - MANUAL STOP LOSS REQUIRED"
+                    return result
+            else:
+                # Entry pending - cancel and return error
+                logger.warning("[Exchange] Protection failed for pending entry, returning warning")
+                result["protection_errors"] = protection_errors
+                result["warning"] = "Protection orders failed - position pending"
+
         return result
 
     except ccxt.InsufficientFunds as e:

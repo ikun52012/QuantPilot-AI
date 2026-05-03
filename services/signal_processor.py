@@ -1293,6 +1293,17 @@ prefilter_result: PreFilterResult | None = None,
                 # NOT multiplied by leverage - leverage affects margin, not risk-based size
                 risk_amount = equity * (risk_pct / 100.0)
                 notional_value = risk_amount / (sl_distance_pct / 100.0)
+
+                # Apply max_position_pct cap to prevent excessive positions
+                max_notional = equity * (max_position / 100.0)
+                if notional_value > max_notional:
+                    original_notional = notional_value
+                    notional_value = max_notional
+                    logger.warning(
+                        f"[PositionSize] risk_ratio exceeded max_position_pct ({max_position}%): "
+                        f"calculated={original_notional:.2f}USDT, capped={max_notional:.2f}USDT"
+                    )
+
                 logger.info(
                     f"[PositionSize] risk_ratio mode: equity={equity}USDT, risk_pct={risk_pct}%, "
                     f"SL_distance={sl_distance_pct}% -> notional={notional_value}USDT (risk_amount={risk_amount}USDT)"

@@ -135,20 +135,6 @@ async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
     Protected by asyncio.Lock to prevent concurrent execution from
     both scheduler and manual admin API trigger.
     """
-    if _position_monitor_lock.locked():
-        logger.warning("[PositionMonitor] Already running, skipping duplicate invocation")
-        return {
-            "tracked": 0,
-            "updated": 0,
-            "partials": 0,
-            "closed": 0,
-            "adjusted": 0,
-            "errors": 0,
-            "skipped": True,
-            "reason": "Already running",
-            "timestamp": utcnow().isoformat(),
-        }
-
     async with _position_monitor_lock:
         stats = {
             "tracked": 0,
@@ -346,7 +332,8 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
                 level["status"] = "hit"
                 continue
             weight = qty / opened_qty if opened_qty > 0 else 1.0
-            level_pnl = _price_pnl_pct(position.direction, position.entry_price, level.get("price"), position.leverage)
+            leverage = safe_float(position.leverage, 1.0)
+            level_pnl = _price_pnl_pct(position.direction, position.entry_price, level.get("price"), leverage)
             position.realized_pnl_pct = round(safe_float(position.realized_pnl_pct) + (level_pnl * weight), 6)
             remaining_qty = max(0.0, remaining_qty - qty)
             level["status"] = "hit"
@@ -452,11 +439,11 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     position.remaining_quantity = filled_amount
 
                 # Update margin based on actual filled cost
-                if filled_cost > 0 and position.leverage > 0:
-                    position.margin = filled_cost / position.leverage
-                elif filled_amount > 0 and filled_price > 0 and position.leverage > 0:
-                    # Fallback: calculate margin from filled_amount * filled_price
-                    position.margin = (filled_amount * filled_price) / position.leverage
+                leverage = safe_float(position.leverage, 1.0)
+                if filled_cost > 0 and leverage > 0:
+                    position.margin = filled_cost / leverage
+                elif filled_amount > 0 and filled_price > 0 and leverage > 0:
+                    position.margin = (filled_amount * filled_price) / leverage
 
                 # Log fee if available
                 fee_info = order.get("fee", {})
@@ -486,10 +473,11 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         position.entry_price = filled_price
                         position.last_price = filled_price
                     filled_cost = safe_float(order.get("cost") or 0)
-                    if filled_cost > 0 and position.leverage > 0:
-                        position.margin = filled_cost / position.leverage
-                    elif filled_amount > 0 and filled_price > 0 and position.leverage > 0:
-                        position.margin = (filled_amount * filled_price) / position.leverage
+                    leverage = safe_float(position.leverage, 1.0)
+                    if filled_cost > 0 and leverage > 0:
+                        position.margin = filled_cost / leverage
+                    elif filled_amount > 0 and filled_price > 0 and leverage > 0:
+                        position.margin = (filled_amount * filled_price) / leverage
                     position.updated_at = utcnow()
                     logger.warning(
                         f"[PositionMonitor] Limit order {order_status} with partial fill for {position.ticker}: "
@@ -518,10 +506,11 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         position.entry_price = filled_price
                         position.last_price = filled_price
                     filled_cost = safe_float(order.get("cost") or 0)
-                    if filled_cost > 0 and position.leverage > 0:
-                        position.margin = filled_cost / position.leverage
-                    elif filled_amount > 0 and filled_price > 0 and position.leverage > 0:
-                        position.margin = (filled_amount * filled_price) / position.leverage
+                    leverage = safe_float(position.leverage, 1.0)
+                    if filled_cost > 0 and leverage > 0:
+                        position.margin = filled_cost / leverage
+                    elif filled_amount > 0 and filled_price > 0 and leverage > 0:
+                        position.margin = (filled_amount * filled_price) / leverage
                     position.updated_at = utcnow()
                     logger.info(
                         f"[PositionMonitor] Limit order partially filled for {position.ticker}: "
@@ -807,9 +796,9 @@ def _update_unrealized(position: PositionModel, mark_price: float) -> None:
     opened_qty = max(safe_float(position.quantity), 0.0)
     remaining_qty = _effective_remaining_quantity(position, opened_qty)
     remaining_weight = min(1.0, max(0.0, remaining_qty / opened_qty)) if opened_qty > 0 else 1.0
-    open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, position.leverage) * remaining_weight
+    leverage = safe_float(position.leverage, 1.0)
+    open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, leverage) * remaining_weight
     entry_price = safe_float(position.entry_price)
-    leverage = max(1.0, safe_float(position.leverage, 1.0))
     if entry_price > 0 and opened_qty > 0 and remaining_qty > 0:
         margin_used = (entry_price * opened_qty) / leverage
         position.unrealized_pnl_usdt = round(margin_used * (open_pnl / 100.0), 8)
