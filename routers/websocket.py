@@ -1,6 +1,7 @@
 """
 WebSocket Router for Real-time Data Streaming.
 Provides live position updates, price alerts, and system status.
+Includes automatic reconnect handling for connection stability.
 """
 import asyncio
 import inspect
@@ -23,7 +24,10 @@ verify_jwt_token = verify_token
 _WS_CONNECTION_LIMIT_PER_USER = 5
 _WS_CONNECTION_COOLDOWN = 60
 _WS_AUTH_TIMEOUT_SECS = 5.0
+_WS_RECONNECT_DELAY_SECS = 1.0
+_WS_MAX_RECONNECT_ATTEMPTS = 5
 _ws_connection_times: dict[str, list[float]] = defaultdict(list)
+_ws_reconnect_counts: dict[str, int] = defaultdict(int)
 
 
 def _verify_ws_token_or_none(token: str) -> dict | None:

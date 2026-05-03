@@ -727,6 +727,72 @@ async def _call_deepseek(system: str, user: str, model: str | None = None) -> st
     return await _with_retry(_do, "deepseek")
 
 
+async def _call_groq(system: str, user: str, model: str | None = None) -> str:
+    """Call Groq API (free tier, fast inference) with automatic retry."""
+    model_name = model or settings.ai.groq_model
+    async def _do() -> str:
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.ai.groq_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": settings.ai.temperature,
+                    "max_tokens": settings.ai.max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            pt, ct, tt = extract_usage_from_response(data)
+            ai_costs.record("groq", model_name, pt, ct, tt)
+            content = data["choices"][0]["message"]["content"]
+            if content is None:
+                raise ValueError(f"Groq API returned null content for model {model_name}")
+            return str(content)
+
+    return await _with_retry(_do, "groq")
+
+
+async def _call_together(system: str, user: str, model: str | None = None) -> str:
+    """Call Together.ai API (free tier) with automatic retry."""
+    model_name = model or settings.ai.together_model
+    async def _do() -> str:
+        async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
+            resp = await client.post(
+                "https://api.together.xyz/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.ai.together_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": settings.ai.temperature,
+                    "max_tokens": settings.ai.max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            pt, ct, tt = extract_usage_from_response(data)
+            ai_costs.record("together", model_name, pt, ct, tt)
+            content = data["choices"][0]["message"]["content"]
+            if content is None:
+                raise ValueError(f"Together API returned null content for model {model_name}")
+            return str(content)
+
+    return await _with_retry(_do, "together")
+
+
 async def _call_mistral(system: str, user: str, model: str | None = None) -> str:
     """Call Mistral API (OpenAI-compatible) with automatic retry."""
     model_name = model or settings.ai.mistral_model
@@ -916,6 +982,14 @@ async def _call_model_by_id(model_id: str, system: str, user: str) -> tuple[str,
 
     elif provider == "openrouter":
         raw = await _call_openrouter(system, user, model=model_name)
+        return raw, model_id
+
+    elif provider == "groq":
+        raw = await _call_groq(system, user, model=model_name)
+        return raw, model_id
+
+    elif provider == "together":
+        raw = await _call_together(system, user, model=model_name)
         return raw, model_id
 
     elif provider == "custom":
@@ -1415,6 +1489,10 @@ async def analyze_signal(
             raw = await _call_deepseek(system_prompt, user_prompt)
         elif provider == "mistral":
             raw = await _call_mistral(system_prompt, user_prompt)
+        elif provider == "groq":
+            raw = await _call_groq(system_prompt, user_prompt)
+        elif provider == "together":
+            raw = await _call_together(system_prompt, user_prompt)
         elif provider == "openrouter":
             raw = await _call_openrouter(system_prompt, user_prompt)
         elif (

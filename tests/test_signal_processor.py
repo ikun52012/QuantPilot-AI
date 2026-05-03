@@ -413,7 +413,7 @@ class TestSignalProcessorBuildDecision:
         assert decision.entry_price == 49500
 
     def test_modified_entry_out_of_range(self, processor, sample_signal, sample_market):
-        """Should reject AI modified entry when >5% from signal price."""
+        """Should fallback to original signal price when AI modified entry >5% away."""
         analysis = AIAnalysis(
             confidence=0.8,
             recommendation="modify",
@@ -424,11 +424,12 @@ class TestSignalProcessorBuildDecision:
             tp1_qty_pct=100.0,
         )
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
-        assert decision.execute is False
-        assert "5.0" not in decision.reason  # reason should be dynamic, not hardcoded copy
-        assert "away from signal price" in decision.reason
+# NEW BEHAVIOR: fallback to original price instead of reject
+        assert decision.entry_price == 50000.0
+        # May be rejected for other reasons (SL too far), but entry should be original price
 
-    def test_modified_entry_without_suggested_entry_is_rejected(self, processor, sample_signal, sample_market):
+    def test_modified_entry_without_suggested_entry_fallback(self, processor, sample_signal, sample_market):
+        """Should fallback to original price when modify without suggested_entry."""
         analysis = AIAnalysis(
             confidence=0.8,
             recommendation="modify",
@@ -440,8 +441,8 @@ class TestSignalProcessorBuildDecision:
 
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
 
-        assert decision.execute is False
-        assert "modify without a suggested entry" in decision.reason
+        # NEW BEHAVIOR: fallback to original price instead of reject
+        assert decision.entry_price == 50000.0  # Should use original signal price
 
 
 class TestPositionSizeCalculation:

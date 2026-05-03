@@ -803,33 +803,36 @@ prefilter_result: PreFilterResult | None = None,
         # ── SMC/FVG entry optimization ──
         # When AI recommends "modify" and provides a suggested_entry, use it
         # as the optimal entry price instead of the raw signal price.
+        # BUG FIX: If modify fails validation, fallback to original price instead of rejecting
         if decision.execute and analysis.recommendation == "modify":
-            if analysis.suggested_entry is None:
-                decision.execute = False
-                decision.reason = "AI recommended modify without a suggested entry"
-                return decision
+            suggested = float(analysis.suggested_entry or 0)
 
-            suggested = float(analysis.suggested_entry)
-            if suggested <= 0:
-                decision.execute = False
-                decision.reason = "AI recommended modify with an invalid suggested entry"
-                return decision
+            if suggested > 0:
+                price_diff_pct = abs(suggested - signal.price) / signal.price * 100 if signal.price > 0 else 0
 
-            price_diff_pct = abs(suggested - signal.price) / signal.price * 100 if signal.price > 0 else 0
-            # Only accept modified entry if it's within 5% of signal price
-            # (prevents AI from suggesting wildly different prices)
-            if price_diff_pct <= 5.0:
-                logger.info(
-                    f"[Signal] AI modified entry: {signal.price} → {suggested} "
-                    f"({price_diff_pct:+.2f}% adjustment via SMC/FVG)"
-                )
-                decision.entry_price = suggested
+                # Only accept modified entry if it's within 5% of signal price
+                if price_diff_pct <= 5.0:
+                    logger.info(
+                        f"[Signal] AI modified entry: {signal.price} → {suggested} "
+                        f"({price_diff_pct:+.2f}% adjustment via SMC/FVG)"
+                    )
+                    decision.entry_price = suggested
+                else:
+                    # Fallback: suggested entry too far, use original price
+                    logger.warning(
+                        f"[Signal] AI suggested entry {suggested} is {price_diff_pct:.2f}% away from signal price, "
+                        f"falling back to original signal price {signal.price}"
+                    )
+                    decision.entry_price = signal.price
+                    # Don't reject the trade, just use original price
             else:
-                decision.execute = False
-                decision.reason = (
-                    f"AI suggested entry {suggested} is {price_diff_pct:.2f}% away from signal price"
+                # Fallback: no valid suggested_entry, use original signal price
+                logger.warning(
+                    f"[Signal] AI recommended modify without valid suggested_entry, "
+                    f"using original signal price {signal.price}"
                 )
-                return decision
+                decision.entry_price = signal.price
+                # Don't reject the trade, continue with original price
 
         if decision.execute:
             self._apply_exit_plan(decision, signal, analysis, market, user_settings or {})

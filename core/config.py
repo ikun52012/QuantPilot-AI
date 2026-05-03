@@ -35,6 +35,13 @@ class AIConfig(BaseModel):
     anthropic_model: str = "claude-opus-4-7"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-pro"
+
+    # Free AI providers
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    together_api_key: str = ""
+    together_model: str = "meta-llama/Llama-3.2-3B-Instruct-Turbo"
+
     custom_provider_enabled: bool = False
     custom_provider_name: str = "custom"
     custom_provider_api_key: str = ""
@@ -81,6 +88,18 @@ class AIConfig(BaseModel):
         "anthropic": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
         "deepseek": ["deepseek-v4-pro", "deepseek-v4-flash"],
         "mistral": ["mistral-large-latest", "mistral-small-latest", "codestral-latest"],
+        "groq": [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+        ],
+        "together": [
+            "meta-llama/Llama-3.2-3B-Instruct-Turbo",
+            "meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo",
+            "Qwen/Qwen2.5-7B-Instruct-Turbo",
+            "mistralai/Mistral-7B-Instruct-v0.3",
+        ],
         "openrouter": [
             "openai/gpt-5.5",
             "openai/gpt-5.4-mini",
@@ -97,7 +116,7 @@ class AIConfig(BaseModel):
     @field_validator('provider')
     @classmethod
     def validate_provider(cls, v: str) -> str:
-        allowed = {'openai', 'anthropic', 'deepseek', 'openrouter', 'custom', 'mistral'}
+        allowed = {'openai', 'anthropic', 'deepseek', 'openrouter', 'custom', 'mistral', 'groq', 'together'}
         normalized = v.lower().strip()
         if normalized not in allowed:
             raise ValueError(f"AI provider must be one of: {allowed}")
