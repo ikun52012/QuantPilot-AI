@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from loguru import logger
+
 # ─────────────────────────────────────────────
 # Timeframe weights and priority system (P0-1)
 # ─────────────────────────────────────────────
@@ -182,7 +184,7 @@ def calculate_break_strength(
     break_candle = ohlcv[swing_point_index + 1]
     break_high = _ohlcv_value(break_candle, 2, "high")
     break_low = _ohlcv_value(break_candle, 3, "low")
-    _ohlcv_value(break_candle, 4, "close")
+    break_close = _ohlcv_value(break_candle, 4, "close")  # BUG-2 FIX: Use close to determine if break sustained
     break_volume = _ohlcv_value(break_candle, 5, "volume")
 
     # Calculate swing candle range
@@ -212,6 +214,20 @@ def calculate_break_strength(
     # Normalize to 0-1 based on swing range
     magnitude_score = min(1.0, abs(break_magnitude) / swing_range)
 
+    # BUG-2 FIX: Add sustainability score - did close sustain beyond swing point?
+    if swing_type == "high":
+        # For high swing, close should be above swing for bullish, below for bearish
+        if (is_bos and break_close > swing_price) or (not is_bos and break_close < swing_price):
+            sustainability_score = 1.0  # Close sustained the break
+        else:
+            sustainability_score = 0.5  # Break but close didn't sustain (potentially false break)
+    else:
+        # For low swing, close should be below swing for bullish BOS (up), above for bearish CHoCH
+        if (is_bos and break_close < swing_price) or (not is_bos and break_close > swing_price):
+            sustainability_score = 1.0
+        else:
+            sustainability_score = 0.5
+
     # Volume confirmation (higher volume = stronger break)
     avg_volume = sum(_ohlcv_value(c, 5, "volume") for c in ohlcv[-10:]) / 10 if len(ohlcv) >= 10 else break_volume
     if avg_volume > 0:
@@ -219,8 +235,8 @@ def calculate_break_strength(
     else:
         volume_factor = 0.5
 
-    # Combine magnitude and volume
-    strength = round((magnitude_score * 0.7 + volume_factor * 0.3), 2)
+    # BUG-2 FIX: Combine magnitude, sustainability, and volume (40%, 30%, 30%)
+    strength = round((magnitude_score * 0.4 + sustainability_score * 0.3 + volume_factor * 0.3), 2)
 
     return max(0.2, min(1.0, strength))
 
@@ -275,7 +291,8 @@ class FVG(CompatDictMixin):
     timeframe: str      # e.g. "1h", "4h", "15m"
     candle_index: int   # index in the OHLCV array
     filled: bool = False
-    effectiveness: float = 1.0  # NEW: Age-based effectiveness score (0.3-1.0)
+    fill_percentage: float = 0.0  # ENH-1: Partial fill tracking (0-100%)
+    effectiveness: float = 1.0  # Age-based effectiveness score (0.3-1.0)
 
 
 @dataclass
@@ -288,17 +305,21 @@ class OrderBlock(CompatDictMixin):
     timeframe: str
     candle_index: int
     strength: float = 0.0  # 0-1 based on impulse magnitude
-    effectiveness: float = 1.0  # P3-11: Age+strength effectiveness score (0.2-1.0), start at 1.0 for fresh OB
+    effectiveness: float = 1.0  # Age+strength effectiveness score (0.2-1.0), start at 1.0 for fresh OB
+    # ENH-2: Mitigation phase tracking
+    mitigation_count: int = 0  # Number of times price has revisited the OB
+    mitigation_status: str = "untested"  # States: "untested", "partial", "mitigated", "broken"
+    last_mitigation_price: float | None = None  # Price at last mitigation touch
 
 
 @dataclass
-class StructurePoint:
+class StructurePoint(CompatDictMixin):  # ENH-5: Add CompatDictMixin for API consistency
     """A swing high or swing low."""
     type: str           # "high" or "low"
     price: float
     index: int
     timeframe: str
-    break_strength: float = 0.5  # NEW: Strength of the break at this point (0-1)
+    break_strength: float = 0.5  # Strength of the break at this point (0-1)
 
 
 @dataclass
@@ -335,9 +356,11 @@ class SMCContext:
     premium_zone: float = 0.0   # price above which is "premium"
     discount_zone: float = 0.0  # price below which is "discount"
     equilibrium: float = 0.0    # midpoint
-    risk_score: float = 0.5  # NEW: Structure-based risk score (0-1, higher = more risky)
-    entry_timing_score: float = 0.7  # NEW: Entry timing quality (0-1, higher = better timing)
-    timing_recommendation: str = ""  # NEW: Entry timing recommendation text
+    risk_score: float = 0.5  # Structure-based risk score (0-1, higher = more risky)
+    entry_timing_score: float = 0.7  # Entry timing quality (0-1, higher = better timing)
+    timing_recommendation: str = ""  # Entry timing recommendation text
+    # ENH-4: Liquidity sweep zones (populated if orderbook data available)
+    liquidity_sweep_zones: list[dict] = field(default_factory=list)  # Simplified sweep zone data
 
 
 @dataclass
@@ -549,7 +572,15 @@ def detect_fvgs(
 
     # P1-7: Calculate average volume for confirmation
     volumes = [_ohlcv_value(c, 5, "volume") for c in ohlcv[-20:] if len(c) >= 6]
-    avg_volume = sum(volumes) / len(volumes) if volumes else 0.0
+    # BUG-3 FIX: Filter out zero-volume candles and warn if data quality is poor
+    non_zero_volumes = [v for v in volumes if v > 0]
+    zero_volume_count = len(volumes) - len(non_zero_volumes)
+    if zero_volume_count > len(volumes) * 0.3 and len(volumes) > 0:  # >30% zero volume
+        logger.warning(f"[SMC/FVG] Poor data quality: {zero_volume_count}/{len(volumes)} zero-volume candles in {timeframe}")
+    avg_volume = sum(non_zero_volumes) / len(non_zero_volumes) if non_zero_volumes else 1.0  # BUG-3 FIX: Use 1.0 minimum
+
+    # ENH-1/BUG-3: If no volume data available (compat mode or missing data), skip volume filter
+    skip_volume_filter = len(non_zero_volumes) == 0
 
     for i in range(1, len(ohlcv) - 1):
         prev_high = _ohlcv_value(ohlcv[i - 1], 2, "high")
@@ -573,10 +604,22 @@ def detect_fvgs(
         if prev_high < next_low:
             top = next_low
             bottom = prev_high
-            filled = current_price <= bottom if current_price > 0 else False
+            fvg_size = top - bottom
 
-            # P1-7: Only add FVG with sufficient volume (or if avg_volume is 0 for compatibility)
-            if avg_volume == 0 or volume_ratio >= min_volume_ratio:
+            # ENH-1: Calculate fill percentage
+            fill_percentage = 0.0
+            filled = False
+            if current_price > 0 and fvg_size > 0:
+                if current_price <= bottom:
+                    filled = True
+                    fill_percentage = 100.0
+                elif current_price < top:
+                    # Partially filled - calculate percentage
+                    filled = False
+                    fill_percentage = round((current_price - bottom) / fvg_size * 100, 2)
+
+            # P1-7: Only add FVG with sufficient volume (skip filter if no volume data available)
+            if skip_volume_filter or volume_ratio >= min_volume_ratio:
                 fvgs.append(FVG(
                     type="bullish",
                     top=top,
@@ -585,6 +628,7 @@ def detect_fvgs(
                     timeframe=timeframe,
                     candle_index=i,
                     filled=filled,
+                    fill_percentage=fill_percentage,  # ENH-1: Add fill percentage
                     effectiveness=effectiveness,
                 ))
 
@@ -592,10 +636,22 @@ def detect_fvgs(
         if prev_low > next_high:
             top = prev_low
             bottom = next_high
-            filled = current_price >= top if current_price > 0 else False
+            fvg_size = top - bottom
 
-            # P1-7: Only add FVG with sufficient volume (or if avg_volume is 0 for compatibility)
-            if avg_volume == 0 or volume_ratio >= min_volume_ratio:
+            # ENH-1: Calculate fill percentage
+            fill_percentage = 0.0
+            filled = False
+            if current_price > 0 and fvg_size > 0:
+                if current_price >= top:
+                    filled = True
+                    fill_percentage = 100.0
+                elif current_price > bottom:
+                    # Partially filled - calculate percentage
+                    filled = False
+                    fill_percentage = round((top - current_price) / fvg_size * 100, 2)
+
+            # P1-7: Only add FVG with sufficient volume (skip filter if no volume data available)
+            if skip_volume_filter or volume_ratio >= min_volume_ratio:
                 fvgs.append(FVG(
                     type="bearish",
                     top=top,
@@ -604,12 +660,13 @@ def detect_fvgs(
                     timeframe=timeframe,
                     candle_index=i,
                     filled=filled,
+                    fill_percentage=fill_percentage,  # ENH-1: Add fill percentage
                     effectiveness=effectiveness,
                 ))
 
-    # Return only unfilled FVGs, most recent first
-    unfilled = [f for f in fvgs if not f.filled]
-    return unfilled[-max_results:]
+    # ENH-1: Return unfilled OR partially filled (<70%) FVGs, most recent first
+    unfilled_or_partial = [f for f in fvgs if not f.filled or f.fill_percentage < 70.0]
+    return unfilled_or_partial[-max_results:]
 
 
 def detect_order_blocks(
@@ -636,7 +693,15 @@ def detect_order_blocks(
 
     # P1-7: Calculate average volume for confirmation
     volumes = [_ohlcv_value(c, 5, "volume") for c in ohlcv[-20:] if len(c) >= 6]
-    avg_volume = sum(volumes) / len(volumes) if volumes else 0.0
+    # BUG-3 FIX: Filter out zero-volume candles and warn if data quality is poor
+    non_zero_volumes = [v for v in volumes if v > 0]
+    zero_volume_count = len(volumes) - len(non_zero_volumes)
+    if zero_volume_count > len(volumes) * 0.3 and len(volumes) > 0:  # >30% zero volume
+        logger.warning(f"[SMC/OB] Poor data quality: {zero_volume_count}/{len(volumes)} zero-volume candles in {timeframe}")
+    avg_volume = sum(non_zero_volumes) / len(non_zero_volumes) if non_zero_volumes else 1.0  # BUG-3 FIX: Use 1.0 minimum
+
+    # ENH-1/BUG-3: If no volume data available (compat mode or missing data), skip volume filter
+    skip_volume_filter = len(non_zero_volumes) == 0
 
     for i in range(1, len(ohlcv) - 2):
         open_i = _ohlcv_value(ohlcv[i], 1, "open")
@@ -671,8 +736,8 @@ def detect_order_blocks(
                 if volume_ratio >= min_volume_ratio:
                     effectiveness = min(1.0, effectiveness * 1.3)  # Boost by 30%
 
-                # P1-7: Only add OB with sufficient volume (or if avg_volume is 0 for compatibility)
-                if avg_volume == 0 or volume_ratio >= min_volume_ratio:
+                # P1-7: Only add OB with sufficient volume (skip filter if no volume data available)
+                if skip_volume_filter or volume_ratio >= min_volume_ratio:
                     obs.append(OrderBlock(
                         type="bullish",
                         high=high_i,
@@ -695,8 +760,8 @@ def detect_order_blocks(
                 if volume_ratio >= min_volume_ratio:
                     effectiveness = min(1.0, effectiveness * 1.3)  # Boost by 30%
 
-                # P1-7: Only add OB with sufficient volume (or if avg_volume is 0 for compatibility)
-                if avg_volume == 0 or volume_ratio >= min_volume_ratio:
+                # P1-7: Only add OB with sufficient volume (skip filter if no volume data available)
+                if skip_volume_filter or volume_ratio >= min_volume_ratio:
                     obs.append(OrderBlock(
                         type="bearish",
                         high=high_i,
@@ -714,13 +779,30 @@ def detect_order_blocks(
 def calculate_premium_discount(
     swing_highs,
     swing_lows,
+    atr_pct: float = 0.0,  # ENH-3: ATR percentage for dynamic zones
 ):
     """Calculate Premium/Discount/Equilibrium zones from recent swing range.
 
     Returns (premium_zone, discount_zone, equilibrium).
     Premium = above 61.8% of range (expensive, good for shorts)
     Discount = below 38.2% of range (cheap, good for longs)
+
+    ENH-3: ATR-based dynamic zones:
+    - High ATR (>3%): Expand zones to 0.70/0.30 (account for volatility)
+    - Low ATR (<1%): Contract zones to 0.60/0.40 (tighter ranges)
+    - Normal ATR: Use standard Fibonacci 0.618/0.382
     """
+    # ENH-3: Determine Fibonacci levels based on ATR
+    if atr_pct > 3.0:  # High volatility
+        premium_fib = 0.70
+        discount_fib = 0.30
+    elif atr_pct < 1.0:  # Low volatility
+        premium_fib = 0.60
+        discount_fib = 0.40
+    else:  # Normal volatility
+        premium_fib = 0.618
+        discount_fib = 0.382
+
     if isinstance(swing_highs, (int, float)) and isinstance(swing_lows, (int, float)):
         range_high = float(swing_highs or 0.0)
         range_low = float(swing_lows or 0.0)
@@ -728,8 +810,8 @@ def calculate_premium_discount(
         if range_size <= 0:
             return {"premium": 0.0, "discount": 0.0, "equilibrium": 0.0}
         equilibrium = range_low + range_size * 0.5
-        premium_zone = range_low + range_size * 0.618
-        discount_zone = range_low + range_size * 0.382
+        premium_zone = range_low + range_size * premium_fib  # ENH-3: Dynamic Fibonacci
+        discount_zone = range_low + range_size * discount_fib  # ENH-3: Dynamic Fibonacci
         return {
             "premium": round(premium_zone, 8),
             "discount": round(discount_zone, 8),
@@ -747,8 +829,8 @@ def calculate_premium_discount(
         return 0.0, 0.0, 0.0
 
     equilibrium = range_low + range_size * 0.5
-    premium_zone = range_low + range_size * 0.618
-    discount_zone = range_low + range_size * 0.382
+    premium_zone = range_low + range_size * premium_fib  # ENH-3: Dynamic Fibonacci
+    discount_zone = range_low + range_size * discount_fib  # ENH-3: Dynamic Fibonacci
 
     return round(premium_zone, 8), round(discount_zone, 8), round(equilibrium, 8)
 

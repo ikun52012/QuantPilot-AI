@@ -41,9 +41,9 @@ _AI_SEMAPHORE = asyncio.Semaphore(settings.ai.max_concurrent_calls)
 _AI_CACHE_BASE_TTL = 60
 _AI_CACHE_MAX_SIZE = 500
 _AI_CACHE: dict[str, tuple[float, float, "AIAnalysis"]] = {}  # (timestamp, ttl, analysis)
-_AI_CACHE_LOCK = asyncio.Lock()
+_AI_CACHE_LOCK: asyncio.Lock | None = None  # BUG-1 FIX: Lazy init to avoid race condition
 _VOLATILITY_TRACKER: dict[str, float] = {}  # ticker -> recent volatility pct
-_VOLATILITY_TRACKER_LOCK = asyncio.Lock()
+_VOLATILITY_TRACKER_LOCK: asyncio.Lock | None = None  # BUG-1 FIX: Lazy init
 
 # ─────────────────────────────────────────────
 # SMC analysis cache (P1-5: Performance optimization)
@@ -51,7 +51,31 @@ _VOLATILITY_TRACKER_LOCK = asyncio.Lock()
 _SMC_CACHE_BASE_TTL = 120  # 2 minutes (SMC structure changes slower than price)
 _SMC_CACHE_MAX_SIZE = 200
 _SMC_CACHE: dict[str, tuple[float, float, dict[str, Any]]] = {}  # (timestamp, ttl, smc_dict)
-_SMC_CACHE_LOCK = asyncio.Lock()
+_SMC_CACHE_LOCK: asyncio.Lock | None = None  # BUG-1 FIX: Lazy init to avoid race condition
+
+
+async def _get_ai_cache_lock() -> asyncio.Lock:
+    """BUG-1 FIX: Lazy initialize AI cache lock to avoid race condition."""
+    global _AI_CACHE_LOCK
+    if _AI_CACHE_LOCK is None:
+        _AI_CACHE_LOCK = asyncio.Lock()
+    return _AI_CACHE_LOCK
+
+
+async def _get_smc_cache_lock() -> asyncio.Lock:
+    """BUG-1 FIX: Lazy initialize SMC cache lock to avoid race condition."""
+    global _SMC_CACHE_LOCK
+    if _SMC_CACHE_LOCK is None:
+        _SMC_CACHE_LOCK = asyncio.Lock()
+    return _SMC_CACHE_LOCK
+
+
+async def _get_volatility_lock() -> asyncio.Lock:
+    """BUG-1 FIX: Lazy initialize volatility tracker lock."""
+    global _VOLATILITY_TRACKER_LOCK
+    if _VOLATILITY_TRACKER_LOCK is None:
+        _VOLATILITY_TRACKER_LOCK = asyncio.Lock()
+    return _VOLATILITY_TRACKER_LOCK
 
 
 def _ohlcv_signature(ohlcv: list[list], samples: int = 5) -> str:
@@ -69,9 +93,18 @@ def _ohlcv_signature(ohlcv: list[list], samples: int = 5) -> str:
 
 
 async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str) -> dict[str, Any] | None:
-    """Get cached SMC analysis result if available and not expired."""
+    """Get cached SMC analysis result if available and not expired.
+
+    BUG-4 FIX: Also clean expired entries during reads.
+    """
     cache_key = f"{ticker}:{timeframe}:{ohlcv_sig}"
-    async with _SMC_CACHE_LOCK:
+    lock = await _get_smc_cache_lock()  # BUG-1 FIX: Lazy init
+    async with lock:
+        # BUG-4 FIX: Clean expired entries during reads
+        expired_keys = [k for k, (ts, ttl, _) in _SMC_CACHE.items() if _time.monotonic() - ts > ttl]
+        for expired_key in expired_keys:
+            del _SMC_CACHE[expired_key]
+
         entry = _SMC_CACHE.get(cache_key)
         if entry:
             timestamp, ttl, smc_dict = entry
@@ -79,9 +112,6 @@ async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str) -> dict[s
             if age < ttl:
                 logger.debug(f"[SMC_CACHE] Hit for {ticker}:{timeframe} (age={age:.1f}s, ttl={ttl}s)")
                 return smc_dict
-            else:
-                del _SMC_CACHE[cache_key]
-                logger.debug(f"[SMC_CACHE] Expired for {ticker}:{timeframe}")
     return None
 
 
@@ -103,7 +133,8 @@ async def _set_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, smc_ctx: 
         "timing_recommendation": smc_ctx.timing_recommendation,
     }
 
-    async with _SMC_CACHE_LOCK:
+    lock = await _get_smc_cache_lock()  # BUG-1 FIX: Lazy init
+    async with lock:
         # Enforce max size by removing oldest entries
         if len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
             sorted_keys = sorted(_SMC_CACHE.keys(), key=lambda k: _SMC_CACHE[k][0])
@@ -179,7 +210,8 @@ async def _update_volatility_tracker(ticker: str, market: MarketContext) -> floa
     if market.current_price > 0 and market.high_24h > 0 and market.low_24h > 0:
         volatility_pct = abs(market.high_24h - market.low_24h) / market.current_price * 100
 
-    async with _VOLATILITY_TRACKER_LOCK:
+    lock = await _get_volatility_lock()  # BUG-1 FIX: Lazy init
+    async with lock:
         _VOLATILITY_TRACKER[ticker] = volatility_pct
         if len(_VOLATILITY_TRACKER) > 200:
             oldest = next(iter(_VOLATILITY_TRACKER))
@@ -198,7 +230,8 @@ async def _get_dynamic_cache_ttl(ticker: str) -> float:
     if not settings.ai.dynamic_cache_ttl_enabled:
         return _AI_CACHE_BASE_TTL
 
-    async with _VOLATILITY_TRACKER_LOCK:
+    lock = await _get_volatility_lock()  # BUG-1 FIX: Lazy init
+    async with lock:
         volatility = _VOLATILITY_TRACKER.get(ticker, 0.0)
 
     base_ttl = settings.ai.dynamic_cache_ttl_base
@@ -261,9 +294,19 @@ async def _get_cached_analysis(
     config_signature: str = "",
     ohlcv_signature: str = "",  # P2-8: Add OHLCV signature
 ) -> AIAnalysis | None:
-    """Get cached analysis with dynamic TTL support."""
+    """Get cached analysis with dynamic TTL support.
+
+    BUG-4 FIX: Also clean expired entries during reads.
+    """
     key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature)
-    async with _AI_CACHE_LOCK:
+    lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
+    async with lock:
+        # BUG-4 FIX: Clean expired entries during reads
+        now = _time.monotonic()
+        expired_keys = [k for k, (ts, ttl, _) in _AI_CACHE.items() if now - ts > ttl]
+        for expired_key in expired_keys:
+            del _AI_CACHE[expired_key]
+
         entry = _AI_CACHE.get(key)
         if entry:
             timestamp, ttl, analysis = entry
@@ -285,7 +328,8 @@ async def _set_cached_analysis(
     key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature)
     ttl = await _get_dynamic_cache_ttl(ticker)
 
-    async with _AI_CACHE_LOCK:
+    lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
+    async with lock:
         _AI_CACHE[key] = (_time.monotonic(), ttl, analysis)
 
         now = _time.monotonic()
