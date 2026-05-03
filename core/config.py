@@ -56,7 +56,9 @@ class AIConfig(BaseModel):
     pool_timeout_secs: float = 10.0
     max_retries: int = 3
     max_concurrent_calls: int = 5
-    signal_queue_limit: int = 10
+    signal_queue_limit: int = 50
+    global_processing_semaphore: int = 5
+    signal_processing_interval_secs: float = 1.0
     voting_enabled: bool = False
     voting_models: list[str] = Field(default_factory=list)
     voting_weights: dict[str, float] = Field(default_factory=dict)

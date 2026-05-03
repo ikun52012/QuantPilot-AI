@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time as _time
 from collections.abc import Sequence
 
 from loguru import logger
@@ -70,7 +71,39 @@ _TICKER_LOCK_MAX_SIZE = 1000
 
 # Per-ticker pending signal count for queue backpressure
 _TICKER_PENDING: dict[str, int] = {}
-_TICKER_PENDING_GUARD = asyncio.Lock()  # Maximum number of ticker locks to hold
+_TICKER_PENDING_GUARD = asyncio.Lock()
+
+# Global processing semaphore and interval control
+_GLOBAL_PROCESSING_SEMAPHORE: asyncio.Semaphore | None = None
+_GLOBAL_PROCESSING_GUARD = asyncio.Lock()
+_LAST_SIGNAL_PROCESS_TIME: float = 0.0
+_PROCESSING_INTERVAL_SEMAPHORE = asyncio.Lock()
+
+
+async def _get_global_semaphore() -> asyncio.Semaphore:
+    """Get or create global processing semaphore (lazy init)."""
+    global _GLOBAL_PROCESSING_SEMAPHORE
+    async with _GLOBAL_PROCESSING_GUARD:
+        if _GLOBAL_PROCESSING_SEMAPHORE is None:
+            _GLOBAL_PROCESSING_SEMAPHORE = asyncio.Semaphore(settings.ai.global_processing_semaphore)
+        return _GLOBAL_PROCESSING_SEMAPHORE
+
+
+async def _wait_processing_interval() -> None:
+    """Wait for processing interval after completing a signal."""
+    global _LAST_SIGNAL_PROCESS_TIME
+    interval = settings.ai.signal_processing_interval_secs
+    if interval <= 0:
+        return
+
+    async with _PROCESSING_INTERVAL_SEMAPHORE:
+        now = _time.time()
+        elapsed = now - _LAST_SIGNAL_PROCESS_TIME
+        if elapsed < interval:
+            wait_time = interval - elapsed
+            logger.debug(f"[SignalProcessor] Waiting {wait_time:.1f}s before next signal")
+            await asyncio.sleep(wait_time)
+        _LAST_SIGNAL_PROCESS_TIME = _time.time()  # Maximum number of ticker locks to hold
 
 
 async def _ticker_lock(ticker: str, user_id: str | None = None) -> asyncio.Lock:
@@ -233,11 +266,21 @@ class SignalProcessor:
         Process a webhook signal through the complete pipeline.
         Returns the result of the processing.
 
-        Uses per-ticker locks to prevent concurrent conflicts when
-        multiple signals arrive for the same ticker simultaneously.
-        Implements queue backpressure to limit pending signals per ticker.
+        Architecture:
+        - Global semaphore limits max concurrent signals (default 5)
+        - Per-ticker lock prevents same-ticker position conflicts
+        - Processing interval (1s) adds delay between signals
+        - Signal queue backpressure for extreme load
+
+        Flow:
+        1. Check global queue limit
+        2. Acquire global semaphore (waits if 5 signals already processing)
+        3. Acquire per-ticker lock (waits if same ticker processing)
+        4. Process signal
+        5. Wait processing interval
+        6. Release semaphore and lock
         """
-        # Check queue limit before acquiring lock
+        # Check queue limit first (fast rejection for extreme load)
         if not await _check_ticker_queue_limit(signal.ticker, user_id):
             return {
                 "status": "rejected",
@@ -245,16 +288,26 @@ class SignalProcessor:
                 "queue_limit": settings.ai.signal_queue_limit,
             }
 
-        # Acquire ticker-specific lock to prevent concurrent conflicts
-        ticker_lock = await _ticker_lock(signal.ticker, user_id)
+        # Get global processing semaphore
+        global_sem = await _get_global_semaphore()
 
-        try:
-            async with ticker_lock:
-                # Process signal within ticker lock context
-                return await self._process_signal_locked(signal, user_id, client_ip, raw_body)
-        finally:
-            # Always release queue slot when done
-            await _release_ticker_queue_slot(signal.ticker, user_id)
+        # Wait for global semaphore (max 5 concurrent signals)
+        async with global_sem:
+            # Acquire ticker-specific lock to prevent same-ticker conflicts
+            ticker_lock = await _ticker_lock(signal.ticker, user_id)
+
+            try:
+                async with ticker_lock:
+                    # Process signal
+                    result = await self._process_signal_locked(signal, user_id, client_ip, raw_body)
+
+                # Wait processing interval before releasing semaphore
+                await _wait_processing_interval()
+
+                return result
+            finally:
+                # Always release queue slot when done
+                await _release_ticker_queue_slot(signal.ticker, user_id)
 
     async def _process_signal_locked(
         self,
