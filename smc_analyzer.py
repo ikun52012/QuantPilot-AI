@@ -288,7 +288,7 @@ class OrderBlock(CompatDictMixin):
     timeframe: str
     candle_index: int
     strength: float = 0.0  # 0-1 based on impulse magnitude
-    effectiveness: float = 0.5  # NEW: Age+strength effectiveness score (0.2-1.0)
+    effectiveness: float = 1.0  # P3-11: Age+strength effectiveness score (0.2-1.0), start at 1.0 for fresh OB
 
 
 @dataclass
@@ -310,6 +310,10 @@ class MarketStructure:
     swing_highs: list[StructurePoint] = field(default_factory=list)
     swing_lows: list[StructurePoint] = field(default_factory=list)
     break_strength: float = 0.5  # NEW: Overall structure break strength
+    # P3-13: Structural momentum tracking
+    hh_count: int = 0       # Number of consecutive Higher Highs (bullish momentum)
+    ll_count: int = 0       # Number of consecutive Lower Lows (bearish momentum)
+    structure_age: int = 0  # Candles since last BOS/CHoCH (structure maturity)
 
     def get(self, key: str, default=None):
         if key == "type":
@@ -358,9 +362,26 @@ def detect_swing_points(
     lookback: int = 3,
     timeframe: str = "1h",
 ) -> tuple[list[StructurePoint], list[StructurePoint]]:
-    """Detect swing highs and swing lows using a simple N-bar pivot method."""
+    """Detect swing highs and swing lows using a simple N-bar pivot method.
+
+    P1-6: Dynamic lookback based on timeframe for better swing detection.
+    """
     highs: list[StructurePoint] = []
     lows: list[StructurePoint] = []
+
+    # P1-6: Dynamic lookback based on timeframe
+    tf_minutes = {
+        "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440
+    }
+    tf_mins = tf_minutes.get(timeframe, 60)
+
+    # Larger TFs need larger lookback for meaningful swing points
+    if tf_mins >= 240:  # 4h or larger
+        lookback = 5  # 5 candles = 20h on 4h, 5d on daily
+    elif tf_mins >= 60:  # 1h or 30m
+        lookback = 4  # 4 candles = 4h on 1h, 2h on 30m
+    else:
+        lookback = 3  # Scalping TFs (5m, 15m), keep default
 
     if len(ohlcv) < lookback * 2 + 1:
         return highs, lows
@@ -386,7 +407,20 @@ def detect_market_structure(
     ohlcv: list,
     timeframe: str | float = "1h",
 ):
-    """Detect BOS (Break of Structure) and CHoCH (Change of Character)."""
+    """Detect BOS (Break of Structure) and CHoCH (Change of Character).
+
+    P2-9: Explicit boundary handling for edge cases.
+    """
+    # P2-9: Explicit boundary checks
+    if not ohlcv:
+        return MarketStructure(trend="ranging")
+
+    # P2-9: Need at least 7 candles for swing detection (lookback*2+1 with dynamic lookback)
+    min_candles = 7 if str(timeframe) in ["1h", "30m", "15m", "5m"] else 11  # 4h/daily need larger lookback
+    if len(ohlcv) < min_candles:
+        return MarketStructure(trend="ranging")
+
+    # Compat mode: convert dict format to StructurePoint list (P0-3 FIX: always return MarketStructure object)
     if ohlcv and isinstance(ohlcv[0], dict) and "price" in ohlcv[0]:
         highs = [StructurePoint(type="high", price=float(p["price"]), index=int(p.get("index", 0)), timeframe="compat") for p in ohlcv if p.get("type") == "high"]
         lows = [StructurePoint(type="low", price=float(p["price"]), index=int(p.get("index", 0)), timeframe="compat") for p in ohlcv if p.get("type") == "low"]
@@ -402,7 +436,7 @@ def detect_market_structure(
             elif lh and ll:
                 structure.trend = "bearish"
                 structure.last_bos = "bearish_bos"
-        return _structure_dict(structure)
+        return structure  # FIX: Return MarketStructure object instead of dict
 
     swing_highs, swing_lows = detect_swing_points(ohlcv, lookback=3, timeframe=str(timeframe))
 
@@ -414,6 +448,28 @@ def detect_market_structure(
 
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return structure
+
+    # P3-13: Calculate structural momentum (consecutive HH/LL counts)
+    hh_count = 0
+    ll_count = 0
+    for i in range(len(swing_highs) - 1):
+        if swing_highs[i + 1].price > swing_highs[i].price:
+            hh_count += 1
+        else:
+            break
+    for i in range(len(swing_lows) - 1):
+        if swing_lows[i + 1].price < swing_lows[i].price:
+            ll_count += 1
+        else:
+            break
+
+    # P3-13: Calculate structure age (candles since last swing point)
+    last_swing_index = max(swing_highs[-1].index, swing_lows[-1].index)
+    structure_age = len(ohlcv) - last_swing_index - 1
+
+    structure.hh_count = hh_count
+    structure.ll_count = ll_count
+    structure.structure_age = structure_age
 
     # Check for Higher Highs + Higher Lows (bullish) or Lower Highs + Lower Lows (bearish)
     last_2_highs = swing_highs[-2:]
@@ -427,9 +483,19 @@ def detect_market_structure(
     if hh and hl:
         structure.trend = "bullish"
         structure.last_bos = "bullish_bos"
+        # NEW: Calculate break strength (P0-1 FIX)
+        if len(swing_lows) >= 2:
+            structure.break_strength = calculate_break_strength(
+                ohlcv, swing_lows[-2].index, "low", True, timeframe
+            )
     elif lh and ll:
         structure.trend = "bearish"
         structure.last_bos = "bearish_bos"
+        # NEW: Calculate break strength (P0-1 FIX)
+        if len(swing_highs) >= 2:
+            structure.break_strength = calculate_break_strength(
+                ohlcv, swing_highs[-2].index, "high", True, timeframe
+            )
     else:
         structure.trend = "ranging"
 
@@ -443,8 +509,18 @@ def detect_market_structure(
 
         if was_bullish and ll:
             structure.last_choch = "bearish_choch"
+            # NEW: Calculate CHoCH break strength (P0-1 FIX)
+            if len(swing_lows) >= 2:
+                structure.break_strength = calculate_break_strength(
+                    ohlcv, swing_lows[-2].index, "low", False, timeframe
+                )
         elif was_bearish and hh:
             structure.last_choch = "bullish_choch"
+            # NEW: Calculate CHoCH break strength (P0-1 FIX)
+            if len(swing_highs) >= 2:
+                structure.break_strength = calculate_break_strength(
+                    ohlcv, swing_highs[-2].index, "high", False, timeframe
+                )
 
     return structure
 
@@ -454,6 +530,7 @@ def detect_fvgs(
     timeframe: str = "1h",
     current_price: float = 0.0,
     max_results: int = 5,
+    min_volume_ratio: float = 1.2,  # P1-7: Volume confirmation threshold
 ) -> list[FVG]:
     """Detect Fair Value Gaps (imbalance zones) in OHLCV data.
 
@@ -461,6 +538,7 @@ def detect_fvgs(
     A Bearish FVG: candle[i-1].low > candle[i+1].high  (gap down)
 
     NEW: Includes effectiveness scoring based on age.
+    P1-7: Volume confirmation to filter weak FVGs.
     """
     fvgs: list[FVG] = []
 
@@ -469,47 +547,65 @@ def detect_fvgs(
 
     total_candles = len(ohlcv)
 
+    # P1-7: Calculate average volume for confirmation
+    volumes = [_ohlcv_value(c, 5, "volume") for c in ohlcv[-20:] if len(c) >= 6]
+    avg_volume = sum(volumes) / len(volumes) if volumes else 0.0
+
     for i in range(1, len(ohlcv) - 1):
         prev_high = _ohlcv_value(ohlcv[i - 1], 2, "high")
         prev_low = _ohlcv_value(ohlcv[i - 1], 3, "low")
         next_high = _ohlcv_value(ohlcv[i + 1], 2, "high")
         next_low = _ohlcv_value(ohlcv[i + 1], 3, "low")
 
+        # P1-7: Get impulse candle volume
+        impulse_volume = _ohlcv_value(ohlcv[i], 5, "volume")
+        volume_ratio = impulse_volume / avg_volume if avg_volume > 0 else 1.0
+
         # Calculate age (distance from current candle)
         fvg_age = total_candles - i - 1
         effectiveness = calculate_fvg_effectiveness_score(fvg_age)
+
+        # P1-7: Boost effectiveness if volume confirmed
+        if volume_ratio >= min_volume_ratio:
+            effectiveness = min(1.0, effectiveness * 1.2)  # Boost by 20%
 
         # Bullish FVG: gap between prev candle high and next candle low
         if prev_high < next_low:
             top = next_low
             bottom = prev_high
             filled = current_price <= bottom if current_price > 0 else False
-            fvgs.append(FVG(
-                type="bullish",
-                top=top,
-                bottom=bottom,
-                midpoint=round((top + bottom) / 2, 8),
-                timeframe=timeframe,
-                candle_index=i,
-                filled=filled,
-                effectiveness=effectiveness,
-            ))
+
+            # P1-7: Only add FVG with sufficient volume (or if avg_volume is 0 for compatibility)
+            if avg_volume == 0 or volume_ratio >= min_volume_ratio:
+                fvgs.append(FVG(
+                    type="bullish",
+                    top=top,
+                    bottom=bottom,
+                    midpoint=round((top + bottom) / 2, 8),
+                    timeframe=timeframe,
+                    candle_index=i,
+                    filled=filled,
+                    effectiveness=effectiveness,
+                ))
 
         # Bearish FVG: gap between prev candle low and next candle high
         if prev_low > next_high:
             top = prev_low
             bottom = next_high
             filled = current_price >= top if current_price > 0 else False
-            fvgs.append(FVG(
-                type="bearish",
-                top=top,
-                bottom=bottom,
-                midpoint=round((top + bottom) / 2, 8),
-                timeframe=timeframe,
-                candle_index=i,
-                filled=filled,
-                effectiveness=effectiveness,
-            ))
+
+            # P1-7: Only add FVG with sufficient volume (or if avg_volume is 0 for compatibility)
+            if avg_volume == 0 or volume_ratio >= min_volume_ratio:
+                fvgs.append(FVG(
+                    type="bearish",
+                    top=top,
+                    bottom=bottom,
+                    midpoint=round((top + bottom) / 2, 8),
+                    timeframe=timeframe,
+                    candle_index=i,
+                    filled=filled,
+                    effectiveness=effectiveness,
+                ))
 
     # Return only unfilled FVGs, most recent first
     unfilled = [f for f in fvgs if not f.filled]
@@ -521,6 +617,7 @@ def detect_order_blocks(
     timeframe: str = "1h",
     min_impulse_pct: float = 0.5,
     max_results: int = 3,
+    min_volume_ratio: float = 1.5,  # P1-7: Volume confirmation threshold (higher for OBs)
 ) -> list[OrderBlock]:
     """Detect Order Blocks — the last opposing candle before a strong impulse move.
 
@@ -528,6 +625,7 @@ def detect_order_blocks(
     Bearish OB: last bullish candle before a strong bearish move
 
     NEW: Includes effectiveness scoring based on age and strength.
+    P1-7: Volume confirmation to filter weak OBs.
     """
     obs: list[OrderBlock] = []
 
@@ -536,11 +634,19 @@ def detect_order_blocks(
 
     total_candles = len(ohlcv)
 
+    # P1-7: Calculate average volume for confirmation
+    volumes = [_ohlcv_value(c, 5, "volume") for c in ohlcv[-20:] if len(c) >= 6]
+    avg_volume = sum(volumes) / len(volumes) if volumes else 0.0
+
     for i in range(1, len(ohlcv) - 2):
         open_i = _ohlcv_value(ohlcv[i], 1, "open")
         close_i = _ohlcv_value(ohlcv[i], 4, "close")
         high_i = _ohlcv_value(ohlcv[i], 2, "high")
         low_i = _ohlcv_value(ohlcv[i], 3, "low")
+
+        # P1-7: Get impulse candles volume (next 2 candles)
+        impulse_volume = (_ohlcv_value(ohlcv[i + 1], 5, "volume") + _ohlcv_value(ohlcv[i + 2], 5, "volume")) / 2.0
+        volume_ratio = impulse_volume / avg_volume if avg_volume > 0 else 1.0
 
         is_bearish_candle = close_i < open_i
         is_bullish_candle = close_i > open_i
@@ -560,16 +666,23 @@ def detect_order_blocks(
             if impulse_pct >= min_impulse_pct:
                 strength = min(1.0, impulse_pct / 3.0)
                 effectiveness = calculate_ob_effectiveness_score(ob_age, strength)
-                obs.append(OrderBlock(
-                    type="bullish",
-                    high=high_i,
-                    low=low_i,
-                    midpoint=round(mid_price, 8),
-                    timeframe=timeframe,
-                    candle_index=i,
-                    strength=round(strength, 3),
-                    effectiveness=effectiveness,
-                ))
+
+                # P1-7: Boost effectiveness if volume confirmed
+                if volume_ratio >= min_volume_ratio:
+                    effectiveness = min(1.0, effectiveness * 1.3)  # Boost by 30%
+
+                # P1-7: Only add OB with sufficient volume (or if avg_volume is 0 for compatibility)
+                if avg_volume == 0 or volume_ratio >= min_volume_ratio:
+                    obs.append(OrderBlock(
+                        type="bullish",
+                        high=high_i,
+                        low=low_i,
+                        midpoint=round(mid_price, 8),
+                        timeframe=timeframe,
+                        candle_index=i,
+                        strength=round(strength, 3),
+                        effectiveness=effectiveness,
+                    ))
 
         # Bearish OB: bullish candle followed by strong bearish impulse
         if is_bullish_candle:
@@ -577,16 +690,23 @@ def detect_order_blocks(
             if impulse_pct >= min_impulse_pct:
                 strength = min(1.0, impulse_pct / 3.0)
                 effectiveness = calculate_ob_effectiveness_score(ob_age, strength)
-                obs.append(OrderBlock(
-                    type="bearish",
-                    high=high_i,
-                    low=low_i,
-                    midpoint=round(mid_price, 8),
-                    timeframe=timeframe,
-                    candle_index=i,
-                    strength=round(strength, 3),
-                    effectiveness=effectiveness,
-                ))
+
+                # P1-7: Boost effectiveness if volume confirmed
+                if volume_ratio >= min_volume_ratio:
+                    effectiveness = min(1.0, effectiveness * 1.3)  # Boost by 30%
+
+                # P1-7: Only add OB with sufficient volume (or if avg_volume is 0 for compatibility)
+                if avg_volume == 0 or volume_ratio >= min_volume_ratio:
+                    obs.append(OrderBlock(
+                        type="bearish",
+                        high=high_i,
+                        low=low_i,
+                        midpoint=round(mid_price, 8),
+                        timeframe=timeframe,
+                        candle_index=i,
+                        strength=round(strength, 3),
+                        effectiveness=effectiveness,
+                    ))
 
     return obs[-max_results:]
 
@@ -608,8 +728,8 @@ def calculate_premium_discount(
         if range_size <= 0:
             return {"premium": 0.0, "discount": 0.0, "equilibrium": 0.0}
         equilibrium = range_low + range_size * 0.5
-        premium_zone = range_low + range_size * 0.81
-        discount_zone = range_low + range_size * 0.19
+        premium_zone = range_low + range_size * 0.618
+        discount_zone = range_low + range_size * 0.382
         return {
             "premium": round(premium_zone, 8),
             "discount": round(discount_zone, 8),
@@ -723,11 +843,43 @@ def find_confluence_zones(
                 "midpoint": round((ctx.premium_zone + ctx.equilibrium) / 2, 8),
             })
 
-    # Find overlapping zones (confluence)
+    # P3-12: Check same-TF FVG+OB overlaps (high probability zones)
+    for ctx, tf_label in [(htf_ctx, "HTF"), (mtf_ctx, "MTF"), (stf_ctx, "STF"), (ltf_ctx, "LTF")]:
+        if not ctx:
+            continue
+
+        # Check FVG+OB overlap within same timeframe
+        for fvg in ctx.fvgs:
+            for ob in ctx.order_blocks:
+                # Must be same direction
+                if fvg.type != ob.type:
+                    continue
+
+                # Check overlap
+                overlap_top = min(fvg.top, ob.high)
+                overlap_bottom = max(fvg.bottom, ob.low)
+                if overlap_top > overlap_bottom:
+                    tf_weight = get_timeframe_weight(fvg.timeframe)
+                    avg_effectiveness = (fvg.effectiveness + ob.effectiveness) / 2.0
+
+                    zones.append({
+                        "confluence_top": round(overlap_top, 8),
+                        "confluence_bottom": round(overlap_bottom, 8),
+                        "confluence_midpoint": round((overlap_top + overlap_bottom) / 2, 8),
+                        "sources": [
+                            {"type": "fvg", "tf": tf_label, "timeframe": fvg.timeframe, "weight": tf_weight, "effectiveness": fvg.effectiveness},
+                            {"type": "order_block", "tf": tf_label, "timeframe": ob.timeframe, "weight": tf_weight, "effectiveness": ob.effectiveness},
+                        ],
+                        "strength": "high" if tf_label == "HTF" else "medium",  # Same-TF overlap is strong
+                        "weighted_strength": round(tf_weight / 2.0, 2),
+                        "effectiveness": round(avg_effectiveness, 2),
+                    })
+
+    # Find overlapping zones (confluence) across different timeframes
     for i, a in enumerate(all_levels):
         for b in all_levels[i + 1:]:
             if a["tf"] == b["tf"]:
-                continue
+                continue  # P3-12: Skip same-TF (already handled above)
             # Check if zones overlap
             overlap_top = min(a["top"], b["top"])
             overlap_bottom = max(a["bottom"], b["bottom"])

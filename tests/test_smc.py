@@ -115,8 +115,8 @@ class TestCalculatePremiumDiscount:
         assert "equilibrium" in result
 
         assert result["equilibrium"] == pytest.approx(105.0, rel=0.01)
-        assert result["premium"] == pytest.approx(108.1, rel=0.01)  # 0.79 Fibonacci
-        assert result["discount"] == pytest.approx(101.9, rel=0.01)  # 0.382 Fibonacci
+        assert result["premium"] == pytest.approx(106.18, rel=0.01)  # P0-2 FIX: Correct Fibonacci 0.618
+        assert result["discount"] == pytest.approx(103.82, rel=0.01)  # P0-2 FIX: Correct Fibonacci 0.382
 
     def test_invalid_range(self):
         result = calculate_premium_discount(0.0, 0.0)

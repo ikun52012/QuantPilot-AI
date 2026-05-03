@@ -32,6 +32,75 @@ _ws_subscribers: dict[str, list[asyncio.Queue]] = {}
 _ws_manager_task: asyncio.Task | None = None
 
 
+# ─────────────────────────────────────────────
+# OHLCV Data Cleaning (P2-10: Data validation)
+# ─────────────────────────────────────────────
+def _clean_ohlcv_data(ohlcv: list[list[Any]], max_candles: int | None = None) -> list[list[float]]:
+    """Clean and validate OHLCV data.
+
+    P2-10: Remove duplicates, invalid prices, validate high>=low, sort by timestamp.
+
+    Args:
+        ohlcv: Raw OHLCV data from exchange
+        max_candles: Optional limit on number of candles to return
+
+    Returns:
+        Cleaned OHLCV data as list of [timestamp, open, high, low, close, volume]
+    """
+    if not ohlcv:
+        return []
+
+    cleaned = []
+    seen_timestamps = set()
+
+    for candle in ohlcv:
+        try:
+            # Extract values with validation
+            ts = float(candle[0])
+            open_p = float(candle[1])
+            high_p = float(candle[2])
+            low_p = float(candle[3])
+            close_p = float(candle[4])
+            volume = float(candle[5]) if len(candle) >= 6 else 0.0
+
+            # Skip duplicates
+            if ts in seen_timestamps:
+                continue
+
+            # Skip invalid prices (must be positive)
+            if any(p <= 0 for p in [open_p, high_p, low_p, close_p]):
+                continue
+
+            # Skip invalid volume (must be non-negative)
+            if volume < 0:
+                continue
+
+            # Validate high >= low (fix if violated)
+            if high_p < low_p:
+                high_p = max(open_p, close_p)
+                low_p = min(open_p, close_p)
+
+            # Validate high >= open and high >= close
+            high_p = max(high_p, open_p, close_p)
+
+            # Validate low <= open and low <= close
+            low_p = min(low_p, open_p, close_p)
+
+            seen_timestamps.add(ts)
+            cleaned.append([ts, open_p, high_p, low_p, close_p, volume])
+        except (ValueError, TypeError, IndexError):
+            continue
+
+    # Sort by timestamp (ascending order)
+    cleaned.sort(key=lambda x: x[0])
+
+    # Apply max_candles limit (keep most recent)
+    if max_candles and len(cleaned) > max_candles:
+        cleaned = cleaned[-max_candles:]
+
+    return cleaned
+
+
 class MarketDataWebSocketManager:
     """Manage WebSocket connections for real-time market data (Optimization 6)."""
 
@@ -411,17 +480,18 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
 
             fetch_results = cast(
-                tuple[object, object, object, object, object],
+                tuple[object, object, object, object, object, object],
                 await asyncio.gather(
                 asyncio.to_thread(exchange.fetch_ticker, symbol),
                 asyncio.to_thread(exchange.fetch_ohlcv, symbol, "1h", None, 100),  # P1-4: Extended to 100 candles
                 asyncio.to_thread(exchange.fetch_ohlcv, symbol, "4h", None, 100),  # P1-4: Extended to 100 candles
                 asyncio.to_thread(exchange.fetch_ohlcv, symbol, "30m", None, 60),  # P1-4: Extended to 60 candles
+                asyncio.to_thread(exchange.fetch_ohlcv, symbol, "5m", None, 30),   # P1-4: NEW - 5m for scalping
                 asyncio.to_thread(exchange.fetch_order_book, symbol, 20),
                 return_exceptions=True,
                 ),
             )
-            ticker_result, ohlcv_1h_result, ohlcv_4h_result, ohlcv_30m_result, orderbook_result = fetch_results
+            ticker_result, ohlcv_1h_result, ohlcv_4h_result, ohlcv_30m_result, ohlcv_5m_result, orderbook_result = fetch_results
 
             if isinstance(ticker_result, Exception):
                 logger.warning(f"[MarketData] {exchange_id} ticker fetch failed for {ticker}: {ticker_result}")
@@ -433,13 +503,25 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
                 logger.warning(f"[MarketData] {exchange_id} 1h OHLCV fetch failed for {ticker}: {ohlcv_1h_result}")
                 ohlcv_1h: list[list[float]] = []
             else:
-                ohlcv_1h = cast(list[list[float]], ohlcv_1h_result)
+                ohlcv_1h = _clean_ohlcv_data(cast(list[list[Any]], ohlcv_1h_result), 100)  # P2-10: Clean data
 
             if isinstance(ohlcv_4h_result, Exception):
                 logger.warning(f"[MarketData] {exchange_id} 4h OHLCV fetch failed for {ticker}: {ohlcv_4h_result}")
                 ohlcv_4h: list[list[float]] = []
             else:
-                ohlcv_4h = cast(list[list[float]], ohlcv_4h_result)
+                ohlcv_4h = _clean_ohlcv_data(cast(list[list[Any]], ohlcv_4h_result), 100)  # P2-10: Clean data
+
+            if isinstance(ohlcv_30m_result, Exception):
+                logger.warning(f"[MarketData] {exchange_id} 30m OHLCV fetch failed for {ticker}: {ohlcv_30m_result}")
+                ohlcv_30m: list[list[float]] = []
+            else:
+                ohlcv_30m = _clean_ohlcv_data(cast(list[list[Any]], ohlcv_30m_result), 60)  # P2-10: Clean data
+
+            if isinstance(ohlcv_5m_result, Exception):
+                logger.warning(f"[MarketData] {exchange_id} 5m OHLCV fetch failed for {ticker}: {ohlcv_5m_result}")
+                ohlcv_5m: list[list[float]] = []
+            else:
+                ohlcv_5m = _clean_ohlcv_data(cast(list[list[Any]], ohlcv_5m_result), 30)  # P2-10: Clean data
 
             if isinstance(orderbook_result, Exception):
                 logger.warning(f"[MarketData] {exchange_id} orderbook fetch failed for {ticker}: {orderbook_result}")
@@ -510,10 +592,10 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             )
 
             ohlcv_15m = await _safe_fetch_ohlcv(exchange, symbol, "15m", 50)
-            ohlcv_30m = await _safe_fetch_ohlcv(exchange, symbol, "30m", 30)
             context_any = cast(Any, context)
             context_any._ohlcv_15m = ohlcv_15m
             context_any._ohlcv_30m = ohlcv_30m
+            context_any._ohlcv_5m = ohlcv_5m
             context_any._ohlcv_1h = ohlcv_1h
             context_any._ohlcv_4h = ohlcv_4h
             context_any._market_data_source = exchange_id
@@ -582,8 +664,13 @@ async def _safe_fetch_long_short_ratio(exchange: Any, symbol: str) -> float | No
 
 
 async def _safe_fetch_ohlcv(exchange: Any, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
+    """Fetch OHLCV data with error handling.
+
+    P2-10: Apply data cleaning before returning.
+    """
     try:
-        return cast(list[list[float]], await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit))
+        raw_ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
+        return _clean_ohlcv_data(cast(list[list[Any]], raw_ohlcv), limit)  # P2-10: Clean data
     except Exception:
         return []
 

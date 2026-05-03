@@ -45,6 +45,133 @@ _AI_CACHE_LOCK = asyncio.Lock()
 _VOLATILITY_TRACKER: dict[str, float] = {}  # ticker -> recent volatility pct
 _VOLATILITY_TRACKER_LOCK = asyncio.Lock()
 
+# ─────────────────────────────────────────────
+# SMC analysis cache (P1-5: Performance optimization)
+# ─────────────────────────────────────────────
+_SMC_CACHE_BASE_TTL = 120  # 2 minutes (SMC structure changes slower than price)
+_SMC_CACHE_MAX_SIZE = 200
+_SMC_CACHE: dict[str, tuple[float, float, dict[str, Any]]] = {}  # (timestamp, ttl, smc_dict)
+_SMC_CACHE_LOCK = asyncio.Lock()
+
+
+def _ohlcv_signature(ohlcv: list[list], samples: int = 5) -> str:
+    """Generate hash signature from last N OHLCV candles to detect data changes."""
+    if not ohlcv or len(ohlcv) < samples:
+        return ""
+    last_candles = ohlcv[-samples:]
+    signature_data = []
+    for candle in last_candles:
+        try:
+            signature_data.append(f"{candle[0]}:{candle[2]}:{candle[3]}:{candle[4]}")
+        except (IndexError, TypeError):
+            continue
+    return hashlib.md5("|".join(signature_data).encode()).hexdigest()[:16]
+
+
+async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str) -> dict[str, Any] | None:
+    """Get cached SMC analysis result if available and not expired."""
+    cache_key = f"{ticker}:{timeframe}:{ohlcv_sig}"
+    async with _SMC_CACHE_LOCK:
+        entry = _SMC_CACHE.get(cache_key)
+        if entry:
+            timestamp, ttl, smc_dict = entry
+            age = _time.monotonic() - timestamp
+            if age < ttl:
+                logger.debug(f"[SMC_CACHE] Hit for {ticker}:{timeframe} (age={age:.1f}s, ttl={ttl}s)")
+                return smc_dict
+            else:
+                del _SMC_CACHE[cache_key]
+                logger.debug(f"[SMC_CACHE] Expired for {ticker}:{timeframe}")
+    return None
+
+
+async def _set_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, smc_ctx: Any, ttl: float = _SMC_CACHE_BASE_TTL) -> None:
+    """Cache SMC analysis result with TTL."""
+    cache_key = f"{ticker}:{timeframe}:{ohlcv_sig}"
+
+    # Convert SMCContext to dict for caching
+    smc_dict = {
+        "timeframe": smc_ctx.timeframe,
+        "fvgs": smc_ctx.fvgs,
+        "order_blocks": smc_ctx.order_blocks,
+        "structure": smc_ctx.structure,
+        "premium_zone": smc_ctx.premium_zone,
+        "discount_zone": smc_ctx.discount_zone,
+        "equilibrium": smc_ctx.equilibrium,
+        "risk_score": smc_ctx.risk_score,
+        "entry_timing_score": smc_ctx.entry_timing_score,
+        "timing_recommendation": smc_ctx.timing_recommendation,
+    }
+
+    async with _SMC_CACHE_LOCK:
+        # Enforce max size by removing oldest entries
+        if len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
+            sorted_keys = sorted(_SMC_CACHE.keys(), key=lambda k: _SMC_CACHE[k][0])
+            for old_key in sorted_keys[:len(_SMC_CACHE) - _SMC_CACHE_MAX_SIZE + 1]:
+                del _SMC_CACHE[old_key]
+
+        _SMC_CACHE[cache_key] = (_time.monotonic(), ttl, smc_dict)
+        logger.debug(f"[SMC_CACHE] Stored for {ticker}:{timeframe} (ttl={ttl}s)")
+
+
+def _reconstruct_smc_context(smc_dict: dict[str, Any], timeframe: str) -> Any:
+    """Reconstruct SMCContext object from cached dict."""
+    from smc_analyzer import MarketStructure, SMCContext
+
+    structure_dict = smc_dict.get("structure")
+    structure = None
+    if structure_dict:
+        structure = MarketStructure(
+            trend=structure_dict.trend,
+            last_bos=structure_dict.last_bos,
+            last_choch=structure_dict.last_choch,
+            swing_highs=structure_dict.swing_highs,
+            swing_lows=structure_dict.swing_lows,
+            break_strength=structure_dict.break_strength,
+        )
+
+    return SMCContext(
+        timeframe=timeframe,
+        fvgs=smc_dict.get("fvgs", []),
+        order_blocks=smc_dict.get("order_blocks", []),
+        structure=structure,
+        premium_zone=smc_dict.get("premium_zone", 0.0),
+        discount_zone=smc_dict.get("discount_zone", 0.0),
+        equilibrium=smc_dict.get("equilibrium", 0.0),
+        risk_score=smc_dict.get("risk_score", 0.5),
+        entry_timing_score=smc_dict.get("entry_timing_score", 0.5),
+        timing_recommendation=smc_dict.get("timing_recommendation", "Fair"),
+    )
+
+
+async def _cached_analyze_smc_single_tf(
+    ticker: str,
+    ohlcv: list[list],
+    timeframe: str,
+    current_price: float,
+    signal_direction: str,
+) -> Any:
+    """Analyze SMC for single timeframe with caching (P1-5)."""
+    from smc_analyzer import analyze_smc_single_tf
+
+    if not ohlcv or len(ohlcv) < 5:
+        return None
+
+    ohlcv_sig = _ohlcv_signature(ohlcv)
+
+    # Try to get cached result
+    cached_dict = await _get_cached_smc(ticker, timeframe, ohlcv_sig)
+    if cached_dict:
+        return _reconstruct_smc_context(cached_dict, timeframe)
+
+    # Perform actual analysis
+    smc_ctx = analyze_smc_single_tf(ohlcv, timeframe, current_price, signal_direction)
+
+    # Cache the result
+    await _set_cached_smc(ticker, timeframe, ohlcv_sig, smc_ctx)
+
+    return smc_ctx
+
 
 async def _update_volatility_tracker(ticker: str, market: MarketContext) -> float:
     """Update volatility tracker for dynamic TTL calculation (Optimization 3)."""
@@ -94,17 +221,21 @@ def _ai_cache_key(
     price_bucket: str = "",
     timeframe: str = "",
     config_signature: str = "",
+    ohlcv_signature: str = "",  # P2-8: Add OHLCV signature to detect market changes
 ) -> str:
     """Generate cache key with price bucket and timeframe to avoid stale cache hits.
 
     Price is bucketed to 1% intervals to allow cache hits for similar prices
     while avoiding incorrect hits when price moves significantly.
+    P2-8: Include OHLCV signature to detect market structure changes.
     """
     key = f"{ticker}:{direction}"
     if timeframe:
         key += f":{timeframe}"
     if price_bucket:
         key += f":{price_bucket}"
+    if ohlcv_signature:
+        key += f":{ohlcv_signature[:8]}"  # P2-8: Only first 8 chars to keep key reasonable length
     if config_signature:
         key += f":{config_signature}"
     return key
@@ -128,9 +259,10 @@ async def _get_cached_analysis(
     price_bucket: str = "",
     timeframe: str = "",
     config_signature: str = "",
+    ohlcv_signature: str = "",  # P2-8: Add OHLCV signature
 ) -> AIAnalysis | None:
     """Get cached analysis with dynamic TTL support."""
-    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature)
+    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature)
     async with _AI_CACHE_LOCK:
         entry = _AI_CACHE.get(key)
         if entry:
@@ -147,9 +279,10 @@ async def _set_cached_analysis(
     price_bucket: str = "",
     timeframe: str = "",
     config_signature: str = "",
+    ohlcv_signature: str = "",  # P2-8: Add OHLCV signature
 ) -> None:
     """Set cached analysis with dynamic TTL based on volatility."""
-    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature)
+    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature)
     ttl = await _get_dynamic_cache_ttl(ticker)
 
     async with _AI_CACHE_LOCK:
@@ -1295,6 +1428,10 @@ async def analyze_signal(
     timeframe = str(signal.timeframe or "")
     config_signature = _analysis_config_signature(user_settings)
 
+    # P2-8: Add OHLCV signature to cache key to detect market structure changes
+    ohlcv_htf = getattr(market, "_ohlcv_4h", None) or getattr(market, "_ohlcv_1h", None) or []
+    ohlcv_signature = _ohlcv_signature(ohlcv_htf, samples=3) if ohlcv_htf else ""
+
     cache_key_suffix = ""
     if settings.ai.voting_enabled and settings.ai.voting_models:
         cache_key_suffix = ":voting"
@@ -1305,6 +1442,7 @@ async def analyze_signal(
         price_bucket,
         timeframe,
         config_signature,
+        ohlcv_signature,  # P2-8: Include OHLCV signature
     )
     if cached is not None:
         logger.info(f"[AI] Using cached analysis for {signal.ticker} {signal.direction.value} @ {price_bucket}")
@@ -1314,7 +1452,6 @@ async def analyze_signal(
     try:
         from smc_analyzer import (
             MultiTimeframeSMC,
-            analyze_smc_single_tf,
             check_htf_structure_conflict,
             find_confluence_zones,
             format_smc_for_ai,
@@ -1330,11 +1467,11 @@ async def analyze_signal(
 
         direction = signal.direction.value if signal.direction else "long"
 
-        # Analyze each timeframe with signal direction for risk scoring
-        htf_ctx = analyze_smc_single_tf(ohlcv_htf, selected_tfs['htf'], market.current_price, direction) if len(ohlcv_htf) >= 5 else None
-        mtf_ctx = analyze_smc_single_tf(ohlcv_mtf, selected_tfs['mtf'], market.current_price, direction) if len(ohlcv_mtf) >= 5 else None
-        stf_ctx = analyze_smc_single_tf(ohlcv_stf, selected_tfs['stf'], market.current_price, direction) if len(ohlcv_stf) >= 5 else None
-        ltf_ctx = analyze_smc_single_tf(ohlcv_ltf, selected_tfs['ltf'], market.current_price, direction) if len(ohlcv_ltf) >= 5 else None
+        # P1-5: Analyze each timeframe with caching for performance
+        htf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_htf, selected_tfs['htf'], market.current_price, direction) if len(ohlcv_htf) >= 5 else None
+        mtf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_mtf, selected_tfs['mtf'], market.current_price, direction) if len(ohlcv_mtf) >= 5 else None
+        stf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_stf, selected_tfs['stf'], market.current_price, direction) if len(ohlcv_stf) >= 5 else None
+        ltf_ctx = await _cached_analyze_smc_single_tf(signal.ticker, ohlcv_ltf, selected_tfs['ltf'], market.current_price, direction) if len(ohlcv_ltf) >= 5 else None
 
         # Find confluence zones
         confluence = find_confluence_zones(htf_ctx, mtf_ctx, stf_ctx, ltf_ctx, direction, market.current_price)
@@ -1419,6 +1556,7 @@ async def analyze_signal(
                 price_bucket,
                 timeframe,
                 config_signature,
+                ohlcv_signature,  # P2-8: Include OHLCV signature
             )
             return final_analysis
 
@@ -1463,6 +1601,7 @@ async def analyze_signal(
             price_bucket,
             timeframe,
             config_signature,
+            ohlcv_signature,  # P2-8: Include OHLCV signature
         )
         return analysis
 
