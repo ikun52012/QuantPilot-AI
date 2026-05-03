@@ -838,55 +838,55 @@ def detect_order_blocks(
         next_high = max(_ohlcv_value(ohlcv[i + 1], 2, "high"), _ohlcv_value(ohlcv[i + 2], 2, "high"))
         next_low = min(_ohlcv_value(ohlcv[i + 1], 3, "low"), _ohlcv_value(ohlcv[i + 2], 3, "low"))
 
-        mid_price = (high_i + low_i) / 2 if (high_i + low_i) > 0 else 1
+        mid_price = (high_i + low_i) / 2
 
-        # Calculate age
+        if mid_price <= 0:
+            continue
+
         ob_age = total_candles - i - 1
 
-        # Bullish OB: bearish candle followed by strong bullish impulse
         if is_bearish_candle:
-            impulse_pct = (next_high - high_i) / mid_price * 100
-            if impulse_pct >= min_impulse_pct:
-                strength = min(1.0, impulse_pct / 3.0)
-                effectiveness = calculate_ob_effectiveness_score(ob_age, strength)
+            impulse_up = next_high - high_i
+            if impulse_up > 0:
+                impulse_pct = impulse_up / mid_price * 100
+                if impulse_pct >= min_impulse_pct:
+                    strength = min(1.0, impulse_pct / 3.0)
+                    effectiveness = calculate_ob_effectiveness_score(ob_age, strength)
 
-                # P1-7: Boost effectiveness if volume confirmed
-                if volume_ratio >= min_volume_ratio:
-                    effectiveness = min(1.0, effectiveness * 1.3)  # Boost by 30%
+                    if volume_ratio >= min_volume_ratio:
+                        effectiveness = min(1.0, effectiveness * 1.3)
 
-                # P1-7: Only add OB with sufficient volume (skip filter if no volume data available)
-                if skip_volume_filter or volume_ratio >= min_volume_ratio:
-                    obs.append(OrderBlock(
-                        type="bullish",
-                        high=high_i,
-                        low=low_i,
-                        midpoint=round(mid_price, 8),
-                        timeframe=timeframe,
-                        candle_index=i,
-                        strength=round(strength, 3),
-                        effectiveness=effectiveness,
-                    ))
+                    if skip_volume_filter or volume_ratio >= min_volume_ratio:
+                        obs.append(OrderBlock(
+                            type="bullish",
+                            high=high_i,
+                            low=low_i,
+                            midpoint=round(mid_price, 8),
+                            timeframe=timeframe,
+                            candle_index=i,
+                            strength=round(strength, 3),
+                            effectiveness=effectiveness,
+                        ))
 
-        # Bearish OB: bullish candle followed by strong bearish impulse
         if is_bullish_candle:
-            impulse_pct = (low_i - next_low) / mid_price * 100
-            if impulse_pct >= min_impulse_pct:
-                strength = min(1.0, impulse_pct / 3.0)
-                effectiveness = calculate_ob_effectiveness_score(ob_age, strength)
+            impulse_down = low_i - next_low
+            if impulse_down > 0:
+                impulse_pct = impulse_down / mid_price * 100
+                if impulse_pct >= min_impulse_pct:
+                    strength = min(1.0, impulse_pct / 3.0)
+                    effectiveness = calculate_ob_effectiveness_score(ob_age, strength)
 
-                # P1-7: Boost effectiveness if volume confirmed
-                if volume_ratio >= min_volume_ratio:
-                    effectiveness = min(1.0, effectiveness * 1.3)  # Boost by 30%
+                    if volume_ratio >= min_volume_ratio:
+                        effectiveness = min(1.0, effectiveness * 1.3)
 
-                # P1-7: Only add OB with sufficient volume (skip filter if no volume data available)
-                if skip_volume_filter or volume_ratio >= min_volume_ratio:
-                    obs.append(OrderBlock(
-                        type="bearish",
-                        high=high_i,
-                        low=low_i,
-                        midpoint=round(mid_price, 8),
-                        timeframe=timeframe,
-                        candle_index=i,
+                    if skip_volume_filter or volume_ratio >= min_volume_ratio:
+                        obs.append(OrderBlock(
+                            type="bearish",
+                            high=high_i,
+                            low=low_i,
+                            midpoint=round(mid_price, 8),
+                            timeframe=timeframe,
+                            candle_index=i,
                         strength=round(strength, 3),
                         effectiveness=effectiveness,
                     ))
@@ -926,15 +926,11 @@ def calculate_premium_discount(
         range_low = float(swing_lows or 0.0)
         range_size = range_high - range_low
         if range_size <= 0:
-            return {"premium": 0.0, "discount": 0.0, "equilibrium": 0.0}
+            return 0.0, 0.0, 0.0
         equilibrium = range_low + range_size * 0.5
-        premium_zone = range_low + range_size * premium_fib  # ENH-3: Dynamic Fibonacci
-        discount_zone = range_low + range_size * discount_fib  # ENH-3: Dynamic Fibonacci
-        return {
-            "premium": round(premium_zone, 8),
-            "discount": round(discount_zone, 8),
-            "equilibrium": round(equilibrium, 8),
-        }
+        premium_zone = range_low + range_size * premium_fib
+        discount_zone = range_low + range_size * discount_fib
+        return round(premium_zone, 8), round(discount_zone, 8), round(equilibrium, 8)
 
     if not swing_highs or not swing_lows:
         return 0.0, 0.0, 0.0
@@ -1160,12 +1156,14 @@ def analyze_smc_single_tf(
 
     # P1-R1: Pass atr_pct to enable dynamic zones based on volatility
     premium_data = calculate_premium_discount(structure.swing_highs, structure.swing_lows, atr_pct)
-    if isinstance(premium_data, dict):
+    if isinstance(premium_data, (tuple, list)) and len(premium_data) == 3:
+        premium, discount, equilibrium = premium_data
+    elif isinstance(premium_data, dict):
         premium = premium_data.get("premium", 0.0)
         discount = premium_data.get("discount", 0.0)
         equilibrium = premium_data.get("equilibrium", 0.0)
     else:
-        premium, discount, equilibrium = premium_data
+        premium, discount, equilibrium = 0.0, 0.0, 0.0
 
     # NEW: Calculate structure risk score
     risk_score = calculate_structure_risk_score(structure, fvgs, obs, signal_direction, current_price, premium, discount)
@@ -1237,9 +1235,13 @@ def calculate_structure_risk_score(
     # Premium/Discount zone risk
     if current_price > 0 and premium_zone > 0 and discount_zone > 0:
         if signal_direction == "long" and current_price > premium_zone:
-            risk += 0.15  # Buying in premium zone (expensive)
+            risk += 0.15
+        elif signal_direction == "long" and current_price < discount_zone:
+            risk -= 0.1
         elif signal_direction == "short" and current_price < discount_zone:
-            risk += 0.15  # Selling in discount zone (cheap)
+            risk += 0.15
+        elif signal_direction == "short" and current_price > premium_zone:
+            risk -= 0.1
 
     # Weak structure break (if BOS/CHoCH detected)
     if structure and structure.break_strength < 0.4:

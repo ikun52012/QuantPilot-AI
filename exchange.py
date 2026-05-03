@@ -371,6 +371,10 @@ def adjust_quantity_for_limits(
 
     adjustments = []
 
+    if price <= 0.0001:
+        logger.warning(f"[Exchange] Invalid price {price}, skipping cost-based adjustments")
+        return quantity, adjustments
+
     # Check minimum cost (order value)
     if min_cost > 0 and current_cost < min_cost:
         min_qty_for_cost = min_cost / price
@@ -662,8 +666,10 @@ def _valid_stop_loss(direction: SignalDirection, entry: float, price: float | No
         return None
     if value <= 0 or entry <= 0:
         return None
-    # BUG FIX: Reject stop loss that equals entry price
-    if value == entry:
+    min_distance_pct = 0.1
+    distance_pct = abs(value - entry) / entry * 100 if entry > 0 else 100
+    if distance_pct < min_distance_pct:
+        logger.warning(f"[Exchange] Stop loss too close to entry ({distance_pct:.4f}% < {min_distance_pct}%), rejecting")
         return None
     if direction == SignalDirection.LONG and value < entry:
         return value
@@ -891,13 +897,23 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         order_id = order.get("id", "unknown")
         order_status = order.get("status", "unknown")
         actual_filled_qty = safe_float(order.get("filled") or 0)
+        requested_qty = safe_float(decision.quantity or 0)
+        is_partial_fill = (
+            actual_filled_qty > 0
+            and actual_filled_qty < requested_qty
+            and order_status not in {"closed", "filled"}
+        )
         if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
             actual_filled_qty = safe_float(order.get("amount") or decision.quantity)
         actual_avg_price = safe_float(order.get("average") or order.get("price") or decision.entry_price or 0)
-        logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status}, filled={actual_filled_qty})")
+        logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status}, filled={actual_filled_qty}/{requested_qty})")
+
+        if is_partial_fill:
+            logger.warning(f"[Exchange] ⚠️ PARTIAL FILL: {actual_filled_qty}/{requested_qty} - placing TP/SL for filled portion only")
 
         result_status = (
             "pending" if order_type == "limit" and order_status in {"open", "new"} and actual_filled_qty == 0
+            else "partial" if is_partial_fill
             else "filled" if order_status in {"closed", "filled"} or actual_filled_qty > 0
             else "error"
         )
@@ -911,12 +927,13 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "symbol": symbol,
             "side": side,
             "quantity": actual_filled_qty if actual_filled_qty > 0 else decision.quantity,
-            "requested_quantity": decision.quantity,
+            "requested_quantity": requested_qty,
             "entry_price": actual_avg_price if actual_avg_price > 0 else decision.entry_price,
             "sandbox_mode": sandbox_mode,
             "order_type": order_type,
             "exchange_order_status": order_status,
             "filled_quantity": actual_filled_qty,
+            "is_partial_fill": is_partial_fill,
         }
         if leverage:
             result["recommended_leverage"] = leverage
@@ -1009,7 +1026,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
         # ── Protection Failure Check ──
         # If entry succeeded but SL/TP failed, close position for safety
-        if result.get("status") in ("filled", "pending") and result.get("stop_loss_error") or result.get("take_profit_error"):
+        if result.get("status") in ("filled", "pending") and (result.get("stop_loss_error") or result.get("take_profit_error")):
             protection_errors = []
             if result.get("stop_loss_error"):
                 protection_errors.append(f"SL: {result['stop_loss_error']}")
@@ -1128,8 +1145,14 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels, p
     return tp_results
 
 
-def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: float) -> list[tuple[str, dict[str, Any]]]:
-    """Return exchange-aware conditional-order candidates."""
+def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: float, position_side: str | None = None) -> list[tuple[str, dict[str, Any]]]:
+    """Return exchange-aware conditional-order candidates.
+
+    Args:
+        position_side: For Bybit, determines triggerDirection. 'long' or 'short'.
+                       LONG position: TP=rises(1), SL=falls(2)
+                       SHORT position: TP=falls(2), SL=rises(1)
+    """
     reduce_params: dict[str, Any] = {"reduceOnly": True, "closePosition": False}
     if kind == "take_profit":
         candidates: list[tuple[str, dict[str, Any]]] = [
@@ -1150,8 +1173,25 @@ def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: floa
     if exchange_id == "bitget":
         candidates.insert(0, ("market", {**reduce_params, "triggerPrice": trigger_price, "planType": "profit_plan" if kind == "take_profit" else "loss_plan"}))
     if exchange_id == "bybit":
-        candidates.insert(0, ("market", {**reduce_params, "triggerPrice": trigger_price, "triggerDirection": 1 if kind == "take_profit" else 2}))
+        trigger_dir = _bybit_trigger_direction(kind, position_side)
+        candidates.insert(0, ("market", {**reduce_params, "triggerPrice": trigger_price, "triggerDirection": trigger_dir}))
     return candidates
+
+
+def _bybit_trigger_direction(kind: str, position_side: str | None) -> int:
+    """Calculate Bybit triggerDirection based on order kind and position side.
+
+    Bybit triggerDirection:
+    - 1 = price rises to trigger price (for: LONG TP, SHORT SL)
+    - 2 = price falls to trigger price (for: LONG SL, SHORT TP)
+    """
+    if not position_side:
+        position_side = "long"
+    pos_is_long = position_side.lower() == "long"
+    if kind == "take_profit":
+        return 1 if pos_is_long else 2
+    else:
+        return 2 if pos_is_long else 1
 
 
 async def _create_conditional_order(exchange, symbol: str, kind: str, side: str, amount: float, trigger_price: float, position_side: str | None = None) -> dict:
@@ -1161,10 +1201,11 @@ async def _create_conditional_order(exchange, symbol: str, kind: str, side: str,
         position_side: For OKX hedge mode, the position being protected ('long' or 'short').
                        For LONG position TP/SL: side=sell, position_side=long
                        For SHORT position TP/SL: side=buy, position_side=short
+                       For Bybit, determines triggerDirection.
     """
     exchange_id = _exchange_id(exchange)
     errors = []
-    for order_type, params in _conditional_order_attempts(exchange_id, kind, trigger_price):
+    for order_type, params in _conditional_order_attempts(exchange_id, kind, trigger_price, position_side):
         try:
             return await _create_exchange_order(
                 exchange,

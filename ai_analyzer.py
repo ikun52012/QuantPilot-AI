@@ -152,14 +152,17 @@ def _reconstruct_smc_context(smc_dict: dict[str, Any], timeframe: str) -> Any:
     structure_dict = smc_dict.get("structure")
     structure = None
     if structure_dict:
-        structure = MarketStructure(
-            trend=structure_dict.trend,
-            last_bos=structure_dict.last_bos,
-            last_choch=structure_dict.last_choch,
-            swing_highs=structure_dict.swing_highs,
-            swing_lows=structure_dict.swing_lows,
-            break_strength=structure_dict.break_strength,
-        )
+        if isinstance(structure_dict, dict):
+            structure = MarketStructure(
+                trend=structure_dict.get("trend"),
+                last_bos=structure_dict.get("last_bos"),
+                last_choch=structure_dict.get("last_choch"),
+                swing_highs=structure_dict.get("swing_highs", []),
+                swing_lows=structure_dict.get("swing_lows", []),
+                break_strength=structure_dict.get("break_strength", 0.5),
+            )
+        else:
+            structure = structure_dict
 
     return SMCContext(
         timeframe=timeframe,

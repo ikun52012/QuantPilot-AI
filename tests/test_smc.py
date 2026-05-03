@@ -108,21 +108,18 @@ class TestCalculatePremiumDiscount:
         range_high = 110.0
         range_low = 100.0
 
-        result = calculate_premium_discount(range_high, range_low)
+        premium, discount, equilibrium = calculate_premium_discount(range_high, range_low)
 
-        assert "premium" in result
-        assert "discount" in result
-        assert "equilibrium" in result
-
-        assert result["equilibrium"] == pytest.approx(105.0, rel=0.01)
-        assert result["premium"] == pytest.approx(106.18, rel=0.01)  # P0-2 FIX: Correct Fibonacci 0.618
-        assert result["discount"] == pytest.approx(103.82, rel=0.01)  # P0-2 FIX: Correct Fibonacci 0.382
+        assert equilibrium == pytest.approx(105.0, rel=0.01)
+        assert premium == pytest.approx(106.18, rel=0.01)
+        assert discount == pytest.approx(103.82, rel=0.01)
 
     def test_invalid_range(self):
-        result = calculate_premium_discount(0.0, 0.0)
+        premium, discount, equilibrium = calculate_premium_discount(0.0, 0.0)
 
-        assert result.get("premium") == 0.0
-        assert result.get("discount") == 0.0
+        assert premium == 0.0
+        assert discount == 0.0
+        assert equilibrium == 0.0
 
 
 class TestFindConfluenceZones:

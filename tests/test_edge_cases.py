@@ -425,8 +425,10 @@ class TestSMCAnalysis:
 
     def test_premium_discount_negative_range(self):
         """Premium/discount with negative range."""
-        result = calculate_premium_discount(100.0, 100.0)
-        assert result["premium"] == 0.0
+        premium, discount, equilibrium = calculate_premium_discount(100.0, 100.0)
+        assert premium == 0.0
+        assert discount == 0.0
+        assert equilibrium == 0.0
 
 
 class TestPasswordSecurity:
