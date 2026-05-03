@@ -261,14 +261,83 @@
             </div>
         </div>
 
-        <!-- Page: Positions -->
+<!-- Page: Positions -->
         <div class="page" id="page-positions">
             <section class="page-intro terminal-intro">
                 <div>
-                    <span class="section-kicker" data-i18n="pages.positions.kicker" data-i18n-fallback="Institutional Terminal">Institutional Terminal</span>
+                    <span class="section-kicker" data-i18n="pages.positions.kicker" data-i18n-fallback="Position Terminal">Position Terminal</span>
                     <h2 data-i18n="nav.positions" data-i18n-fallback="Positions">Positions</h2>
                     <p data-i18n="pages.positions.description" data-i18n-fallback="Scan exposure, margin usage, liquidation distance, and unrealized performance with minimal friction.">Scan exposure, margin usage, liquidation distance, and unrealized performance with minimal friction.</p>
                 </div>
+                <button class="btn btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
+            </section>
+            
+            <!-- NEW: Pending Orders Section -->
+            <div class="card" id="pending-orders-card" style="background: linear-gradient(135deg, rgba(255,193,7,0.1), rgba(255,152,0,0.1)); border: 1px solid rgba(255,193,7,0.3);">
+                <div class="card-header">
+                    <h3 style="color: #FFC107;">
+                        <i class="ri-time-line"></i> 
+                        <span data-i18n="pending_orders.title" data-i18n-fallback="Pending Orders">Pending Orders</span>
+                        <span class="badge badge-warning" id="pending-count-badge">0</span>
+                    </h3>
+                    <button class="btn btn-sm btn-warning" onclick="cancelAllPendingOrders()">
+                        <i class="ri-close-circle-line"></i> Cancel All
+                    </button>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table" id="pending-orders-table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Type</th>
+                                <th>Qty</th>
+                                <th>Limit Price</th>
+                                <th>Created</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pending-orders-body">
+                            <tr><td colspan="8" class="empty-state">No pending orders</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="card-footer" style="padding: 12px; font-size: 13px; color: #856404;">
+                    <i class="ri-information-line"></i>
+                    <span data-i18n="pending_orders.info" data-i18n-fallback="Orders awaiting entry. Reverse signals will cancel pending orders automatically.">Orders awaiting entry. Reverse signals will cancel pending orders automatically.</span>
+                </div>
+            </div>
+            
+            <!-- Open Positions Section -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-stock-line"></i> Open Positions</h3>
+                    <span class="badge badge-success" id="open-count-badge">0</span>
+                    <button class="btn btn-sm btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table" id="positions-table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Size</th>
+                                <th>Entry Price</th>
+                                <th>Mark Price</th>
+                                <th>Liq. Price</th>
+                                <th>Margin</th>
+                                <th>Unrealized P&L</th>
+                                <th>ROE %</th>
+                                <th>Leverage</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body">
+                            <tr><td colspan="10" class="empty-state">No open positions</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
                 <button class="btn btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
             </section>
             <div class="card">

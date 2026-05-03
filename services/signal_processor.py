@@ -8,6 +8,7 @@ import json
 import os
 import time as _time
 from collections.abc import Sequence
+from datetime import datetime, timezone
 
 from loguru import logger
 from sqlalchemy import select
@@ -1873,20 +1874,48 @@ prefilter_result: PreFilterResult | None = None,
         Check for conflicting open positions on the same ticker.
         Returns (rejection_reason, conflicting_position) tuple.
 
-        Checks BOTH:
-        1. Database tracked positions
-        2. Exchange actual positions (for live trading)
+        Checks THREE layers:
+        1. Pending orders of opposite direction (cancel them first)
+        2. Database tracked OPEN positions (status="open", NOT pending)
+        3. Exchange actual positions (for live trading)
 
         If opposite direction found, returns reason and the position to close.
+
+        FIX: Pending orders should be cancelled before checking open positions.
         """
         try:
-            # Step 1: Check database positions
-            stmt = select(PositionModel).where(PositionModel.status.in_(["open", "pending"]))
+            direction = decision.direction.value if decision.direction else ""
+            target_key = position_symbol_key(decision.ticker)
+
+            # Step 1: Check for pending orders of opposite direction and cancel them
+            pending_stmt = select(PositionModel).where(PositionModel.status == "pending")
+            if user_id:
+                pending_stmt = pending_stmt.where(PositionModel.user_id == user_id)
+
+            pending_result = await self.session.execute(pending_stmt)
+            pending_positions = [
+                pos for pos in pending_result.scalars().all()
+                if position_symbol_key(pos.ticker) == target_key
+            ]
+
+            # Cancel pending orders of opposite direction
+            for pending_pos in pending_positions:
+                pending_dir = (pending_pos.direction or "").lower()
+                if (direction in ("long", "short") and pending_dir in ("long", "short")
+                        and direction != pending_dir):
+                    # Cancel this pending order
+                    logger.info(
+                        f"[Signal] Cancelling pending {pending_dir} order on {decision.ticker} "
+                        f"(id={pending_pos.id[:8]}) before opening {direction}"
+                    )
+                    await self._cancel_pending_position(pending_pos, user_id, user_settings)
+
+            # Step 2: Check database OPEN positions (FIX: only status="open")
+            stmt = select(PositionModel).where(PositionModel.status == "open")
             if user_id:
                 stmt = stmt.where(PositionModel.user_id == user_id)
 
             result = await self.session.execute(stmt)
-            target_key = position_symbol_key(decision.ticker)
             open_positions = [
                 pos for pos in result.scalars().all()
                 if position_symbol_key(pos.ticker) == target_key
@@ -2061,6 +2090,79 @@ prefilter_result: PreFilterResult | None = None,
             logger.error(f"[Signal] Failed to close conflicting position: {e}")
             result["status"] = "error"
             result["reason"] = str(e)
+
+        return result
+
+    async def _cancel_pending_position(
+        self,
+        position: PositionModel,
+        user_id: str | None,
+        user_settings: dict | None = None,
+    ) -> dict:
+        """
+        Cancel a pending position (limit order not yet filled).
+
+        Used for reverse signal handling - cancel pending orders of opposite direction
+        before opening new position.
+        """
+        result = {
+            "status": "unknown",
+            "ticker": position.ticker,
+            "position_id": position.id[:8] if len(position.id) >= 8 else position.id,
+        }
+
+        try:
+            # Build exchange config
+            exchange_config = self._build_exchange_config(user_id, user_settings)
+            exchange_config["live_trading"] = position.live_trading
+
+            # Step 1: Cancel limit entry order on exchange
+            if position.live_trading and position.exchange_order_id:
+                from exchange import cancel_order
+                cancel_result = await cancel_order(str(position.exchange_order_id), position.ticker, exchange_config)
+                result["exchange_cancel"] = cancel_result
+
+                if cancel_result.get("status") not in ("cancelled", "simulated"):
+                    logger.warning(f"[Signal] Failed to cancel pending order on exchange: {cancel_result}")
+                    # Still proceed to mark as cancelled in DB
+
+            # Step 2: Cancel TP orders if any
+            if hasattr(position, "take_profit_order_ids_json") and position.take_profit_order_ids_json:
+                from exchange import cancel_order
+                tp_order_ids = loads_list(position.take_profit_order_ids_json)
+                for order_id in tp_order_ids:
+                    if order_id:
+                        await cancel_order(str(order_id), position.ticker, exchange_config)
+
+            # Step 3: Cancel SL order if any
+            if hasattr(position, "stop_loss_order_id") and position.stop_loss_order_id:
+                from exchange import cancel_order
+                await cancel_order(str(position.stop_loss_order_id), position.ticker, exchange_config)
+
+            # Step 4: Mark position as cancelled in database
+            position.status = "cancelled"
+            position.closed_at = datetime.now(timezone.utc)
+            position.close_reason = "cancelled_reverse_signal"
+            await self.session.flush()
+
+            result["status"] = "cancelled"
+            logger.info(
+                f"[Signal] ✅ Cancelled pending position {position.id[:8]} "
+                f"on {position.ticker}"
+            )
+
+        except Exception as e:
+            logger.error(f"[Signal] Failed to cancel pending position: {e}")
+            result["status"] = "error"
+            result["reason"] = str(e)
+            # Still mark as cancelled in DB even if exchange cancel failed
+            try:
+                position.status = "cancelled"
+                position.closed_at = datetime.now(timezone.utc)
+                position.close_reason = f"cancelled_error: {str(e)}"
+                await self.session.flush()
+            except Exception:
+                pass
 
         return result
 
