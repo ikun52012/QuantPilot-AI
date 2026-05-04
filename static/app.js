@@ -209,64 +209,6 @@ async function logout() {
     } catch {}
     redirectToLogin('logout');
 }
-    // Fallback: fetch from API
-    if (_cachedUser) return _cachedUser;
-    try {
-        const r = await fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' });
-        if (!r.ok) return null;
-        _cachedUser = await r.json();
-        // Sync back to QP.Auth if available
-        if (window.QP && QP.Auth) {
-            QP.Auth._cachedUser = _cachedUser;
-        }
-        return _cachedUser;
-    } catch { return null; }
-}
-
-function getUser() {
-    // Sync with QP.Auth if available
-    if (window.QP && QP.Auth) {
-        return QP.Auth.getUser();
-    }
-    return _cachedUser || {};
-}
-
-function isAdmin() {
-    // Sync with QP.Auth if available
-    if (window.QP && QP.Auth) {
-        return QP.Auth.isAdmin();
-    }
-    return getUser().role === 'admin';
-}
-
-async function requireAuth() {
-    const user = await ensureUser();
-    if (!user) {
-        redirectToLogin('expired');
-        return false;
-    }
-    return true;
-}
-
-function redirectToLogin(reason = 'expired') {
-    if (_sessionRedirecting) return;
-    _sessionRedirecting = true;
-    _cachedUser = null;
-    const query = reason ? `?${encodeURIComponent(reason)}=1` : '';
-    window.location.replace(`/login${query}`);
-}
-
-async function logout() {
-    try {
-        const csrf = getCookie('tvss_csrf');
-        await fetch('/api/auth/logout', {
-            method: 'POST',
-            credentials: 'include',
-            headers: csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf) } : {},
-        });
-    } catch {}
-    redirectToLogin('logout');
-}
 
 function getCookie(name) {
     const prefix = `${name}=`;
@@ -709,7 +651,6 @@ async function checkSystemHealth() {
         if (chipEl) chipEl.className = 'status-chip error';
         if (healthTextEl) healthTextEl.textContent = 'Health Check Failed';
     }
-}
 }
 
 function renderDashboardBrief(perf = {}, overview = {}, status = {}) {
@@ -3308,7 +3249,8 @@ async function runBacktestAsync() {
             startBacktestPolling(result.task_id, request);
             showToast('Async backtest started. Polling for results...', 'success', 'Task Created');
             if (btn) { btn.innerHTML = '<i class="ri-loader-line"></i> Running...'; }
-            document.getElementById('btn-cancel-backtest-async')?.style.display = 'inline-block';
+            const cancelBtn = document.getElementById('btn-cancel-backtest-async');
+            if (cancelBtn) cancelBtn.style.display = 'inline-block';
         } else {
             displayBacktestResults(result, request);
             if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-loader-line"></i> Run Async (Long)'; }
@@ -3335,7 +3277,8 @@ function showBacktestProgress(taskId, status) {
 function hideBacktestProgress() {
     const progressEl = document.getElementById('backtest-progress');
     if (progressEl) progressEl.style.display = 'none';
-    document.getElementById('btn-cancel-backtest-async')?.style.display = 'none';
+    const cancelBtn = document.getElementById('btn-cancel-backtest-async');
+    if (cancelBtn) cancelBtn.style.display = 'none';
     _backtestAsyncTaskId = null;
     if (_backtestAsyncPollTimer) {
         clearTimeout(_backtestAsyncPollTimer);
@@ -4568,10 +4511,4 @@ async function handleSavedStrategyImportFile(event) {
         showToast('Invalid JSON file.', 'error', 'Import Failed');
     }
     event.target.value = '';
-}
-        showToast('Strategy deleted.', 'warning', 'Deleted');
-        await loadStrategyEditorPage();
-    } catch (err) {
-        showToast(err.message, 'error', 'Delete Failed');
-    }
 }
