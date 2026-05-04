@@ -568,9 +568,8 @@ function switchPage(page) {
 // ─── Dashboard ───
 async function loadDashboard() {
     try {
-        const [status, stats, perf, strategyOverview] = await Promise.all([
+        const [status, perf, strategyOverview] = await Promise.all([
             fetchAPI('/api/status'),
-            fetchAPI('/stats'),
             fetchAPI('/api/performance?days=30'),
             fetchAPI('/api/strategies/overview').catch(() => null),
         ]);
@@ -2661,6 +2660,43 @@ async function resetAdminPassword(userId) {
         showToast('Password updated.','success','Saved');
     } catch (err) {
         showToast(err.message,'error','Password Reset Failed');
+    }
+}
+
+async function changePassword() {
+    const currentPw = document.getElementById('change-pw-current')?.value || '';
+    const newPw = document.getElementById('change-pw-new')?.value || '';
+    const confirmPw = document.getElementById('change-pw-confirm')?.value || '';
+
+    if (!currentPw || !newPw || !confirmPw) {
+        showToast('All fields are required.', 'warning', 'Missing Fields');
+        return;
+    }
+
+    if (newPw.length < 8) {
+        showToast('New password must be at least 8 characters.', 'warning', 'Weak Password');
+        return;
+    }
+
+    if (newPw !== confirmPw) {
+        showToast('New password and confirmation do not match.', 'warning', 'Mismatch');
+        return;
+    }
+
+    try {
+        await fetchAPI('/api/auth/change-password', {
+            method: 'POST',
+            body: JSON.stringify({
+                current_password: currentPw,
+                new_password: newPw,
+            }),
+        });
+        document.getElementById('change-pw-current').value = '';
+        document.getElementById('change-pw-new').value = '';
+        document.getElementById('change-pw-confirm').value = '';
+        showToast('Password updated successfully.', 'success', 'Password Changed');
+    } catch (err) {
+        showToast(err.message, 'error', 'Password Change Failed');
     }
 }
 

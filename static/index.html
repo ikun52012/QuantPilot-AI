@@ -1116,6 +1116,33 @@
                 </div>
             </div>
 
+            <!-- Change Password -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-lock-password-line"></i> Change Password</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label for="change-pw-current">Current Password</label>
+                        <input type="password" id="change-pw-current" class="text-input" placeholder="Enter current password" autocomplete="current-password">
+                    </div>
+                    <div class="form-group">
+                        <label for="change-pw-new">New Password</label>
+                        <input type="password" id="change-pw-new" class="text-input" placeholder="Enter new password (min 8 chars)" autocomplete="new-password">
+                        <p class="hint">Minimum 8 characters, mix of uppercase, lowercase, numbers, and symbols recommended</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="change-pw-confirm">Confirm New Password</label>
+                        <input type="password" id="change-pw-confirm" class="text-input" placeholder="Confirm new password" autocomplete="new-password">
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-primary" onclick="changePassword()" id="btn-change-pw">
+                            <i class="ri-key-line"></i> Update Password
+                        </button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Two-Factor Authentication -->
             <div class="card mt-4">
                 <div class="card-header">
