@@ -1740,6 +1740,53 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         return []
 
 
+async def get_open_orders(symbol: str | None = None, exchange_config: dict | None = None) -> list[dict]:
+    """Fetch open/pending orders from exchange."""
+    exchange_config = exchange_config or {}
+    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+        return []
+    exchange = _get_or_create_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
+        live=True,
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+    )
+    try:
+        if symbol:
+            resolved_symbol = await asyncio.to_thread(
+                _resolve_symbol,
+                exchange,
+                symbol,
+                exchange_config.get("market_type") or settings.exchange.market_type,
+            )
+            orders = await asyncio.to_thread(exchange.fetch_open_orders, resolved_symbol)
+        else:
+            orders = await asyncio.to_thread(exchange.fetch_open_orders)
+
+        return [
+            {
+                "id": o.get("id"),
+                "symbol": o.get("symbol"),
+                "side": o.get("side"),
+                "type": o.get("type"),
+                "price": o.get("price"),
+                "amount": o.get("amount"),
+                "filled": o.get("filled") or 0,
+                "remaining": o.get("remaining") or o.get("amount") or 0,
+                "status": o.get("status"),
+                "timestamp": o.get("timestamp"),
+                "datetime": o.get("datetime"),
+            }
+            for o in orders
+        ]
+    except Exception as e:
+        logger.error(f"[Exchange] Failed to fetch open orders: {e}")
+        return []
+
+
 async def get_recent_orders(symbol: str | None = None, limit: int = 50, exchange_config: dict | None = None) -> list[dict]:
     """Fetch recent closed orders from exchange."""
     exchange_config = exchange_config or {}

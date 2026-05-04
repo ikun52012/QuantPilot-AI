@@ -491,6 +491,62 @@ async def get_balance(
     return balance
 
 
+@router.get("/pending-orders")
+async def get_pending_orders(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get open/pending orders from exchange."""
+    from exchange import get_open_orders
+
+    exchange_config = await _exchange_config_for_user(db, user)
+    if not exchange_config.get("live_trading"):
+        return []
+
+    try:
+        orders = await get_open_orders(exchange_config=exchange_config)
+        return [
+            {
+                "id": o.get("id"),
+                "symbol": o.get("symbol"),
+                "side": o.get("side"),
+                "type": o.get("type"),
+                "price": o.get("price"),
+                "amount": o.get("amount"),
+                "filled": o.get("filled") or 0,
+                "remaining": o.get("remaining") or 0,
+                "status": o.get("status"),
+                "timestamp": o.get("timestamp"),
+                "datetime": o.get("datetime"),
+            }
+            for o in orders
+        ]
+    except Exception as e:
+        logger.warning(f"[User] Failed to fetch pending orders: {e}")
+        return []
+
+
+@router.post("/cancel-order")
+async def cancel_pending_order(
+    order_id: str = Query(...),
+    symbol: str = Query(...),
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a pending order on exchange."""
+    from exchange import cancel_order
+
+    exchange_config = await _exchange_config_for_user(db, user)
+    if not exchange_config.get("live_trading"):
+        raise HTTPException(400, "Not in live trading mode")
+
+    result = await cancel_order(order_id, symbol, exchange_config)
+    if result.get("status") != "cancelled":
+        raise HTTPException(400, result.get("reason") or "Failed to cancel order")
+
+    return {"status": "cancelled", "order_id": order_id}
+
+
 # ─────────────────────────────────────────────
 # Trade History
 # ─────────────────────────────────────────────

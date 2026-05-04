@@ -55,6 +55,8 @@ from notifier import (
     notify_ai_analysis,
     notify_error,
     notify_pre_filter_blocked,
+    notify_signal_batched,
+    notify_signal_queued,
     notify_signal_received,
     notify_trade_executed,
 )
@@ -431,10 +433,21 @@ class SignalProcessor:
         # Optimization 4: Check batch signals
         batched = await _check_batch_signals(signal.ticker, signal, raw_body)
         if batched:
+            await notify_signal_batched(
+                signal.ticker,
+                signal.direction.value,
+                settings.ai.batch_signals_max_count,
+                settings.ai.batch_signals_window_secs,
+            )
             return {"status": "batched", "reason": "Signal added to batch queue"}
 
         # Check queue limit first (fast rejection for extreme load)
         if not await _check_ticker_queue_limit(signal.ticker, user_id):
+            await notify_signal_queued(
+                signal.ticker,
+                signal.direction.value,
+                f"Queue full for {signal.ticker} - too many pending signals",
+            )
             return {
                 "status": "rejected",
                 "reason": f"Queue full for {signal.ticker} - too many pending signals",
@@ -581,6 +594,8 @@ class SignalProcessor:
                 result = await self._execute_trade(decision, user_id, user_settings)
             else:
                 result = {"status": "rejected", "reason": decision.reason}
+                # Notify rejection to Telegram
+                await notify_trade_executed(decision, result)
 
             self._update_reserved_event(
                 reservation,

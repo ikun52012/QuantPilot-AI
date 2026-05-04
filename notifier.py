@@ -24,9 +24,14 @@ _PHRASES = {
     "en": {
         "signal_received": "📡 <b>Signal Received</b>",
         "signal_blocked": "🚫 <b>Signal Blocked (Pre-Filter)</b>",
+        "signal_batched": "📦 <b>Signal Batched (Duplicate Detection)</b>",
+        "signal_queued": "⏳ <b>Signal Queued</b>",
         "ai_analysis": "AI Analysis",
         "trade_executed": "🎯 <b>Trade Executed</b>",
         "trade_failed": "💥 <b>Trade Failed</b>",
+        "trade_rejected": "🚫 <b>Trade Rejected</b>",
+        "trade_blocked": "⏸️ <b>Trade Blocked</b>",
+        "execution_blocked": "🛡️ <b>Execution Blocked</b>",
         "system_error": "🔴 <b>System Error</b>",
         "daily_summary": "Daily Summary",
         "ticker": "Ticker",
@@ -54,9 +59,14 @@ _PHRASES = {
     "zh": {
         "signal_received": "📡 <b>收到信号</b>",
         "signal_blocked": "🚫 <b>信号被拦截（预过滤）</b>",
+        "signal_batched": "📦 <b>信号被批量处理（重复检测）</b>",
+        "signal_queued": "⏳ <b>信号已排队</b>",
         "ai_analysis": "AI 分析",
         "trade_executed": "🎯 <b>交易已执行</b>",
         "trade_failed": "💥 <b>交易失败</b>",
+        "trade_rejected": "🚫 <b>交易被拒绝</b>",
+        "trade_blocked": "⏸️ <b>交易被拦截</b>",
+        "execution_blocked": "🛡️ <b>执行被拦截</b>",
         "system_error": "🔴 <b>系统错误</b>",
         "daily_summary": "每日总结",
         "ticker": "交易对",
@@ -150,6 +160,32 @@ async def notify_pre_filter_blocked(ticker: str, direction: str, reason: str):
     await send_telegram(text)
 
 
+async def notify_signal_batched(ticker: str, direction: str, batch_count: int, window_secs: int):
+    """Notify when a signal is batched with duplicates."""
+    text = (
+        f"{_t('signal_batched')}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{_t('ticker')}: <code>{ticker}</code>\n"
+        f"{_t('direction')}: {direction.upper()}\n"
+        f"📊 Batch count: {batch_count}\n"
+        f"⏱️ Window: {window_secs}s\n"
+        f"💡 Reason: Too many same-direction signals within window"
+    )
+    await send_telegram(text)
+
+
+async def notify_signal_queued(ticker: str, direction: str, reason: str):
+    """Notify when a signal is queued/rejected due to queue limit."""
+    text = (
+        f"{_t('signal_queued')}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{_t('ticker')}: <code>{ticker}</code>\n"
+        f"{_t('direction')}: {direction.upper()}\n"
+        f"{_t('reason')}: {reason}"
+    )
+    await send_telegram(text)
+
+
 async def notify_ai_analysis(ticker: str, analysis: AIAnalysis):
     """Notify AI analysis results."""
     emoji_map = {
@@ -208,10 +244,41 @@ async def notify_trade_executed(decision: TradeDecision, order_result: dict):
             f"{_t('trade_failed')}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"{_t('ticker')}: <code>{decision.ticker}</code>\n"
+            f"{_t('direction')}: <b>{decision.direction.value.upper() if decision.direction else 'N/A'}</b>\n"
             f"{_t('error')}: {order_result.get('reason', 'Unknown')}"
         )
+        if decision.ai_analysis:
+            text += f"\n🤖 {_t('confidence')}: {decision.ai_analysis.confidence:.0%}"
+    elif status == "rejected":
+        text = (
+            f"{_t('trade_rejected')}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{_t('ticker')}: <code>{decision.ticker}</code>\n"
+            f"{_t('direction')}: <b>{decision.direction.value.upper() if decision.direction else 'N/A'}</b>\n"
+            f"{_t('reason')}: {order_result.get('reason', 'Unknown rejection reason')}"
+        )
+        if decision.ai_analysis:
+            text += f"\n🤖 {_t('confidence')}: {decision.ai_analysis.confidence:.0%}"
+        trading_control = order_result.get("trading_control", {})
+        if trading_control:
+            text += f"\n🛡️ Block: {trading_control.get('block_reason', 'System control')}"
+    elif status == "blocked":
+        text = (
+            f"{_t('execution_blocked')}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{_t('ticker')}: <code>{decision.ticker}</code>\n"
+            f"{_t('direction')}: <b>{decision.direction.value.upper() if decision.direction else 'N/A'}</b>\n"
+            f"{_t('reason')}: {order_result.get('reason', 'Execution blocked')}"
+        )
+        if decision.ai_analysis:
+            text += f"\n🤖 {_t('confidence')}: {decision.ai_analysis.confidence:.0%}"
     else:
-        text = f"ℹ️ {_t('status')}: {status} - {order_result.get('reason', '')}"
+        text = (
+            f"ℹ️ {_t('status')}: {status}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{_t('ticker')}: <code>{decision.ticker}</code>\n"
+            f"{_t('reason')}: {order_result.get('reason', '')}"
+        )
 
     await send_telegram(text)
 

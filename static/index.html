@@ -337,36 +337,8 @@
                         </tbody>
                     </table>
                 </div>
-            </div>
-                <button class="btn btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
-            </section>
-            <div class="card">
-                <div class="card-header">
-                    <h3><i class="ri-stock-line"></i> Open Positions</h3>
-                    <button class="btn btn-sm btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
-                </div>
-                <div class="table-wrapper">
-                    <table class="data-table" id="positions-table">
-                        <thead>
-                            <tr>
-                                <th>Symbol</th>
-                                <th>Side</th>
-                                <th>Size</th>
-                                <th>Entry Price</th>
-                                <th>Mark Price</th>
-                                <th>Liq. Price</th>
-                                <th>Margin</th>
-                                <th>Unrealized P&L</th>
-                                <th>ROE %</th>
-                                <th>Leverage</th>
-                            </tr>
-                        </thead>
-                        <tbody id="positions-body">
-                            <tr><td colspan="9" class="empty-state">Loading positions...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+</div>
+        </section>
 
             <!-- Account Balance -->
             <div class="card mt-4">
@@ -896,6 +868,7 @@
                         <label for="set-ts-mode">Trailing Stop Mode</label>
                         <select id="set-ts-mode" class="select-input" onchange="toggleTSFields()">
                             <option value="none">None (Fixed SL)</option>
+                            <option value="auto">Auto (Smart Selection)</option>
                             <option value="moving">Moving Trailing Stop</option>
                             <option value="breakeven_on_tp1">Breakeven on TP1 Hit</option>
                             <option value="step_trailing">Step Trailing (SL to TP n-1)</option>

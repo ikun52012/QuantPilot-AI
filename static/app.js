@@ -376,7 +376,7 @@ function connectSystemSocket() {
         if (['position_update', 'position_closed', 'trade_executed'].includes(message?.type)) {
             setServerStatus('Realtime live', 'online');
             const page = document.querySelector('.page.active')?.id?.replace('page-', '');
-            if (page === 'positions') loadPositions();
+            if (page === 'positions') { loadPositions(); loadPendingOrders(); }
             if (page === 'dashboard') loadRecentSignals();
         }
     };
@@ -544,7 +544,7 @@ function switchPage(page) {
     }
     if (page === 'dashboard') applyProtocolLaunchContext();
     if (page === 'dashboard') loadDashboard();
-    if (page === 'positions') loadPositions();
+    if (page === 'positions') { loadPositions(); loadPendingOrders(); }
     if (page === 'history') loadHistory();
     if (page === 'analytics') loadAnalytics();
     if (page === 'charts') loadChartPage();
@@ -711,6 +711,52 @@ else { tbody.innerHTML = positions.map(p => {
         document.getElementById('bal-free').textContent = `$${formatNum(balance.free_quote ?? pickBalance(balance.free, balance.quote))}`;
         document.getElementById('bal-used').textContent = `$${formatNum(balance.used_quote ?? pickBalance(balance.used, balance.quote))}`;
     } catch (err) { showToast(err.message, 'error', 'Positions Load Failed'); }
+}
+
+async function loadPendingOrders() {
+    try {
+        const orders = await fetchAPI('/api/pending-orders');
+        const tbody = document.getElementById('pending-orders-body');
+        const badge = document.getElementById('pending-count-badge');
+        if (badge) badge.textContent = orders.length;
+        if (!orders.length) {
+            tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No pending orders</td></tr>';
+            return;
+        }
+        tbody.innerHTML = orders.map(o => {
+            const time = o.timestamp || o.datetime ? new Date(o.timestamp || o.datetime).toLocaleString() : '--';
+            const price = o.price ? `$${formatNum(o.price)}` : 'Market';
+            return `<tr>
+                <td><strong>${escapeHtml(o.symbol || '--')}</strong></td>
+                <td><span class="badge ${o.side === 'buy' ? 'badge-long' : 'badge-short'}">${escapeHtml(o.side || '--')}</span></td>
+                <td>${escapeHtml(o.type || '--')}</td>
+                <td>${escapeHtml(o.amount ? formatNum(o.amount) : '--')}</td>
+                <td>${price}</td>
+                <td>${escapeHtml(time)}</td>
+                <td><span class="badge badge-warning">${escapeHtml(o.status || 'open')}</span></td>
+                <td><button class="btn btn-sm btn-danger" onclick="cancelPendingOrder('${escapeHtml(o.id)}', '${escapeHtml(o.symbol)}')"><i class="ri-close-line"></i></button></td>
+            </tr>`;
+        }).join('');
+    } catch (err) { showToast(err.message, 'error', 'Pending Orders Load Failed'); }
+}
+
+async function cancelPendingOrder(orderId, symbol) {
+    if (!confirm(`Cancel order ${orderId} for ${symbol}?`)) return;
+    try {
+        await fetchAPI(`/api/cancel-order?order_id=${orderId}&symbol=${symbol}`, { method: 'POST' });
+        showToast('Order cancelled', 'success');
+        await loadPendingOrders();
+    } catch (err) { showToast(err.message, 'error', 'Cancel Failed'); }
+}
+
+async function cancelAllPendingOrders() {
+    if (!confirm('Cancel ALL pending orders?')) return;
+    try {
+        const orders = await fetchAPI('/api/pending-orders');
+        await Promise.all(orders.map(o => fetchAPI(`/api/cancel-order?order_id=${o.id}&symbol=${o.symbol}`, { method: 'POST' })));
+        showToast(`Cancelled ${orders.length} orders`, 'success');
+        await loadPendingOrders();
+    } catch (err) { showToast(err.message, 'error', 'Cancel All Failed'); }
 }
 
 // ─── History ───
@@ -1074,7 +1120,7 @@ function toggleTSFields() {
     const mode = document.getElementById('set-ts-mode').value;
     const m = document.getElementById('ts-moving-fields'), p = document.getElementById('ts-profit-fields'), d = document.getElementById('ts-description'), dt = document.getElementById('ts-description-text');
     m.style.display = 'none'; p.style.display = 'none'; d.style.display = 'none';
-    const descs = { none:'', moving:'The stop-loss will trail behind the price by the specified percentage.', breakeven_on_tp1:'When TP1 is reached, the stop-loss moves to the entry price (breakeven).', step_trailing:'As each TP is reached, SL moves to the previous TP price.', profit_pct_trailing:'The trailing stop activates after unrealized profit reaches the threshold.' };
+    const descs = { none:'', auto:'AI automatically selects optimal trailing stop mode based on market conditions, confidence, and trend strength.', moving:'The stop-loss will trail behind the price by the specified percentage.', breakeven_on_tp1:'When TP1 is reached, the stop-loss moves to the entry price (breakeven).', step_trailing:'As each TP is reached, SL moves to the previous TP price.', profit_pct_trailing:'The trailing stop activates after unrealized profit reaches the threshold.' };
     if (mode === 'moving') m.style.display = 'block';
     else if (mode === 'profit_pct_trailing') p.style.display = 'block';
     if (descs[mode]) { dt.textContent = descs[mode]; d.style.display = 'flex'; }
