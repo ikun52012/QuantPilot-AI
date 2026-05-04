@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from loguru import logger
+from sqlalchemy.exc import SQLAlchemyError
 
 from core.cache import cache
 from core.config import settings
@@ -51,6 +52,10 @@ async def _init_database():
             from core.runtime_settings import apply_persisted_admin_settings
             await apply_persisted_admin_settings(session)
             await session.commit()
+        except SQLAlchemyError:
+            # BUG FIX: Rollback on failure so partial state changes are not committed.
+            await session.rollback()
+            raise
         except Exception:
             # BUG FIX: Rollback on failure so partial state changes are not committed.
             await session.rollback()

@@ -9,6 +9,7 @@ import jwt
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -288,5 +289,7 @@ async def get_optional_user(
             "role": user.role,
             "email": user.email,
         }
+    except SQLAlchemyError:
+        return None
     except Exception:
         return None

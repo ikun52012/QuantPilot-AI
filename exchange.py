@@ -147,6 +147,9 @@ async def _create_exchange_order(
                        Required for close/TP/SL orders to target correct position.
                        Optional for open orders (derived from side).
     """
+    import time
+    from core.metrics import EXCHANGE_ERRORS, record_exchange_request
+
     # Validate amount against market limits before placing order
     requested_amount = amount
     amount = _validate_and_adjust_amount(exchange, symbol, amount)
@@ -155,11 +158,13 @@ async def _create_exchange_order(
             f"Adjusted close amount {amount} exceeds requested rollback amount {requested_amount}"
         )
 
+    exchange_id = _exchange_id(exchange)
     errors: list[str] = []
     for attempt_params in _order_create_attempts(exchange, side, params, position_side):
+        start = time.time()
         try:
             if price is None:
-                return await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     exchange.create_order,
                     symbol=symbol,
                     type=order_type,
@@ -167,18 +172,46 @@ async def _create_exchange_order(
                     amount=amount,
                     params=attempt_params,
                 )
-            return await asyncio.to_thread(
-                exchange.create_order,
-                symbol=symbol,
-                type=order_type,
-                side=side,
-                amount=amount,
-                price=price,
-                params=attempt_params,
+            else:
+                result = await asyncio.to_thread(
+                    exchange.create_order,
+                    symbol=symbol,
+                    type=order_type,
+                    side=side,
+                    amount=amount,
+                    price=price,
+                    params=attempt_params,
+                )
+            record_exchange_request(
+                exchange=exchange_id,
+                endpoint="create_order",
+                status="success",
+                latency=time.time() - start,
             )
-        except Exception as exc:
+            return result
+        except ccxt.BaseError as exc:
+            latency = time.time() - start
+            record_exchange_request(
+                exchange=exchange_id,
+                endpoint="create_order",
+                status="error",
+                latency=latency,
+            )
+            EXCHANGE_ERRORS.labels(exchange=exchange_id, error_type=type(exc).__name__).inc()
             errors.append(f"{attempt_params}: {exc}")
-            if not (_exchange_id(exchange) == "okx" and _is_okx_pos_side_error(exc)):
+            if not (exchange_id == "okx" and _is_okx_pos_side_error(exc)):
+                break
+        except Exception as exc:
+            latency = time.time() - start
+            record_exchange_request(
+                exchange=exchange_id,
+                endpoint="create_order",
+                status="error",
+                latency=latency,
+            )
+            EXCHANGE_ERRORS.labels(exchange=exchange_id, error_type=type(exc).__name__).inc()
+            errors.append(f"{attempt_params}: {exc}")
+            if not (exchange_id == "okx" and _is_okx_pos_side_error(exc)):
                 break
     raise RuntimeError("; ".join(errors[-2:]) or f"Failed to create {order_type} order")
 
@@ -913,8 +946,24 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             try:
                 await asyncio.to_thread(exchange.set_leverage, leverage, symbol)
                 logger.info(f"[Exchange] Leverage set: {symbol} {leverage}x")
+            except ccxt.AuthenticationError as e:
+                logger.error(f"[Exchange] Authentication error setting leverage for {symbol}: {e}")
+                return {"status": "error", "reason": f"Authentication failed: {e}"}
+            except ccxt.ExchangeError as e:
+                # Some exchanges reject leverage changes when positions exist or due to margin mode.
+                # If leverage was explicitly requested (>1x) and we cannot set it, abort for safety.
+                if leverage > 1:
+                    logger.error(
+                        f"[Exchange] CRITICAL: Could not set requested leverage {leverage}x for {symbol}: {e}. "
+                        f"Aborting trade to prevent unintended risk exposure."
+                    )
+                    return {
+                        "status": "error",
+                        "reason": f"Leverage setup failed ({leverage}x): {e}. Trade aborted for safety.",
+                    }
+                logger.warning(f"[Exchange] Could not set leverage for {symbol}: {e}. Continuing with default leverage.")
             except Exception as e:
-                logger.warning(f"[Exchange] Could not set leverage for {symbol}: {e}")
+                logger.warning(f"[Exchange] Unexpected error setting leverage for {symbol}: {e}. Continuing with caution.")
 
         if decision.direction in [SignalDirection.LONG]:
             side = "buy"
@@ -1005,6 +1054,12 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                         "order_id": order_id,
                         "cancel_result": cancel_result,
                     }
+            except ccxt.OrderNotFound as e:
+                logger.error(f"[Exchange] Re-fetch order not found: {e}")
+                return {"status": "error", "reason": f"Order not found during verification: {e}", "order_id": order_id}
+            except ccxt.NetworkError as e:
+                logger.error(f"[Exchange] Network error re-fetching order: {e}")
+                return {"status": "error", "reason": f"Network error verifying market order fill: {e}", "order_id": order_id}
             except Exception as e:
                 logger.error(f"[Exchange] Failed to re-fetch order: {e}")
                 return {"status": "error", "reason": f"Cannot verify market order fill: {e}", "order_id": order_id}
@@ -1166,8 +1221,14 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                         result["protection_errors"] = protection_errors
                         result["warning"] = "CRITICAL: Position opened but SL/TP failed - MANUAL STOP LOSS REQUIRED"
                         return result
-                except Exception as rollback_err:
+                except ccxt.BaseError as rollback_err:
                     logger.error(f"[Exchange] CRITICAL: Rollback exception: {rollback_err}")
+                    result["status"] = "partial_protection"
+                    result["protection_errors"] = protection_errors
+                    result["warning"] = "CRITICAL: Rollback failed - MANUAL STOP LOSS REQUIRED"
+                    return result
+                except Exception as rollback_err:
+                    logger.error(f"[Exchange] CRITICAL: Unexpected rollback exception: {rollback_err}")
                     result["status"] = "partial_protection"
                     result["protection_errors"] = protection_errors
                     result["warning"] = "CRITICAL: Rollback failed - MANUAL STOP LOSS REQUIRED"
@@ -1186,6 +1247,9 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
     except ccxt.NetworkError as e:
         logger.error(f"[Exchange] Network error: {e}")
         return {"status": "error", "reason": f"Network error: {e}"}
+    except ccxt.BaseError as e:
+        logger.error(f"[Exchange] Exchange error: {e}")
+        return {"status": "error", "reason": f"Exchange error: {e}"}
     except Exception as e:
         logger.error(f"[Exchange] Order failed: {e}")
         return {"status": "error", "reason": f"Order execution failed: {e}"}
@@ -1204,8 +1268,11 @@ async def _place_stop_loss(exchange, symbol, side, quantity, stop_price, result,
         sl_order = await _create_conditional_order(exchange, symbol, "stop_loss", sl_side, quantity, stop_price, pos_side)
         result["stop_loss_order_id"] = sl_order.get("id")
         logger.info(f"[Exchange] ✅ Stop-loss set at {stop_price} (qty={quantity}, position_side={pos_side})")
-    except Exception as e:
+    except ccxt.BaseError as e:
         logger.error(f"[Exchange] Failed to set stop-loss: {e}")
+        result["stop_loss_error"] = "Failed to set stop-loss order"
+    except Exception as e:
+        logger.error(f"[Exchange] Unexpected error setting stop-loss: {e}")
         result["stop_loss_error"] = "Failed to set stop-loss order"
 
 
@@ -1220,8 +1287,18 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels, p
     pos_side = position_side or ("long" if side == "buy" else "short")
     tp_results = []
 
+    # Validate TP percentages to prevent overselling on partial fills
+    total_qty_pct = sum(tp.qty_pct for tp in tp_levels)
+    if total_qty_pct > 100:
+        logger.warning(f"[Exchange] TP qty_pct sum {total_qty_pct}% exceeds 100%, normalizing to 100%")
+        scale = 100.0 / total_qty_pct
+        normalized_pcts = [tp.qty_pct * scale for tp in tp_levels]
+    else:
+        normalized_pcts = [tp.qty_pct for tp in tp_levels]
+
     for i, tp in enumerate(tp_levels):
-        tp_qty = total_qty * (tp.qty_pct / 100.0)
+        qty_pct = normalized_pcts[i]
+        tp_qty = total_qty * (qty_pct / 100.0)
         if tp_qty <= 0:
             continue
         try:
@@ -1232,19 +1309,29 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels, p
                 "level": i + 1,
                 "price": tp.price,
                 "qty": round(tp_qty, 6),
-                "qty_pct": tp.qty_pct,
+                "qty_pct": qty_pct,
                 "order_id": tp_order.get("id"),
                 "status": "placed",
                 "position_side": pos_side,
             })
-            logger.info(f"[Exchange] ✅ TP{i+1} set at {tp.price} ({tp.qty_pct}% = {tp_qty}, position_side={pos_side})")
-        except Exception as e:
+            logger.info(f"[Exchange] ✅ TP{i+1} set at {tp.price} ({qty_pct}% = {tp_qty}, position_side={pos_side})")
+        except ccxt.BaseError as e:
             logger.error(f"[Exchange] Failed to set TP{i+1}: {e}")
             tp_results.append({
                 "level": i + 1,
                 "price": tp.price,
                 "qty": round(tp_qty, 6),
-                "qty_pct": tp.qty_pct,
+                "qty_pct": qty_pct,
+                "error": "Failed to place take-profit order",
+                "status": "failed",
+            })
+        except Exception as e:
+            logger.error(f"[Exchange] Unexpected error setting TP{i+1}: {e}")
+            tp_results.append({
+                "level": i + 1,
+                "price": tp.price,
+                "qty": round(tp_qty, 6),
+                "qty_pct": qty_pct,
                 "error": "Failed to place take-profit order",
                 "status": "failed",
             })
@@ -1323,6 +1410,9 @@ async def _create_conditional_order(exchange, symbol: str, kind: str, side: str,
                 params=params,
                 position_side=position_side,
             )
+        except ccxt.BaseError as exc:
+            errors.append(f"{order_type}: {exc}")
+            logger.debug(f"[Exchange] {exchange_id} {kind} candidate failed: {order_type} {exc}")
         except Exception as exc:
             errors.append(f"{order_type}: {exc}")
             logger.debug(f"[Exchange] {exchange_id} {kind} candidate failed: {order_type} {exc}")
@@ -1341,6 +1431,11 @@ async def _cancel_exchange_order(exchange, symbol: str, order_id: str) -> dict:
             "order_id": str((result or {}).get("id") or order_id),
             "symbol": symbol,
         }
+    except ccxt.OrderNotFound as exc:
+        return {"status": "not_found", "order_id": order_id, "symbol": symbol}
+    except ccxt.NetworkError as exc:
+        logger.error(f"[Exchange] Network error cancelling order {order_id} on {symbol}: {exc}")
+        return {"status": "error", "order_id": order_id, "symbol": symbol, "reason": f"Network error: {exc}"}
     except Exception as exc:
         if _is_order_not_found_error(exc):
             return {"status": "not_found", "order_id": order_id, "symbol": symbol}
@@ -1373,8 +1468,11 @@ async def cancel_order(order_id: str, ticker: str, exchange_config: dict | None 
             exchange_config.get("market_type") or settings.exchange.market_type,
         )
         return await _cancel_exchange_order(exchange, symbol, order_id)
-    except Exception as exc:
+    except ccxt.BaseError as exc:
         logger.error(f"[Exchange] Failed to cancel order {order_id} for {ticker}: {exc}")
+        return {"status": "error", "order_id": order_id, "ticker": ticker, "reason": str(exc)}
+    except Exception as exc:
+        logger.error(f"[Exchange] Unexpected error cancelling order {order_id} for {ticker}: {exc}")
         return {"status": "error", "order_id": order_id, "ticker": ticker, "reason": str(exc)}
 
 
@@ -1424,8 +1522,11 @@ async def place_protective_stop(
         if cancelled_order_id:
             result["replaced_order_id"] = cancelled_order_id
         return result
-    except Exception as e:
+    except ccxt.BaseError as e:
         logger.error(f"[Exchange] Failed to place protective stop: {e}")
+        return {"status": "error", "reason": str(e)}
+    except Exception as e:
+        logger.error(f"[Exchange] Unexpected error placing protective stop: {e}")
         return {"status": "error", "reason": str(e)}
 
 
@@ -1480,8 +1581,11 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
             exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
             return {"status": "closed", "order_id": order.get("id"), "exit_price": exit_price, "position_side": pos_side}
         return {"status": "no_position", "reason": f"No open {position_side or ''} position to close"}
-    except Exception as e:
+    except ccxt.BaseError as e:
         logger.error(f"[Exchange] Failed to close position: {e}")
+        return {"status": "error", "reason": f"Failed to close position: {e}"}
+    except Exception as e:
+        logger.error(f"[Exchange] Unexpected error closing position: {e}")
         return {"status": "error", "reason": "Failed to close position"}
 
 

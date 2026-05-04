@@ -212,6 +212,8 @@ try:
         check(f"端口 {port} 可用", False, "端口已被占用，请停止占用进程或修改 PORT 环境变量", warn=True)
     else:
         check(f"端口 {port} 可用", True)
+except (OSError, TimeoutError, ValueError):
+    check(f"端口 {port} 检测", False, "检测失败", warn=True)
 except Exception:
     check(f"端口 {port} 检测", False, "检测失败", warn=True)
 

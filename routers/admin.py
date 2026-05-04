@@ -656,15 +656,57 @@ async def update_settings(
     db: AsyncSession = Depends(get_db),
 ):
     """Update admin settings."""
+    if not isinstance(settings_data, dict):
+        raise HTTPException(400, "Settings data must be a JSON object")
+
+    MAX_SETTINGS_KEYS = 100
+    if len(settings_data) > MAX_SETTINGS_KEYS:
+        raise HTTPException(400, f"Too many settings keys (max {MAX_SETTINGS_KEYS})")
+
+    MAX_KEY_LENGTH = 100
+    MAX_VALUE_LENGTH = 10_000
+    SAFE_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
+
     for key, value in settings_data.items():
-        await set_admin_setting(db, key, str(value))
+        if not isinstance(key, str):
+            raise HTTPException(400, f"Setting key must be a string: {key!r}")
+        if len(key) > MAX_KEY_LENGTH:
+            raise HTTPException(400, f"Setting key too long (max {MAX_KEY_LENGTH} chars): {key[:50]}...")
+        if not SAFE_KEY_PATTERN.match(key):
+            raise HTTPException(400, f"Setting key contains invalid characters: {key!r}")
+        value_str = str(value)
+        if len(value_str) > MAX_VALUE_LENGTH:
+            raise HTTPException(400, f"Setting value too long (max {MAX_VALUE_LENGTH} chars): {key}")
+        await set_admin_setting(db, key, value_str)
 
     await db.commit()
 
     # Audit log
-    await _add_audit_log(db, admin, "update_settings", "settings", "", "Updated admin settings", request)
+    await _add_audit_log(db, admin, "update_settings", "settings", "", f"Updated {len(settings_data)} admin settings", request)
 
     return {"status": "ok"}
+
+
+@router.post("/reload-config")
+async def reload_config(
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hot-reload configuration from database without restarting the server."""
+    from core.hot_reload import reload_settings_from_db
+
+    try:
+        changed = await reload_settings_from_db(db)
+        await _add_audit_log(db, admin, "reload_config", "settings", "", f"Reloaded {len(changed)} setting(s)", request)
+        return {
+            "status": "ok",
+            "reloaded": len(changed),
+            "changed": {k: {"old": str(v[0]), "new": str(v[1])} for k, v in changed.items()},
+        }
+    except Exception as exc:
+        logger.error(f"[Admin] Config reload failed: {exc}")
+        raise HTTPException(500, f"Config reload failed: {exc}") from exc
 
 
 @router.get("/webhook-config")
@@ -1309,6 +1351,8 @@ def os_access_writable(path: Path) -> bool:
     try:
         path.mkdir(parents=True, exist_ok=True)
         return os.access(path, os.W_OK)
+    except (OSError, PermissionError):
+        return False
     except Exception:
         return False
 
@@ -1413,6 +1457,8 @@ async def update_filter_thresholds(
         persisted = json.loads(current_raw) if current_raw else {}
         if not isinstance(persisted, dict):
             persisted = {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        persisted = {}
     except Exception:
         persisted = {}
 

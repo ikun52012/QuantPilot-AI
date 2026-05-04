@@ -100,6 +100,8 @@ async def _load_encrypted_dict(session: AsyncSession, key: str) -> dict[str, Any
         if isinstance(payload, dict):
             decrypted = decrypt_settings_payload(payload)
             return decrypted if isinstance(decrypted, dict) else {}
+    except json.JSONDecodeError:
+        return {}
     except Exception:
         return {}
     return {}
@@ -346,6 +348,8 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 enabled = json.loads(openrouter_enabled_raw)
                 if isinstance(enabled, bool):
                     settings.ai.openrouter_enabled = enabled
+            except json.JSONDecodeError:
+                pass
             except Exception:
                 pass
 
@@ -355,6 +359,8 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 enabled = json.loads(custom_provider_enabled_raw)
                 if isinstance(enabled, bool):
                     settings.ai.custom_provider_enabled = enabled
+            except json.JSONDecodeError:
+                pass
             except Exception:
                 pass
 
@@ -380,6 +386,8 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 temp = float(ai_temperature_raw)
                 if 0 <= temp <= 2:
                     settings.ai.temperature = temp
+            except (ValueError, TypeError):
+                pass
             except Exception:
                 pass
 
@@ -389,6 +397,8 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 tokens = int(ai_max_tokens_raw)
                 if 100 <= tokens <= 4000:
                     settings.ai.max_tokens = tokens
+            except (ValueError, TypeError):
+                pass
             except Exception:
                 pass
 

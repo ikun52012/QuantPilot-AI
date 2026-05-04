@@ -96,6 +96,8 @@ def safe_str(value: Any, default: str = '', max_length: int | None = None) -> st
         if max_length and len(result) > max_length:
             result = result[:max_length]
         return result
+    except (TypeError, ValueError):
+        return default
     except Exception:
         return default
 

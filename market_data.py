@@ -661,6 +661,8 @@ async def _safe_fetch_funding_rate(exchange: Any, symbol: str) -> float | None:
         funding = await asyncio.to_thread(exchange.fetch_funding_rate, symbol)
         if isinstance(funding, dict):
             return _to_optional_float(funding.get("fundingRate"))
+    except (OSError, ConnectionError, TimeoutError):
+        return None
     except Exception:
         return None
     return None
@@ -680,6 +682,8 @@ async def _safe_fetch_open_interest(exchange: Any, symbol: str) -> tuple[float |
                 oi_change = ((oi - prev_oi) / prev_oi) * 100
                 return oi, oi_change
             return oi, None
+    except (OSError, ConnectionError, TimeoutError):
+        pass
     except Exception:
         pass
     return None, None
@@ -691,6 +695,8 @@ async def _safe_fetch_long_short_ratio(exchange: Any, symbol: str) -> float | No
             ratio_data = await asyncio.to_thread(exchange.fetch_long_short_ratio, symbol)
             if isinstance(ratio_data, dict):
                 return _to_optional_float(ratio_data.get("longShortRatio"))
+    except (OSError, ConnectionError, TimeoutError):
+        pass
     except Exception:
         pass
     return None
@@ -704,6 +710,8 @@ async def _safe_fetch_ohlcv(exchange: Any, symbol: str, timeframe: str, limit: i
     try:
         raw_ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
         return _clean_ohlcv_data(cast(list[list[Any]], raw_ohlcv), limit)  # P2-10: Clean data
+    except (OSError, ConnectionError, TimeoutError):
+        return []
     except Exception:
         return []
 

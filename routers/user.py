@@ -57,6 +57,8 @@ def _loads_list(json_str: str) -> list:
     try:
         data = json.loads(str(json_str or "[]"))
         return data if isinstance(data, list) else []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
     except Exception:
         return []
 

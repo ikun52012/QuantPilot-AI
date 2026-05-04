@@ -1176,6 +1176,8 @@ def _local_rule_analysis(system: str, user: str) -> str:
         if tf_match:
             tf_match.group(1)
 
+    except (TypeError, AttributeError):
+        pass
     except Exception:
         pass
 
@@ -1206,6 +1208,8 @@ def _local_rule_analysis(system: str, user: str) -> str:
         if atr_match:
             atr_pct = float(atr_match.group(1))
 
+    except (TypeError, ValueError, AttributeError):
+        pass
     except Exception:
         pass
 

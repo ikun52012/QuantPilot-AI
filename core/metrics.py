@@ -341,6 +341,8 @@ try:
         "platform": platform.platform(),
         "machine": platform.machine(),
     })
+except (OSError, AttributeError):
+    pass
 except Exception:
     pass
 
@@ -410,6 +412,8 @@ def update_db_pool_metrics(pool_type: str = "async"):
             DB_POOL_OVERFLOW.labels(pool_type=pool_type).set(overflow)
             DB_CONNECTIONS.labels(status="active").set(checked_out)
             DB_CONNECTIONS.labels(status="idle").set(max(0, pool_size - checked_out))
+        except (AttributeError, TypeError):
+            pass
         except Exception:
             pass
 
@@ -441,6 +445,8 @@ def update_exchange_pool_metrics():
             exchange_counts[exchange_id] = exchange_counts.get(exchange_id, 0) + 1
         for exchange_id, count in exchange_counts.items():
             EXCHANGE_POOL_SIZE.labels(exchange=exchange_id).set(count)
+    except (ImportError, AttributeError, TypeError):
+        pass
     except Exception:
         pass
 

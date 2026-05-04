@@ -2,6 +2,7 @@
 QuantPilot AI - Application Factory
 Creates and configures the FastAPI application instance.
 """
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -169,6 +170,8 @@ def _setup_page_routes(app: FastAPI):
             if "application/json" in content_type:
                 try:
                     payload = await request.json()
+                except json.JSONDecodeError:
+                    payload = {}
                 except Exception:
                     payload = {}
                 if isinstance(payload, dict):

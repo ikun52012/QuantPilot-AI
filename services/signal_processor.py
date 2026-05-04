@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import time as _time
+
+import httpx
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
@@ -65,6 +67,7 @@ from services.order_reconciler import record_order_event
 
 _WEBHOOK_LOCKS: dict[str, asyncio.Lock] = {}
 _WEBHOOK_LOCKS_GUARD = asyncio.Lock()
+_WEBHOOK_LOCK_MAX_SIZE = 5000
 _SENSITIVE_EVENT_KEY_PARTS = ("secret", "token", "password", "api_key", "api_secret")
 
 # Per-ticker locks for concurrent signal handling
@@ -91,9 +94,11 @@ _AI_RESPONSE_TIMES_MAX_SAMPLES = 20
 _PENDING_BATCH_SIGNALS: dict[str, list[tuple[TradingViewSignal, float, dict | None]]] = {}
 _BATCH_SIGNALS_GUARD = asyncio.Lock()
 
-# Prefetch market data cache (Optimization 5)
+# Prefetch market data cache (Optimization 5) with TTL
 _PREFETCHED_MARKET_DATA: dict[str, tuple[float, MarketContext]] = {}
 _PREFETCH_GUARD = asyncio.Lock()
+_PREFETCH_TTL_SECONDS = 30.0
+_PREFETCH_MAX_SIZE = 500
 
 
 async def _track_ai_response_time(response_time: float) -> None:
@@ -182,24 +187,26 @@ async def _prefetch_market_data_async(ticker: str) -> MarketContext | None:
 
     async with _PREFETCH_GUARD:
         cached = _PREFETCHED_MARKET_DATA.get(cache_key)
-        if cached and (now - cached[0]) < 30:
-            logger.debug(f"[SignalProcessor] Using prefetched market data for {ticker}")
-            return cached[1]
+        if cached:
+            timestamp, context = cached
+            if now - timestamp < _PREFETCH_TTL_SECONDS:
+                return context
+            # Expired - clean up
+            _PREFETCHED_MARKET_DATA.pop(cache_key, None)
 
+    # Cache miss or expired - fetch fresh data (outside lock to reduce contention)
     try:
-        enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
-        if enhanced_filters:
-            market = await fetch_enhanced_market_context(ticker)
-        else:
-            market = await fetch_market_context(ticker)
-
+        context = await fetch_market_context(ticker)
         async with _PREFETCH_GUARD:
-            _PREFETCHED_MARKET_DATA[cache_key] = (now, market)
-            if len(_PREFETCHED_MARKET_DATA) > 100:
+            # Evict oldest entries if cache is too large
+            if len(_PREFETCHED_MARKET_DATA) >= _PREFETCH_MAX_SIZE:
                 oldest_key = next(iter(_PREFETCHED_MARKET_DATA))
-                _PREFETCHED_MARKET_DATA.pop(oldest_key)
-
-        return market
+                _PREFETCHED_MARKET_DATA.pop(oldest_key, None)
+            _PREFETCHED_MARKET_DATA[cache_key] = (now, context)
+        return context
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning(f"[SignalProcessor] Prefetch market data failed for {ticker}: {e}")
+        return None
     except Exception as e:
         logger.warning(f"[SignalProcessor] Prefetch market data failed for {ticker}: {e}")
         return None
@@ -338,6 +345,13 @@ async def _fingerprint_lock(fingerprint: str) -> asyncio.Lock:
         if lock is None:
             lock = asyncio.Lock()
             _WEBHOOK_LOCKS[fingerprint] = lock
+            # Prevent unbounded memory growth
+            if len(_WEBHOOK_LOCKS) > _WEBHOOK_LOCK_MAX_SIZE:
+                keys_to_remove = list(_WEBHOOK_LOCKS.keys())[:_WEBHOOK_LOCK_MAX_SIZE // 2]
+                for k in keys_to_remove:
+                    old_lock = _WEBHOOK_LOCKS.get(k)
+                    if old_lock and not old_lock.locked():
+                        _WEBHOOK_LOCKS.pop(k, None)
         return lock
 
 
@@ -623,7 +637,6 @@ class SignalProcessor:
                     reason=str(e),
                     payload=raw_body or signal.model_dump(),
                 )
-                await self.session.commit()
 
             return {"status": "error", "reason": str(e)}
 

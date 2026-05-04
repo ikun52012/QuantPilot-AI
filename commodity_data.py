@@ -254,6 +254,8 @@ def _calculate_atr_yf(hist: Any, period: int = 14) -> float:
 
         atr = sum(tr_list[-period:]) / period
         return atr
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return 0
     except Exception:
         return 0
 

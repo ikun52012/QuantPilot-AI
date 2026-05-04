@@ -110,6 +110,9 @@ def _derive_fernet_key(raw: str) -> bytes:
     try:
         Fernet(raw.encode())
         return raw.encode()
+    except (ValueError, TypeError):
+        digest = hashlib.sha256(raw.encode()).digest()
+        return base64.urlsafe_b64encode(digest)
     except Exception:
         digest = hashlib.sha256(raw.encode()).digest()
         return base64.urlsafe_b64encode(digest)
@@ -230,6 +233,8 @@ def verify_password(password: str, password_hash: str) -> bool:
         stored_hash = bytes.fromhex(parts[2])
         dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
         return hmac.compare_digest(dk, stored_hash)
+    except (ValueError, IndexError, TypeError):
+        return False
     except Exception:
         return False
 

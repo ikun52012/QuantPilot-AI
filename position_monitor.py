@@ -165,12 +165,12 @@ async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
                             stats[key] = stats.get(key, 0) + value
                     except Exception as exc:
                         stats["errors"] += 1
-                        logger.error(f"[PositionMonitor] Failed to reconcile {position.id}: {exc}")
+                        logger.exception(f"[PositionMonitor] Failed to reconcile {position.id}: {exc}")
 
                 await session.commit()
         except Exception as exc:
             stats["errors"] += 1
-            logger.error(f"[PositionMonitor] Cycle failed: {exc}")
+            logger.exception(f"[PositionMonitor] Cycle failed: {exc}")
 
         return stats
 
@@ -215,7 +215,7 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
                     "sandbox_mode": safe_bool(exchange.get("sandbox_mode"), config["sandbox_mode"]),
                     "market_type": exchange.get("market_type") or config["market_type"],
                 })
-            except Exception as exc:
+            except (ValueError, TypeError, KeyError) as exc:
                 logger.warning(f"[PositionMonitor] Could not decrypt user exchange config: {exc}")
     return config
 
@@ -527,16 +527,20 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     order_age_secs = (time.time() * 1000 - created_at) / 1000
                     limit_timeout = _position_limit_timeout_secs(position)
                     if order_age_secs > limit_timeout:
-                        # Cancel the order
+                        # Cancel the order if it still exists
                         try:
                             await asyncio.to_thread(exchange.cancel_order, position.entry_order_id, symbol)
-                            position.status = "closed"
-                            position.close_reason = "limit_order_timeout"
-                            position.closed_at = utcnow()
-                            position.updated_at = utcnow()
-                            logger.info(f"[PositionMonitor] Cancelled expired limit order for {position.ticker}")
+                        except ccxt.OrderNotFound:
+                            pass
+                        except ccxt.NetworkError as e:
+                            logger.warning(f"[PositionMonitor] Network error cancelling limit order: {e}")
                         except Exception as e:
                             logger.warning(f"[PositionMonitor] Failed to cancel limit order: {e}")
+                        position.status = "closed"
+                        position.close_reason = "limit_order_timeout"
+                        position.closed_at = utcnow()
+                        position.updated_at = utcnow()
+                        logger.info(f"[PositionMonitor] Cancelled expired limit order for {position.ticker}")
         finally:
             await _close_exchange(exchange)
     except ccxt.OrderNotFound:
@@ -546,6 +550,8 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
         position.closed_at = utcnow()
         position.updated_at = utcnow()
         logger.warning(f"[PositionMonitor] Limit order not found on exchange for {position.ticker}")
+    except ccxt.BaseError as e:
+        logger.warning(f"[PositionMonitor] Exchange error checking limit order for {position.ticker}: {e}")
     except Exception as e:
         logger.debug(f"[PositionMonitor] Error checking limit order for {position.ticker}: {e}")
 
@@ -577,6 +583,8 @@ async def _create_protective_orders_for_position(position: PositionModel, exchan
                     tp_order = await _cco(exchange, symbol, "take_profit", tp_side, round(tp_qty, 6), tp_price, pos_side)
                     tp_ids.append(str(tp_order.get("id") or ""))
                     logger.info(f"[PositionMonitor] TP{i+1} created for filled limit: price={tp_price}")
+                except ccxt.BaseError as e:
+                    logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
                 except Exception as e:
                     logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
             if tp_ids:
@@ -590,6 +598,8 @@ async def _create_protective_orders_for_position(position: PositionModel, exchan
                 sl_order = await _cco(exchange, symbol, "stop_loss", tp_side, filled_qty, sl_price, pos_side)
                 position.stop_loss_order_id = str(sl_order.get("id") or "")
                 logger.info(f"[PositionMonitor] SL created for filled limit: price={sl_price}")
+            except ccxt.BaseError as e:
+                logger.error(f"[PositionMonitor] Failed to create SL for filled limit: {e}")
             except Exception as e:
                 logger.error(f"[PositionMonitor] Failed to create SL for filled limit: {e}")
 
@@ -1251,7 +1261,10 @@ async def _adjust_sl_for_volatility(
     """
     entry_price = safe_float(position.entry_price)
     current_stop = safe_float(position.stop_loss)
-    original_atr_pct = safe_float(position.original_atr_pct or position.entry_price * 0.02 / position.entry_price * 100)
+    original_atr_pct = safe_float(getattr(position, "original_atr_pct", None), 0.0)
+    if original_atr_pct <= 0:
+        # Fallback: estimate from entry price (assume 2% default ATR)
+        original_atr_pct = 2.0
 
     if entry_price <= 0 or current_stop <= 0 or current_atr_pct <= 0:
         return False
@@ -1345,6 +1358,8 @@ async def monitor_black_swan_events(session: AsyncSession) -> dict[str, Any]:
         try:
             ticker_data = await get_ticker(ticker)
             current_price = safe_float(ticker_data.get("last") or ticker_data.get("price") or 0)
+        except ccxt.BaseError:
+            continue
         except Exception:
             continue
 
@@ -1410,6 +1425,8 @@ async def monitor_black_swan_events(session: AsyncSession) -> dict[str, Any]:
                             "reason": "Losing during black swan - limit losses",
                         })
 
+                except (ValueError, TypeError) as e:
+                    logger.error(f"[PositionMonitor] Failed to handle position: {e}")
                 except Exception as e:
                     logger.error(f"[PositionMonitor] Failed to handle position: {e}")
 

@@ -1,0 +1,267 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "quantpilot-ai",
+    "title": "QuantPilot AI - Trading Signals",
+    "tags": ["quantpilot", "trading", "crypto"],
+    "timezone": "utc",
+    "schemaVersion": 36,
+    "refresh": "10s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Signal Server Info",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "signal_server_info",
+            "legendFormat": "{{version}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "options": {"graphMode": "none", "colorMode": "value"}
+      },
+      {
+        "id": 2,
+        "title": "Live Trading",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "signal_server_info{live_trading=\"True\"}",
+            "legendFormat": "Live",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 3, "x": 6, "y": 0},
+        "options": {"graphMode": "none", "colorMode": "background"},
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"options": {"match": "null", "result": {"text": "Paper"}}, "type": "special"}
+            ],
+            "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Signals Received (1m rate)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(signals_received_total[1m])",
+            "legendFormat": "{{ticker}} {{direction}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "fieldConfig": {"defaults": {"unit": "ops", "custom": {"lineWidth": 2}}}
+      },
+      {
+        "id": 4,
+        "title": "PreFilter Pass vs Block",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(signals_passed_prefilter_total[1m])",
+            "legendFormat": "Passed",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(signals_blocked_prefilter_total[1m])",
+            "legendFormat": "Blocked: {{reason}}",
+            "refId": "B"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      },
+      {
+        "id": 5,
+        "title": "AI Analysis Latency (p95)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ai_analysis_latency_seconds_bucket[5m]))",
+            "legendFormat": "{{provider}} p95",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+        "fieldConfig": {"defaults": {"unit": "s", "custom": {"lineWidth": 2}}}
+      },
+      {
+        "id": 6,
+        "title": "AI Confidence Distribution",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "rate(ai_confidence_bucket[5m])",
+            "legendFormat": "{{provider}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+        "options": {"calculate": false, "color": {"mode": "opacity", "scale": "exponential"}}
+      },
+      {
+        "id": 7,
+        "title": "Trades Executed (1m rate)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(trades_executed_total[1m])",
+            "legendFormat": "{{ticker}} {{direction}} {{status}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20}
+      },
+      {
+        "id": 8,
+        "title": "Trade PnL Distribution",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "rate(trades_pnl_percent_bucket[5m])",
+            "legendFormat": "{{ticker}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20}
+      },
+      {
+        "id": 9,
+        "title": "Exchange Request Rate",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(exchange_requests_total[1m])",
+            "legendFormat": "{{exchange}} {{endpoint}} {{status}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28}
+      },
+      {
+        "id": 10,
+        "title": "Exchange Errors (1m rate)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(exchange_errors_total[1m])",
+            "legendFormat": "{{exchange}} {{error_type}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28}
+      },
+      {
+        "id": 11,
+        "title": "HTTP Request Latency (p95)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_latency_seconds_bucket[5m]))",
+            "legendFormat": "{{method}} {{path}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+        "fieldConfig": {"defaults": {"unit": "s"}}
+      },
+      {
+        "id": 12,
+        "title": "DB Connections",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "db_connections",
+            "legendFormat": "{{status}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36}
+      },
+      {
+        "id": 13,
+        "title": "Daily Loss %",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "daily_loss_percent",
+            "legendFormat": "{{user_id}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 44},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 10,
+            "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 3}, {"color": "red", "value": 5}]}
+          }
+        }
+      },
+      {
+        "id": 14,
+        "title": "Open Positions",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "open_positions_count",
+            "legendFormat": "{{user_id}} {{direction}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 44}
+      },
+      {
+        "id": 15,
+        "title": "Unrealized PnL (USDT)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "unrealized_pnl_usdt",
+            "legendFormat": "{{user_id}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 44}
+      },
+      {
+        "id": 16,
+        "title": "Cache Hit/Miss Rate",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(cache_hits_total[5m])",
+            "legendFormat": "Hits {{cache_type}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(cache_misses_total[5m])",
+            "legendFormat": "Misses {{cache_type}}",
+            "refId": "B"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 50}
+      },
+      {
+        "id": 17,
+        "title": "AI Cost (USD/hour)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "increase(ai_cost_usd_total[1h])",
+            "legendFormat": "{{provider}}",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 50}
+      }
+    ]
+  },
+  "overwrite": true
+}

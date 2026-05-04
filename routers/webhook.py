@@ -69,8 +69,11 @@ async def webhook(
 
     try:
         signal = TradingViewSignal(**body)
-    except Exception as err:
+    except (ValueError, TypeError, KeyError) as err:
         logger.error(f"[Webhook] Invalid signal: {err}")
+        raise HTTPException(400, f"Invalid signal: {err}") from err
+    except Exception as err:
+        logger.error(f"[Webhook] Unexpected error validating signal: {err}")
         raise HTTPException(400, f"Invalid signal: {err}") from err
 
     user = await _find_user_by_secret(db, secret)
@@ -124,7 +127,7 @@ async def _process_webhook_background(
             await session.commit()
             logger.info(f"[Webhook] Background processing complete: {result.get('status')}")
     except Exception as exc:
-        logger.error(f"[Webhook] Background processing error: {exc}")
+        logger.exception(f"[Webhook] Background processing error: {exc}")
 
 
 async def _find_user_by_secret(db: AsyncSession, secret: str):

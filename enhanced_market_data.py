@@ -120,6 +120,8 @@ def _get_hardcoded_crypto_events() -> list[dict]:
                     "impact": event["impact"],
                     "days_until": days_diff,
                 })
+        except (ValueError, TypeError, AttributeError):
+            pass
         except Exception:
             pass
 
@@ -140,6 +142,8 @@ async def check_macro_event_risk() -> tuple[bool, str | None]:
             time_diff = (event_time - now).total_seconds()
             if -1800 <= time_diff <= 1800:
                 return False, f"High-impact event '{event.get('event')}' at {event_time.strftime('%H:%M')} UTC"
+        except (ValueError, TypeError, AttributeError):
+            pass
         except Exception:
             pass
 
@@ -205,6 +209,8 @@ async def fetch_liquidation_heatmap(symbol: str) -> dict[str, Any]:
                                     heatmap["long_liquidations"].append({"price": price, "usd": liq_usd})
                                 elif side == "buy":
                                     heatmap["short_liquidations"].append({"price": price, "usd": liq_usd})
+                except (aiohttp.ClientError, OSError, asyncio.TimeoutError):
+                    pass
                 except Exception:
                     pass
 

@@ -9,6 +9,7 @@ import re
 import subprocess
 import time
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -234,6 +235,8 @@ def _health_payload() -> dict[str, Any] | None:
             data = response.read().decode("utf-8", errors="ignore")
         payload = json.loads(data)
         return payload if isinstance(payload, dict) else None
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+        return None
     except Exception:
         return None
 

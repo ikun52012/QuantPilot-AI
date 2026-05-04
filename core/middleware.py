@@ -16,6 +16,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from core.config import settings
+from core.metrics import record_http_request
 from core.request_utils import client_ip
 
 # ─────────────────────────────────────────────
@@ -76,6 +77,14 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 f"{response.status_code} in {duration:.3f}s rid={request_id}"
             )
 
+            # Record Prometheus metrics
+            record_http_request(
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                latency=duration,
+            )
+
             # Add timing header
             response.headers["X-Response-Time"] = f"{duration:.3f}s"
             return response
@@ -85,6 +94,13 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             logger.error(
                 f"[Request] {request.method} {request.url.path} "
                 f"failed after {duration:.3f}s rid={request_id}: {e}"
+            )
+            # Record failed request metrics
+            record_http_request(
+                method=request.method,
+                path=request.url.path,
+                status=500,
+                latency=duration,
             )
             raise
 
@@ -135,6 +151,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 if redis_obj.is_connected():
                     self._redis = redis_obj
                     return self._redis
+        except (ConnectionError, TimeoutError):
+            pass
         except Exception:
             pass
         return None
@@ -167,6 +185,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             else:
                 await client.setex(redis_key, ttl, str(count + 1))
             return True
+        except (ConnectionError, TimeoutError, OSError):
+            return self._check_rate_memory(prefix, key, max_attempts, window_secs)
         except Exception:
             return self._check_rate_memory(prefix, key, max_attempts, window_secs)
 
@@ -179,6 +199,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             client = await redis._get_client()
             if client:
                 await client.delete(f"rl:{prefix}:{key}")
+        except (ConnectionError, TimeoutError):
+            pass
         except Exception:
             pass
 

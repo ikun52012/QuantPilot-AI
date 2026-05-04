@@ -139,6 +139,8 @@ class ConnectionManager:
         for connection in connections:
             try:
                 await connection.send_json(message)
+            except (RuntimeError, OSError):
+                pass
             except Exception:
                 pass
 
@@ -147,6 +149,8 @@ class ConnectionManager:
             for connection in connections:
                 try:
                     await connection.send_json(message)
+                except (RuntimeError, OSError):
+                    pass
                 except Exception:
                     pass
 

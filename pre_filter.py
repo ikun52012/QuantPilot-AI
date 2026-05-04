@@ -13,7 +13,9 @@ from datetime import timedelta
 from typing import Any
 
 from loguru import logger
+from sqlalchemy.exc import SQLAlchemyError
 
+from core.account_risk import check_account_loss_limits
 from core.utils.common import position_symbol_key
 from core.utils.datetime import utcnow
 from models import MarketContext, PreFilterResult, SignalDirection, TradingViewSignal
@@ -52,6 +54,8 @@ def _load_filter_stats() -> dict[str, dict[str, int]]:
                             continue
                     loaded[check_name] = normalized_counts
                 return loaded
+    except (FileNotFoundError, PermissionError, OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
     except Exception:
         pass
     return {}
@@ -64,6 +68,8 @@ def _save_filter_stats(stats: dict[str, dict[str, int]]) -> None:
         os.makedirs("data", exist_ok=True)
         with open(_STATS_FILE, "w") as f:
             json.dump(stats, f, indent=2)
+    except (OSError, PermissionError, TypeError, ValueError):
+        pass
     except Exception:
         pass
 
@@ -197,6 +203,8 @@ class FilterThresholds:
             if env_value:
                 try:
                     self._custom_thresholds[threshold_key] = float(env_value)
+                except (ValueError, TypeError):
+                    pass
                 except Exception:
                     pass
 
@@ -362,6 +370,13 @@ async def count_today_executed_trades_async(user_id: str | None = None) -> int:
     try:
         async with db_manager.async_session_factory() as session:
             return await count_today_executed_trades(session, user_id)
+    except SQLAlchemyError as e:
+        logger.warning(f"[PreFilter] Database count failed, using in-memory fallback: {e}")
+        with _state_lock:
+            today = utcnow().strftime("%Y-%m-%d")
+            if today != _daily_trade_date:
+                reset_daily_counters()
+            return _daily_trade_count
     except Exception as e:
         logger.warning(f"[PreFilter] Database count failed, using in-memory fallback: {e}")
         with _state_lock:
@@ -413,6 +428,12 @@ async def run_pre_filter_async(
     # ── Check 1: Daily trade limit ──
     try:
         daily_count_snapshot = await count_today_executed_trades_async(user_id=user_id)
+    except (SQLAlchemyError, ConnectionError, TimeoutError, OSError):
+        with _state_lock:
+            today = utcnow().strftime("%Y-%m-%d")
+            if today != _daily_trade_date:
+                reset_daily_counters()
+            daily_count_snapshot = _daily_trade_count
     except Exception:
         with _state_lock:
             today = utcnow().strftime("%Y-%m-%d")
@@ -442,6 +463,22 @@ async def run_pre_filter_async(
         reasons.append(f"Daily loss limit reached ({current_pnl:.2f}% / -{max_daily_loss_pct}%)")
         _record_filter_block("daily_loss_limit", ticker)
 
+    # ── Check 2b: Account-level daily loss limit (real-time tracker) ──
+    account_equity = float(getattr(market, 'account_equity_usdt', 0) or 10000)
+    loss_allowed, loss_reason = await check_account_loss_limits(
+        user_id=user_id,
+        account_equity_usdt=account_equity,
+        max_daily_loss_pct=max_daily_loss_pct,
+        max_total_loss_pct=None,
+    )
+    checks["account_daily_loss_limit"] = {
+        "passed": loss_allowed,
+        "reason": loss_reason,
+    }
+    if not loss_allowed:
+        reasons.append(loss_reason)
+        _record_filter_block("account_daily_loss_limit", ticker)
+
     # ── Check 3: Duplicate signal cooldown (Dynamic) ──
     base_cooldown = thresholds.get("cooldown_seconds", ticker)
     dynamic_enabled = thresholds.get("dynamic_cooldown_enabled", ticker)
@@ -461,6 +498,8 @@ async def run_pre_filter_async(
                     cooldown_secs = base_cooldown
             else:
                 cooldown_secs = base_cooldown
+        except (SQLAlchemyError, ConnectionError, TimeoutError, OSError, ValueError, TypeError):
+            cooldown_secs = base_cooldown
         except Exception:
             cooldown_secs = base_cooldown
     else:
@@ -704,6 +743,8 @@ async def run_pre_filter_async(
         elif consec_losses >= 2:
             soft_fail_reasons.append(f"{consec_losses} recent losses — suggest reduce position by {position_reduce_pct}%")
             checks["consecutive_loss"]["soft_fail"] = True
+    except (SQLAlchemyError, ConnectionError, TimeoutError, OSError, TypeError, ValueError, AttributeError):
+        checks["consecutive_loss"] = {"passed": True, "note": "Could not check"}
     except Exception:
         checks["consecutive_loss"] = {"passed": True, "note": "Could not check"}
 

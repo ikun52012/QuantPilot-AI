@@ -247,6 +247,8 @@ def _is_closed_trade(trade: Any) -> bool:
     try:
         payload = json.loads(trade.payload_json) if trade.payload_json else {}
         return payload.get("position_event") == "closed" or bool(payload.get("close_reason"))
+    except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+        return False
     except Exception:
         return False
 

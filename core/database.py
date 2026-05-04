@@ -31,7 +31,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.exc import SQLAlchemyError
 
+from core.account_risk import record_position_pnl
 from core.config import settings
 from core.utils.common import position_symbol_key, resolve_limit_timeout_secs
 from core.utils.datetime import parse_datetime_utc_naive, utcnow
@@ -737,6 +739,9 @@ async def get_db() -> AsyncSession:
         try:
             yield session
             await session.commit()
+        except SQLAlchemyError:
+            await session.rollback()
+            raise
         except Exception:
             await session.rollback()
             raise
@@ -1166,6 +1171,17 @@ async def close_position_async(
     # Update user balance with realized PnL for paper trading
     if not position.live_trading and position.user_id and pnl_usdt != 0.0:
         await update_user_balance(session, position.user_id, pnl_usdt)
+
+    # Record PnL in account risk tracker for loss-limit enforcement
+    try:
+        await record_position_pnl(
+            user_id=position.user_id,
+            pnl_pct=pnl_pct,
+            pnl_usdt=pnl_usdt,
+            equity_usdt=(entry_price * opened_qty) / max(1.0, leverage) if entry_price > 0 and opened_qty > 0 else 0.0,
+        )
+    except Exception:
+        logger.warning(f"[Database] Failed to record account risk PnL for position {position.id}")
 
     await session.flush()
     return pnl_pct
