@@ -136,20 +136,108 @@ async function initI18n() {
 // ─── Auth Helper ───
 // Token lives in httpOnly cookie managed by the server.
 // We keep a lightweight in-memory user profile fetched via /api/auth/me.
+// IMPORTANT: Sync with QP.Auth namespace to avoid state inconsistencies
 let _cachedUser = null;
 let _sessionRedirecting = false;
 
 async function ensureUser() {
+    // Sync with QP.Auth._cachedUser if available (qp-core.js loaded)
+    if (window.QP && QP.Auth && QP.Auth._cachedUser) {
+        _cachedUser = QP.Auth._cachedUser; // Sync local cache
+        return _cachedUser;
+    }
+    // Fallback: fetch from API
     if (_cachedUser) return _cachedUser;
     try {
         const r = await fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' });
         if (!r.ok) return null;
         _cachedUser = await r.json();
+        // Sync back to QP.Auth if available
+        if (window.QP && QP.Auth) {
+            QP.Auth._cachedUser = _cachedUser;
+        }
         return _cachedUser;
     } catch { return null; }
 }
-function getUser() { return _cachedUser || {}; }
-function isAdmin() { return getUser().role === 'admin'; }
+
+function getUser() {
+    // Sync with QP.Auth if available
+    if (window.QP && QP.Auth) {
+        return QP.Auth.getUser();
+    }
+    return _cachedUser || {};
+}
+
+function isAdmin() {
+    // Sync with QP.Auth if available
+    if (window.QP && QP.Auth) {
+        return QP.Auth.isAdmin();
+    }
+    return getUser().role === 'admin';
+}
+
+async function requireAuth() {
+    const user = await ensureUser();
+    if (!user) {
+        redirectToLogin('expired');
+        return false;
+    }
+    return true;
+}
+
+function redirectToLogin(reason = 'expired') {
+    if (_sessionRedirecting) return;
+    _sessionRedirecting = true;
+    _cachedUser = null;
+    // Sync with QP.Auth if available
+    if (window.QP && QP.Auth) {
+        QP.Auth._cachedUser = null;
+        QP.Auth._sessionRedirecting = true;
+    }
+    const query = reason ? `?${encodeURIComponent(reason)}=1` : '';
+    window.location.replace(`/login${query}`);
+}
+
+async function logout() {
+    try {
+        const csrf = getCookie('tvss_csrf');
+        await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'include',
+            headers: csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf) } : {},
+        });
+    } catch {}
+    redirectToLogin('logout');
+}
+    // Fallback: fetch from API
+    if (_cachedUser) return _cachedUser;
+    try {
+        const r = await fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' });
+        if (!r.ok) return null;
+        _cachedUser = await r.json();
+        // Sync back to QP.Auth if available
+        if (window.QP && QP.Auth) {
+            QP.Auth._cachedUser = _cachedUser;
+        }
+        return _cachedUser;
+    } catch { return null; }
+}
+
+function getUser() {
+    // Sync with QP.Auth if available
+    if (window.QP && QP.Auth) {
+        return QP.Auth.getUser();
+    }
+    return _cachedUser || {};
+}
+
+function isAdmin() {
+    // Sync with QP.Auth if available
+    if (window.QP && QP.Auth) {
+        return QP.Auth.isAdmin();
+    }
+    return getUser().role === 'admin';
+}
 
 async function requireAuth() {
     const user = await ensureUser();
