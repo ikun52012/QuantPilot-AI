@@ -519,6 +519,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         f"[PositionMonitor] Limit order partially filled for {position.ticker}: "
                         f"qty={filled_amount}, price={filled_price}, position remains open"
                     )
+                    await _create_protective_orders_for_position(position, exchange, symbol, filled_amount)
                     return
 
                 # Check if order has exceeded timeout
@@ -528,15 +529,24 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     order_age_secs = (time.time() * 1000 - created_at) / 1000
                     limit_timeout = _position_limit_timeout_secs(position)
                     if order_age_secs > limit_timeout:
-                        # Cancel the order if it still exists
+                        # Only close the local pending position after cancellation is confirmed.
+                        cancel_confirmed = False
                         try:
                             await asyncio.to_thread(exchange.cancel_order, position.entry_order_id, symbol)
+                            cancel_confirmed = True
                         except ccxt.OrderNotFound:
-                            pass
+                            logger.warning(
+                                f"[PositionMonitor] Limit order not found during timeout cancel for {position.ticker}; "
+                                "keeping position pending until exchange state can be confirmed"
+                            )
                         except ccxt.NetworkError as e:
                             logger.warning(f"[PositionMonitor] Network error cancelling limit order: {e}")
                         except Exception as e:
                             logger.warning(f"[PositionMonitor] Failed to cancel limit order: {e}")
+
+                        if not cancel_confirmed:
+                            return
+
                         position.status = "closed"
                         position.close_reason = "limit_order_timeout"
                         position.closed_at = utcnow()
@@ -545,12 +555,10 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
         finally:
             await _close_exchange(exchange)
     except ccxt.OrderNotFound:
-        # Order no longer exists on exchange
-        position.status = "closed"
-        position.close_reason = "limit_order_not_found"
-        position.closed_at = utcnow()
-        position.updated_at = utcnow()
-        logger.warning(f"[PositionMonitor] Limit order not found on exchange for {position.ticker}")
+        logger.warning(
+            f"[PositionMonitor] Limit order not found on exchange for {position.ticker}; "
+            "leaving position state unchanged until reconciliation confirms no exchange exposure"
+        )
     except ccxt.BaseError as e:
         logger.warning(f"[PositionMonitor] Exchange error checking limit order for {position.ticker}: {e}")
     except Exception as e:
@@ -566,30 +574,53 @@ async def _create_protective_orders_for_position(position: PositionModel, exchan
     tp_side = "sell" if side == "buy" else "buy"
     pos_side = "long" if side == "buy" else "short"
 
-    tp_ids_json = str(position.take_profit_order_ids_json or "")
-    if not tp_ids_json or tp_ids_json in ("", "[]", "null"):
-        tp_levels = loads_list(position.take_profit_json)
-        if tp_levels:
-            from exchange import _create_conditional_order as _cco
-            tp_ids = []
-            for i, tp in enumerate(tp_levels):
-                tp_price = safe_float(tp.get("price"))
-                tp_qty_pct = safe_float(tp.get("qty_pct"), 100.0)
-                if tp_price <= 0:
+    tp_levels = loads_list(position.take_profit_json)
+    if tp_levels:
+        from exchange import _create_conditional_order as _cco
+        tp_ids = [str(order_id or "") for order_id in loads_list(position.take_profit_order_ids_json)]
+        if len(tp_ids) < len(tp_levels):
+            tp_ids.extend([""] * (len(tp_levels) - len(tp_ids)))
+        tp_changed = False
+
+        for i, tp in enumerate(tp_levels):
+            level_status = str(tp.get("status") or "pending").lower()
+            if level_status in {"hit", "filled", "closed"}:
+                continue
+            existing_id = str(tp.get("order_id") or (tp_ids[i] if i < len(tp_ids) else "") or "")
+            if existing_id:
+                if i < len(tp_ids) and tp_ids[i] != existing_id:
+                    tp_ids[i] = existing_id
+                    tp_changed = True
+                if tp.get("order_id") != existing_id:
+                    tp["order_id"] = existing_id
+                    tp_changed = True
+                continue
+
+            tp_price = safe_float(tp.get("price"))
+            tp_qty_pct = safe_float(tp.get("qty_pct"), 100.0)
+            if tp_price <= 0:
+                continue
+            tp_qty = filled_qty * (tp_qty_pct / 100.0)
+            if tp_qty <= 0:
+                continue
+            try:
+                tp_order = await _cco(exchange, symbol, "take_profit", tp_side, round(tp_qty, 6), tp_price, pos_side)
+                order_id = str(tp_order.get("id") or "")
+                if not order_id:
+                    logger.warning(f"[PositionMonitor] TP{i+1} for filled limit returned no order id: price={tp_price}")
                     continue
-                tp_qty = filled_qty * (tp_qty_pct / 100.0)
-                if tp_qty <= 0:
-                    continue
-                try:
-                    tp_order = await _cco(exchange, symbol, "take_profit", tp_side, round(tp_qty, 6), tp_price, pos_side)
-                    tp_ids.append(str(tp_order.get("id") or ""))
-                    logger.info(f"[PositionMonitor] TP{i+1} created for filled limit: price={tp_price}")
-                except ccxt.BaseError as e:
-                    logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
-                except Exception as e:
-                    logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
-            if tp_ids:
-                position.take_profit_order_ids_json = json.dumps(tp_ids, ensure_ascii=False)
+                tp_ids[i] = order_id
+                tp["order_id"] = order_id
+                tp_changed = True
+                logger.info(f"[PositionMonitor] TP{i+1} created for filled limit: price={tp_price}")
+            except ccxt.BaseError as e:
+                logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
+            except Exception as e:
+                logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
+
+        if tp_changed:
+            position.take_profit_order_ids_json = json.dumps(tp_ids, ensure_ascii=False)
+            position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
 
     if not position.stop_loss_order_id:
         sl_price = safe_float(position.stop_loss)
@@ -612,7 +643,21 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
     await _check_pending_limit_orders(session, position, exchange_config)
 
-    exchange_positions = await get_open_positions(exchange_config)
+    checked_exchange_config = {**exchange_config, "raise_on_error": True}
+    try:
+        exchange_positions = await get_open_positions(checked_exchange_config)
+    except Exception as exc:
+        logger.warning(
+            f"[PositionMonitor] Skipping exchange position reconciliation for {position.ticker}; "
+            f"open-position query failed: {exc}"
+        )
+        ticker = await get_ticker(position.ticker, exchange_config)
+        mark_price = safe_float(ticker.get("last") or position.last_price)
+        if mark_price > 0:
+            _update_unrealized(position, mark_price)
+            stats["updated"] += 1
+        return stats
+
     match = _find_exchange_position(position, exchange_positions)
 
     if match:
@@ -624,7 +669,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         if await _maybe_adjust_trailing_stop(position, exchange_config, match, place_protective_stop):
             stats["adjusted"] += 1
             await session.flush()
-        tp_orders = await get_recent_orders(position.ticker, 20, exchange_config)
+        try:
+            tp_orders = await get_recent_orders(position.ticker, 20, checked_exchange_config)
+        except Exception as exc:
+            logger.warning(f"[PositionMonitor] Skipping TP order reconciliation for {position.ticker}; recent-order query failed: {exc}")
+            tp_orders = []
         tp_hit_levels = _detect_tp_hits_from_orders(position, tp_orders)
         if tp_hit_levels:
             tp_levels = loads_list(position.take_profit_json)
@@ -633,7 +682,20 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 await session.flush()
         return stats
 
-    order = await _find_recent_close_order(position, exchange_config, get_recent_orders)
+    try:
+        order = await _find_recent_close_order(position, checked_exchange_config, get_recent_orders)
+    except Exception as exc:
+        logger.warning(
+            f"[PositionMonitor] Skipping missing-position handling for {position.ticker}; "
+            f"recent-order query failed: {exc}"
+        )
+        ticker = await get_ticker(position.ticker, exchange_config)
+        mark_price = safe_float(ticker.get("last") or position.last_price)
+        if mark_price > 0:
+            _update_unrealized(position, mark_price)
+            stats["updated"] += 1
+        return stats
+
     if not order:
         now = utcnow()
         ghost_entry = _GHOST_POSITION_TRACKER.get(position.id)
@@ -697,8 +759,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
 
 def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> list[dict]:
-    tp_order_ids = set(loads_list(position.take_profit_order_ids_json))
+    tp_order_ids = {str(order_id) for order_id in loads_list(position.take_profit_order_ids_json) if order_id}
     tp_levels = loads_list(position.take_profit_json)
+    for level in tp_levels:
+        if isinstance(level, dict) and level.get("order_id"):
+            tp_order_ids.add(str(level.get("order_id")))
     hit_levels = []
     total_filled_qty_pct = 0.0
 
@@ -787,11 +852,14 @@ def _find_exchange_position(position: PositionModel, exchange_positions: list[di
 
 async def _find_recent_close_order(position: PositionModel, exchange_config: dict, get_recent_orders) -> dict | None:
     orders = await get_recent_orders(position.ticker, 50, exchange_config)
-    tp_order_ids = [str(order_id) for order_id in loads_list(position.take_profit_order_ids_json) if order_id]
+    tp_order_ids = [str(order_id or "") for order_id in loads_list(position.take_profit_order_ids_json)]
     tp_levels = loads_list(position.take_profit_json)
     order_ids = set()
-    for index, order_id in enumerate(tp_order_ids):
+    for index in range(max(len(tp_order_ids), len(tp_levels))):
         level = tp_levels[index] if index < len(tp_levels) and isinstance(tp_levels[index], dict) else {}
+        order_id = str(level.get("order_id") or (tp_order_ids[index] if index < len(tp_order_ids) else "") or "")
+        if not order_id:
+            continue
         level_status = str(level.get("status") or "pending").lower()
         if level_status not in {"hit", "filled", "closed"}:
             order_ids.add(order_id)
@@ -869,7 +937,11 @@ def _close_reason_for_order(position: PositionModel, order: dict | None) -> str:
     order_id = str(order.get("id") or "")
     if position.stop_loss_order_id and order_id == position.stop_loss_order_id:
         return "stop_loss"
-    if order_id in set(loads_list(position.take_profit_order_ids_json)):
+    tp_order_ids = {str(tp_order_id) for tp_order_id in loads_list(position.take_profit_order_ids_json) if tp_order_id}
+    for level in loads_list(position.take_profit_json):
+        if isinstance(level, dict) and level.get("order_id"):
+            tp_order_ids.add(str(level.get("order_id")))
+    if order_id in tp_order_ids:
         return "take_profit"
     return "exchange_closed"
 
@@ -1484,27 +1556,36 @@ async def _enable_emergency_trailing_stop(
         "trail_pct": 0.5,  # Tight trailing
         "trailing_step_pct": 0.2,
     }
+
+    new_stop_order_id = str(position.stop_loss_order_id or "")
+    if position.live_trading:
+        exchange_config = _get_exchange_config_for_position(position)
+        if not exchange_config:
+            logger.warning(f"[PositionMonitor] Cannot enable emergency trailing for {position.ticker}: missing exchange config")
+            return False
+        try:
+            from exchange import place_protective_stop
+            remaining_qty = _effective_remaining_quantity(position, safe_float(position.quantity))
+            result = await place_protective_stop(
+                ticker=position.ticker,
+                direction=position.direction,
+                quantity=remaining_qty,
+                stop_price=emergency_sl,
+                exchange_config=exchange_config,
+                existing_order_id=position.stop_loss_order_id or None,
+            )
+        except Exception as e:
+            logger.warning(f"[PositionMonitor] Failed to update exchange SL: {e}")
+            return False
+        if result.get("status") not in {"placed", "simulated"}:
+            logger.warning(f"[PositionMonitor] Failed to enable emergency trailing for {position.ticker}: {result}")
+            return False
+        new_stop_order_id = str(result.get("order_id") or new_stop_order_id)
+
     position.trailing_stop_config_json = json.dumps(emergency_config)
     position.stop_loss = emergency_sl
+    position.stop_loss_order_id = new_stop_order_id
     position.updated_at = utcnow()
-
-    # Also try to place the stop on exchange if live trading
-    if position.live_trading and position.stop_loss_order_id:
-        exchange_config = _get_exchange_config_for_position(position)
-        if exchange_config:
-            try:
-                from exchange import place_protective_stop
-                remaining_qty = _effective_remaining_quantity(position, safe_float(position.quantity))
-                await place_protective_stop(
-                    ticker=position.ticker,
-                    direction=position.direction,
-                    quantity=remaining_qty,
-                    stop_price=emergency_sl,
-                    exchange_config=exchange_config,
-                    existing_order_id=position.stop_loss_order_id,
-                )
-            except Exception as e:
-                logger.warning(f"[PositionMonitor] Failed to update exchange SL: {e}")
 
     logger.info(
         f"[PositionMonitor] Emergency trailing stop enabled for {position.ticker}: "

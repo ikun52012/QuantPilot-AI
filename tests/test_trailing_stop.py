@@ -25,6 +25,7 @@ from position_monitor import (
     _reconcile_paper_position,
     _safe_float,
 )
+from services.signal_processor import SignalProcessor
 
 
 class TestSafeFloat:
@@ -245,12 +246,15 @@ async def test_place_protective_stop_replaces_existing_order(monkeypatch):
     fake_exchange = FakeExchange()
     cancel_calls = []
     create_calls = []
+    call_order = []
 
     async def fake_cancel(exchange, symbol, order_id):
+        call_order.append("cancel")
         cancel_calls.append((exchange, symbol, order_id))
         return {"status": "cancelled", "order_id": order_id, "symbol": symbol}
 
     async def fake_create(exchange, symbol, kind, side, amount, trigger_price, position_side=None):
+        call_order.append("create")
         create_calls.append((exchange, symbol, kind, side, amount, trigger_price, position_side))
         return {"id": "stop-new"}
 
@@ -273,6 +277,70 @@ async def test_place_protective_stop_replaces_existing_order(monkeypatch):
     assert result["replaced_order_id"] == "stop-old"
     assert cancel_calls == [(fake_exchange, "TRB/USDT:USDT", "stop-old")]
     assert create_calls == [(fake_exchange, "TRB/USDT:USDT", "stop_loss", "sell", 1.5, 99.0, "long")]
+    assert call_order == ["create", "cancel"]
+
+
+@pytest.mark.asyncio
+async def test_place_protective_stop_keeps_old_stop_when_new_stop_fails(monkeypatch):
+    class FakeExchange:
+        def __init__(self):
+            self.options = {"defaultType": "future"}
+
+    fake_exchange = FakeExchange()
+    cancel_order = AsyncMock(return_value={"status": "cancelled", "order_id": "stop-old", "symbol": "TRB/USDT:USDT"})
+
+    async def fake_create(*args, **kwargs):
+        raise RuntimeError("create failed")
+
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: fake_exchange)
+    monkeypatch.setattr("exchange._resolve_symbol", lambda *args, **kwargs: "TRB/USDT:USDT")
+    monkeypatch.setattr("exchange._cancel_exchange_order", cancel_order)
+    monkeypatch.setattr("exchange._create_conditional_order", fake_create)
+
+    result = await place_protective_stop(
+        ticker="TRBUSDT",
+        direction="long",
+        quantity=1.5,
+        stop_price=99.0,
+        exchange_config={"live_trading": True, "market_type": "contract"},
+        existing_order_id="stop-old",
+    )
+
+    assert result["status"] == "error"
+    assert "create failed" in result["reason"]
+    cancel_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_conflicting_position_keeps_protection_when_exchange_close_fails(monkeypatch):
+    class FakeSession:
+        pass
+
+    position = PositionModel(
+        id="position-1234",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        live_trading=True,
+        take_profit_order_ids_json=json.dumps(["tp1"]),
+        stop_loss_order_id="sl1",
+    )
+    cancel_order = AsyncMock()
+    execute_trade = AsyncMock(return_value={"status": "error", "reason": "close rejected"})
+
+    monkeypatch.setattr("exchange.get_ticker", AsyncMock(return_value={"last": 101.0}))
+    monkeypatch.setattr("services.signal_processor.cancel_order", cancel_order)
+    monkeypatch.setattr("services.signal_processor.execute_trade", execute_trade)
+
+    result = await SignalProcessor(FakeSession())._close_conflicting_position(position, user_id=None)
+
+    assert result["status"] == "error"
+    assert "close rejected" in result["reason"]
+    execute_trade.assert_awaited_once()
+    cancel_order.assert_not_awaited()
 
 
 @pytest.mark.asyncio

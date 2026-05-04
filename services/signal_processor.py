@@ -2058,20 +2058,10 @@ prefilter_result: PreFilterResult | None = None,
         exchange_config["live_trading"] = position.live_trading
 
         try:
-            # Step 1: Cancel TP orders (only for non-synthetic positions with order IDs)
             cancel_results = []
-            if not is_synthetic and hasattr(position, "take_profit_order_ids_json"):
-                tp_order_ids = loads_list(position.take_profit_order_ids_json)
-                for order_id in tp_order_ids:
-                    if order_id:
-                        cancel_result = await cancel_order(str(order_id), position.ticker, exchange_config)
-                        cancel_results.append(cancel_result)
+            sl_cancel_result = None
 
-            # Step 2: Cancel SL order (only for non-synthetic positions)
-            if not is_synthetic and hasattr(position, "stop_loss_order_id") and position.stop_loss_order_id:
-                await cancel_order(str(position.stop_loss_order_id), position.ticker, exchange_config)
-
-            # Step 3: Close position on exchange (for live trading)
+            # Step 1: Close position on exchange first. Do not remove protection while the position may still be open.
             exit_price = float(position.entry_price or 0)
             if position.live_trading and exchange_config.get("live_trading"):
                 from exchange import get_ticker
@@ -2104,7 +2094,7 @@ prefilter_result: PreFilterResult | None = None,
                         result["reason"] = f"Failed to close on exchange: {close_result.get('reason')}"
                         return result
 
-            # Step 4: Record close in database (only for non-synthetic positions)
+            # Step 2: Record close in database (only for non-synthetic positions)
             if not is_synthetic and exit_price > 0:
                 try:
                     locked_result = await self.session.execute(
@@ -2126,9 +2116,22 @@ prefilter_result: PreFilterResult | None = None,
                 except Exception as db_err:
                     logger.warning(f"[Signal] Failed to update database position: {db_err}")
 
+            # Step 3: The position is closed or already absent; now clean up any leftover TP/SL orders.
+            if not is_synthetic and hasattr(position, "take_profit_order_ids_json"):
+                tp_order_ids = loads_list(position.take_profit_order_ids_json)
+                for order_id in tp_order_ids:
+                    if order_id:
+                        cancel_result = await cancel_order(str(order_id), position.ticker, exchange_config)
+                        cancel_results.append(cancel_result)
+
+            if not is_synthetic and hasattr(position, "stop_loss_order_id") and position.stop_loss_order_id:
+                sl_cancel_result = await cancel_order(str(position.stop_loss_order_id), position.ticker, exchange_config)
+
             result["status"] = "closed"
             result["exit_price"] = exit_price
             result["cancelled_tp_orders"] = len([r for r in cancel_results if r.get("status") in ("cancelled", "simulated")])
+            if sl_cancel_result:
+                result["stop_loss_cancel"] = sl_cancel_result
             logger.info(
                 f"[Signal] ✅ Closed conflicting position {position.id[:8] if len(position.id) >= 8 else position.id} "
                 f"on {position.ticker} (exit={exit_price}, synthetic={is_synthetic})"

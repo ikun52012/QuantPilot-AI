@@ -1266,7 +1266,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
         return entry
 
     status = str(entry.get("order_status") or "").lower()
-    if status not in {"filled", "simulated", "closed", "pending"}:
+    if status not in {"filled", "simulated", "closed", "pending", "partial", "partial_protection"}:
         return entry
 
     direction = str(entry.get("direction") or "").lower()

@@ -1507,21 +1507,19 @@ async def place_protective_stop(
         )
         side = "sell" if str(direction).lower() == SignalDirection.LONG.value else "buy"
         pos_side_for_sl = "long" if str(direction).lower() in ("long", SignalDirection.LONG.value) else "short"
-        cancelled_order_id = ""
-        if existing_order_id:
-            cancel_result = await _cancel_exchange_order(exchange, symbol, str(existing_order_id))
-            if cancel_result.get("status") == "error":
-                return {
-                    "status": "error",
-                    "reason": cancel_result.get("reason") or "Failed to replace protective stop",
-                    "symbol": symbol,
-                    "stop_price": stop_price,
-                }
-            cancelled_order_id = str(cancel_result.get("order_id") or existing_order_id)
         order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price, pos_side_for_sl)
         result = {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price, "position_side": pos_side_for_sl}
-        if cancelled_order_id:
-            result["replaced_order_id"] = cancelled_order_id
+        if existing_order_id:
+            cancel_result = await _cancel_exchange_order(exchange, symbol, str(existing_order_id))
+            result["replace_cancel_result"] = cancel_result
+            if cancel_result.get("status") in {"cancelled", "not_found", "skipped"}:
+                result["replaced_order_id"] = str(cancel_result.get("order_id") or existing_order_id)
+            else:
+                result["warning"] = cancel_result.get("reason") or "New stop placed but old stop could not be cancelled"
+                logger.warning(
+                    f"[Exchange] New protective stop placed for {symbol}, but old stop "
+                    f"{existing_order_id} was not cancelled: {cancel_result}"
+                )
         return result
     except ccxt.BaseError as e:
         logger.error(f"[Exchange] Failed to place protective stop: {e}")
@@ -1873,6 +1871,8 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         return result
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch positions: {e}")
+        if exchange_config.get("raise_on_error"):
+            raise
         return []
 
 
@@ -1920,6 +1920,8 @@ async def get_open_orders(symbol: str | None = None, exchange_config: dict | Non
         ]
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch open orders: {e}")
+        if exchange_config.get("raise_on_error"):
+            raise
         return []
 
 
@@ -1969,6 +1971,8 @@ async def get_recent_orders(symbol: str | None = None, limit: int = 50, exchange
         ]
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch orders: {e}")
+        if exchange_config.get("raise_on_error"):
+            raise
         return []
 
 
