@@ -724,12 +724,6 @@ async function loadRecentSignals() {
     } catch (e) { console.error('Failed to load signals:', e); }
 }
 
-// ─── Charts ───
-let marketChart = null;
-
-
-
-
 function setChartPeriod(evt, days) {
     document.querySelectorAll('.card-actions .btn-sm').forEach(b => b.classList.remove('active'));
     evt.target.classList.add('active');
@@ -4124,12 +4118,12 @@ async function loadChartPage() {
 function renderMarketChart(data) {
     const ctx = document.getElementById('market-chart')?.getContext('2d');
     if (!ctx) return;
-    if (marketChart) marketChart.destroy();
+    if (window.marketChart) window.marketChart.destroy();
     const labels = data.map(bar => new Date((bar.time || 0) * 1000).toLocaleString());
     const close = data.map(bar => Number(bar.close || 0));
     const high = data.map(bar => Number(bar.high || 0));
     const low = data.map(bar => Number(bar.low || 0));
-    marketChart = new Chart(ctx, {
+    window.marketChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels,

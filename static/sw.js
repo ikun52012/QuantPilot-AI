@@ -1,6 +1,6 @@
 // QuantPilot AI Service Worker for PWA
 // Keep this in sync with versioned asset URLs in the HTML entrypoints.
-const CACHE_VERSION = '20260430-2';
+const CACHE_VERSION = '20260504-2';
 const CACHE_NAME = `quantpilot-${CACHE_VERSION}`;
 const STATIC_CACHE = `quantpilot-static-${CACHE_VERSION}`;
 const NETWORK_FIRST_PATHS = new Set([
@@ -13,12 +13,12 @@ const NETWORK_FIRST_PATHS = new Set([
 ]);
 
 const STATIC_ASSETS = [
-  '/static/style.css?v=20260430-2',
-  '/static/app.js?v=20260430-2',
-  '/static/js/qp-core.js?v=20260430-2',
-  '/static/js/charts.js?v=20260430-2',
-  '/static/js/i18n.js?v=20260430-2',
-  '/static/manifest.json?v=20260430-2',
+  '/static/style.css?v=20260504-2',
+  '/static/app.js?v=20260504-2',
+  '/static/js/qp-core.js?v=20260504-2',
+  '/static/js/charts.js?v=20260504-2',
+  '/static/js/i18n.js?v=20260504-2',
+  '/static/manifest.json?v=20260504-2',
   '/static/icon.svg',
 ];
 

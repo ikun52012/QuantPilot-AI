@@ -8,6 +8,7 @@ let equityChart = null;
 let dailyPnlChart = null;
 let winlossChart = null;
 let userEquityChart = null;
+window.marketChart = window.marketChart || null;
 
 /**
  * Default chart options
@@ -219,9 +220,9 @@ function destroyAllCharts() {
         userEquityChart.destroy();
         userEquityChart = null;
     }
-    if (marketChart) {
-        marketChart.destroy();
-        marketChart = null;
+    if (window.marketChart) {
+        window.marketChart.destroy();
+        window.marketChart = null;
     }
 }
 
@@ -232,4 +233,3 @@ window.renderDailyPnlChart = renderDailyPnlChart;
 window.renderWinLossChart = renderWinLossChart;
 window.setChartPeriod = setChartPeriod;
 window.destroyAllCharts = destroyAllCharts;
-window.marketChart = marketChart;

@@ -419,7 +419,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if request.url.scheme == "https" or forwarded_proto == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
-# Content Security Policy for HTML responses
+        # Content Security Policy for HTML responses
         if "text/html" in response.headers.get("content-type", ""):
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
