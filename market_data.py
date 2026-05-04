@@ -710,23 +710,23 @@ async def _safe_fetch_ohlcv(exchange: Any, symbol: str, timeframe: str, limit: i
 
 def _normalize_symbol(ticker: str, market_type: str | None = None) -> str:
     """Convert TradingView ticker to ccxt symbol format.
-    
+
     ENHANCED: Handle .P perpetual contract tickers properly.
     """
     # BTCUSDT -> BTC/USDT
     ticker = ticker.upper().replace(" ", "")
-    
+
     # ENHANCED: Detect perpetual contract
     is_perpetual = ticker.endswith(".P") or ticker.endswith("PERP")
-    
+
     for suffix in (".P", "PERP"):
         if ticker.endswith(suffix):
             ticker = ticker[:-len(suffix)]
             break
-    
+
 # Prefer contract format for .P tickers
     prefer_contract = is_perpetual or str(market_type or "").lower() == "contract"
-    
+
     for quote in ["USDT", "BUSD", "USDC", "USD"]:
         if ticker.endswith(quote):
             base = ticker[: -len(quote)]
@@ -734,13 +734,13 @@ def _normalize_symbol(ticker: str, market_type: str | None = None) -> str:
             if prefer_contract:
                 return f"{pair_symbol}:{quote}"
             return pair_symbol
-    
+
     # Fallback: Add USDT pair
     pair_symbol = f"{ticker}/USDT"
     if prefer_contract:
         return f"{pair_symbol}:USDT"
     return pair_symbol
-    
+
     # Fallback: Add USDT pair
     pair_symbol = f"{ticker}/USDT"
     if prefer_contract:
@@ -771,7 +771,7 @@ def _calculate_rsi(closes: list[float], period: int = 14) -> float | None:
 
 def _calculate_atr(ohlcv: list[list[float]], period: int = 14) -> float | None:
     """Calculate ATR from OHLCV data.
-    
+
     ENHANCED: Fallback calculation when OHLCV data is insufficient.
     - If len(ohlcv) < period + 1, use available data (min 7 candles)
     - If len(ohlcv) < 7, return None (insufficient for any estimate)
@@ -789,7 +789,7 @@ def _calculate_atr(ohlcv: list[list[float]], period: int = 14) -> float | None:
         for i in range(period, len(trs)):
             atr = (atr * (period - 1) + trs[i]) / period
         return atr
-    
+
     # ENHANCED: Fallback with fewer candles (minimum 7)
     min_candles = 7
     if len(ohlcv) >= min_candles:
@@ -799,12 +799,12 @@ def _calculate_atr(ohlcv: list[list[float]], period: int = 14) -> float | None:
             high, low, prev_close = ohlcv[i][2], ohlcv[i][3], ohlcv[i - 1][4]
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
             trs.append(tr)
-        
+
         # Calculate ATR with available data
         fallback_period = len(trs)
         atr = sum(trs) / fallback_period
         return atr
-    
+
     # Insufficient data even for fallback
     return None
 

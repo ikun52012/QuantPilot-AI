@@ -671,30 +671,27 @@ def _build_exchange(
 
 def _normalize_symbol(symbol: str) -> str:
     """Normalize symbol to exchange format.
-    
+
     ENHANCED: Preserve .P suffix information for perpetual contract resolution.
     """
     if not symbol:
         return ""
     symbol = symbol.upper().replace(" ", "")
-    
-    # Check if this is a perpetual contract (.P suffix)
-    is_perpetual = symbol.endswith(".P") or symbol.endswith("PERP")
-    
+
     # Remove .P/PERP suffix for normalization
     for suffix in (".P", "PERP"):
         if symbol.endswith(suffix):
             symbol = symbol[:-len(suffix)]
             break
-    
+
     if "/" in symbol:
         return symbol
     symbol = symbol.replace("-", "").replace("_", "").replace(":", "")
-    
+
     # Add USDT suffix if missing and not already a pair
     if not symbol.endswith(("USDT", "USD", "BTC", "ETH", "BNB")):
         symbol = f"{symbol}USDT"
-    
+
     # Return normalized symbol (caller will use is_perpetual info if needed)
     return symbol
 
@@ -778,22 +775,22 @@ def _market_matches_type(market: dict[str, Any], market_type: str) -> bool:
 
 def _symbol_candidates(symbol: str, market_type: str | None = None) -> list[str]:
     """Return common CCXT symbol candidates for a TradingView-style ticker.
-    
+
     ENHANCED: Prioritize perpetual contract format for .P tickers.
     """
     raw_symbol = str(symbol or "").upper().replace(" ", "")
-    
+
     # ENHANCED: Detect perpetual contract ticker
     is_perpetual = _is_perpetual_ticker(symbol)
-    
+
     cleaned = _normalize_symbol(symbol).replace("/", "")
     quotes = ["USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]
     prefer_contract = _market_type_key(market_type) == "contract"
-    
+
     # ENHANCED: Force contract preference for .P tickers
     if is_perpetual:
         prefer_contract = True
-    
+
     candidates: list[str] = []
     if "/" in raw_symbol:
         candidates.append(raw_symbol)
@@ -803,7 +800,7 @@ def _symbol_candidates(symbol: str, market_type: str | None = None) -> list[str]
             base = cleaned[:-len(quote)]
             pair_symbol = f"{base}/{quote}"
             contract_symbol = f"{pair_symbol}:{quote}"
-            
+
             # ENHANCED: For perpetual (.P) tickers, prioritize contract format
             if is_perpetual or prefer_contract:
                 candidates.extend([contract_symbol, pair_symbol, f"{base}{quote}"])
@@ -813,7 +810,7 @@ def _symbol_candidates(symbol: str, market_type: str | None = None) -> list[str]
     else:
         pair_symbol = f"{cleaned}/USDT"
         contract_symbol = f"{pair_symbol}:USDT"
-        
+
         # ENHANCED: For perpetual (.P) tickers, prioritize contract format
         if is_perpetual or prefer_contract:
             candidates.extend([contract_symbol, pair_symbol, f"{cleaned}USDT"])
