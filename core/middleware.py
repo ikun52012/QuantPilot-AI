@@ -419,17 +419,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if request.url.scheme == "https" or forwarded_proto == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
-        # Content Security Policy for HTML responses
+# Content Security Policy for HTML responses
         if "text/html" in response.headers.get("content-type", ""):
-response.headers["Content-Security-Policy"] = (
-    "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.bunny.net https://cdn.jsdelivr.net; "
-    "font-src 'self' https://fonts.gstatic.com https://fonts.bunny.net https://cdn.jsdelivr.net; "
-    "img-src 'self' data: https:; "
-    "connect-src 'self' https: wss: https://cloudflareinsights.com; "
-    "worker-src 'self';"
-)
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.bunny.net https://cdn.jsdelivr.net; "
+                "font-src 'self' https://fonts.gstatic.com https://fonts.bunny.net https://cdn.jsdelivr.net; "
+                "img-src 'self' data: https:; "
+                "connect-src 'self' https: wss: https://cloudflareinsights.com; "
+                "worker-src 'self';"
+            )
 
         return response
 
