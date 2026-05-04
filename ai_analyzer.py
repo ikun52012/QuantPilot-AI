@@ -682,6 +682,8 @@ When market data is limited:
 - Set warnings to inform about missing data limitations
 - Use simpler stop-loss and take-profit estimates based on typical asset volatility for this type of instrument
 - DO NOT automatically reject solely due to missing market data; evaluate what information IS available
+- IMPORTANT: You MUST provide suggested_stop_loss even if ATR is unavailable - use 1.5% distance as fallback for low-volatility assets, or 2-3% for volatile assets
+- IMPORTANT: You MUST provide suggested_tp1 (at least one take-profit target) - use 3-5% distance as fallback
 """
 
     tp_section = f"""
@@ -1236,24 +1238,35 @@ def _local_rule_analysis(system: str, user: str) -> str:
     suggested_stop_loss = None
     suggested_tp1 = None
 
-    if signal_price > 0 and atr_pct > 0:
-        sl_distance = atr_pct * 1.5  # SL at 1.5×ATR
+    # BUG FIX: When ATR is missing, use fallback default percentage (1.5% SL, 3% TP)
+    # This prevents "No valid stop loss" error when market data is unavailable
+    sl_distance_pct = atr_pct * 1.5 if atr_pct > 0 else 1.5  # Default 1.5% SL distance
+    tp_distance_pct = atr_pct * 2.0 if atr_pct > 0 else 3.0  # Default 3% TP distance
 
+    if signal_price > 0:
         if signal_direction == "long":
-            suggested_stop_loss = round(signal_price * (1 - sl_distance / 100), 4)
-            suggested_tp1 = round(signal_price * (1 + atr_pct * 2.0 / 100), 4)  # TP at 2×ATR
+            suggested_stop_loss = round(signal_price * (1 - sl_distance_pct / 100), 4)
+            suggested_tp1 = round(signal_price * (1 + tp_distance_pct / 100), 4)
         else:
-            suggested_stop_loss = round(signal_price * (1 + sl_distance / 100), 4)
-            suggested_tp1 = round(signal_price * (1 - atr_pct * 2.0 / 100), 4)
+            suggested_stop_loss = round(signal_price * (1 + sl_distance_pct / 100), 4)
+            suggested_tp1 = round(signal_price * (1 - tp_distance_pct / 100), 4)
 
-        # Only recommend execute if we have valid SL/TP
+        # Always recommend execute when we have valid SL/TP (even without ATR)
         if suggested_stop_loss and suggested_tp1:
             recommendation = "execute"
-            reasoning = (
-                f"Local fallback: Conservative SL/TP calculated from ATR ({atr_pct:.1f}%). "
-                f"SL={suggested_stop_loss}, TP={suggested_tp1}. "
-                f"Recommend manual review before execution."
-            )
+            if atr_pct > 0:
+                reasoning = (
+                    f"Local fallback: Conservative SL/TP calculated from ATR ({atr_pct:.1f}%). "
+                    f"SL={suggested_stop_loss}, TP={suggested_tp1}. "
+                    f"Recommend manual review before execution."
+                )
+            else:
+                reasoning = (
+                    f"Local fallback: Default SL/TP used (ATR unavailable). "
+                    f"SL={suggested_stop_loss} ({sl_distance_pct:.1f}% distance), TP={suggested_tp1} ({tp_distance_pct:.1f}% distance). "
+                    f"Recommend manual review - verify market conditions."
+                )
+                warnings.append("ATR unavailable - using default stop distance")
             confidence = 0.5
             warnings.append("Conservative position sizing recommended")
 
