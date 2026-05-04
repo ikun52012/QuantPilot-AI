@@ -2,6 +2,7 @@
 QuantPilot AI - Market Data Fetcher
 Fetches real-time market data from the exchange via ccxt.
 Includes WebSocket streaming for real-time updates (Optimization 6).
+ENHANCED: Improved handling for perpetual contracts (.P tickers) and low liquidity assets.
 """
 import asyncio
 import json
@@ -30,6 +31,38 @@ _ws_connections: dict[str, Any] = {}
 _ws_data_buffer: dict[str, dict] = {}
 _ws_subscribers: dict[str, list[asyncio.Queue]] = {}
 _ws_manager_task: asyncio.Task | None = None
+
+
+# ─────────────────────────────────────────────
+# ENHANCED: Known low liquidity / niche tickers
+# ─────────────────────────────────────────────
+
+# Tickers that often have insufficient OHLCV data
+KNOWN_LOW_LIQUIDITY_TICKERS = {
+    # New or niche perpetuals on Binance
+    "APE", "DYDX", "GMX", "RDNT", "TRB", "BLUR", "ARB", "OP", "SSV", "MAGIC",
+    "GLMR", "CELO", "GAL", "APT", "INJ", "SUI", "SEI", "WLD", "YGG", "ILV",
+    "IMX", "RNDR", "FET", "AGIX", "QNT", "HFT", "HOOK", "AMB", "ALGO",
+    # Commodities and stocks on Binance (often low OHLCV)
+    "XAU", "XAG", "BTCST", "BNBDOWN", "BNBUP", "BTCDOWN", "BTCUP",
+}
+
+# Minimum OHLCV candles for different ticker types
+MIN_OHLCV_STANDARD = 15  # Standard requirement for most tickers
+MIN_OHLCV_LOW_LIQUIDITY = 7  # Fallback minimum for low liquidity tickers
+
+
+def _is_low_liquidity_ticker(ticker: str) -> bool:
+    """Detect if ticker is known to have low liquidity/insufficient data."""
+    ticker_clean = ticker.upper().replace(".P", "").replace("PERP", "").replace("USDT", "").replace("USD", "")
+    return ticker_clean in KNOWN_LOW_LIQUIDITY_TICKERS
+
+
+def _get_min_ohlcv_requirement(ticker: str) -> int:
+    """Get minimum OHLCV candles required based on ticker liquidity."""
+    if _is_low_liquidity_ticker(ticker):
+        return MIN_OHLCV_LOW_LIQUIDITY
+    return MIN_OHLCV_STANDARD
 
 
 # ─────────────────────────────────────────────
@@ -675,19 +708,44 @@ async def _safe_fetch_ohlcv(exchange: Any, symbol: str, timeframe: str, limit: i
         return []
 
 
-def _normalize_symbol(ticker: str) -> str:
-    """Convert TradingView ticker to ccxt symbol format."""
+def _normalize_symbol(ticker: str, market_type: str | None = None) -> str:
+    """Convert TradingView ticker to ccxt symbol format.
+    
+    ENHANCED: Handle .P perpetual contract tickers properly.
+    """
     # BTCUSDT -> BTC/USDT
     ticker = ticker.upper().replace(" ", "")
+    
+    # ENHANCED: Detect perpetual contract
+    is_perpetual = ticker.endswith(".P") or ticker.endswith("PERP")
+    
     for suffix in (".P", "PERP"):
         if ticker.endswith(suffix):
             ticker = ticker[:-len(suffix)]
             break
+    
+# Prefer contract format for .P tickers
+    prefer_contract = is_perpetual or str(market_type or "").lower() == "contract"
+    
     for quote in ["USDT", "BUSD", "USDC", "USD"]:
         if ticker.endswith(quote):
             base = ticker[: -len(quote)]
-            return f"{base}/{quote}"
-    return ticker
+            pair_symbol = f"{base}/{quote}"
+            if prefer_contract:
+                return f"{pair_symbol}:{quote}"
+            return pair_symbol
+    
+    # Fallback: Add USDT pair
+    pair_symbol = f"{ticker}/USDT"
+    if prefer_contract:
+        return f"{pair_symbol}:USDT"
+    return pair_symbol
+    
+    # Fallback: Add USDT pair
+    pair_symbol = f"{ticker}/USDT"
+    if prefer_contract:
+        return f"{pair_symbol}:USDT"
+    return pair_symbol
 
 
 def _calculate_rsi(closes: list[float], period: int = 14) -> float | None:
@@ -712,20 +770,43 @@ def _calculate_rsi(closes: list[float], period: int = 14) -> float | None:
 
 
 def _calculate_atr(ohlcv: list[list[float]], period: int = 14) -> float | None:
-    """Calculate ATR from OHLCV data."""
-    if len(ohlcv) < period + 1:
-        return None
-    trs: list[float] = []
-    for i in range(1, len(ohlcv)):
-        high, low, prev_close = ohlcv[i][2], ohlcv[i][3], ohlcv[i - 1][4]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        trs.append(tr)
-    if len(trs) < period:
-        return None
-    atr = sum(trs[:period]) / period
-    for i in range(period, len(trs)):
-        atr = (atr * (period - 1) + trs[i]) / period
-    return atr
+    """Calculate ATR from OHLCV data.
+    
+    ENHANCED: Fallback calculation when OHLCV data is insufficient.
+    - If len(ohlcv) < period + 1, use available data (min 7 candles)
+    - If len(ohlcv) < 7, return None (insufficient for any estimate)
+    """
+    # Standard calculation with sufficient data
+    if len(ohlcv) >= period + 1:
+        trs: list[float] = []
+        for i in range(1, len(ohlcv)):
+            high, low, prev_close = ohlcv[i][2], ohlcv[i][3], ohlcv[i - 1][4]
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            trs.append(tr)
+        if len(trs) < period:
+            return None
+        atr = sum(trs[:period]) / period
+        for i in range(period, len(trs)):
+            atr = (atr * (period - 1) + trs[i]) / period
+        return atr
+    
+    # ENHANCED: Fallback with fewer candles (minimum 7)
+    min_candles = 7
+    if len(ohlcv) >= min_candles:
+        logger.debug(f"[MarketData] ATR fallback: using {len(ohlcv)} candles (requested {period + 1})")
+        trs: list[float] = []
+        for i in range(1, len(ohlcv)):
+            high, low, prev_close = ohlcv[i][2], ohlcv[i][3], ohlcv[i - 1][4]
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            trs.append(tr)
+        
+        # Calculate ATR with available data
+        fallback_period = len(trs)
+        atr = sum(trs) / fallback_period
+        return atr
+    
+    # Insufficient data even for fallback
+    return None
 
 
 def _calculate_ema(data: list[float], period: int) -> float | None:
