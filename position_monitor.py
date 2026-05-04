@@ -8,6 +8,7 @@ import json
 from datetime import timezone
 from typing import Any
 
+import ccxt
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -29,9 +29,9 @@ from sqlalchemy import (
     text,
     update,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship
-from sqlalchemy.exc import SQLAlchemyError
 
 from core.account_risk import record_position_pnl
 from core.config import settings

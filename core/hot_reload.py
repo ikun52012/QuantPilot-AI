@@ -26,7 +26,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.database import get_admin_setting
 
-
 # Cache of last-known values for change-detection
 _last_known_settings: dict[str, Any] = {}
 

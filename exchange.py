@@ -148,6 +148,7 @@ async def _create_exchange_order(
                        Optional for open orders (derived from side).
     """
     import time
+
     from core.metrics import EXCHANGE_ERRORS, record_exchange_request
 
     # Validate amount against market limits before placing order
@@ -1431,7 +1432,7 @@ async def _cancel_exchange_order(exchange, symbol: str, order_id: str) -> dict:
             "order_id": str((result or {}).get("id") or order_id),
             "symbol": symbol,
         }
-    except ccxt.OrderNotFound as exc:
+    except ccxt.OrderNotFound:
         return {"status": "not_found", "order_id": order_id, "symbol": symbol}
     except ccxt.NetworkError as exc:
         logger.error(f"[Exchange] Network error cancelling order {order_id} on {symbol}: {exc}")
