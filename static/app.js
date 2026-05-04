@@ -593,11 +593,35 @@ async function loadDashboard() {
         renderMetrics(perf);
         renderEquityChart(perf.equity_curve || []);
         await loadRecentSignals();
+        checkSystemHealth();
     } catch (err) {
-        console.error('Dashboard load error:', err);
-        if (err.message.includes('401') || err.message.includes('Session expired')) redirectToLogin('expired');
-        else showToast(err.message, 'error', 'Dashboard Load Failed');
+console.error('Dashboard load error:', err);
     }
+}
+
+async function checkSystemHealth() {
+    try {
+        const health = await fetchAPI('/health/quick');
+        const chipEl = document.getElementById('system-health-chip');
+        const healthTextEl = document.getElementById('dash-system-health');
+
+        if (health.status === 'healthy') {
+            if (chipEl) chipEl.className = 'status-chip';
+            if (healthTextEl) healthTextEl.textContent = 'System Healthy';
+        } else if (health.status === 'degraded') {
+            if (chipEl) chipEl.className = 'status-chip warning';
+            if (healthTextEl) healthTextEl.textContent = 'System Degraded';
+        } else {
+            if (chipEl) chipEl.className = 'status-chip error';
+            if (healthTextEl) healthTextEl.textContent = 'System Issues';
+        }
+    } catch (err) {
+        const chipEl = document.getElementById('system-health-chip');
+        const healthTextEl = document.getElementById('dash-system-health');
+        if (chipEl) chipEl.className = 'status-chip error';
+        if (healthTextEl) healthTextEl.textContent = 'Health Check Failed';
+    }
+}
 }
 
 function renderDashboardBrief(perf = {}, overview = {}, status = {}) {
@@ -1478,6 +1502,29 @@ async function redeemCardCode() {
     }
 }
 
+async function loadSubscriptionHistory() {
+    try {
+        const subscriptions = await fetchAPI('/api/subscriptions');
+        const cardEl = document.getElementById('subscription-history-card');
+        const listEl = document.getElementById('subscription-history');
+        if (cardEl) cardEl.style.display = 'block';
+        if (!subscriptions.length) {
+            if (listEl) listEl.innerHTML = '<div class="empty-state">No subscription history</div>';
+            return;
+        }
+        if (listEl) {
+            listEl.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>Plan</th><th>Status</th><th>Start Date</th><th>End Date</th><th>Auto Renew</th></tr></thead><tbody>${subscriptions.map(s => `<tr><td><strong>${escapeHtml(s.plan_name || s.plan_id)}</strong></td><td><span class="badge badge-${s.status === 'active' ? 'active' : 'pending'}">${escapeHtml(s.status)}</span></td><td>${escapeHtml(formatDateTime(s.start_date))}</td><td>${escapeHtml(formatDateTime(s.end_date))}</td><td>${s.auto_renew ? 'Yes' : 'No'}</td></tr>`).join('')}</tbody></table></div>`;
+        }
+    } catch (err) {
+        showToast(err.message, 'error', 'History Load Failed');
+    }
+}
+
+function hideSubscriptionHistory() {
+    const cardEl = document.getElementById('subscription-history-card');
+    if (cardEl) cardEl.style.display = 'none';
+}
+
 async function showPaymentModal(subscriptionId, amount) {
     const options = await fetchAPI('/api/payment-options');
     const modal = document.getElementById('payment-modal');
@@ -1591,7 +1638,7 @@ async function adminVerifyPayment(paymentId) {
 async function loadAdmin() {
     if (!isAdmin()) { showToast('Admin access required','error'); return; }
     try {
-        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs, webhookEvents, backups, monitorState, filterThresholds, filterStats, externalKeys, enhancedFilters, updateStatus] = await Promise.all([
+        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs, webhookEvents, backups, monitorState, filterThresholds, filterStats, externalKeys, enhancedFilters, updateStatus, aiCosts] = await Promise.all([
             fetchAPI('/api/admin/users'),
             fetchAPI('/api/admin/payments'),
             fetchAPI('/api/admin/plans'),
@@ -1609,6 +1656,7 @@ async function loadAdmin() {
             fetchAPI('/api/admin/external-api-keys'),
             fetchAPI('/api/admin/enhanced-filters'),
             fetchAPI('/api/admin/update-status'),
+            fetchAPI('/api/admin/ai-costs').catch(() => ({ costs: {} })),
         ]);
 
         renderAdminUsers(users, plans);
@@ -1617,7 +1665,7 @@ async function loadAdmin() {
         renderAdminRedeemCodes(redeemCodes || [], plans || []);
         renderAdminPendingPayments(payments || []);
         renderAdminUpdate(updateStatus || {});
-        renderAdminSystem(system || {}, auditLogs || []);
+        renderAdminSystem(system || {}, auditLogs || [], aiCosts || {});
         renderAdminWebhookEvents(webhookEvents || []);
         renderAdminBackups(backups || []);
         renderAdminPositionMonitor(monitorState || {});
@@ -1626,7 +1674,87 @@ async function loadAdmin() {
         renderAdminExternalAPIKeys(externalKeys || {});
         renderAdminEnhancedFilters(enhancedFilters || {});
         loadAdminRiskConsole();
+        loadAIProviderConfig();
     } catch (err) { showToast(err.message, 'error', 'Admin Load Failed'); }
+}
+
+async function loadAIProviderConfig() {
+    try {
+        const [config, models] = await Promise.all([
+            fetchAPI('/api/admin/ai/provider-config'),
+            fetchAPI('/api/admin/ai/models-list'),
+        ]);
+        renderAIProviderConfig(config, models);
+    } catch (err) {
+        const el = document.getElementById('admin-ai-provider');
+        if (el) el.innerHTML = `<div class="empty-state">AI provider config unavailable: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function renderAIProviderConfig(config, models) {
+    const el = document.getElementById('admin-ai-provider');
+    if (!el) return;
+
+    const providers = models.providers || {};
+    const defaultProvider = config.default_provider || 'openai';
+
+    let providerHtml = '';
+    for (const [name, providerModels] of Object.entries(providers)) {
+        const isDefault = name === defaultProvider;
+        providerHtml += `
+            <div style="margin-bottom:16px;padding:12px;border:1px solid rgba(255,255,255,0.08);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                    <strong>${escapeHtml(name.toUpperCase())}</strong>
+                    ${isDefault ? '<span class="badge badge-active">Default</span>' : ''}
+                </div>
+                <div style="font-size:12px;color:var(--text-secondary)">
+                    Available Models: ${providerModels.length || 0}
+                </div>
+                ${providerModels.length ? `
+                    <div style="margin-top:8px;max-height:120px;overflow-y:auto">
+                        ${providerModels.slice(0, 10).map(m => `<div style="font-size:11px;color:var(--text-muted);padding:2px 0">• ${escapeHtml(m)}</div>`).join('')}
+                        ${providerModels.length > 10 ? `<div style="font-size:11px;color:var(--text-muted);padding:2px 0">... and ${providerModels.length - 10} more</div>` : ''}
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+
+    el.innerHTML = `
+        <div class="settings-form">
+            <div class="form-group">
+                <label>Default AI Provider</label>
+                <select id="admin-default-provider" class="select-input">
+                    ${Object.keys(providers).map(p => `<option value="${escapeHtml(p)}" ${p === defaultProvider ? 'selected' : ''}>${escapeHtml(p.toUpperCase())}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-row">
+                <button class="btn btn-primary" onclick="saveAIProviderConfig()"><i class="ri-save-line"></i> Save</button>
+            </div>
+        </div>
+        <h4 style="margin:24px 0 12px;font-size:14px">Available Providers & Models</h4>
+        ${providerHtml}
+        <div style="margin-top:16px;padding:12px;background:rgba(59,130,246,0.06);border-radius:8px;border:1px solid rgba(59,130,246,0.14)">
+            <p style="font-size:12px;color:var(--text-secondary);margin:0">
+                <i class="ri-information-line"></i>
+                Provider models are fetched dynamically from AI service. Configure API keys in Settings page to enable providers.
+            </p>
+        </div>
+    `;
+}
+
+async function saveAIProviderConfig() {
+    const provider = document.getElementById('admin-default-provider')?.value || 'openai';
+    try {
+        await fetchAPI('/api/admin/ai/provider-config', {
+            method: 'POST',
+            body: JSON.stringify({ default_provider: provider }),
+        });
+        showToast('Default provider updated.', 'success', 'Saved');
+        await loadAIProviderConfig();
+    } catch (err) {
+        showToast(err.message, 'error', 'Save Failed');
+    }
 }
 
 async function loadAdminRiskConsole() {
@@ -2173,7 +2301,7 @@ function renderUpdateTaskResult(task) {
     `;
 }
 
-function renderAdminSystem(system, auditLogs) {
+function renderAdminSystem(system, auditLogs, aiCosts = {}) {
     const el = document.getElementById('admin-system');
     if (!el) return;
     const storage = system.storage || {};
@@ -2181,12 +2309,25 @@ function renderAdminSystem(system, auditLogs) {
         .map(([name, item]) => `<tr><td>${escapeHtml(name)}</td><td>${escapeHtml(item.path || '')}</td><td><span class="badge badge-${item.writable === false ? 'error' : 'active'}">${item.writable === false ? 'Blocked' : 'OK'}</span></td></tr>`)
         .join('');
     const auditRows = auditLogs.length ? auditLogs.map(a => `<tr><td>${escapeHtml(formatDateTime(a.created_at))}</td><td>${escapeHtml(a.admin_username || '--')}</td><td>${escapeHtml(a.action)}</td><td>${escapeHtml(a.target_type || '')}:${escapeHtml(a.target_id || '')}</td><td>${escapeHtml(a.summary || '')}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No audit events yet</td></tr>';
+    
+    const costs = aiCosts.costs || {};
+    const totalCost = costs.total_cost_usd || 0;
+    const totalRequests = costs.total_requests || 0;
+    const byProvider = costs.by_provider || {};
+    const providerRows = Object.entries(byProvider).map(([p, c]) => `<div class="metric-item"><span class="metric-label">${escapeHtml(p.toUpperCase())}</span><span class="metric-value">$${formatNum(c.cost || 0)} (${c.requests || 0} req)</span></div>`).join('');
+
     el.innerHTML = `
         <div class="metrics-table">
             <div class="metric-item"><span class="metric-label">Version</span><span class="metric-value">${escapeHtml(system.version || '--')}</span></div>
             <div class="metric-item"><span class="metric-label">Commit</span><span class="metric-value">${escapeHtml(system.commit || '--')}</span></div>
             <div class="metric-item"><span class="metric-label">Webhook</span><span class="metric-value">${escapeHtml(system.webhook_url || '--')}</span></div>
             <div class="metric-item"><span class="metric-label">Live Trading</span><span class="metric-value">${system.live_trading ? 'YES' : 'NO'}</span></div>
+        </div>
+        <div class="metrics-table mt-4" style="background:rgba(59,130,246,0.06);padding:12px;border-radius:8px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:8px"><i class="ri-robot-line"></i> AI Costs Summary</div>
+            <div class="metric-item"><span class="metric-label">Total Cost</span><span class="metric-value">$${formatNum(totalCost)}</span></div>
+            <div class="metric-item"><span class="metric-label">Total Requests</span><span class="metric-value">${totalRequests}</span></div>
+            ${providerRows}
         </div>
         <div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Storage</th><th>Path</th><th>Status</th></tr></thead><tbody>${storageRows}</tbody></table></div>
         <div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Time</th><th>Admin</th><th>Action</th><th>Target</th><th>Summary</th></tr></thead><tbody>${auditRows}</tbody></table></div>
@@ -2589,8 +2730,18 @@ async function saveEnhancedFilters() {
 function renderAdminBackups(backups) {
     const el = document.getElementById('admin-backups');
     if (!el) return;
-    const rows = backups.length ? backups.map(b => `<tr><td>${escapeHtml(b.filename)}</td><td>${formatNum(Number(b.size || 0) / 1024)} KB</td><td>${escapeHtml(formatDateTime(b.created_at))}</td><td><div class="admin-actions"><button class="btn btn-sm" onclick="downloadBackup('${escapeJsSingle(b.filename)}')">Download</button><button class="btn btn-sm btn-warning" onclick="stageRestore('${escapeJsSingle(b.filename)}')">Stage Restore</button></div></td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No backups yet</td></tr>';
-    el.innerHTML = `<div class="settings-form"><div class="form-row"><button class="btn btn-primary" onclick="createBackup()"><i class="ri-archive-line"></i> Create Backup</button><span class="hint">Restore is staged only; stop the service before replacing live database files.</span></div><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Backup</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    const rows = backups.length ? backups.map(b => `<tr><td>${escapeHtml(b.filename)}</td><td>${formatNum(Number(b.size || 0) / 1024)} KB</td><td>${escapeHtml(formatDateTime(b.created_at))}</td><td><div class="admin-actions"><button class="btn btn-sm" onclick="downloadBackup('${escapeJsSingle(b.filename)}')">Download</button><button class="btn btn-sm btn-warning" onclick="stageRestore('${escapeJsSingle(b.filename)}')">Stage Restore</button><button class="btn btn-sm btn-danger" onclick="restoreBackupPG('${escapeJsSingle(b.filename)}')">Restore PG</button></div></td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No backups yet</td></tr>';
+    el.innerHTML = `<div class="settings-form"><div class="form-row"><button class="btn btn-primary" onclick="createBackup()"><i class="ri-archive-line"></i> Create Backup</button><span class="hint">Restore PG requires PostgreSQL service restart. Stop QuantPilot first.</span></div><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Backup</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
+async function restoreBackupPG(filename) {
+    if (!confirm('Restore PostgreSQL database from backup? This will REPLACE the current database. Stop the service first!')) return;
+    try {
+        await fetchAPI(`/api/admin/backups/${encodeURIComponent(filename)}/restore-pg`, { method: 'POST' });
+        showToast('PostgreSQL restore initiated. Check logs for result.', 'success', 'Restore Started');
+    } catch (err) {
+        showToast(err.message, 'error', 'Restore Failed');
+    }
 }
 
 function planOptions(plans, selected = '', emptyLabel = 'Select plan...') {
@@ -3034,6 +3185,137 @@ async function runBacktest() {
     } catch (err) {
         showToast(err.message, 'error', 'Backtest Failed');
         if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-play-line"></i> Run Backtest'; }
+    }
+}
+
+let _backtestAsyncTaskId = null;
+let _backtestAsyncPollTimer = null;
+
+async function runBacktestAsync() {
+    const btn = document.getElementById('btn-run-backtest-async');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ri-loader-line"></i> Starting...'; }
+
+    const request = {
+        ticker: document.getElementById('bt-ticker')?.value || 'BTCUSDT',
+        timeframe: document.getElementById('bt-timeframe')?.value || '1h',
+        days: parseInt(document.getElementById('bt-days')?.value) || 30,
+        strategy: document.getElementById('bt-strategy')?.value || 'simple_trend',
+        initial_capital: parseFloat(document.getElementById('bt-capital')?.value) || 10000,
+        position_size_pct: parseFloat(document.getElementById('bt-position-size')?.value) || 10,
+        leverage: parseFloat(document.getElementById('bt-leverage')?.value) || 1,
+        fee_pct: parseFloat(document.getElementById('bt-fee')?.value) || 0.04,
+        slippage_pct: parseFloat(document.getElementById('bt-slippage')?.value) || 0.01,
+        async: true,
+    };
+
+    try {
+        const result = await fetchAPI('/api/backtest/run', {
+            method: 'POST',
+            body: JSON.stringify(request)
+        });
+
+        if (result.task_id) {
+            _backtestAsyncTaskId = result.task_id;
+            showBacktestProgress(result.task_id, 'Running...');
+            startBacktestPolling(result.task_id, request);
+            showToast('Async backtest started. Polling for results...', 'success', 'Task Created');
+            if (btn) { btn.innerHTML = '<i class="ri-loader-line"></i> Running...'; }
+            document.getElementById('btn-cancel-backtest-async')?.style.display = 'inline-block';
+        } else {
+            displayBacktestResults(result, request);
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-loader-line"></i> Run Async (Long)'; }
+        }
+    } catch (err) {
+        showToast(err.message, 'error', 'Async Backtest Failed');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-loader-line"></i> Run Async (Long)'; }
+        hideBacktestProgress();
+    }
+}
+
+function showBacktestProgress(taskId, status) {
+    const progressEl = document.getElementById('backtest-progress');
+    const taskIdEl = document.getElementById('backtest-task-id');
+    const statusEl = document.getElementById('backtest-progress-status');
+    const barEl = document.getElementById('backtest-progress-bar');
+
+    if (progressEl) progressEl.style.display = 'block';
+    if (taskIdEl) taskIdEl.textContent = taskId;
+    if (statusEl) statusEl.textContent = status;
+    if (barEl) barEl.style.width = '10%';
+}
+
+function hideBacktestProgress() {
+    const progressEl = document.getElementById('backtest-progress');
+    if (progressEl) progressEl.style.display = 'none';
+    document.getElementById('btn-cancel-backtest-async')?.style.display = 'none';
+    _backtestAsyncTaskId = null;
+    if (_backtestAsyncPollTimer) {
+        clearTimeout(_backtestAsyncPollTimer);
+        _backtestAsyncPollTimer = null;
+    }
+}
+
+function startBacktestPolling(taskId, config) {
+    let pollCount = 0;
+    const maxPolls = 120; // 120 * 2s = 240s = 4 minutes max
+
+    const poll = async () => {
+        pollCount++;
+        if (pollCount > maxPolls) {
+            showToast('Backtest timeout - took too long', 'warning', 'Timeout');
+            hideBacktestProgress();
+            const btn = document.getElementById('btn-run-backtest-async');
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-loader-line"></i> Run Async (Long)'; }
+            return;
+        }
+
+        try {
+            const result = await fetchAPI(`/api/backtest/result/${encodeURIComponent(taskId)}`);
+
+            const barEl = document.getElementById('backtest-progress-bar');
+            const statusEl = document.getElementById('backtest-progress-status');
+
+            if (result.status === 'completed') {
+                if (barEl) barEl.style.width = '100%';
+                if (statusEl) statusEl.textContent = 'Completed!';
+                displayBacktestResults(result, config);
+                showToast('Async backtest completed!', 'success', 'Results Ready');
+                hideBacktestProgress();
+                const btn = document.getElementById('btn-run-backtest-async');
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-loader-line"></i> Run Async (Long)'; }
+                return;
+            } else if (result.status === 'failed' || result.status === 'error') {
+                showToast(result.error || 'Backtest failed', 'error', 'Task Failed');
+                hideBacktestProgress();
+                const btn = document.getElementById('btn-run-backtest-async');
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-loader-line"></i> Run Async (Long)'; }
+                return;
+            } else if (result.status === 'running' || result.status === 'pending') {
+                const progress = Math.min(90, 10 + (pollCount / maxPolls) * 80);
+                if (barEl) barEl.style.width = `${progress}%`;
+                if (statusEl) statusEl.textContent = `Running... (${pollCount * 2}s)`;
+                _backtestAsyncPollTimer = setTimeout(poll, 2000);
+            }
+        } catch (err) {
+            console.warn('Backtest poll error:', err);
+            _backtestAsyncPollTimer = setTimeout(poll, 2000);
+        }
+    };
+
+    poll();
+}
+
+async function cancelBacktestAsync() {
+    if (!_backtestAsyncTaskId) return;
+
+    try {
+        await fetchAPI(`/api/backtest/result/${encodeURIComponent(_backtestAsyncTaskId)}`, { method: 'DELETE' });
+        showToast('Backtest task cancelled.', 'warning', 'Cancelled');
+        hideBacktestProgress();
+        const btn = document.getElementById('btn-run-backtest-async');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ri-loader-line"></i> Run Async (Long)'; }
+    } catch (err) {
+        showToast(err.message, 'error', 'Cancel Failed');
     }
 }
 
@@ -4053,7 +4335,7 @@ function renderEditorStrategies(strategies) {
         el.innerHTML = `<div class="empty-state">${escapeHtml(t('pages.editor.no_saved_strategies', 'No saved custom strategies'))}</div>`;
         return;
     }
-    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('common.name', 'Name'))}</th><th>${escapeHtml(t('common.ticker', 'Ticker'))}</th><th>${escapeHtml(t('common.direction', 'Direction'))}</th><th>${escapeHtml(t('common.status', 'Status'))}</th><th>${escapeHtml(t('messages.updated', 'Updated'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${strategies.map(s => `<tr><td><strong>${escapeHtml(s.name || '--')}</strong></td><td>${escapeHtml(s.ticker || '--')}</td><td><span class="badge badge-${safeClassToken(s.direction || 'long')}">${escapeHtml(t(`trading.${s.direction || 'long'}`, s.direction || '--'))}</span></td><td><span class="badge badge-${s.is_active ? 'active' : 'pending'}">${s.is_active ? t('common.active', 'active') : t('common.draft', 'draft')}</span></td><td>${escapeHtml(formatDateTime(s.updated_at))}</td><td><div class="admin-actions"><button class="btn btn-sm btn-secondary" onclick="editStrategyDraft('${escapeJsSingle(s.strategy_id)}')">${escapeHtml(t('actions.edit', 'Edit'))}</button><button class="btn btn-sm btn-primary" onclick="toggleEditorStrategy('${escapeJsSingle(s.strategy_id)}', ${s.is_active ? 'false' : 'true'})">${escapeHtml(s.is_active ? t('actions.deactivate', 'Deactivate') : t('actions.activate', 'Activate'))}</button><button class="btn btn-sm btn-danger" onclick="deleteEditorStrategy('${escapeJsSingle(s.strategy_id)}')">${escapeHtml(t('actions.delete', 'Delete'))}</button></div></td></tr>`).join('')}</tbody></table></div>`;
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('common.name', 'Name'))}</th><th>${escapeHtml(t('common.ticker', 'Ticker'))}</th><th>${escapeHtml(t('common.direction', 'Direction'))}</th><th>${escapeHtml(t('common.status', 'Status'))}</th><th>${escapeHtml(t('messages.updated', 'Updated'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${strategies.map(s => `<tr><td><strong>${escapeHtml(s.name || '--')}</strong></td><td>${escapeHtml(s.ticker || '--')}</td><td><span class="badge badge-${safeClassToken(s.direction || 'long')}">${escapeHtml(t(`trading.${s.direction || 'long'}`, s.direction || '--'))}</span></td><td><span class="badge badge-${s.is_active ? 'active' : 'pending'}">${s.is_active ? t('common.active', 'active') : t('common.draft', 'draft')}</span></td><td>${escapeHtml(formatDateTime(s.updated_at))}</td><td><div class="admin-actions"><button class="btn btn-sm btn-secondary" onclick="editStrategyDraft('${escapeJsSingle(s.strategy_id)}')">${escapeHtml(t('actions.edit', 'Edit'))}</button><button class="btn btn-sm btn-warning" onclick="exportStrategy('${escapeJsSingle(s.strategy_id)}')"><i class="ri-download-line"></i> Export</button><button class="btn btn-sm btn-primary" onclick="toggleEditorStrategy('${escapeJsSingle(s.strategy_id)}', ${s.is_active ? 'false' : 'true'})">${escapeHtml(s.is_active ? t('actions.deactivate', 'Deactivate') : t('actions.activate', 'Activate'))}</button><button class="btn btn-sm btn-danger" onclick="deleteEditorStrategy('${escapeJsSingle(s.strategy_id)}')">${escapeHtml(t('actions.delete', 'Delete'))}</button></div></td></tr>`).join('')}</tbody></table></div><div style="padding:12px;text-align:right"><button class="btn btn-secondary" onclick="exportAllStrategies()"><i class="ri-download-line"></i> Export All</button></div>`;
 }
 
 async function editStrategyDraft(strategyId) {
@@ -4087,6 +4369,118 @@ async function deleteEditorStrategy(strategyId) {
     if (!confirm('Delete this strategy?')) return;
     try {
         await fetchAPI(`/api/strategy-editor/${encodeURIComponent(strategyId)}`, { method: 'DELETE' });
+        showToast('Strategy deleted.', 'success', 'Deleted');
+        await loadStrategyEditorPage();
+    } catch (err) {
+        showToast(err.message, 'error', 'Delete Failed');
+    }
+}
+
+async function exportStrategy(strategyId) {
+    try {
+        const s = await fetchAPI(`/api/strategy-editor/export/${encodeURIComponent(strategyId)}`);
+        const dataStr = JSON.stringify(s, null, 2);
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `strategy_${s.name || strategyId}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast('Strategy exported.', 'success', 'Export Complete');
+    } catch (err) {
+        showToast(err.message, 'error', 'Export Failed');
+    }
+}
+
+async function exportAllStrategies() {
+    try {
+        const result = await fetchAPI('/api/strategy-editor/list');
+        const strategies = result.strategies || [];
+        if (!strategies.length) {
+            showToast('No strategies to export.', 'warning', 'Empty');
+            return;
+        }
+        const exportData = {
+            exported_at: new Date().toISOString(),
+            strategies: strategies,
+        };
+        const dataStr = JSON.stringify(exportData, null, 2);
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `all_strategies_${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast(`${strategies.length} strategies exported.`, 'success', 'Export Complete');
+    } catch (err) {
+        showToast(err.message, 'error', 'Export Failed');
+    }
+}
+
+function importStrategyFromJSON() {
+    const input = document.getElementById('strategy-import-file');
+    if (input) input.click();
+}
+
+function triggerStrategyImport() {
+    const input = document.getElementById('saved-strategy-import-file');
+    if (input) input.click();
+}
+
+async function handleStrategyImportFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        setFieldValue('editor-strategy-id', data.strategy_id || '');
+        setFieldValue('editor-name', data.name || file.name.replace('.json', ''));
+        setFieldValue('editor-ticker', data.ticker || 'BTCUSDT');
+        setFieldValue('editor-direction', data.direction || 'long');
+        setFieldValue('editor-entry-json', JSON.stringify(data.entry_conditions || [], null, 2));
+        setFieldValue('editor-exit-json', JSON.stringify(data.exit_conditions || [], null, 2));
+        setFieldValue('editor-risk-json', JSON.stringify(data.risk_management || {}, null, 2));
+        setFieldValue('editor-tp-json', JSON.stringify(data.tp_levels || [], null, 2));
+        setFieldValue('editor-trailing-json', JSON.stringify(data.trailing_stop || {}, null, 2));
+        showToast('Strategy imported to form.', 'success', 'Import Complete');
+    } catch (err) {
+        showToast('Invalid JSON file.', 'error', 'Import Failed');
+    }
+    event.target.value = '';
+}
+
+async function handleSavedStrategyImportFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const strategies = data.strategies || [data];
+        let imported = 0;
+        for (const s of strategies) {
+            try {
+                await fetchAPI('/api/strategy-editor/import', {
+                    method: 'POST',
+                    body: JSON.stringify(s),
+                });
+                imported++;
+            } catch (err) {
+                console.warn('Failed to import strategy:', s.name, err);
+            }
+        }
+        showToast(`${imported} strategies imported.`, 'success', 'Import Complete');
+        await loadStrategyEditorPage();
+    } catch (err) {
+        showToast('Invalid JSON file.', 'error', 'Import Failed');
+    }
+    event.target.value = '';
+}
         showToast('Strategy deleted.', 'warning', 'Deleted');
         await loadStrategyEditorPage();
     } catch (err) {

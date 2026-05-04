@@ -123,6 +123,10 @@
                         <span class="status-dot"></span>
                         <span id="dash-api-health">API Online</span>
                     </div>
+                    <div class="status-chip" id="system-health-chip">
+                        <i class="ri-heart-pulse-line"></i>
+                        <span id="dash-system-health">System Healthy</span>
+                    </div>
                     <div class="status-chip warning">
                         <i class="ri-shield-check-line"></i>
                         <span id="dash-risk-mode">Risk Guard Active</span>
@@ -1453,8 +1457,26 @@
                             </div>
                             <div class="form-group" style="display:flex;align-items:flex-end">
                                 <button class="btn btn-primary" id="btn-run-backtest" onclick="runBacktest()">
-                                    <i class="ri-play-line"></i> Run Backtest
+                                    <i class="ri-play-line"></i> Run Backtest (Sync)
                                 </button>
+                                <button class="btn btn-warning" id="btn-run-backtest-async" onclick="runBacktestAsync()">
+                                    <i class="ri-loader-line"></i> Run Async (Long)
+                                </button>
+                                <button class="btn btn-secondary" onclick="cancelBacktestAsync()" id="btn-cancel-backtest-async" style="display:none">
+                                    <i class="ri-close-line"></i> Cancel
+                                </button>
+                            </div>
+                            <div id="backtest-progress" style="display:none;margin-top:16px;padding:12px;background:rgba(59,130,246,0.06);border-radius:8px">
+                                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                                    <span style="font-size:13px;font-weight:600">Task Progress</span>
+                                    <span id="backtest-progress-status" style="font-size:12px;color:var(--text-secondary)">Running...</span>
+                                </div>
+                                <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;overflow:hidden">
+                                    <div id="backtest-progress-bar" style="height:100%;background:var(--accent-blue);width:0%;transition:width 0.3s"></div>
+                                </div>
+                                <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">
+                                    Task ID: <code id="backtest-task-id">--</code>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -2006,6 +2028,8 @@
                         <div class="form-row">
                             <button class="btn btn-primary" onclick="saveEditorStrategy()"><i class="ri-save-line"></i> <span data-i18n="actions.save" data-i18n-fallback="Save">Save</span></button>
                             <button class="btn btn-secondary" onclick="resetStrategyEditorForm()"><i class="ri-refresh-line"></i> <span data-i18n="actions.reset" data-i18n-fallback="Reset">Reset</span></button>
+                            <button class="btn btn-warning" onclick="importStrategyFromJSON()"><i class="ri-upload-line"></i> Import JSON</button>
+                            <input type="file" id="strategy-import-file" accept=".json" style="display:none" onchange="handleStrategyImportFile(event)">
                         </div>
                     </div>
                 </div>
@@ -2013,7 +2037,11 @@
             <div class="card mt-4">
                 <div class="card-header">
                     <h3><i class="ri-folder-chart-line"></i> <span data-i18n="pages.editor.saved_strategies" data-i18n-fallback="Saved Strategies">Saved Strategies</span></h3>
-                    <button class="btn btn-secondary btn-sm" onclick="loadStrategyEditorPage()"><i class="ri-refresh-line"></i></button>
+                    <div style="display:flex;gap:8px">
+                        <button class="btn btn-secondary btn-sm" onclick="loadStrategyEditorPage()"><i class="ri-refresh-line"></i></button>
+                        <button class="btn btn-warning btn-sm" onclick="triggerStrategyImport()"><i class="ri-upload-line"></i> Import</button>
+                        <input type="file" id="saved-strategy-import-file" accept=".json" style="display:none" onchange="handleSavedStrategyImportFile(event)">
+                    </div>
                 </div>
                 <div id="editor-strategy-list" style="padding:20px" data-i18n="messages.loading" data-i18n-fallback="Loading...">Loading...</div>
             </div>
@@ -2044,8 +2072,18 @@
                 </div>
             </div>
             <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-history-line"></i> Payment History</h3></div>
+                <div class="card-header">
+                    <h3><i class="ri-history-line"></i> Payment History</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadSubscriptionHistory()">View All Subscriptions</button>
+                </div>
                 <div id="payment-history" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4" id="subscription-history-card" style="display:none">
+                <div class="card-header">
+                    <h3><i class="ri-file-list-3-line"></i> Subscription History</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="hideSubscriptionHistory()">Close</button>
+                </div>
+                <div id="subscription-history" style="padding:20px">Loading...</div>
             </div>
         </div>
 
@@ -2135,6 +2173,13 @@
             <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-fish-line"></i> Enhanced Whale Filters</h3></div>
                 <div id="admin-enhanced-filters" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-robot-line"></i> AI Provider Configuration</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadAIProviderConfig()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div id="admin-ai-provider" style="padding:20px">Loading...</div>
             </div>
             <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-archive-line"></i> Backup & Restore</h3></div>
