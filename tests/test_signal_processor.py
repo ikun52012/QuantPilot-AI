@@ -602,13 +602,13 @@ class TestPositionSizeCalculation:
             mock_settings.risk.position_sizing_mode = "fixed"
             mock_settings.exchange.name = "okx"
             mock_settings.exchange.market_type = "contract"
-            
+
             decision = TradeDecision(
                 ticker="ARB/USDT:USDT",
                 direction=SignalDirection.LONG,
                 entry_price=0.12,
             )
-            
+
             with patch("exchange.get_market_limits") as mock_get_limits:
                 mock_get_limits.return_value = {
                     "min_amount": 1.0,
@@ -618,14 +618,14 @@ class TestPositionSizeCalculation:
                     "contract_size": 10.0,
                     "amount_precision": 6,
                 }
-                
+
                 qty = processor._calculate_position_size(
                     price=0.12,
                     size_pct=1.0,
                     leverage=5.0,
                     decision=decision,
                 )
-                
+
                 assert qty == pytest.approx(416.666667)
                 mock_get_limits.assert_called()
 
@@ -638,13 +638,13 @@ class TestPositionSizeCalculation:
             mock_settings.risk.position_sizing_mode = "fixed"
             mock_settings.exchange.name = "okx"
             mock_settings.exchange.market_type = "spot"
-            
+
             decision = TradeDecision(
                 ticker="ARB/USDT",
                 direction=SignalDirection.LONG,
                 entry_price=0.12,
             )
-            
+
             with patch("exchange.get_market_limits") as mock_get_limits:
                 mock_get_limits.return_value = {
                     "min_amount": 1.0,
@@ -654,14 +654,14 @@ class TestPositionSizeCalculation:
                     "contract_size": 1.0,
                     "amount_precision": 6,
                 }
-                
+
                 qty = processor._calculate_position_size(
                     price=0.12,
                     size_pct=1.0,
                     leverage=5.0,
                     decision=decision,
                 )
-                
+
                 assert qty == pytest.approx(4166.666667)
 
 
