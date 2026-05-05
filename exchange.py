@@ -1020,8 +1020,11 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             )
 
         order_id = order.get("id", "unknown")
-        order_status = order.get("status", "unknown")
+        raw_status = order.get("status")
+        order_status = raw_status if raw_status is not None else "open"
         actual_filled_qty = safe_float(order.get("filled") or 0)
+        if raw_status is None and order_type == "limit":
+            logger.info(f"[Exchange] OKX sandbox returned status=None for limit order {order_id}, treating as 'open' (pending)")
         requested_qty = safe_float(decision.quantity or 0)
         if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
             actual_filled_qty = safe_float(order.get("amount") or decision.quantity)
@@ -1047,7 +1050,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             await asyncio.sleep(3)
             try:
                 order = await asyncio.to_thread(exchange.fetch_order, order_id, symbol)
-                order_status = order.get("status", "unknown")
+                raw_status = order.get("status")
+                order_status = raw_status if raw_status is not None else "open"
                 actual_filled_qty = safe_float(order.get("filled") or 0)
                 if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
                     actual_filled_qty = safe_float(order.get("amount") or decision.quantity)

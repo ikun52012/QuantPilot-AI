@@ -421,7 +421,10 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
             )
             order = await asyncio.to_thread(exchange.fetch_order, position.entry_order_id, symbol)
 
-            order_status = str(order.get("status", "")).lower()
+            raw_status = order.get("status")
+            order_status = str(raw_status if raw_status is not None else "open").lower()
+            if raw_status is None:
+                logger.info(f"[PositionMonitor] OKX sandbox returned status=None for order {position.entry_order_id}, treating as 'open'")
 
             if order_status in {"closed", "filled"}:
                 # Limit order filled - update position entry price and quantity
