@@ -365,6 +365,13 @@ def get_market_limits(exchange_id: str, symbol: str, market_type: str = "contrac
                 min_amount = max(1, int(min_amount) if min_amount > 0 else 1)
                 amount_precision = 0  # Integer only
 
+        contract_size = 1.0
+        if market.get("contractSize"):
+            try:
+                contract_size = float(market.get("contractSize") or 1.0)
+            except (TypeError, ValueError):
+                contract_size = 1.0
+
         result = {
             "min_amount": min_amount,
             "max_amount": max_amount,
@@ -372,15 +379,24 @@ def get_market_limits(exchange_id: str, symbol: str, market_type: str = "contrac
             "max_cost": max_cost,
             "amount_precision": amount_precision,
             "price_precision": price_precision,
+            "contract_size": contract_size,
             "symbol": symbol,
             "exchange": exchange_id,
         }
 
-        logger.debug(
-            f"[Exchange] Market limits for {symbol}: "
-            f"min_amount={min_amount}, max_amount={max_amount}, "
-            f"min_cost={min_cost}, max_cost={max_cost}"
-        )
+        if contract_size > 1.0:
+            logger.debug(
+                f"[Exchange] Market limits for {symbol}: "
+                f"min_amount={min_amount}, max_amount={max_amount}, "
+                f"min_cost={min_cost}, max_cost={max_cost}, "
+                f"contractSize={contract_size}"
+            )
+        else:
+            logger.debug(
+                f"[Exchange] Market limits for {symbol}: "
+                f"min_amount={min_amount}, max_amount={max_amount}, "
+                f"min_cost={min_cost}, max_cost={max_cost}"
+            )
         return result
 
     except Exception as e:

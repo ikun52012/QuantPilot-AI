@@ -593,6 +593,77 @@ class TestPositionSizeCalculation:
             )
             assert decision.quantity == 1.0
 
+    def test_position_size_uses_contract_size_for_contract_markets(self, processor):
+        """For contract markets with contractSize > 1, quantity should be contract count, not base currency amount."""
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.position_sizing_mode = "fixed"
+            mock_settings.exchange.name = "okx"
+            mock_settings.exchange.market_type = "contract"
+            
+            decision = TradeDecision(
+                ticker="ARB/USDT:USDT",
+                direction=SignalDirection.LONG,
+                entry_price=0.12,
+            )
+            
+            with patch("exchange.get_market_limits") as mock_get_limits:
+                mock_get_limits.return_value = {
+                    "min_amount": 1.0,
+                    "max_amount": 10000.0,
+                    "min_cost": 5.0,
+                    "max_cost": float("inf"),
+                    "contract_size": 10.0,
+                    "amount_precision": 6,
+                }
+                
+                qty = processor._calculate_position_size(
+                    price=0.12,
+                    size_pct=1.0,
+                    leverage=5.0,
+                    decision=decision,
+                )
+                
+                assert qty == pytest.approx(416.666667)
+                mock_get_limits.assert_called()
+
+    def test_position_size_uses_no_contract_size_for_spot_markets(self, processor):
+        """For spot markets (contractSize = 1), quantity should be base currency amount."""
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.position_sizing_mode = "fixed"
+            mock_settings.exchange.name = "okx"
+            mock_settings.exchange.market_type = "spot"
+            
+            decision = TradeDecision(
+                ticker="ARB/USDT",
+                direction=SignalDirection.LONG,
+                entry_price=0.12,
+            )
+            
+            with patch("exchange.get_market_limits") as mock_get_limits:
+                mock_get_limits.return_value = {
+                    "min_amount": 1.0,
+                    "max_amount": 10000.0,
+                    "min_cost": 5.0,
+                    "max_cost": float("inf"),
+                    "contract_size": 1.0,
+                    "amount_precision": 6,
+                }
+                
+                qty = processor._calculate_position_size(
+                    price=0.12,
+                    size_pct=1.0,
+                    leverage=5.0,
+                    decision=decision,
+                )
+                
+                assert qty == pytest.approx(4166.666667)
+
 
 class TestValidStopLoss:
     """Tests for stop loss validation."""
