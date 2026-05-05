@@ -194,6 +194,24 @@ class TestSymbolNormalization:
         exchange = _FakeExchange()
         assert _resolve_symbol(exchange, "TRBUSDT", "spot") == "TRB/USDT"
 
+    def test_resolve_symbol_does_not_return_spot_when_contract_requested(self):
+        """When contract is requested but only spot exists, should not return spot market."""
+
+        class _FakeExchange:
+            def __init__(self):
+                self.options = {"defaultType": "future"}
+
+            def load_markets(self):
+                return {
+                    "ASTR/USDT": {"id": "ASTRUSDT", "spot": True, "contract": False},
+                }
+
+        exchange = _FakeExchange()
+        result = _resolve_symbol(exchange, "ASTR.P", "contract")
+        assert result in ["ASTR/USDT:USDT", "ASTRUSDT", "ASTR.P", "ASTR/USDT"]
+        market = exchange.load_markets().get(result)
+        assert market is None or market.get("contract") is not True
+
 
 class TestEnhancedMarketSymbolNormalization:
     def test_tradingview_perp_to_public_api_symbols(self):

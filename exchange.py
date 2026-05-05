@@ -902,10 +902,13 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str, market_type: str | Non
         if isinstance(market, dict) and _market_matches_type(market, target_market_type):
             return candidate
 
+    # ENHANCED: Fallback loop now respects market type to avoid returning spot when contract is requested
     for candidate in candidates:
-        if candidate in markets:
+        market = markets.get(candidate)
+        if isinstance(market, dict) and _market_matches_type(market, target_market_type):
             return candidate
 
+    # Fallback: scan all markets for matching ID with type check
     cleaned = _normalize_symbol(symbol).replace("/", "")
     fallback_symbol = ""
     for market_symbol_raw, market in markets.items():
@@ -920,8 +923,16 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str, market_type: str | Non
             if not fallback_symbol:
                 fallback_symbol = market_symbol
 
+    # ENHANCED: Only use fallback if it matches type, or log warning
     if fallback_symbol:
-        return fallback_symbol
+        fallback_market = markets.get(fallback_symbol)
+        if fallback_market and _market_matches_type(fallback_market, target_market_type):
+            return fallback_symbol
+        logger.warning(
+            f"[Exchange] Symbol {symbol} not found with requested type '{target_market_type}', "
+            f"found '{fallback_symbol}' but it is {fallback_market.get('type', 'unknown')} market. "
+            f"Using first candidate '{candidates[0]}' instead."
+        )
 
     logger.warning(f"[Exchange] Symbol {symbol} not found in loaded markets; using {candidates[0]}")
     return candidates[0]
