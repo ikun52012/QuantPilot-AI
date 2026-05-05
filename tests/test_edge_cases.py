@@ -28,6 +28,7 @@ from exchange import (
     _valid_stop_loss,
     _valid_take_profit,
 )
+from market_data import build_entry_exit_indicator_context
 from models import (
     MarketContext,
     SignalDirection,
@@ -460,6 +461,35 @@ class TestSMCAnalysis:
         assert discount == 0.0
         assert equilibrium == 0.0
 
+
+class TestEntryExitIndicators:
+    """Test AI entry/exit placement indicator calculations."""
+
+    def test_build_entry_exit_indicator_context_detects_levels(self):
+        base_ts = 1_700_000_000_000
+        ohlcv = []
+        for i in range(30):
+            price = 100 + i * 0.2
+            ohlcv.append([base_ts + i * 3_600_000, price, price + 1, price - 1, price + 0.5, 1000 + i * 10])
+
+        context = build_entry_exit_indicator_context(ohlcv_1h=ohlcv, ohlcv_15m=ohlcv, ohlcv_5m=ohlcv)
+
+        assert context["vwap_1h_24"]["vwap"] is not None
+        assert context["volume_profile_1h"]["poc"] is not None
+        assert context["session_levels"]["session_high"] is not None
+        assert context["liquidity_sweep"]["recent_high"] is not None
+
+    def test_build_entry_exit_indicator_context_detects_bullish_sweep(self):
+        base_ts = 1_700_000_000_000
+        ohlcv = []
+        for i in range(20):
+            ohlcv.append([base_ts + i * 300_000, 100, 102, 98, 100, 1000])
+        ohlcv.append([base_ts + 20 * 300_000, 100, 101, 96, 99, 2000])
+
+        context = build_entry_exit_indicator_context(ohlcv_1h=ohlcv, ohlcv_5m=ohlcv)
+
+        assert context["liquidity_sweep"]["type"] == "bullish_low_sweep"
+        assert context["liquidity_sweep"]["swept_level"] == 98
 
 class TestPasswordSecurity:
     """Test password security edge cases."""

@@ -134,6 +134,171 @@ def _clean_ohlcv_data(ohlcv: list[list[Any]], max_candles: int | None = None) ->
     return cleaned
 
 
+def _calculate_vwap(ohlcv: list[list[float]], lookback: int = 24) -> dict[str, float | None]:
+    """Calculate rolling VWAP from OHLCV candles."""
+    candles = [c for c in ohlcv[-lookback:] if len(c) >= 6 and c[5] > 0]
+    if not candles:
+        return {"vwap": None, "distance_pct": None}
+
+    total_pv = 0.0
+    total_volume = 0.0
+    for candle in candles:
+        typical_price = (float(candle[2]) + float(candle[3]) + float(candle[4])) / 3.0
+        volume = float(candle[5])
+        total_pv += typical_price * volume
+        total_volume += volume
+
+    if total_volume <= 0:
+        return {"vwap": None, "distance_pct": None}
+
+    vwap = total_pv / total_volume
+    current_price = float(candles[-1][4])
+    distance_pct = ((current_price - vwap) / vwap * 100.0) if vwap > 0 else None
+    return {
+        "vwap": round(vwap, 8),
+        "distance_pct": round(distance_pct, 4) if distance_pct is not None else None,
+    }
+
+
+def _calculate_volume_profile(
+    ohlcv: list[list[float]],
+    lookback: int = 96,
+    bins: int = 24,
+    value_area_pct: float = 0.70,
+) -> dict[str, Any]:
+    """Build a simple volume profile with POC and value area from recent candles."""
+    candles = [c for c in ohlcv[-lookback:] if len(c) >= 6 and c[5] > 0]
+    if len(candles) < 3:
+        return {"poc": None, "value_area_high": None, "value_area_low": None, "high_volume_nodes": [], "low_volume_nodes": []}
+
+    lows = [float(c[3]) for c in candles]
+    highs = [float(c[2]) for c in candles]
+    low = min(lows)
+    high = max(highs)
+    if high <= low:
+        return {"poc": None, "value_area_high": None, "value_area_low": None, "high_volume_nodes": [], "low_volume_nodes": []}
+
+    bin_count = max(4, min(int(bins), 80))
+    step = (high - low) / bin_count
+    volumes = [0.0 for _ in range(bin_count)]
+
+    for candle in candles:
+        typical_price = (float(candle[2]) + float(candle[3]) + float(candle[4])) / 3.0
+        idx = int((typical_price - low) / step)
+        idx = max(0, min(bin_count - 1, idx))
+        volumes[idx] += float(candle[5])
+
+    total_volume = sum(volumes)
+    if total_volume <= 0:
+        return {"poc": None, "value_area_high": None, "value_area_low": None, "high_volume_nodes": [], "low_volume_nodes": []}
+
+    def midpoint(index: int) -> float:
+        return low + (index + 0.5) * step
+
+    poc_idx = max(range(bin_count), key=lambda i: volumes[i])
+    ranked = sorted(range(bin_count), key=lambda i: volumes[i], reverse=True)
+    selected: list[int] = []
+    running_volume = 0.0
+    for idx in ranked:
+        selected.append(idx)
+        running_volume += volumes[idx]
+        if running_volume >= total_volume * value_area_pct:
+            break
+
+    nonzero = [idx for idx in range(bin_count) if volumes[idx] > 0]
+    high_volume_nodes = [round(midpoint(idx), 8) for idx in ranked[:3] if volumes[idx] > 0]
+    low_volume_nodes = [round(midpoint(idx), 8) for idx in sorted(nonzero, key=lambda i: volumes[i])[:3]]
+
+    return {
+        "poc": round(midpoint(poc_idx), 8),
+        "value_area_high": round(max(midpoint(idx) for idx in selected), 8),
+        "value_area_low": round(min(midpoint(idx) for idx in selected), 8),
+        "high_volume_nodes": high_volume_nodes,
+        "low_volume_nodes": low_volume_nodes,
+        "lookback_bars": len(candles),
+    }
+
+
+def _calculate_session_levels(ohlcv: list[list[float]]) -> dict[str, float | None]:
+    """Calculate current and previous UTC session high/low levels."""
+    candles = [c for c in ohlcv if len(c) >= 5]
+    if not candles:
+        return {"session_high": None, "session_low": None, "prior_session_high": None, "prior_session_low": None}
+
+    def session_key(candle: list[float]) -> str:
+        return datetime.fromtimestamp(float(candle[0]) / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    latest_key = session_key(candles[-1])
+    current_session = [c for c in candles if session_key(c) == latest_key]
+    if len(current_session) < 3:
+        current_session = candles[-24:]
+
+    prior_sessions = sorted({session_key(c) for c in candles if session_key(c) != latest_key})
+    prior_session = [c for c in candles if prior_sessions and session_key(c) == prior_sessions[-1]]
+
+    return {
+        "session_high": round(max(float(c[2]) for c in current_session), 8) if current_session else None,
+        "session_low": round(min(float(c[3]) for c in current_session), 8) if current_session else None,
+        "prior_session_high": round(max(float(c[2]) for c in prior_session), 8) if prior_session else None,
+        "prior_session_low": round(min(float(c[3]) for c in prior_session), 8) if prior_session else None,
+    }
+
+
+def _detect_liquidity_sweep(ohlcv: list[list[float]], lookback: int = 20) -> dict[str, Any]:
+    """Detect recent stop-run sweeps around prior swing highs/lows."""
+    candles = [c for c in ohlcv if len(c) >= 5]
+    if len(candles) < 5:
+        return {"type": "none", "swept_level": None, "strength": 0.0, "recent_high": None, "recent_low": None}
+
+    window = candles[-(lookback + 1):]
+    prior = window[:-1]
+    last = window[-1]
+    recent_high = max(float(c[2]) for c in prior)
+    recent_low = min(float(c[3]) for c in prior)
+    last_high = float(last[2])
+    last_low = float(last[3])
+    last_close = float(last[4])
+    candle_range = max(last_high - last_low, 0.0)
+
+    sweep_type = "none"
+    swept_level: float | None = None
+    strength = 0.0
+    if last_high > recent_high and last_close < recent_high:
+        sweep_type = "bearish_high_sweep"
+        swept_level = recent_high
+        strength = (last_high - recent_high) / candle_range if candle_range > 0 else 0.0
+    elif last_low < recent_low and last_close > recent_low:
+        sweep_type = "bullish_low_sweep"
+        swept_level = recent_low
+        strength = (recent_low - last_low) / candle_range if candle_range > 0 else 0.0
+
+    return {
+        "type": sweep_type,
+        "swept_level": round(swept_level, 8) if swept_level else None,
+        "strength": round(max(0.0, min(strength, 1.0)), 4),
+        "recent_high": round(recent_high, 8),
+        "recent_low": round(recent_low, 8),
+    }
+
+
+def build_entry_exit_indicator_context(
+    ohlcv_1h: list[list[float]] | None = None,
+    ohlcv_15m: list[list[float]] | None = None,
+    ohlcv_5m: list[list[float]] | None = None,
+) -> dict[str, Any]:
+    """Build extra AI-only indicators for entry and exit placement."""
+    one_hour = ohlcv_1h or []
+    intraday = ohlcv_15m or ohlcv_5m or one_hour
+    sweep_source = ohlcv_5m or ohlcv_15m or one_hour
+    return {
+        "vwap_1h_24": _calculate_vwap(one_hour, lookback=24),
+        "volume_profile_1h": _calculate_volume_profile(one_hour, lookback=96),
+        "session_levels": _calculate_session_levels(one_hour),
+        "liquidity_sweep": _detect_liquidity_sweep(sweep_source, lookback=20),
+        "intraday_vwap": _calculate_vwap(intraday, lookback=48),
+    }
+
+
 class MarketDataWebSocketManager:
     """Manage WebSocket connections for real-time market data (Optimization 6)."""
 
@@ -632,6 +797,11 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             context_any._ohlcv_1h = ohlcv_1h
             context_any._ohlcv_4h = ohlcv_4h
             context_any._market_data_source = exchange_id
+            context_any._entry_exit_indicators = build_entry_exit_indicator_context(
+                ohlcv_1h=ohlcv_1h,
+                ohlcv_15m=ohlcv_15m,
+                ohlcv_5m=ohlcv_5m,
+            )
 
             logger.info(f"[MarketData] Fetched context for {ticker} via {exchange_id}: price={current_price}, RSI={rsi}, ATR%={atr_pct}")
             return context

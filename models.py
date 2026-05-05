@@ -254,6 +254,10 @@ class TradeDecision(BaseModel):
     order_type: str = Field(default="market", description="market or limit")
     # For limit orders: maximum time to wait before cancelling (seconds)
     limit_timeout_secs: int = Field(default=4 * 60 * 60, ge=10, le=7 * 24 * 60 * 60)
+    entry_source: str = Field(default="raw_signal", max_length=80)
+    exit_quality_score: float = Field(default=100.0, ge=0.0, le=100.0)
+    exit_quality_reasons: list[str] = Field(default_factory=list)
+    position_size_multiplier: float = Field(default=1.0, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _apply_signal_timeframe_timeout(self):

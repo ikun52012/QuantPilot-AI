@@ -638,6 +638,10 @@ class SignalProcessor:
                 outcome="execute" if decision.execute else "rejected",
                 reason=decision.reason,
                 payload={
+                    "entry_source": decision.entry_source,
+                    "exit_quality_score": decision.exit_quality_score,
+                    "exit_quality_reasons": decision.exit_quality_reasons,
+                    "position_size_multiplier": decision.position_size_multiplier,
                     "entry_price": decision.entry_price,
                     "stop_loss": decision.stop_loss,
                     "take_profit_levels": [level.model_dump() for level in decision.take_profit_levels],
@@ -965,6 +969,7 @@ class SignalProcessor:
                         f"({price_diff_pct:+.2f}% adjustment via SMC/FVG)"
                     )
                     decision.entry_price = suggested
+                    decision.entry_source = "ai_modified"
                 else:
                     # Fallback: suggested entry too far, use original price
                     logger.warning(
@@ -972,6 +977,7 @@ class SignalProcessor:
                         f"falling back to original signal price {signal.price}"
                     )
                     decision.entry_price = signal.price
+                    decision.entry_source = "fallback_raw_invalid_ai_entry"
                     # Don't reject the trade, just use original price
             else:
                 # Fallback: no valid suggested_entry, use original signal price
@@ -980,6 +986,7 @@ class SignalProcessor:
                     f"using original signal price {signal.price}"
                 )
                 decision.entry_price = signal.price
+                decision.entry_source = "fallback_raw_missing_ai_entry"
                 # Don't reject the trade, continue with original price
 
         if decision.execute:
@@ -1002,6 +1009,7 @@ class SignalProcessor:
                     decision.execute = False
                     decision.reason = rr_reason
                     return decision
+                self._apply_entry_exit_quality(decision, signal, analysis, market, user_settings or {})
 
         # Set trailing stop - use smart selector if not explicitly configured
         trailing_cfg = (user_settings or {}).get("trailing_stop") or {}
@@ -1068,6 +1076,14 @@ class SignalProcessor:
             decision=decision,
             user_settings=user_settings,
         )
+        if decision.quantity and decision.position_size_multiplier < 1.0:
+            original_qty = decision.quantity
+            decision.quantity = float(round(decision.quantity * decision.position_size_multiplier, 6))
+            logger.info(
+                f"[Signal] Position size adjusted by entry/exit quality: "
+                f"{original_qty} -> {decision.quantity} (multiplier={decision.position_size_multiplier:.2f}, "
+                f"score={decision.exit_quality_score:.1f})"
+            )
 
         decision.reason = analysis.reasoning
         return decision
@@ -1119,6 +1135,7 @@ class SignalProcessor:
                     f"[Signal] AI stop loss missing/invalid for {signal.ticker}; "
                     f"using deterministic fallback SL={sl_price}"
                 )
+                decision.exit_quality_reasons.append("server_fallback_stop_loss")
         decision.stop_loss = sl_price
         if sl_price:
             self._append_stop_loss_advisory_warnings(
@@ -1587,6 +1604,95 @@ class SignalProcessor:
             )
 
         return (False, "Invalid TP quantities for R:R calculation")
+
+    def _apply_entry_exit_quality(
+        self,
+        decision: TradeDecision,
+        signal: TradingViewSignal,
+        analysis: AIAnalysis,
+        market: MarketContext,
+        user_settings: dict,
+    ) -> None:
+        """Score entry/exit quality and reduce size for weaker but still valid setups."""
+        if not decision.execute or not decision.entry_price or not decision.stop_loss or not decision.take_profit_levels:
+            return
+
+        score = 100.0
+        reasons = list(decision.exit_quality_reasons)
+        entry = float(decision.entry_price)
+        sl_dist_pct = abs(float(decision.stop_loss) - entry) / entry * 100 if entry > 0 else 0.0
+        atr_pct = safe_float(market.atr_pct, 0.0)
+        timeframe = str(signal.timeframe or "60")
+
+        if decision.entry_source.startswith("fallback_raw"):
+            score -= 20.0
+            reasons.append(decision.entry_source)
+
+        if analysis.confidence < 0.55:
+            score -= 15.0
+            reasons.append("low_ai_confidence")
+        elif analysis.confidence < 0.70:
+            score -= 6.0
+            reasons.append("moderate_ai_confidence")
+
+        if analysis.risk_score > 0.75:
+            score -= 15.0
+            reasons.append("high_ai_risk_score")
+        elif analysis.risk_score > 0.55:
+            score -= 7.0
+            reasons.append("elevated_ai_risk_score")
+
+        if market.atr_pct is None:
+            score -= 6.0
+            reasons.append("missing_atr_for_exit_quality")
+        elif atr_pct > 0:
+            min_sl_pct = self._get_min_sl_percentage(atr_pct, user_settings, timeframe)
+            max_sl_pct = self._get_max_sl_percentage(user_settings, timeframe)
+            if sl_dist_pct < min_sl_pct:
+                score -= 12.0
+                reasons.append("stop_loss_below_atr_timeframe_guidance")
+            elif max_sl_pct > 0 and sl_dist_pct > max_sl_pct:
+                score -= 8.0
+                reasons.append("stop_loss_above_timeframe_guidance")
+
+        total_qty = sum(float(tp.qty_pct or 0.0) for tp in decision.take_profit_levels)
+        if total_qty > 0 and sl_dist_pct > 0:
+            avg_tp_dist = sum(
+                abs(float(tp.price) - entry) / entry * 100 * float(tp.qty_pct or 0.0)
+                for tp in decision.take_profit_levels
+            ) / total_qty
+            avg_rr = avg_tp_dist / sl_dist_pct
+            if avg_rr < 1.5:
+                score -= 10.0
+                reasons.append(f"thin_average_rr_{avg_rr:.2f}")
+            elif avg_rr >= 2.0:
+                score += 3.0
+
+        if len(decision.take_profit_levels) == 1:
+            score -= 3.0
+            reasons.append("single_take_profit_level")
+
+        if analysis.warnings:
+            warning_penalty = min(10.0, len(analysis.warnings) * 3.0)
+            score -= warning_penalty
+            reasons.append("ai_warnings_present")
+
+        score = max(0.0, min(100.0, score))
+        multiplier = 1.0
+        if decision.entry_source.startswith("fallback_raw"):
+            multiplier = min(multiplier, 0.75)
+        if "server_fallback_stop_loss" in reasons:
+            multiplier = min(multiplier, 0.80)
+        if score < 60.0:
+            multiplier = min(multiplier, 0.50)
+        elif score < 75.0:
+            multiplier = min(multiplier, 0.75)
+        elif score < 85.0:
+            multiplier = min(multiplier, 0.90)
+
+        decision.exit_quality_score = round(score, 2)
+        decision.position_size_multiplier = round(multiplier, 4)
+        decision.exit_quality_reasons = list(dict.fromkeys(reasons))
 
     async def _check_correlation_risk(
         self,
@@ -2076,6 +2182,12 @@ class SignalProcessor:
             payload={
                 "signal": signal_data,
                 "analysis": decision.ai_analysis.model_dump() if decision.ai_analysis else {},
+                "entry_exit_quality": {
+                    "entry_source": decision.entry_source,
+                    "exit_quality_score": decision.exit_quality_score,
+                    "exit_quality_reasons": decision.exit_quality_reasons,
+                    "position_size_multiplier": decision.position_size_multiplier,
+                },
                 "result": result,
                 "exchange_config": {
                     "exchange": exchange_config.get("exchange") or exchange_config.get("name"),

@@ -559,6 +559,8 @@ class TestSignalProcessorBuildDecision:
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
         assert decision.execute is True
         assert decision.entry_price == 49500
+        assert decision.entry_source == "ai_modified"
+        assert decision.exit_quality_score > 0
 
     def test_modified_entry_out_of_range(self, processor, sample_signal, sample_market):
         """Should fallback to original signal price when AI modified entry >5% away."""
@@ -574,6 +576,7 @@ class TestSignalProcessorBuildDecision:
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
 # NEW BEHAVIOR: fallback to original price instead of reject
         assert decision.entry_price == 50000.0
+        assert decision.entry_source == "fallback_raw_invalid_ai_entry"
         # May be rejected for other reasons (SL too far), but entry should be original price
 
     def test_modified_entry_without_suggested_entry_fallback(self, processor, sample_signal, sample_market):
@@ -591,6 +594,42 @@ class TestSignalProcessorBuildDecision:
 
         # NEW BEHAVIOR: fallback to original price instead of reject
         assert decision.entry_price == 50000.0  # Should use original signal price
+        assert decision.entry_source == "fallback_raw_missing_ai_entry"
+
+    def test_fallback_entry_reduces_position_size(self, processor, sample_signal, sample_market):
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="modify",
+            reasoning="Entry unavailable but thesis valid",
+            suggested_stop_loss=49000,
+            suggested_tp1=51500,
+            tp1_qty_pct=100.0,
+            position_size_pct=1.0,
+        )
+
+        decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
+
+        assert decision.execute is True
+        assert decision.entry_source == "fallback_raw_missing_ai_entry"
+        assert decision.position_size_multiplier == 0.75
+        assert "fallback_raw_missing_ai_entry" in decision.exit_quality_reasons
+
+    def test_fallback_stop_loss_reduces_position_size(self, processor, sample_signal, sample_market):
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="No SL but TP valid",
+            suggested_stop_loss=None,
+            suggested_tp1=51500,
+            tp1_qty_pct=100.0,
+            position_size_pct=1.0,
+        )
+
+        decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
+
+        assert decision.execute is True
+        assert decision.position_size_multiplier == 0.8
+        assert "server_fallback_stop_loss" in decision.exit_quality_reasons
 
 
 class TestPositionSizeCalculation:

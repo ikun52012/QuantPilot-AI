@@ -128,6 +128,42 @@ def test_build_user_prompt_includes_prefilter_context(sample_signal, sample_mark
     assert "Notable Checks: spread; funding_rate" in prompt
 
 
+def test_build_user_prompt_includes_entry_exit_indicators(sample_signal, sample_market, monkeypatch):
+    monkeypatch.setattr(settings.risk, "exit_management_mode", "ai")
+    sample_market._entry_exit_indicators = {
+        "vwap_1h_24": {"vwap": 50100.0, "distance_pct": -0.2},
+        "intraday_vwap": {"vwap": 50050.0, "distance_pct": -0.1},
+        "volume_profile_1h": {
+            "poc": 49900.0,
+            "value_area_low": 49200.0,
+            "value_area_high": 50600.0,
+            "high_volume_nodes": [49900.0, 50200.0],
+            "low_volume_nodes": [48800.0],
+        },
+        "session_levels": {
+            "session_high": 51000.0,
+            "session_low": 49000.0,
+            "prior_session_high": 50500.0,
+            "prior_session_low": 48500.0,
+        },
+        "liquidity_sweep": {
+            "type": "bullish_low_sweep",
+            "swept_level": 49000.0,
+            "strength": 0.62,
+            "recent_high": 51000.0,
+            "recent_low": 49000.0,
+        },
+    }
+
+    prompt = _build_user_prompt(sample_signal, sample_market)
+
+    assert "Entry / Exit Placement Indicators" in prompt
+    assert "24h VWAP" in prompt
+    assert "Volume Profile" in prompt
+    assert "UTC Session Levels" in prompt
+    assert "bullish_low_sweep" in prompt
+
+
 def test_analysis_config_signature_changes_with_prefilter_summary():
     baseline = _analysis_config_signature({"_prefilter_summary": {"score": 80.0, "soft_fail_count": 1}})
     changed = _analysis_config_signature({"_prefilter_summary": {"score": 65.0, "soft_fail_count": 2}})

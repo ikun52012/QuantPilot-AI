@@ -384,9 +384,10 @@ Your analysis process:
 3. Check for conflicting indicators
 4. Consider market microstructure (orderbook, spread, volume)
 5. Factor in broader market conditions (funding rate, 24h trend)
-6. Determine optimal take-profit targets (up to 4 levels)
-7. Assess volatility to suggest appropriate trailing stop parameters
-8. Recommend trailing stop mode based on market conditions and confidence
+6. Use VWAP, volume profile, session highs/lows, and liquidity sweeps to improve entry and exit placement
+7. Determine optimal take-profit targets (up to 4 levels)
+8. Assess volatility to suggest appropriate trailing stop parameters
+9. Recommend trailing stop mode based on market conditions and confidence
 
 You MUST respond in valid JSON format with these exact fields:
 {
@@ -437,6 +438,8 @@ Key rules:
 - For "execute" or "modify", `suggested_stop_loss` must be a finite number, never null/0/equal to entry, and on the protective side of the final entry
 - ATR/timeframe SL ranges are guidance only; do not force SL to a fixed percentage if the structure gives a better invalidation level
 - If using "modify", calculate SL/TP from `suggested_entry`; if using "execute", calculate SL/TP from the signal price
+- Prefer entries near fair value, discount/premium imbalance, VWAP reclaim/rejection, value-area edges, or post-sweep retests instead of chasing extended moves
+- Use session highs/lows, POC/HVN, LVN gaps, liquidity sweep levels, and SMC invalidation points as candidates for TP/SL placement
 - If you cannot produce a valid stop loss, set recommendation="reject" instead of execute/modify
 - If you recommend "reject" or "hold", set `suggested_entry`, `suggested_stop_loss`, `suggested_take_profit`, and all `suggested_tp*` fields to null
 - If `suggested_direction` matches the incoming signal direction, return null instead of repeating the same direction
@@ -648,6 +651,53 @@ def _effective_trailing_stop_config(user_settings: dict | None = None):
     return _TS()
 
 
+def _format_entry_exit_indicators(market: MarketContext) -> str:
+    """Format optional VWAP/profile/session/liquidity data for the AI prompt."""
+    indicators = getattr(market, "_entry_exit_indicators", None) or {}
+    if not isinstance(indicators, dict):
+        return ""
+
+    vwap = indicators.get("vwap_1h_24") or {}
+    intraday_vwap = indicators.get("intraday_vwap") or {}
+    profile = indicators.get("volume_profile_1h") or {}
+    session = indicators.get("session_levels") or {}
+    sweep = indicators.get("liquidity_sweep") or {}
+
+    lines = ["## Entry / Exit Placement Indicators"]
+    if vwap.get("vwap") is not None:
+        lines.append(f"- 24h VWAP (1h): {vwap.get('vwap')} (price distance {vwap.get('distance_pct')}%)")
+    if intraday_vwap.get("vwap") is not None:
+        lines.append(f"- Intraday VWAP: {intraday_vwap.get('vwap')} (price distance {intraday_vwap.get('distance_pct')}%)")
+    if profile.get("poc") is not None:
+        lines.append(
+            "- Volume Profile: "
+            f"POC={profile.get('poc')}, Value Area={profile.get('value_area_low')} - {profile.get('value_area_high')}, "
+            f"HVN={profile.get('high_volume_nodes')}, LVN={profile.get('low_volume_nodes')}"
+        )
+    if session.get("session_high") is not None or session.get("session_low") is not None:
+        lines.append(
+            "- UTC Session Levels: "
+            f"current high={session.get('session_high')}, current low={session.get('session_low')}, "
+            f"prior high={session.get('prior_session_high')}, prior low={session.get('prior_session_low')}"
+        )
+    if sweep.get("type") and sweep.get("type") != "none":
+        lines.append(
+            "- Liquidity Sweep: "
+            f"{sweep.get('type')} at {sweep.get('swept_level')} "
+            f"(strength={sweep.get('strength')}, recent high={sweep.get('recent_high')}, recent low={sweep.get('recent_low')})"
+        )
+    elif sweep.get("recent_high") is not None:
+        lines.append(f"- Liquidity Sweep: none detected; recent high={sweep.get('recent_high')}, recent low={sweep.get('recent_low')}")
+
+    if len(lines) == 1:
+        return ""
+    lines.append(
+        "Use VWAP and volume-profile levels to judge fair value, POC/HVN as likely magnets, "
+        "LVN as fast-move zones, session highs/lows as liquidity pools, and sweep levels as structural invalidation or TP candidates."
+    )
+    return "\n" + "\n".join(lines) + "\n"
+
+
 def _build_user_prompt(
     signal: TradingViewSignal,
     market: MarketContext,
@@ -659,6 +709,7 @@ def _build_user_prompt(
     tp_config = _effective_take_profit_config(user_settings)
     ts_config = _effective_trailing_stop_config(user_settings)
     prefilter_summary = ((user_settings or {}).get("_prefilter_summary") or {}) if isinstance(user_settings, dict) else {}
+    entry_exit_indicator_section = _format_entry_exit_indicators(market)
 
     missing_data_items = []
     if market.current_price <= 0:
@@ -791,6 +842,7 @@ When market data is limited:
 - EMA Fast: {market.ema_fast if market.ema_fast is not None else 'N/A'}
 - EMA Slow: {market.ema_slow if market.ema_slow is not None else 'N/A'}
 - Orderbook Imbalance (bid/ask): {market.orderbook_imbalance if market.orderbook_imbalance is not None else 'N/A'}
+{entry_exit_indicator_section}
 {tp_section}
 {ts_section}
 {prefilter_section}
