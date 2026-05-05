@@ -1421,9 +1421,9 @@ prefilter_result: PreFilterResult | None = None,
         """Validate that the trade has acceptable risk/reward ratio.
 
         Returns (is_valid, reason) tuple.
-        Checks:
-        - TP1 distance vs SL distance (minimum 1.5:1)
-        - Average TP distance vs SL distance (minimum 1.2:1)
+        Checks (prioritized by weighted average first):
+        - Weighted average TP distance vs SL distance (minimum 1.2:1)
+        - TP1 distance vs SL distance (minimum 1.5:1) - only checked if average fails
         """
         if not sl or not tp_levels or entry <= 0:
             return (False, "Missing SL or TP for R:R validation")
@@ -1434,19 +1434,13 @@ prefilter_result: PreFilterResult | None = None,
 
         risk_cfg = user_settings.get("risk") or {}
         min_rr_ratio = safe_float(risk_cfg.get("min_risk_reward_ratio"), 1.5)
+        min_avg_rr = safe_float(risk_cfg.get("min_avg_risk_reward_ratio"), 1.2)
 
-        # Check TP1 (nearest target) R:R
+        # Calculate TP1 R:R
         tp1_dist_pct = abs(tp_levels[0].price - entry) / entry * 100
         tp1_rr = tp1_dist_pct / sl_dist_pct
 
-        if tp1_rr < min_rr_ratio:
-            return (
-                False,
-                f"TP1 R:R ratio {tp1_rr:.2f}:1 below minimum {min_rr_ratio}:1 "
-                f"(TP1={tp_levels[0].price}, SL={sl}, entry={entry})"
-            )
-
-        # Check average TP R:R (weighted by qty_pct)
+        # Calculate weighted average TP R:R
         total_qty = sum(tp.qty_pct for tp in tp_levels)
         avg_rr = 0.0
         if total_qty > 0:
@@ -1455,19 +1449,35 @@ prefilter_result: PreFilterResult | None = None,
                 for tp in tp_levels
             ) / total_qty
             avg_rr = avg_tp_dist / sl_dist_pct
-            min_avg_rr = safe_float(risk_cfg.get("min_avg_risk_reward_ratio"), 1.2)
 
-            if avg_rr < min_avg_rr:
-                return (
-                    False,
-                    f"Average TP R:R ratio {avg_rr:.2f}:1 below minimum {min_avg_rr}:1"
+            # Prioritize weighted average R:R check
+            if avg_rr >= min_avg_rr:
+                logger.info(
+                    f"[Signal] R:R validation passed (weighted average): "
+                    f"avg={avg_rr:.2f}:1 >= min_avg={min_avg_rr:.2f}:1, "
+                    f"TP1={tp1_rr:.2f}:1, TP levels={len(tp_levels)}"
                 )
+                return (True, "")
 
-        logger.info(
-            f"[Signal] R:R validation passed: TP1={tp1_rr:.2f}:1, "
-            f"avg={avg_rr:.2f}:1 (min={min_rr_ratio}:1)"
-        )
-        return (True, "")
+            # If average fails, check TP1 as fallback safety
+            if tp1_rr >= min_rr_ratio:
+                logger.info(
+                    f"[Signal] R:R validation passed (TP1 fallback): "
+                    f"TP1={tp1_rr:.2f}:1 >= min={min_rr_ratio:.2f}:1, "
+                    f"avg={avg_rr:.2f}:1 < min_avg={min_avg_rr:.2f}:1"
+                )
+                return (True, "")
+
+            # Both average and TP1 fail
+            return (
+                False,
+                f"R:R validation failed: weighted avg={avg_rr:.2f}:1 < {min_avg_rr:.2f}:1, "
+                f"TP1={tp1_rr:.2f}:1 < {min_rr_ratio:.2f}:1 "
+                f"(TP1={tp_levels[0].price}, SL={sl}, entry={entry}, TP levels={len(tp_levels)}, "
+                f"total_qty_pct={total_qty:.1f}%)"
+            )
+
+        return (False, "Invalid TP quantities for R:R calculation")
 
     async def _check_correlation_risk(
         self,
