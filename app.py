@@ -1,5 +1,5 @@
 """
-QuantPilot AI v4.5.3 - Main Application Entry Point
+QuantPilot AI v4.5.4 - Main Application Entry Point
 
 Complete pipeline:
   TradingView Webhook -> Pre-Filter -> AI Analysis -> Trade Execution -> Notification

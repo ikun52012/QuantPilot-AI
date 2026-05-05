@@ -26,6 +26,7 @@ from core.database import (
     has_recent_webhook_event,
     log_trade_db,
     record_webhook_event,
+    record_signal_decision_audit,
 )
 from core.metrics import (
     record_ai_analysis,
@@ -414,6 +415,43 @@ class SignalProcessor:
     def __init__(self, session: AsyncSession):
         self.session = session
 
+    @staticmethod
+    def _live_trading_requested(user_settings: dict | None = None) -> bool:
+        exchange_cfg = (user_settings or {}).get("exchange") or {}
+        if "live_trading" in exchange_cfg:
+            return bool(exchange_cfg.get("live_trading"))
+        return bool(settings.exchange.live_trading)
+
+    @staticmethod
+    def _block_live_risk_check_errors(user_settings: dict | None = None) -> bool:
+        risk_cfg = (user_settings or {}).get("risk") or {}
+        if "block_live_on_risk_check_error" in risk_cfg:
+            return bool(risk_cfg.get("block_live_on_risk_check_error"))
+        return bool(settings.risk.block_live_on_risk_check_error)
+
+    async def _record_signal_audit(
+        self,
+        *,
+        fingerprint: str,
+        signal: TradingViewSignal,
+        user_id: str | None,
+        stage: str,
+        outcome: str,
+        reason: str = "",
+        payload: dict | None = None,
+    ) -> None:
+        await record_signal_decision_audit(
+            session=self.session,
+            user_id=user_id,
+            fingerprint=fingerprint,
+            ticker=signal.ticker,
+            direction=signal.direction.value,
+            stage=stage,
+            outcome=outcome,
+            reason=reason,
+            payload=_safe_event_payload(payload or {}),
+        )
+
     async def process_webhook(
         self,
         signal: TradingViewSignal,
@@ -555,6 +593,18 @@ class SignalProcessor:
 
             # Step 2: Run pre-filter
             prefilter_result = await self._run_prefilter(signal, market, user_id, user_settings)
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="prefilter",
+                outcome="passed" if prefilter_result.passed else "blocked",
+                reason=prefilter_result.reason,
+                payload={
+                    "score": prefilter_result.score,
+                    "checks": prefilter_result.checks,
+                },
+            )
 
             if not prefilter_result.passed:
                 await self._record_and_notify_blocked(
@@ -568,9 +618,34 @@ class SignalProcessor:
 
             # Step 3: AI Analysis
             analysis = await self._run_ai_analysis(signal, market, user_settings, prefilter_result)
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="ai_analysis",
+                outcome=analysis.recommendation,
+                reason=analysis.reasoning,
+                payload={"analysis": analysis.model_dump()},
+            )
 
             # Step 4: Build trade decision
             decision = self._build_trade_decision(signal, analysis, market, user_id, user_settings)
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="trade_decision",
+                outcome="execute" if decision.execute else "rejected",
+                reason=decision.reason,
+                payload={
+                    "entry_price": decision.entry_price,
+                    "stop_loss": decision.stop_loss,
+                    "take_profit_levels": [level.model_dump() for level in decision.take_profit_levels],
+                    "quantity": decision.quantity,
+                    "order_type": decision.order_type,
+                    "trailing_stop": decision.trailing_stop.model_dump(),
+                },
+            )
 
             # Step 5: Check for conflicting open positions
             if decision.execute:
@@ -611,6 +686,16 @@ class SignalProcessor:
                 # Notify rejection to Telegram
                 await notify_trade_executed(decision, result)
 
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="execution",
+                outcome=str(result.get("status", "unknown")),
+                reason=str(result.get("reason", "")),
+                payload={"result": result},
+            )
+
             self._update_reserved_event(
                 reservation,
                 status=result.get("status", "processed"),
@@ -628,6 +713,16 @@ class SignalProcessor:
         except Exception as e:
             logger.error(f"[Signal] Processing error: {e}")
             await notify_error(str(e))
+
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="error",
+                outcome="error",
+                reason=str(e),
+                payload={"error": str(e)},
+            )
 
             if reservation:
                 self._update_reserved_event(
@@ -696,6 +791,17 @@ class SignalProcessor:
         use_scoring = min_pass_score > 0.0
 
         user_risk = (user_settings or {}).get("risk") or {}
+        live_trading = self._live_trading_requested(user_settings)
+        live_data_quality_mode = str(
+            user_risk.get("live_data_quality_mode") or settings.risk.live_data_quality_mode
+        ).lower().strip()
+        try:
+            max_live_missing_data_checks = max(
+                0,
+                int(user_risk.get("max_live_missing_data_checks", settings.risk.max_live_missing_data_checks)),
+            )
+        except (TypeError, ValueError):
+            max_live_missing_data_checks = int(settings.risk.max_live_missing_data_checks)
         if user_risk:
             # BUG FIX: Validate user risk settings to prevent bypass of risk controls.
             # Negative or extreme values could disable safety limits entirely.
@@ -721,6 +827,9 @@ class SignalProcessor:
             user_id=user_id,
             use_scoring=use_scoring,
             min_pass_score=min_pass_score,
+            live_trading=live_trading,
+            data_quality_mode=live_data_quality_mode,
+            max_missing_data_checks=max_live_missing_data_checks,
         )
 
         record_prefilter_result(
@@ -737,7 +846,7 @@ class SignalProcessor:
         signal: TradingViewSignal,
         market: MarketContext,
         user_settings: dict | None = None,
-prefilter_result: PreFilterResult | None = None,
+        prefilter_result: PreFilterResult | None = None,
     ) -> AIAnalysis:
         """Run AI analysis on the signal."""
         import time
@@ -1593,6 +1702,12 @@ prefilter_result: PreFilterResult | None = None,
             )
 
         except Exception as e:
+            live_trading = self._live_trading_requested(user_settings)
+            if live_trading and self._block_live_risk_check_errors(user_settings):
+                result["exceeded"] = True
+                result["reason"] = f"Correlation risk check failed in live mode: {e}"
+                logger.error(f"[Signal] {result['reason']}")
+                return result
             logger.warning(f"[Signal] Correlation check failed (allowing trade): {e}")
 
         return result
@@ -2194,6 +2309,10 @@ prefilter_result: PreFilterResult | None = None,
                             )
                             return (msg, synthetic_pos)
                 except Exception as ex:
+                    if self._block_live_risk_check_errors(user_settings):
+                        msg = f"Exchange position conflict check failed in live mode: {ex}"
+                        logger.error(f"[Signal] {msg}")
+                        return (msg, None)
                     logger.warning(f"[Signal] Failed to check exchange positions: {ex}")
 
             # Allow same-direction (scaling in)

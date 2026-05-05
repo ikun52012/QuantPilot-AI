@@ -10,6 +10,8 @@
 - [ ] Set `TRUST_PROXY_HEADERS=true` only if behind a trusted reverse proxy
 - [ ] Configure Nginx/Caddy with SSL (see `nginx.conf.example`)
 - [ ] Verify `LIVE_TRADING=false` until fully tested
+- [ ] Keep `LIVE_DATA_QUALITY_MODE=fail_closed` for live trading unless you have an explicit degraded-data playbook
+- [ ] Keep `BLOCK_LIVE_ON_RISK_CHECK_ERROR=true` so failed live risk checks block new entries
 
 ## Infrastructure
 

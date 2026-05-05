@@ -4,7 +4,7 @@
 
 **QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration platform. It combines TradingView's Webhook signal mechanism and advanced filtering rules with powerful AI models (OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral, **OpenRouter 100+ models**, or custom LLMs) to perform secondary artificial intelligence decision-making. Finally, it automates order placement and execution on mainstream crypto exchanges like Binance and OKX.
 
-**NEW in v4.6**: Enhanced risk validation (SL/TP distance + R:R ratio), per-ticker concurrency locks, liquidity sweep analysis, dynamic volatility-based SL adjustment, smart black swan handling (profit→trail, loss→close), correlation risk control, reverse signal auto-processing, intelligent AI fallback strategy.
+**NEW in v4.5.4**: Live-trading fail-closed data-quality gate, signal decision audit trail, stricter live risk-check failure handling, enhanced risk validation (SL/TP distance + R:R ratio), per-ticker concurrency locks, liquidity sweep analysis, dynamic volatility-based SL adjustment, correlation risk control, reverse signal auto-processing, intelligent AI fallback strategy.
 
 **NEW in v4.5**: Login brute-force protection, AI cost tracking, position conflict detection, voting timeout control, automated daily backups, Telegram i18n notifications, Nginx reverse proxy template, and full content page i18n coverage.
 
@@ -21,7 +21,7 @@
   - **NEW**: Liquidity sweep analysis (pools, vacuums, false breakout detection).
   - **NEW**: Reverse signal handling (auto-close opposite position before opening new).
 
-- **🛡️ 26-Layer Pre-Filter System**
+- **🛡️ 29-Check Pre-Filter System**
   - Strict Webhook signal processor preventing entries during whale manipulation/black swan events.
   - Circuit breakers for max daily trades and drawdown.
   - Whale activity monitoring (Whale Alert, Etherscan, Blockchain.com).
@@ -179,7 +179,7 @@ Message format:
 
 ```mermaid
 graph LR
-    A[TradingView Webhook] --> B(19-Layer Pre-Filter)
+    A[TradingView Webhook] --> B(29-Check Pre-Filter)
     B --> |Passed| C{AI Strategy & Voting}
     B --> |Rejected| F[Logs & Telegram]
     C --> |Trade Approved| D[Exchange Execution]

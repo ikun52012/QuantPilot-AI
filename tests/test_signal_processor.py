@@ -390,6 +390,87 @@ class TestSignalProcessorBuildDecision:
         assert kwargs["use_scoring"] is True
         assert kwargs["min_pass_score"] == 70.0
 
+    @patch("services.signal_processor.run_pre_filter_async", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_run_prefilter_passes_live_data_quality_controls(
+        self,
+        mock_run_pre_filter,
+        processor,
+        sample_signal,
+        sample_market,
+        monkeypatch,
+    ):
+        mock_run_pre_filter.return_value = PreFilterResult(passed=True, reason="ok", checks={}, score=88.0)
+        monkeypatch.setattr("pre_filter.get_thresholds", lambda: type("_T", (), {"get": staticmethod(lambda key, ticker="": 0.0)})())
+
+        await processor._run_prefilter(
+            sample_signal,
+            sample_market,
+            None,
+            {
+                "exchange": {"live_trading": True},
+                "risk": {"live_data_quality_mode": "fail_closed", "max_live_missing_data_checks": 2},
+            },
+        )
+
+        kwargs = mock_run_pre_filter.await_args.kwargs
+        assert kwargs["live_trading"] is True
+        assert kwargs["data_quality_mode"] == "fail_closed"
+        assert kwargs["max_missing_data_checks"] == 2
+
+    @pytest.mark.asyncio
+    async def test_live_prefilter_blocks_when_data_quality_missing(self, processor, monkeypatch):
+        with pre_filter._state_lock:
+            pre_filter._recent_signals.clear()
+
+        monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=0))
+        monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
+        monkeypatch.setattr("pre_filter.get_recent_trade_results_async", AsyncMock(return_value=[]))
+
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=50000.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        market = MarketContext(ticker="BTCUSDT", current_price=50000.0)
+
+        result = await pre_filter.run_pre_filter_async(
+            signal,
+            market,
+            user_id="user-live",
+            live_trading=True,
+            data_quality_mode="fail_closed",
+            max_missing_data_checks=0,
+        )
+
+        assert result.passed is False
+        assert result.checks["live_data_quality"]["passed"] is False
+        assert "Live data quality gate failed" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_correlation_risk_error_blocks_live_mode(self, processor, sample_signal):
+        processor.session.execute = AsyncMock(side_effect=RuntimeError("database unavailable"))
+        decision = TradeDecision(
+            ticker=sample_signal.ticker,
+            direction=SignalDirection.LONG,
+            entry_price=50000.0,
+            quantity=0.01,
+        )
+
+        result = await processor._check_correlation_risk(
+            decision,
+            user_id="user-live",
+            user_settings={"exchange": {"live_trading": True}},
+        )
+
+        assert result["exceeded"] is True
+        assert "live mode" in result["reason"]
+
     @pytest.mark.asyncio
     async def test_run_prefilter_blocks_aliased_duplicate_signal_during_cooldown(self, processor, monkeypatch):
         with pre_filter._state_lock:

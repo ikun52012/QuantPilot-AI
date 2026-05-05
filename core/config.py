@@ -246,6 +246,10 @@ class RiskConfig(BaseModel):
     # Correlation risk limits
     max_same_direction_positions: int = 5  # Max positions in same direction
     max_correlated_exposure_pct: float = 50.0  # Max % of equity in one direction
+    # Production safety mode: live trading should stop when required market/risk data is unavailable.
+    live_data_quality_mode: str = "fail_closed"
+    max_live_missing_data_checks: int = 0
+    block_live_on_risk_check_error: bool = True
 
     @field_validator('exit_management_mode')
     @classmethod
@@ -268,6 +272,14 @@ class RiskConfig(BaseModel):
             raise ValueError("position_sizing_mode must be 'percentage', 'fixed', or 'risk_ratio'")
         return v
 
+    @field_validator('live_data_quality_mode')
+    @classmethod
+    def validate_live_data_quality_mode(cls, v: str) -> str:
+        normalized = str(v or "fail_closed").lower().strip()
+        if normalized not in ('fail_closed', 'warn'):
+            raise ValueError("live_data_quality_mode must be 'fail_closed' or 'warn'")
+        return normalized
+
     @classmethod
     def from_env(cls) -> "RiskConfig":
         return cls(
@@ -284,6 +296,9 @@ class RiskConfig(BaseModel):
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
             max_same_direction_positions=int(os.getenv("MAX_SAME_DIRECTION_POSITIONS", "5")),
             max_correlated_exposure_pct=float(os.getenv("MAX_CORRELATED_EXPOSURE_PCT", "50.0")),
+            live_data_quality_mode=os.getenv("LIVE_DATA_QUALITY_MODE", "fail_closed"),
+            max_live_missing_data_checks=int(os.getenv("MAX_LIVE_MISSING_DATA_CHECKS", "0")),
+            block_live_on_risk_check_error=os.getenv("BLOCK_LIVE_ON_RISK_CHECK_ERROR", "true").lower() == "true",
         )
 
 
@@ -433,7 +448,7 @@ class RateLimitConfig(BaseModel):
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
     app_name: str = "QuantPilot AI"
-    app_version: str = "4.5.3"
+    app_version: str = "4.5.4"
     debug: bool = False
     json_logs: bool = False
 

@@ -185,6 +185,26 @@ class WebhookEventModel(Base):
     created_at = Column(DateTime, default=lambda: utcnow(), index=True)
 
 
+class SignalDecisionAuditModel(Base):
+    """Append-only audit trail for signal filtering, AI analysis, and final decisions."""
+    __tablename__ = "signal_decision_audits"
+    __table_args__ = (
+        Index("idx_signal_decision_audits_fingerprint_stage", "fingerprint", "stage"),
+        Index("idx_signal_decision_audits_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), nullable=True, index=True)
+    fingerprint = Column(String(64), default="", index=True)
+    ticker = Column(String(40), default="", index=True)
+    direction = Column(String(20), default="")
+    stage = Column(String(40), nullable=False, index=True)
+    outcome = Column(String(40), default="")
+    reason = Column(Text, default="")
+    payload_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=lambda: utcnow(), index=True)
+
+
 class AdminSettingModel(Base):
     """Admin settings model."""
     __tablename__ = "admin_settings"
@@ -458,6 +478,7 @@ class DatabaseManager:
             "trades", "webhook_events", "invite_codes", "redeem_codes",
             "admin_settings", "admin_audit_logs", "positions",
             "order_events", "strategy_states", "shared_signals", "signal_subscriptions",
+            "signal_decision_audits",
         }
         VALID_COLUMN_TYPES = {
             "FLOAT", "BOOLEAN", "TIMESTAMP", "TEXT", "VARCHAR", "INTEGER",
@@ -587,6 +608,17 @@ class DatabaseManager:
             "status_code": "INTEGER DEFAULT 200",
             "reason": "TEXT DEFAULT ''",
             "client_ip": "VARCHAR(45) DEFAULT ''",
+            "payload_json": "TEXT DEFAULT '{}'",
+            "created_at": "TIMESTAMP",
+        })
+        add_missing_columns("signal_decision_audits", {
+            "user_id": "VARCHAR(36)",
+            "fingerprint": "VARCHAR(64) DEFAULT ''",
+            "ticker": "VARCHAR(40) DEFAULT ''",
+            "direction": "VARCHAR(20) DEFAULT ''",
+            "stage": "VARCHAR(40) DEFAULT ''",
+            "outcome": "VARCHAR(40) DEFAULT ''",
+            "reason": "TEXT DEFAULT ''",
             "payload_json": "TEXT DEFAULT '{}'",
             "created_at": "TIMESTAMP",
         })
@@ -1514,6 +1546,41 @@ async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, wind
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
+
+
+async def record_signal_decision_audit(
+    session: AsyncSession,
+    user_id: str | None,
+    fingerprint: str,
+    ticker: str,
+    direction: str,
+    stage: str,
+    outcome: str,
+    reason: str,
+    payload: dict,
+) -> SignalDecisionAuditModel | None:
+    """Record an append-only signal decision audit entry without affecting trading flow."""
+    if session is None:
+        return None
+    try:
+        audit = SignalDecisionAuditModel(
+            user_id=user_id,
+            fingerprint=str(fingerprint or ""),
+            ticker=str(ticker or ""),
+            direction=str(direction or ""),
+            stage=str(stage or "")[:40],
+            outcome=str(outcome or "")[:40],
+            reason=str(reason or ""),
+            payload_json=json.dumps(payload or {}, default=str),
+        )
+        maybe_added = session.add(audit)
+        if hasattr(maybe_added, "__await__"):
+            await maybe_added
+        await session.flush()
+        return audit
+    except Exception as exc:
+        logger.warning(f"[Audit] Failed to record signal decision audit: {exc}")
+        return None
 
 
 # ─────────────────────────────────────────────

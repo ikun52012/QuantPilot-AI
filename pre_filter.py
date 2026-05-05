@@ -1,7 +1,7 @@
 """
 QuantPilot AI - Pre-Filter (Rule-Based Layer)
 Fast, free, rule-based checks BEFORE calling the AI.
-Enhanced v3: 18 intelligent filters with configurable thresholds, weighted scoring,
+Enhanced v4: 29 intelligent checks with configurable thresholds, weighted scoring,
 dynamic thresholds per ticker, and blocking statistics.
 """
 import asyncio
@@ -398,9 +398,12 @@ async def run_pre_filter_async(
     disabled_checks: set[str] | list[str] | tuple[str, ...] | None = None,
     use_scoring: bool = False,
     min_pass_score: float | None = None,
+    live_trading: bool = False,
+    data_quality_mode: str | None = None,
+    max_missing_data_checks: int | None = None,
 ) -> PreFilterResult:
     """
-    Run 18 fast rule-based checks on the incoming signal (async version).
+    Run fast rule-based checks on the incoming signal (async version).
 
     Args:
         use_scoring: If True, use weighted scoring instead of hard pass/fail
@@ -427,6 +430,7 @@ async def run_pre_filter_async(
     has_ema_data = market.ema_fast is not None and market.ema_slow is not None
 
     missing_data_checks = []
+    unavailable_data_checks = []
 
     # ── Check 1: Daily trade limit ──
     try:
@@ -958,6 +962,7 @@ async def run_pre_filter_async(
     # ── Check 20: Macro Events Risk ──
     if isinstance(macro_result, Exception):
         checks["macro_events"] = {"passed": True, "note": f"Skip: {macro_result}"}
+        unavailable_data_checks.append("macro_events")
     else:
         macro_ok, macro_reason = macro_result
         checks["macro_events"] = {
@@ -973,6 +978,7 @@ async def run_pre_filter_async(
     liq_distance_min = thresholds.get("liquidation_distance_pct_min", ticker)
     if isinstance(liq_result, Exception):
         checks["liquidation_heatmap"] = {"passed": True, "note": f"Skip: {liq_result}"}
+        unavailable_data_checks.append("liquidation_heatmap")
     else:
         liq_data = liq_result
         liq_data.get("nearest_liq_level")
@@ -999,6 +1005,7 @@ async def run_pre_filter_async(
     ls_low = thresholds.get("long_short_ratio_extreme_low", ticker)
     if isinstance(ls_result, Exception):
         checks["long_short_ratio"] = {"passed": True, "note": f"Skip: {ls_result}"}
+        unavailable_data_checks.append("long_short_ratio")
     else:
         ls_data = ls_result
         current_ratio = ls_data.get("current_ratio")
@@ -1028,6 +1035,7 @@ async def run_pre_filter_async(
     basis_max = thresholds.get("basis_pct_max", ticker)
     if isinstance(basis_result, Exception):
         checks["basis_check"] = {"passed": True, "note": f"Skip: {basis_result}"}
+        unavailable_data_checks.append("basis_check")
     else:
         basis_data = basis_result
         basis_pct = basis_data.get("basis_pct")
@@ -1051,6 +1059,7 @@ async def run_pre_filter_async(
     fg_threshold = thresholds.get("fear_greed_extreme_threshold", ticker)
     if isinstance(fg_result, Exception):
         checks["fear_greed"] = {"passed": True, "note": f"Skip: {fg_result}"}
+        unavailable_data_checks.append("fear_greed")
     else:
         fg_data = fg_result
         fg_value = fg_data.get("value")
@@ -1111,6 +1120,7 @@ async def run_pre_filter_async(
             missing_data_checks.append("cvd_divergence")
     except Exception as e:
         checks["cvd_divergence"] = {"passed": True, "note": f"Skip: {e}"}
+        unavailable_data_checks.append("cvd_divergence")
 
     # ── Check 26: Volatility Regime ──
     regime_ok = True
@@ -1143,6 +1153,7 @@ async def run_pre_filter_async(
             missing_data_checks.append("volatility_regime")
     except Exception as e:
         checks["volatility_regime"] = {"passed": True, "note": f"Skip: {e}"}
+        unavailable_data_checks.append("volatility_regime")
 
     # ── Check 27: Market Data Completeness ──
     missing_soft_fail_count = int(thresholds.get("data_completeness_soft_fail_count", ticker) or 5)
@@ -1150,8 +1161,10 @@ async def run_pre_filter_async(
     checks["data_completeness"] = {
         "passed": data_complete_ok,
         "missing_count": len(missing_data_checks),
+        "unavailable_count": len(unavailable_data_checks),
         "soft_fail_threshold": missing_soft_fail_count,
         "missing_checks": missing_data_checks,
+        "unavailable_checks": unavailable_data_checks,
     }
     if not data_complete_ok:
         soft_fail_reasons.append(
@@ -1159,6 +1172,29 @@ async def run_pre_filter_async(
         )
         checks["data_completeness"]["soft_fail"] = True
         _record_filter_block("data_completeness", ticker)
+
+    # ── Live trading data quality gate ──
+    live_quality_mode = str(data_quality_mode or "warn").lower().strip()
+    live_missing_limit = int(max_missing_data_checks if max_missing_data_checks is not None else 0)
+    live_quality_issues = len(missing_data_checks) + len(unavailable_data_checks)
+    live_quality_ok = True
+    if live_trading and live_quality_mode == "fail_closed" and live_quality_issues > live_missing_limit:
+        live_quality_ok = False
+    checks["live_data_quality"] = {
+        "passed": live_quality_ok,
+        "live_trading": bool(live_trading),
+        "mode": live_quality_mode,
+        "issue_count": live_quality_issues,
+        "max_allowed_issues": live_missing_limit,
+        "missing_checks": missing_data_checks,
+        "unavailable_checks": unavailable_data_checks,
+    }
+    if not live_quality_ok:
+        reasons.append(
+            f"Live data quality gate failed: {live_quality_issues} unavailable/missing checks "
+            f"(max {live_missing_limit})"
+        )
+        _record_filter_block("live_data_quality", ticker)
 
     # ═══════════════════════════════════════════
     # Final Verdict
