@@ -261,6 +261,7 @@ class TestUserEndpoints:
 
     @pytest.mark.asyncio
     async def test_positions_include_pending_limit_orders(self, client: AsyncClient, test_user_data, db_session):
+        """Pending orders should NOT appear in /positions endpoint (shown in Pending Orders module instead)."""
         from core.database import PositionModel
         from core.utils.datetime import utcnow
 
@@ -284,9 +285,7 @@ class TestUserEndpoints:
         response = await client.get("/api/positions")
         assert response.status_code == 200
         data = response.json()
-        assert len(data) == 1
-        assert data[0]["symbol"] == "BTCUSDT"
-        assert data[0]["status"] == "pending"
+        assert len(data) == 0  # Pending orders should NOT appear in positions
 
     @pytest.mark.asyncio
     async def test_positions_deduplicate_exchange_symbol_aliases(self, client: AsyncClient, test_user_data, db_session, monkeypatch):
@@ -643,6 +642,7 @@ class TestUserEndpoints:
 
     @pytest.mark.asyncio
     async def test_chart_position_markers_include_pending_positions(self, client: AsyncClient, test_user_data, db_session):
+        """Pending orders should NOT appear in chart markers (shown in Pending Orders module instead)."""
         from core.database import PositionModel
         from core.utils.datetime import utcnow
 
@@ -666,8 +666,7 @@ class TestUserEndpoints:
         response = await client.get("/api/chart/positions/BTCUSDT")
         assert response.status_code == 200
         payload = response.json()
-        assert payload["count"] == 1
-        assert payload["markers"][0]["text"].startswith("LONG @ 50000.00")
+        assert payload["count"] == 0  # Pending orders should NOT appear in chart markers
 
     @pytest.mark.asyncio
     async def test_chart_position_markers_match_symbol_aliases(self, client: AsyncClient, test_user_data, db_session):

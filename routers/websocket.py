@@ -442,7 +442,7 @@ async def websocket_status(admin: dict = Depends(require_admin)):
 
 
 async def _fetch_user_positions(user_id: str) -> list[dict]:
-    """Fetch user's open positions from database."""
+    """Fetch user's open positions from database (filled positions only)."""
     try:
         from sqlalchemy import select
 
@@ -452,7 +452,7 @@ async def _fetch_user_positions(user_id: str) -> list[dict]:
             result = await session.execute(
                 select(PositionModel)
                 .where(PositionModel.user_id == user_id)
-                .where(PositionModel.status.in_(["open", "pending"]))
+                .where(PositionModel.status == "open")
             )
             positions = result.scalars().all()
 
@@ -545,7 +545,7 @@ async def _fetch_system_stats() -> dict:
         async with db_manager.async_session_factory() as session:
             open_positions = await session.execute(
                 select(func.count(PositionModel.id))
-                .where(PositionModel.status.in_(["open", "pending"]))
+                .where(PositionModel.status == "open")
             )
             open_count = open_positions.scalar() or 0
 

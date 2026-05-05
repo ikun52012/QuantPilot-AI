@@ -99,6 +99,7 @@ class TestWebSocketPositions:
 
     @pytest.mark.asyncio
     async def test_fetch_user_positions_includes_pending(self, db_session):
+        """WebSocket positions should only include filled positions (status='open'), not pending orders."""
         from core.database import PositionModel, UserModel, db_manager
         from core.security import hash_password
         from core.utils.datetime import utcnow
@@ -130,9 +131,7 @@ class TestWebSocketPositions:
         finally:
             db_manager.async_session_factory = None
 
-        assert len(result) == 1
-        assert result[0]["ticker"] == "BTCUSDT"
-        assert result[0]["status"] == "pending"
+        assert len(result) == 0  # Pending orders should NOT appear in WebSocket positions
 
 
 class TestWebSocketPrices:

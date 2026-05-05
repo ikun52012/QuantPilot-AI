@@ -387,10 +387,14 @@ async def get_positions(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get tracked open positions, scoped to the current user."""
+    """Get tracked open positions (filled orders only), scoped to the current user.
+
+    Note: Pending orders (unfilled limit orders) are shown in Pending Orders module,
+    not here. This endpoint only returns status='open' positions.
+    """
     from exchange import get_open_positions
 
-    filters = [PositionModel.status.in_(["open", "pending"])]
+    filters = [PositionModel.status == "open"]
     if not _is_admin(user):
         filters.append(PositionModel.user_id == user.get("sub"))
 

@@ -137,14 +137,14 @@ async def get_position_markers(
     db: AsyncSession = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    """Get position markers for chart display."""
+    """Get position markers for chart display (filled positions only)."""
     try:
         user_id = user.get("sub") or user.get("id")
 
         result = await db.execute(
             select(PositionModel)
             .where(PositionModel.user_id == user_id)
-            .where(PositionModel.status.in_(["open", "pending"]))
+            .where(PositionModel.status == "open")
         )
         target_key = position_symbol_key(ticker)
         positions = [
