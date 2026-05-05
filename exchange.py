@@ -326,7 +326,7 @@ def get_market_limits(exchange_id: str, symbol: str, market_type: str = "contrac
         )
 
         markets = exchange.load_markets()
-        
+
         candidates = _symbol_candidates(symbol, market_type)
         market = None
         resolved_symbol = None
