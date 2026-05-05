@@ -180,10 +180,24 @@ def get_today_trades(user_id: str | None = None) -> list[dict]:
     return get_trade_history(1, user_id=user_id)
 
 
-def get_today_pnl(user_id: str | None = None) -> float:
-    """Return today's cumulative realised PnL percentage from the trade log."""
+def get_today_pnl(user_id: str | None = None, account_equity_usdt: float = 0.0) -> float:
+    """Return today's cumulative realised PnL percentage relative to account equity.
+
+    FIX: Calculate PnL % relative to account equity, NOT by summing position-level %.
+
+    Args:
+        account_equity_usdt: Account equity in USDT (required for correct % calculation)
+
+    Returns:
+        PnL percentage relative to account equity (e.g., -1.5 means -1.5% of account)
+    """
     trades = get_today_trades(user_id)
-    return sum(t.get("pnl_pct", 0.0) or 0.0 for t in trades if t.get("execute"))
+    total_pnl_usdt = sum(t.get("pnl_usdt", 0.0) or 0.0 for t in trades if t.get("execute"))
+
+    if account_equity_usdt <= 0:
+        return 0.0
+
+    return (total_pnl_usdt / account_equity_usdt) * 100.0
 
 
 def get_today_stats(user_id: str | None = None) -> dict[str, Any]:
@@ -211,7 +225,6 @@ def get_trade_history(days: int = 7, user_id: str | None = None) -> list[dict[st
         trades = _load_logs(path)
         all_trades.extend(_filter_user(trades, user_id))
 
-    # Sort by timestamp descending
     all_trades.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
     return all_trades
 
@@ -227,10 +240,8 @@ async def get_trade_history_async(days: int = 7, user_id: str | None = None) -> 
         logger.warning(f"[TradeLog] Database read failed, falling back to JSON: {e}")
         return get_trade_history(days, user_id)
 
-    # Merge with JSON logs for completeness
     json_trades = get_trade_history(days, user_id)
 
-    # Deduplicate by ID
     by_id = {t.get("id"): t for t in json_trades if t.get("id")}
     for trade in db_trades:
         trade_id = trade.get("id")
@@ -250,14 +261,28 @@ def get_recent_trade_results(limit: int = 5, user_id: str | None = None) -> list
     return executed[:limit]
 
 
-async def get_today_pnl_async(user_id: str | None = None) -> float:
-    """Return today's cumulative realised PnL percentage (async version)."""
+async def get_today_pnl_async(user_id: str | None = None, account_equity_usdt: float = 0.0) -> float:
+    """Return today's cumulative realised PnL percentage relative to account equity (async version).
+
+    FIX: Calculate PnL % relative to account equity, NOT by summing position-level %.
+
+    Args:
+        account_equity_usdt: Account equity in USDT (required for correct % calculation)
+
+    Returns:
+        PnL percentage relative to account equity (e.g., -1.5 means -1.5% of account)
+    """
     try:
         trades = await get_trade_history_async(1, user_id=user_id)
-        return sum(t.get("pnl_pct", 0.0) or 0.0 for t in trades if t.get("execute"))
+        total_pnl_usdt = sum(t.get("pnl_usdt", 0.0) or 0.0 for t in trades if t.get("execute"))
+
+        if account_equity_usdt <= 0:
+            return 0.0
+
+        return (total_pnl_usdt / account_equity_usdt) * 100.0
     except Exception as e:
         logger.debug(f"[TradeLog] Async PnL fetch failed: {e}")
-        return get_today_pnl(user_id)
+        return get_today_pnl(user_id, account_equity_usdt)
 
 
 async def get_recent_trade_results_async(limit: int = 5, user_id: str | None = None, ticker: str | None = None) -> list[dict[str, Any]]:

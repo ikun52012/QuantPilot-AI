@@ -454,20 +454,24 @@ async def run_pre_filter_async(
         reasons.append(f"Daily trade limit reached ({daily_count_snapshot}/{max_daily_trades})")
         _record_filter_block("daily_trade_limit", ticker)
 
-    # ── Check 2: Daily loss limit ──
-    current_pnl = await get_today_pnl_async(user_id=user_id)
+    account_equity = float(getattr(market, 'account_equity_usdt', 0) or 10000)
+    current_pnl = await get_today_pnl_async(user_id=user_id, account_equity_usdt=account_equity)
     loss_ok = current_pnl > -max_daily_loss_pct
     checks["daily_loss_limit"] = {
         "passed": loss_ok,
         "current_pnl": current_pnl,
+        "current_pnl_usdt": current_pnl * account_equity / 100.0,
+        "account_equity": account_equity,
         "max_loss": max_daily_loss_pct,
     }
     if not loss_ok:
-        reasons.append(f"Daily loss limit reached ({current_pnl:.2f}% / -{max_daily_loss_pct}%)")
+        pnl_usdt = current_pnl * account_equity / 100.0
+        reasons.append(
+            f"Daily loss limit reached ({current_pnl:.2f}% / {abs(pnl_usdt):.2f} USDT / {account_equity:.2f} USDT equity "
+            f"/ -{max_daily_loss_pct}%)"
+        )
         _record_filter_block("daily_loss_limit", ticker)
 
-    # ── Check 2b: Account-level daily loss limit (real-time tracker) ──
-    account_equity = float(getattr(market, 'account_equity_usdt', 0) or 10000)
     loss_allowed, loss_reason = await check_account_loss_limits(
         user_id=user_id,
         account_equity_usdt=account_equity,

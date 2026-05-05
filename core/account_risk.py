@@ -3,6 +3,9 @@ QuantPilot AI - Account-Level Risk Management
 
 Tracks daily and cumulative account PnL to enforce account-level stop-loss limits.
 When limits are breached, new trades are blocked until the next trading day.
+
+FIX: Daily loss % should be calculated relative to account equity, NOT by summing
+individual position PnL percentages (which are relative to position margin).
 """
 from __future__ import annotations
 
@@ -14,15 +17,9 @@ from loguru import logger
 from core.utils.common import safe_float
 from core.utils.datetime import utcnow
 
-# ─────────────────────────────────────────────
-# In-memory daily PnL trackers
-# ─────────────────────────────────────────────
-
-# user_id -> {"date": "YYYY-MM-DD", "daily_pnl_pct": float, "daily_pnl_usdt": float}
 _ACCOUNT_DAILY_TRACKER: dict[str, dict[str, Any]] = {}
 _ACCOUNT_TRACKER_GUARD = asyncio.Lock()
 
-# Global (admin/no-user) tracker key
 _GLOBAL_ACCOUNT_KEY = "__global__"
 
 
@@ -34,6 +31,14 @@ async def record_position_pnl(
 ) -> dict[str, Any]:
     """Record realized PnL from a closed position into the daily tracker.
 
+    FIX: Only accumulate USDT amounts. Daily PnL % is calculated relative to account
+    equity when checking limits, NOT by summing position-level percentages.
+
+    Args:
+        pnl_pct: Position-level PnL % (relative to position margin, NOT account equity)
+        pnl_usdt: Actual USDT profit/loss amount
+        equity_usdt: Account equity at time of position close (for tracking)
+
     Returns the updated tracker state for the user.
     """
     key = user_id or _GLOBAL_ACCOUNT_KEY
@@ -42,30 +47,28 @@ async def record_position_pnl(
     async with _ACCOUNT_TRACKER_GUARD:
         tracker = _ACCOUNT_DAILY_TRACKER.get(key)
         if tracker is None or tracker.get("date") != today:
-            # Reset for new day
             tracker = {
                 "date": today,
-                "daily_pnl_pct": 0.0,
                 "daily_pnl_usdt": 0.0,
-                "cumulative_pnl_pct": 0.0,
+                "cumulative_pnl_usdt": 0.0,
                 "positions_closed": 0,
                 "limit_triggered": False,
+                "account_equity_usdt": 0.0,
             }
             _ACCOUNT_DAILY_TRACKER[key] = tracker
 
-        tracker["daily_pnl_pct"] = round(tracker["daily_pnl_pct"] + safe_float(pnl_pct, 0.0), 6)
         tracker["daily_pnl_usdt"] = round(tracker["daily_pnl_usdt"] + safe_float(pnl_usdt, 0.0), 6)
-        tracker["cumulative_pnl_pct"] = round(tracker["cumulative_pnl_pct"] + safe_float(pnl_pct, 0.0), 6)
+        tracker["cumulative_pnl_usdt"] = round(tracker["cumulative_pnl_usdt"] + safe_float(pnl_usdt, 0.0), 6)
         tracker["positions_closed"] += 1
 
-        # Check if limit just breached
         if equity_usdt > 0:
-            daily_loss_pct = abs(min(0, tracker["daily_pnl_pct"]))
-            if daily_loss_pct > 0:
-                logger.info(
-                    f"[AccountRisk] {key} daily PnL: {tracker['daily_pnl_pct']:+.4f}% "
-                    f"({tracker['daily_pnl_usdt']:+.2f} USDT) after position close"
-                )
+            tracker["account_equity_usdt"] = max(equity_usdt, tracker.get("account_equity_usdt", 0.0))
+
+        daily_pnl_usdt = tracker["daily_pnl_usdt"]
+        logger.info(
+            f"[AccountRisk] {key} daily PnL: {daily_pnl_usdt:+.2f} USDT "
+            f"after position close (position PnL: {pnl_pct:+.2f}%, {pnl_usdt:+.2f} USDT)"
+        )
 
         return tracker.copy()
 
@@ -78,6 +81,8 @@ async def check_account_loss_limits(
 ) -> tuple[bool, str]:
     """Check if account loss limits are breached.
 
+    FIX: Calculate loss % relative to account equity, NOT by summing position %.
+
     Returns (allowed, reason) where allowed=True means trading can proceed.
     """
     key = user_id or _GLOBAL_ACCOUNT_KEY
@@ -86,37 +91,45 @@ async def check_account_loss_limits(
     async with _ACCOUNT_TRACKER_GUARD:
         tracker = _ACCOUNT_DAILY_TRACKER.get(key)
         if tracker is None or tracker.get("date") != today:
-            # No trades today yet, or new day
             return (True, "")
 
-        daily_pnl_pct = tracker.get("daily_pnl_pct", 0.0)
-        cumulative_pnl_pct = tracker.get("cumulative_pnl_pct", 0.0)
+        daily_pnl_usdt = tracker.get("daily_pnl_usdt", 0.0)
+        cumulative_pnl_usdt = tracker.get("cumulative_pnl_usdt", 0.0)
 
-    # Daily loss limit check
-    if max_daily_loss_pct > 0 and daily_pnl_pct < 0:
+    if account_equity_usdt <= 0:
+        logger.warning(f"[AccountRisk] {key} account equity is 0, skipping loss limit check")
+        return (True, "")
+
+    daily_pnl_pct = daily_pnl_usdt / account_equity_usdt * 100.0
+    cumulative_pnl_pct = cumulative_pnl_usdt / account_equity_usdt * 100.0
+
+    if max_daily_loss_pct > 0 and daily_pnl_usdt < 0:
         daily_loss_pct = abs(daily_pnl_pct)
         if daily_loss_pct >= max_daily_loss_pct:
             logger.warning(
                 f"[AccountRisk] BLOCKED: {key} daily loss {daily_loss_pct:.2f}% "
+                f"({abs(daily_pnl_usdt):.2f} USDT / {account_equity_usdt:.2f} USDT equity) "
                 f"exceeds limit {max_daily_loss_pct:.2f}%"
             )
             return (
                 False,
-                f"Account daily loss limit exceeded: {daily_loss_pct:.2f}% >= {max_daily_loss_pct:.2f}%. "
+                f"Account daily loss limit exceeded: {daily_loss_pct:.2f}% "
+                f"({abs(daily_pnl_usdt):.2f} USDT loss / {account_equity_usdt:.2f} USDT equity) >= {max_daily_loss_pct:.2f}%. "
                 f"Trading paused until next day.",
             )
 
-    # Total/cumulative loss limit check
-    if max_total_loss_pct and max_total_loss_pct > 0 and cumulative_pnl_pct < 0:
+    if max_total_loss_pct and max_total_loss_pct > 0 and cumulative_pnl_usdt < 0:
         total_loss_pct = abs(cumulative_pnl_pct)
         if total_loss_pct >= max_total_loss_pct:
             logger.warning(
                 f"[AccountRisk] BLOCKED: {key} cumulative loss {total_loss_pct:.2f}% "
+                f"({abs(cumulative_pnl_usdt):.2f} USDT / {account_equity_usdt:.2f} USDT equity) "
                 f"exceeds limit {max_total_loss_pct:.2f}%"
             )
             return (
                 False,
-                f"Account cumulative loss limit exceeded: {total_loss_pct:.2f}% >= {max_total_loss_pct:.2f}%. "
+                f"Account cumulative loss limit exceeded: {total_loss_pct:.2f}% "
+                f"({abs(cumulative_pnl_usdt):.2f} USDT loss / {account_equity_usdt:.2f} USDT equity) >= {max_total_loss_pct:.2f}%. "
                 f"Trading paused. Reset required.",
             )
 
@@ -131,11 +144,11 @@ def get_account_risk_status(user_id: str | None = None) -> dict[str, Any]:
     if tracker is None or tracker.get("date") != today:
         return {
             "date": today,
-            "daily_pnl_pct": 0.0,
             "daily_pnl_usdt": 0.0,
-            "cumulative_pnl_pct": 0.0,
+            "cumulative_pnl_usdt": 0.0,
             "positions_closed": 0,
             "limit_triggered": False,
+            "account_equity_usdt": 0.0,
         }
     return tracker.copy()
 
