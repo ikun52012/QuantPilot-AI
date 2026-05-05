@@ -326,10 +326,18 @@ def get_market_limits(exchange_id: str, symbol: str, market_type: str = "contrac
         )
 
         markets = exchange.load_markets()
-        market = markets.get(symbol)
+        
+        candidates = _symbol_candidates(symbol, market_type)
+        market = None
+        resolved_symbol = None
+        for candidate in candidates:
+            market = markets.get(candidate)
+            if isinstance(market, dict):
+                resolved_symbol = candidate
+                break
 
         if not isinstance(market, dict):
-            logger.warning(f"[Exchange] Market {symbol} not found in {exchange_id}")
+            logger.warning(f"[Exchange] Market {symbol} not found in {exchange_id} (tried: {candidates})")
             return {}
 
         limits = market.get("limits", {})
@@ -380,20 +388,21 @@ def get_market_limits(exchange_id: str, symbol: str, market_type: str = "contrac
             "amount_precision": amount_precision,
             "price_precision": price_precision,
             "contract_size": contract_size,
-            "symbol": symbol,
+            "symbol": resolved_symbol or symbol,
+            "original_symbol": symbol,
             "exchange": exchange_id,
         }
 
         if contract_size > 1.0:
             logger.debug(
-                f"[Exchange] Market limits for {symbol}: "
+                f"[Exchange] Market limits for {resolved_symbol or symbol}: "
                 f"min_amount={min_amount}, max_amount={max_amount}, "
                 f"min_cost={min_cost}, max_cost={max_cost}, "
                 f"contractSize={contract_size}"
             )
         else:
             logger.debug(
-                f"[Exchange] Market limits for {symbol}: "
+                f"[Exchange] Market limits for {resolved_symbol or symbol}: "
                 f"min_amount={min_amount}, max_amount={max_amount}, "
                 f"min_cost={min_cost}, max_cost={max_cost}"
             )
