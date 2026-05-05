@@ -494,10 +494,10 @@ def format_timeframe_exit_instructions(timeframe: str) -> str:
 
 This signal is on a **{config.timeframe} timeframe**. Use these distance guidelines:
 
-### Stop-Loss Rules
-- MINIMUM distance: {config.min_sl_pct}% from entry
-- MAXIMUM distance: {config.max_sl_pct}% from entry (strictly enforced)
-- RECOMMENDED: {config.default_sl_pct}% from entry
+### Stop-Loss Guidance
+- ADVISORY range: {config.min_sl_pct}% to {config.max_sl_pct}% from entry
+- RECOMMENDED baseline: {config.default_sl_pct}% from entry
+- Prefer the multi-timeframe structural invalidation level when it differs from the advisory range
 
 ### Take-Profit Targets
 - TP1: {ranges['tp1'][0]}% to {ranges['tp1'][1]}% from entry
@@ -522,9 +522,9 @@ This signal is on a **{config.timeframe} timeframe**. Use these distance guideli
 - Recommended for: Lower confidence, want early profits
 
 ### Critical Rules
-1. DO NOT set SL above {config.max_sl_pct}% - will be rejected
-2. DO NOT set TP1 below {config.min_tp_pct}% - will be auto-adjusted
-3. For single TP: TP1 must be >= {config.tp1_range[0]}% (ensures min R:R 1.5:1)
-4. For multi TP: ensure weighted average TP >= SL × 1.5
-5. Place SL at logical invalidation point (support/resistance break)
+1. Place SL at the logical invalidation point (support/resistance break, OB/FVG boundary, swing failure)
+2. Treat the SL range above as guidance, not a hard rejection range
+3. DO NOT set TP1 below {config.min_tp_pct}% - will be auto-adjusted
+4. For single TP: TP1 should be >= {config.tp1_range[0]}% where structure allows
+5. For multi TP: ensure weighted average TP >= SL × 1.5 where realistic
 """

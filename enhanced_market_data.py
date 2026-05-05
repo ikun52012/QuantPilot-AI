@@ -12,8 +12,9 @@ Fetches advanced market data from free public APIs:
 import asyncio
 import os
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeVar, cast
 
 import aiohttp
 from loguru import logger
@@ -21,7 +22,9 @@ from loguru import logger
 from core.utils.datetime import utcnow
 
 _cache_ttl = 300
-_cache: dict[str, tuple[float, Any]] = {}
+T = TypeVar("T")
+
+_cache: dict[str, tuple[float, object]] = {}
 _cache_lock = asyncio.Lock()
 
 MACRO_EVENTS_CACHE_KEY = "macro_events"
@@ -29,21 +32,49 @@ LIQUIDATION_CACHE_KEY = "liquidation_heatmap"
 FEAR_GREED_CACHE_KEY = "fear_greed_index"
 
 
-async def _fetch_with_cache(key: str, fetcher: callable, ttl: int = _cache_ttl) -> Any:
+async def _fetch_with_cache(key: str, fetcher: Callable[[], Awaitable[T]], ttl: int = _cache_ttl) -> T:
     """Fetch data with cache to avoid repeated API calls."""
     now = time.time()
     async with _cache_lock:
         if key in _cache:
             cached_time, cached_data = _cache[key]
             if now - cached_time < ttl:
-                return cached_data
-        data = await fetcher()
-        if data is not None:
-            _cache[key] = (now, data)
-        return data
+                return cast(T, cached_data)
+
+    data = await fetcher()
+    if data is not None:
+        async with _cache_lock:
+            _cache[key] = (time.time(), data)
+    return data
 
 
-async def fetch_macro_events_calendar() -> dict[str, list[dict]]:
+def _base_asset(symbol: str) -> str:
+    """Normalize TradingView/ccxt symbols to a base asset for public APIs."""
+    value = str(symbol or "").upper().strip().replace(" ", "")
+    if ":" in value:
+        value = value.split(":", 1)[0]
+    for suffix in (".P", "PERP"):
+        if value.endswith(suffix):
+            value = value[:-len(suffix)]
+            break
+    value = value.replace("/", "").replace("-", "").replace("_", "")
+    for quote in ("USDT", "USDC", "BUSD", "USD"):
+        if value.endswith(quote) and len(value) > len(quote):
+            return value[:-len(quote)]
+    return value
+
+
+def _binance_usdt_symbol(symbol: str) -> str:
+    base = _base_asset(symbol)
+    return f"{base}USDT" if base else ""
+
+
+def _okx_swap_inst_id(symbol: str) -> str:
+    base = _base_asset(symbol)
+    return f"{base}-USDT-SWAP" if base else ""
+
+
+async def fetch_macro_events_calendar() -> dict[str, list[dict[str, Any]]]:
     """
     Fetch macro economic events calendar.
     Free sources:
@@ -53,8 +84,8 @@ async def fetch_macro_events_calendar() -> dict[str, list[dict]]:
 
     Returns dict with event categories and their schedules.
     """
-    async def _fetch():
-        events = {
+    async def _fetch() -> dict[str, list[dict[str, Any]]]:
+        events: dict[str, list[dict[str, Any]]] = {
             "high_impact": [],
             "medium_impact": [],
             "crypto_specific": [],
@@ -99,10 +130,10 @@ async def fetch_macro_events_calendar() -> dict[str, list[dict]]:
     return await _fetch_with_cache(MACRO_EVENTS_CACHE_KEY, _fetch, ttl=3600)
 
 
-def _get_hardcoded_crypto_events() -> list[dict]:
+def _get_hardcoded_crypto_events() -> list[dict[str, Any]]:
     """Hardcoded major crypto events that we know about."""
     now = utcnow()
-    events = []
+    events: list[dict[str, Any]] = []
 
     known_events = [
         {"name": "BTC Halving", "approximate_date": "2024-04-20", "impact": "high"},
@@ -164,8 +195,10 @@ async def fetch_liquidation_heatmap(symbol: str) -> dict[str, Any]:
 
     Returns levels where large liquidations exist.
     """
-    async def _fetch():
-        heatmap = {
+    async def _fetch() -> dict[str, Any]:
+        base = _base_asset(symbol)
+        binance_symbol = _binance_usdt_symbol(symbol)
+        heatmap: dict[str, Any] = {
             "long_liquidations": [],
             "short_liquidations": [],
             "total_long_liq_usd": 0,
@@ -176,7 +209,7 @@ async def fetch_liquidation_heatmap(symbol: str) -> dict[str, Any]:
 
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                coinglass_url = f"https://open-api.coinglass.com/api/liquidation_heat_map?symbol={symbol}&interval=1h"
+                coinglass_url = f"https://open-api.coinglass.com/api/liquidation_heat_map?symbol={base}&interval=1h"
                 api_key = os.getenv("COINGLASS_API_KEY", "")
                 if api_key:
                     headers = {"coinglass-api-Key": api_key}
@@ -195,7 +228,7 @@ async def fetch_liquidation_heatmap(symbol: str) -> dict[str, Any]:
                                         heatmap["short_liquidations"].append({"price": price, "usd": liq_usd})
                                         heatmap["total_short_liq_usd"] += liq_usd
 
-                binance_url = f"https://fapi.binance.com/fapi/v1/forceOrders?symbol={symbol}&limit=100"
+                binance_url = f"https://fapi.binance.com/fapi/v1/forceOrders?symbol={binance_symbol}&limit=100"
                 try:
                     async with session.get(binance_url) as resp:
                         if resp.status == 200:
@@ -231,8 +264,8 @@ async def fetch_long_short_ratio(symbol: str) -> dict[str, Any]:
 
     Returns ratio data with history.
     """
-    async def _fetch():
-        ratio_data = {
+    async def _fetch() -> dict[str, Any]:
+        ratio_data: dict[str, Any] = {
             "current_ratio": None,
             "long_accounts_pct": None,
             "short_accounts_pct": None,
@@ -242,8 +275,8 @@ async def fetch_long_short_ratio(symbol: str) -> dict[str, Any]:
         }
 
         try:
-            base = symbol.replace("/USDT", "").replace("USDT", "").upper()
-            binance_symbol = f"{base}USDT"
+            base = _base_asset(symbol)
+            binance_symbol = _binance_usdt_symbol(symbol)
 
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 binance_url = f"https://fapi.binance.com/fapi/v1/globalLongShortAccountRatio?symbol={binance_symbol}&period=1h&limit=24"
@@ -286,8 +319,8 @@ async def fetch_basis_data(symbol: str) -> dict[str, Any]:
 
     Returns basis percentage and historical trend.
     """
-    async def _fetch():
-        basis_data = {
+    async def _fetch() -> dict[str, Any]:
+        basis_data: dict[str, Any] = {
             "basis_pct": None,
             "spot_price": None,
             "futures_price": None,
@@ -296,9 +329,8 @@ async def fetch_basis_data(symbol: str) -> dict[str, Any]:
         }
 
         try:
-            base = symbol.replace("/USDT", "").replace("USDT", "").upper()
-            spot_symbol = f"{base}USDT"
-            futures_symbol = f"{base}USDT"
+            spot_symbol = _binance_usdt_symbol(symbol)
+            futures_symbol = spot_symbol
 
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 spot_url = f"https://api.binance.com/api/v3/ticker/price?symbol={spot_symbol}"
@@ -339,8 +371,8 @@ async def fetch_fear_greed_index() -> dict[str, Any]:
 
     Returns current index value and classification.
     """
-    async def _fetch():
-        fg_data = {
+    async def _fetch() -> dict[str, Any]:
+        fg_data: dict[str, Any] = {
             "value": None,
             "classification": None,
             "is_extreme_fear": False,
@@ -385,7 +417,7 @@ async def calculate_cvd_divergence(ohlcv_data: list[list[float]], lookback: int 
 
     price_change = (closes[-1] - closes[0]) / closes[0] * 100 if closes[0] > 0 else 0
 
-    cvd = 0
+    cvd = 0.0
     for i in range(1, len(closes)):
         if closes[i] > closes[i-1]:
             cvd += volumes[i]
@@ -394,7 +426,7 @@ async def calculate_cvd_divergence(ohlcv_data: list[list[float]], lookback: int 
 
     cvd_change_pct = cvd / sum(volumes) * 100 if sum(volumes) > 0 else 0
 
-    divergence_data = {
+    divergence_data: dict[str, Any] = {
         "price_change_pct": price_change,
         "cvd_change_pct": cvd_change_pct,
         "divergence": None,
@@ -424,14 +456,14 @@ async def detect_volatility_regime(ohlcv_data: list[list[float]], lookback: int 
     if len(ohlcv_data) < lookback:
         return {"regime": "unknown", "atr_pct": None, "suggestion": None}
 
-    recent_atr = []
+    recent_atr: list[float] = []
     for i in range(max(0, len(ohlcv_data) - lookback), len(ohlcv_data) - 14):
         window = ohlcv_data[i:i+14]
         if len(window) >= 14:
             highs = [c[2] for c in window]
             lows = [c[3] for c in window]
             closes = [c[4] for c in window]
-            tr_sum = 0
+            tr_sum = 0.0
             for j in range(1, len(window)):
                 tr = max(highs[j] - lows[j], abs(highs[j] - closes[j-1]), abs(lows[j] - closes[j-1]))
                 tr_sum += tr
@@ -445,7 +477,7 @@ async def detect_volatility_regime(ohlcv_data: list[list[float]], lookback: int 
     current_atr_pct = recent_atr[-1] if recent_atr else 0
     avg_atr_pct = sum(recent_atr) / len(recent_atr)
 
-    regime_data = {
+    regime_data: dict[str, Any] = {
         "current_atr_pct": current_atr_pct,
         "avg_atr_pct": avg_atr_pct,
         "regime": "normal",
@@ -455,12 +487,12 @@ async def detect_volatility_regime(ohlcv_data: list[list[float]], lookback: int 
     if current_atr_pct < avg_atr_pct * 0.5:
         regime_data["regime"] = "low_volatility"
         regime_data["suggestion"] = "breakout_approach"
-    elif current_atr_pct > avg_atr_pct * 1.5:
-        regime_data["regime"] = "high_volatility"
-        regime_data["suggestion"] = "reduce_position"
     elif current_atr_pct > avg_atr_pct * 2.0:
         regime_data["regime"] = "extreme_volatility"
         regime_data["suggestion"] = "pause_trading"
+    elif current_atr_pct > avg_atr_pct * 1.5:
+        regime_data["regime"] = "high_volatility"
+        regime_data["suggestion"] = "reduce_position"
 
     return regime_data
 
@@ -475,21 +507,20 @@ async def fetch_orderbook_data(symbol: str, exchange: str = "binance") -> dict[s
 
     Returns order book with bids and asks.
     """
-    orderbook_data = {
+    orderbook_data: dict[str, Any] = {
         "bids": [],
         "asks": [],
         "timestamp": None,
         "spread_pct": 0.0,
     }
 
-    symbol_normalized = symbol.upper().replace("/", "").replace(":", "")
-    if "/" not in symbol and ":" not in symbol:
-        symbol_normalized = f"{symbol_normalized}USDT"
+    binance_symbol = _binance_usdt_symbol(symbol)
+    okx_inst_id = _okx_swap_inst_id(symbol)
 
-    async def _fetch():
+    async def _fetch() -> dict[str, Any]:
         urls = {
-            "binance": f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol_normalized}&limit=100",
-            "okx": f"https://www.okx.com/api/v5/market/books?instId={symbol_normalized}-USDT-SWAP",
+            "binance": f"https://fapi.binance.com/fapi/v1/depth?symbol={binance_symbol}&limit=100",
+            "okx": f"https://www.okx.com/api/v5/market/books?instId={okx_inst_id}",
         }
 
         for ex_name, url in urls.items():
@@ -549,7 +580,7 @@ async def fetch_orderbook_data(symbol: str, exchange: str = "binance") -> dict[s
     return await _fetch_with_cache(cache_key, _fetch, ttl=5)
 
 
-async def fetch_recent_trades(symbol: str, exchange: str = "binance", limit: int = 100) -> list[dict]:
+async def fetch_recent_trades(symbol: str, exchange: str = "binance", limit: int = 100) -> list[dict[str, Any]]:
     """
     Fetch recent trades for sweep detection.
 
@@ -559,15 +590,14 @@ async def fetch_recent_trades(symbol: str, exchange: str = "binance", limit: int
 
     Returns list of recent trades.
     """
-    symbol_normalized = symbol.upper().replace("/", "").replace(":", "")
-    if "/" not in symbol and ":" not in symbol:
-        symbol_normalized = f"{symbol_normalized}USDT"
+    binance_symbol = _binance_usdt_symbol(symbol)
+    okx_inst_id = _okx_swap_inst_id(symbol)
 
-    async def _fetch():
-        trades = []
+    async def _fetch() -> list[dict[str, Any]]:
+        trades: list[dict[str, Any]] = []
         urls = {
-            "binance": f"https://fapi.binance.com/fapi/v1/trades?symbol={symbol_normalized}&limit={limit}",
-            "okx": f"https://www.okx.com/api/v5/market/trades?instId={symbol_normalized}-USDT-SWAP&limit={limit}",
+            "binance": f"https://fapi.binance.com/fapi/v1/trades?symbol={binance_symbol}&limit={limit}",
+            "okx": f"https://www.okx.com/api/v5/market/trades?instId={okx_inst_id}&limit={limit}",
         }
 
         for ex_name, url in urls.items():
@@ -638,7 +668,7 @@ async def analyze_liquidity_structure(
         current_price=current_price,
         orderbook=orderbook,
         recent_trades=recent_trades,
-        ohlcv=ohlcv_data,
+        ohlcv=cast(Any, ohlcv_data),
     )
 
     return {

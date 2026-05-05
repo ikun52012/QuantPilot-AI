@@ -231,6 +231,41 @@ async def test_exchange_execute_trade_preserves_explicit_empty_credentials(monke
 
 
 @pytest.mark.asyncio
+async def test_execute_trade_pending_limit_includes_exit_plan(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+
+    fake_exchange = SimpleNamespace(options={"defaultType": "future"})
+    _capture_exchange_kwargs(monkeypatch, fake_exchange)
+
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr(
+        exchange_module,
+        "_create_exchange_order",
+        AsyncMock(return_value={"id": "entry-1", "status": "open", "filled": 0.0, "price": 100.0}),
+    )
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            stop_loss=98.0,
+            take_profit_levels=[TakeProfitLevel(price=103.0, qty_pct=100.0)],
+            order_type="limit",
+        ),
+        _user_exchange_config(),
+    )
+
+    assert result["status"] == "pending"
+    assert result["stop_loss"] == 98.0
+    assert result["take_profit_orders"][0]["price"] == 103.0
+    assert result["take_profit_orders"][0]["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_exchange_cancel_order_preserves_explicit_empty_credentials(monkeypatch):
     _set_global_exchange_defaults(monkeypatch)
 

@@ -19,6 +19,7 @@ from core.security import (
     verify_password,
 )
 from core.utils.common import safe_bool, safe_float, safe_int, safe_str
+from enhanced_market_data import _base_asset, _binance_usdt_symbol, _okx_swap_inst_id
 from exchange import (
     _create_exchange_order,
     _normalize_symbol,
@@ -192,6 +193,17 @@ class TestSymbolNormalization:
 
         exchange = _FakeExchange()
         assert _resolve_symbol(exchange, "TRBUSDT", "spot") == "TRB/USDT"
+
+
+class TestEnhancedMarketSymbolNormalization:
+    def test_tradingview_perp_to_public_api_symbols(self):
+        assert _base_asset("INTCUSDT.P") == "INTC"
+        assert _binance_usdt_symbol("INTCUSDT.P") == "INTCUSDT"
+        assert _okx_swap_inst_id("INTCUSDT.P") == "INTC-USDT-SWAP"
+
+    def test_ccxt_contract_to_public_api_symbols(self):
+        assert _base_asset("BTC/USDT:USDT") == "BTC"
+        assert _binance_usdt_symbol("BTC/USDT:USDT") == "BTCUSDT"
 
 
 class TestStopLossTakeProfitValidation:

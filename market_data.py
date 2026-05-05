@@ -275,9 +275,9 @@ class MarketDataWebSocketManager:
                     }
 
         # Binance format
-        if "p" in data:
+        if "c" in data or "p" in data:
             return {
-                "price": float(data.get("p", 0)),
+                "price": float(data.get("c") or data.get("p") or 0),
                 "high": float(data.get("h", 0)),
                 "low": float(data.get("l", 0)),
                 "volume": float(data.get("v", 0)),
@@ -306,7 +306,7 @@ class MarketDataWebSocketManager:
                 context.high_24h = data.get("high", context.high_24h)
                 context.low_24h = data.get("low", context.low_24h)
                 context.volume_24h = data.get("volume", context.volume_24h)
-                context.price_change_pct_24h = data.get("change_pct", context.price_change_pct_24h)
+                context.price_change_24h = data.get("change_pct", context.price_change_24h)
             else:
                 # Create minimal context
                 context = MarketContext(
@@ -742,12 +742,6 @@ def _normalize_symbol(ticker: str, market_type: str | None = None) -> str:
             if prefer_contract:
                 return f"{pair_symbol}:{quote}"
             return pair_symbol
-
-    # Fallback: Add USDT pair
-    pair_symbol = f"{ticker}/USDT"
-    if prefer_contract:
-        return f"{pair_symbol}:USDT"
-    return pair_symbol
 
     # Fallback: Add USDT pair
     pair_symbol = f"{ticker}/USDT"

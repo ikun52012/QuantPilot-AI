@@ -13,6 +13,7 @@ from ai_analyzer import (
     _get_effective_system_prompt,
     _parse_response,
     _set_cached_analysis,
+    validate_ai_analysis_against_signal,
 )
 from core.config import settings
 from core.database import PositionModel
@@ -99,6 +100,9 @@ def test_build_user_prompt_includes_modify_and_null_field_contract(sample_signal
     )
 
     assert "Use recommendation='modify' only if you also provide a valid suggested_entry" in prompt
+    assert "suggested_stop_loss must be a finite numeric price" in prompt
+    assert "For LONG: stop loss must be below final entry" in prompt
+    assert "If no valid stop loss can be calculated" in prompt
     assert "If recommendation is 'reject' or 'hold', set suggested_entry, suggested_stop_loss, and all TP fields to null" in prompt
 
 
@@ -275,3 +279,46 @@ def test_parse_response_rejects_nonfinite_stop_loss():
 
     assert result.recommendation == "reject"
     assert result.suggested_stop_loss is None
+
+
+def test_parse_response_allows_missing_stop_loss_for_processor_fallback():
+    result = _parse_response(json.dumps({
+        "confidence": 0.8,
+        "recommendation": "execute",
+        "reasoning": "ok",
+    }))
+
+    assert result.recommendation == "execute"
+    assert result.suggested_stop_loss is None
+    assert any("server will apply fallback" in warning for warning in result.warnings)
+
+
+def test_validate_ai_analysis_clears_wrong_side_stop_loss(sample_signal, sample_market):
+    analysis = AIAnalysis(
+        confidence=0.8,
+        recommendation="execute",
+        reasoning="ok",
+        suggested_stop_loss=51000.0,
+        suggested_tp1=53000.0,
+    )
+
+    result = validate_ai_analysis_against_signal(sample_signal, sample_market, analysis)
+
+    assert result.recommendation == "execute"
+    assert result.suggested_stop_loss is None
+    assert any("post-validation" in warning for warning in result.warnings)
+
+
+def test_validate_ai_analysis_rejects_when_no_valid_tp(sample_signal, sample_market):
+    analysis = AIAnalysis(
+        confidence=0.8,
+        recommendation="execute",
+        reasoning="ok",
+        suggested_stop_loss=49000.0,
+        suggested_tp1=48000.0,
+    )
+
+    result = validate_ai_analysis_against_signal(sample_signal, sample_market, analysis)
+
+    assert result.recommendation == "reject"
+    assert "No valid take-profit" in result.reasoning

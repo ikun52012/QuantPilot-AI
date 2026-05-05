@@ -1,7 +1,8 @@
 """Tests for AI voting functionality."""
 import pytest
 
-from ai_analyzer import TrailingStopMode, _aggregate_voting_results, _parse_model_id
+from ai_analyzer import TrailingStopMode, _aggregate_voting_results, _aggregate_voting_results_async, _parse_model_id
+from models import AIAnalysis
 
 
 class TestParseModelId:
@@ -117,6 +118,63 @@ class TestAggregateVotingResults:
         final = _aggregate_voting_results(results, weights, "weighted")
         assert final["action"] == "buy"
         assert final["confidence"] == pytest.approx(0.75, rel=0.01)
+
+    @pytest.mark.asyncio
+    async def test_weighted_current_voting_uses_exit_plan_from_execute_model(self):
+        results = [
+            (AIAnalysis(confidence=0.95, recommendation="reject", reasoning="bad setup"), "rejector"),
+            (AIAnalysis(
+                confidence=0.75,
+                recommendation="execute",
+                reasoning="ok",
+                suggested_stop_loss=95.0,
+                suggested_tp1=110.0,
+                tp1_qty_pct=100.0,
+            ), "executor_a"),
+            (AIAnalysis(
+                confidence=0.7,
+                recommendation="execute",
+                reasoning="ok2",
+                suggested_stop_loss=94.0,
+                suggested_tp1=112.0,
+                tp1_qty_pct=100.0,
+            ), "executor_b"),
+        ]
+
+        final = await _aggregate_voting_results_async(
+            results,
+            "weighted",
+            {"rejector": 1.0, "executor_a": 2.0, "executor_b": 2.0},
+        )
+
+        assert final.recommendation == "execute"
+        assert final.suggested_stop_loss == 95.0
+        assert final.suggested_tp1 == 110.0
+
+    @pytest.mark.asyncio
+    async def test_consensus_execute_does_not_return_high_confidence_reject(self):
+        results = [
+            (AIAnalysis(confidence=0.99, recommendation="reject", reasoning="no"), "rejector"),
+            (AIAnalysis(
+                confidence=0.75,
+                recommendation="execute",
+                reasoning="yes1",
+                suggested_stop_loss=95.0,
+                suggested_tp1=110.0,
+            ), "executor_a"),
+            (AIAnalysis(
+                confidence=0.7,
+                recommendation="execute",
+                reasoning="yes2",
+                suggested_stop_loss=96.0,
+                suggested_tp1=108.0,
+            ), "executor_b"),
+        ]
+
+        final = await _aggregate_voting_results_async(results, "consensus", {})
+
+        assert final.recommendation == "execute"
+        assert final.suggested_stop_loss == 95.0
 
 
 class TestTrailingStopMode:

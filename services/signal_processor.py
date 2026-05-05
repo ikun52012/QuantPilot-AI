@@ -5,6 +5,7 @@ Handles the complete signal processing pipeline.
 import asyncio
 import hashlib
 import json
+import math
 import os
 import time as _time
 from collections.abc import Sequence
@@ -988,7 +989,7 @@ prefilter_result: PreFilterResult | None = None,
             self._apply_custom_exit_plan(decision, signal, user_settings, atr_pct)
             return
 
-        # AI-generated exits with strict validation
+        # AI-generated exits are the source of truth; the server only applies safety guards.
         # BUG FIX: Use decision.entry_price (may be modified by AI) instead of signal.price
         entry_price = float(decision.entry_price or signal.price or 0)
         timeframe = str(signal.timeframe or "60")
@@ -996,7 +997,30 @@ prefilter_result: PreFilterResult | None = None,
             signal.direction, entry_price, analysis.suggested_stop_loss,
             atr_pct=atr_pct, user_settings=user_settings, timeframe=timeframe
         )
+        if not sl_price:
+            sl_price = self._fallback_stop_loss(
+                signal.direction,
+                entry_price,
+                atr_pct=atr_pct,
+                user_settings=user_settings,
+                timeframe=timeframe,
+            )
+            if sl_price:
+                logger.warning(
+                    f"[Signal] AI stop loss missing/invalid for {signal.ticker}; "
+                    f"using deterministic fallback SL={sl_price}"
+                )
         decision.stop_loss = sl_price
+        if sl_price:
+            self._append_stop_loss_advisory_warnings(
+                analysis,
+                signal,
+                entry_price,
+                sl_price,
+                atr_pct=atr_pct,
+                user_settings=user_settings,
+                timeframe=timeframe,
+            )
 
         raw_levels = [
             (analysis.suggested_tp1, analysis.tp1_qty_pct),
@@ -1163,6 +1187,41 @@ prefilter_result: PreFilterResult | None = None,
         return max(1, min(int(tp_cfg.get("num_levels") or settings.take_profit.num_levels or 1), 4))
 
     @staticmethod
+    def _append_stop_loss_advisory_warnings(
+        analysis: AIAnalysis,
+        signal: TradingViewSignal,
+        entry: float,
+        sl_price: float,
+        atr_pct: float = 0.0,
+        user_settings: dict | None = None,
+        timeframe: str = "60",
+    ) -> None:
+        """Record soft risk warnings when AI SL is outside ATR/timeframe guidance."""
+        if entry <= 0 or sl_price <= 0:
+            return
+
+        sl_dist_pct = abs(sl_price - entry) / entry * 100
+        min_sl_pct = SignalProcessor._get_min_sl_percentage(atr_pct, user_settings or {}, timeframe)
+        max_sl_pct = SignalProcessor._get_max_sl_percentage(user_settings or {}, timeframe)
+
+        if sl_dist_pct < min_sl_pct:
+            warning = (
+                f"AI stop loss distance {sl_dist_pct:.2f}% is below ATR/timeframe guidance "
+                f"{min_sl_pct:.2f}% for {timeframe}; accepted as AI invalidation, with higher stop-out risk"
+            )
+            if warning not in analysis.warnings:
+                analysis.warnings.append(warning)
+            logger.warning(f"[Signal] {signal.ticker}: {warning}")
+        elif max_sl_pct > 0 and sl_dist_pct > max_sl_pct:
+            warning = (
+                f"AI stop loss distance {sl_dist_pct:.2f}% is above timeframe guidance "
+                f"{max_sl_pct:.2f}% for {timeframe}; accepted, position sizing will cap risk where possible"
+            )
+            if warning not in analysis.warnings:
+                analysis.warnings.append(warning)
+            logger.warning(f"[Signal] {signal.ticker}: {warning}")
+
+    @staticmethod
     def _valid_stop_loss(
         direction: SignalDirection,
         entry: float,
@@ -1171,23 +1230,18 @@ prefilter_result: PreFilterResult | None = None,
         user_settings: dict | None = None,
         timeframe: str = "60",
     ) -> float | None:
-        """Validate stop loss with distance requirements.
+        """Validate stop loss using hard safety guards only.
 
-        Checks:
-        1. Basic direction (LONG: SL < entry, SHORT: SL > entry)
-        2. Minimum distance (adjusts SL if too close)
-        3. Maximum distance (rejects oversized risk)
-        4. Not equal to entry price (would trigger immediately)
-
-        If SL distance is below minimum, auto-adjusts to minimum distance
-        instead of rejecting outright (to allow AI trades with tight stops).
+        AI-generated stops are treated as the trading invalidation level. ATR and
+        timeframe ranges are advisory elsewhere; this validator only rejects
+        values that are unsafe to send to the exchange.
         """
         try:
             value = float(price or 0)
             entry = float(entry or 0)
         except (TypeError, ValueError):
             return None
-        if value <= 0 or entry <= 0:
+        if value <= 0 or entry <= 0 or not math.isfinite(value) or not math.isfinite(entry):
             return None
 
         # Reject SL that equals entry (immediate trigger)
@@ -1201,32 +1255,67 @@ prefilter_result: PreFilterResult | None = None,
         if direction == SignalDirection.SHORT and value <= entry:
             return None
 
-        # Distance validation with timeframe-aware limits
         sl_dist_pct = abs(value - entry) / entry * 100
         min_sl_pct = SignalProcessor._get_min_sl_percentage(atr_pct, user_settings or {}, timeframe)
         max_sl_pct = SignalProcessor._get_max_sl_percentage(user_settings or {}, timeframe)
-
-        # Auto-adjust if SL is too tight (don't reject outright)
         if sl_dist_pct < min_sl_pct:
             logger.warning(
-                f"[Signal] SL distance {sl_dist_pct:.2f}% below minimum {min_sl_pct:.2f}%, "
-                f"auto-adjusting SL to minimum distance"
+                f"[Signal] SL distance {sl_dist_pct:.2f}% below ATR/timeframe guidance {min_sl_pct:.2f}% "
+                f"(entry={entry}, sl={value}); accepting AI invalidation level"
             )
-            # Adjust SL to minimum distance
-            if direction == SignalDirection.LONG:
-                value = entry * (1 - min_sl_pct / 100.0)
-            else:
-                value = entry * (1 + min_sl_pct / 100.0)
-            sl_dist_pct = min_sl_pct
-
-        if sl_dist_pct > max_sl_pct:
+        elif max_sl_pct > 0 and sl_dist_pct > max_sl_pct:
             logger.warning(
-                f"[Signal] SL distance {sl_dist_pct:.2f}% above maximum {max_sl_pct:.2f}% "
-                f"(entry={entry}, sl={value}), rejecting oversized risk"
+                f"[Signal] SL distance {sl_dist_pct:.2f}% above timeframe guidance {max_sl_pct:.2f}% "
+                f"(entry={entry}, sl={value}); accepting and relying on risk-based position cap"
             )
-            return None
 
         return round(value, 8)
+
+    @staticmethod
+    def _fallback_stop_loss(
+        direction: SignalDirection,
+        entry: float,
+        atr_pct: float = 0.0,
+        user_settings: dict | None = None,
+        timeframe: str = "60",
+    ) -> float | None:
+        """Build a bounded fallback SL when AI exits are incomplete."""
+        try:
+            entry = float(entry or 0)
+        except (TypeError, ValueError):
+            return None
+        if entry <= 0:
+            return None
+
+        from timeframe_exits import get_default_sl_for_timeframe
+
+        user_settings = user_settings or {}
+        min_sl_pct = SignalProcessor._get_min_sl_percentage(atr_pct, user_settings, timeframe)
+        max_sl_pct = SignalProcessor._get_max_sl_percentage(user_settings, timeframe)
+        if max_sl_pct <= 0:
+            return None
+        if min_sl_pct > max_sl_pct:
+            min_sl_pct = max_sl_pct
+
+        default_sl_pct = get_default_sl_for_timeframe(timeframe)
+        atr_sl_pct = atr_pct * 1.5 if atr_pct > 0 else default_sl_pct
+        sl_pct = max(min_sl_pct, min(atr_sl_pct, max_sl_pct))
+
+        if direction == SignalDirection.LONG:
+            price = entry * (1 - sl_pct / 100.0)
+        elif direction == SignalDirection.SHORT:
+            price = entry * (1 + sl_pct / 100.0)
+        else:
+            return None
+
+        return SignalProcessor._valid_stop_loss(
+            direction,
+            entry,
+            price,
+            atr_pct=atr_pct,
+            user_settings=user_settings,
+            timeframe=timeframe,
+        )
 
     @staticmethod
     def _valid_take_profit(
@@ -1636,6 +1725,8 @@ prefilter_result: PreFilterResult | None = None,
             margin_value = equity * (max_position / 100.0) * size_fraction
             notional_value = margin_value * leverage
 
+        notional_value = self._cap_notional_by_stop_risk(notional_value, price, decision, risk_settings)
+
         # Calculate initial quantity
         if price <= 0:
             return 0.0
@@ -1672,6 +1763,39 @@ prefilter_result: PreFilterResult | None = None,
                 logger.warning(f"[PositionSize] Could not apply exchange limits: {e}")
 
         return float(round(quantity, 6))
+
+    def _cap_notional_by_stop_risk(
+        self,
+        notional_value: float,
+        price: float,
+        decision: TradeDecision | None,
+        risk_settings: dict[str, float | str],
+    ) -> float:
+        """Limit notional so the accepted AI SL cannot exceed configured account risk."""
+        if not decision or not decision.stop_loss or not self._has_valid_sl(price, decision.stop_loss):
+            return notional_value
+
+        sl_distance_pct = self._sl_distance_pct(decision.direction, price, decision.stop_loss)
+        if sl_distance_pct <= 0:
+            return notional_value
+
+        equity = float(risk_settings["account_equity_usdt"])
+        risk_pct = float(risk_settings["risk_per_trade_pct"])
+        risk_amount = equity * (risk_pct / 100.0)
+        max_notional_by_risk = risk_amount / (sl_distance_pct / 100.0)
+
+        if max_notional_by_risk <= 0 or not math.isfinite(max_notional_by_risk):
+            return notional_value
+
+        if notional_value > max_notional_by_risk:
+            logger.warning(
+                f"[PositionSize] Capping notional by accepted SL risk: "
+                f"calculated={notional_value:.2f}USDT, capped={max_notional_by_risk:.2f}USDT, "
+                f"SL_distance={sl_distance_pct:.2f}%, risk_pct={risk_pct:.2f}%"
+            )
+            return max_notional_by_risk
+
+        return notional_value
 
     def _get_exchange_config(self, user_settings: dict | None = None) -> dict:
         """Get exchange configuration from settings."""

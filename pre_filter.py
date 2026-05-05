@@ -4,6 +4,7 @@ Fast, free, rule-based checks BEFORE calling the AI.
 Enhanced v3: 18 intelligent filters with configurable thresholds, weighted scoring,
 dynamic thresholds per ticker, and blocking statistics.
 """
+import asyncio
 import json
 import os
 import threading
@@ -168,6 +169,7 @@ class FilterThresholds:
         "volatility_regime_multiplier": 1.5,
         "position_reduce_on_loss_pct": 50.0,
         "dynamic_cooldown_enabled": True,
+        "data_completeness_soft_fail_count": 5,
     }
 
     DYNAMIC_THRESHOLDS: dict[str, dict[str, Any]] = {
@@ -302,6 +304,7 @@ FILTER_WEIGHTS: dict[str, float] = {
     "basis_check": 5.0,
     "fear_greed": 4.0,
     "volatility_regime": 6.0,
+    "data_completeness": 6.0,
 }
 
 
@@ -920,11 +923,39 @@ async def run_pre_filter_async(
     # ENHANCED CHECKS (v4) - New Market Data
     # ═══════════════════════════════════════════
 
-    # ── Check 20: Macro Events Risk ──
-    macro_ok = True
+    async def _enhanced_call(name: str, coro):
+        try:
+            return await asyncio.wait_for(coro, timeout=6.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"[PreFilter] Enhanced check {name} timed out")
+            return TimeoutError(f"{name} timed out")
+        except Exception as exc:
+            return exc
+
     try:
-        from enhanced_market_data import check_macro_event_risk
-        macro_ok, macro_reason = await check_macro_event_risk()
+        from enhanced_market_data import (
+            check_macro_event_risk,
+            fetch_basis_data,
+            fetch_fear_greed_index,
+            fetch_liquidation_heatmap,
+            fetch_long_short_ratio,
+        )
+
+        macro_result, liq_result, ls_result, basis_result, fg_result = await asyncio.gather(
+            _enhanced_call("macro_events", check_macro_event_risk()),
+            _enhanced_call("liquidation_heatmap", fetch_liquidation_heatmap(ticker)),
+            _enhanced_call("long_short_ratio", fetch_long_short_ratio(ticker)),
+            _enhanced_call("basis_check", fetch_basis_data(ticker)),
+            _enhanced_call("fear_greed", fetch_fear_greed_index()),
+        )
+    except Exception as e:
+        macro_result = liq_result = ls_result = basis_result = fg_result = e
+
+    # ── Check 20: Macro Events Risk ──
+    if isinstance(macro_result, Exception):
+        checks["macro_events"] = {"passed": True, "note": f"Skip: {macro_result}"}
+    else:
+        macro_ok, macro_reason = macro_result
         checks["macro_events"] = {
             "passed": macro_ok,
             "reason": macro_reason,
@@ -932,20 +963,19 @@ async def run_pre_filter_async(
         if not macro_ok:
             reasons.append(f"Macro event risk: {macro_reason}")
             _record_filter_block("macro_events", ticker)
-    except Exception as e:
-        checks["macro_events"] = {"passed": True, "note": f"Skip: {e}"}
 
     # ── Check 21: Liquidation Heatmap ──
     liq_ok = True
     liq_distance_min = thresholds.get("liquidation_distance_pct_min", ticker)
-    try:
-        from enhanced_market_data import fetch_liquidation_heatmap
-        liq_data = await fetch_liquidation_heatmap(ticker)
+    if isinstance(liq_result, Exception):
+        checks["liquidation_heatmap"] = {"passed": True, "note": f"Skip: {liq_result}"}
+    else:
+        liq_data = liq_result
         liq_data.get("nearest_liq_level")
         nearest_distance = liq_data.get("nearest_liq_distance_pct")
+        total_liq = liq_data.get("total_long_liq_usd", 0) + liq_data.get("total_short_liq_usd", 0)
 
         if nearest_distance is not None and nearest_distance < liq_distance_min:
-            total_liq = liq_data.get("total_long_liq_usd", 0) + liq_data.get("total_short_liq_usd", 0)
             if total_liq > 10_000_000:
                 liq_ok = False
 
@@ -958,16 +988,15 @@ async def run_pre_filter_async(
         if not liq_ok:
             soft_fail_reasons.append(f"Large liquidations nearby (${total_liq/1e6:.1f}M within {nearest_distance:.1f}%)")
             checks["liquidation_heatmap"]["soft_fail"] = True
-    except Exception as e:
-        checks["liquidation_heatmap"] = {"passed": True, "note": f"Skip: {e}"}
 
     # ── Check 22: Long/Short Ratio Extreme ──
     ls_ok = True
     ls_high = thresholds.get("long_short_ratio_extreme_high", ticker)
     ls_low = thresholds.get("long_short_ratio_extreme_low", ticker)
-    try:
-        from enhanced_market_data import fetch_long_short_ratio
-        ls_data = await fetch_long_short_ratio(ticker)
+    if isinstance(ls_result, Exception):
+        checks["long_short_ratio"] = {"passed": True, "note": f"Skip: {ls_result}"}
+    else:
+        ls_data = ls_result
         current_ratio = ls_data.get("current_ratio")
 
         if current_ratio is not None:
@@ -989,8 +1018,58 @@ async def run_pre_filter_async(
         if not ls_ok:
             soft_fail_reasons.append(f"Long/Short ratio extreme: {current_ratio:.2f} (soft fail)")
             checks["long_short_ratio"]["soft_fail"] = True
-    except Exception as e:
-        checks["long_short_ratio"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ── Check 24: Basis (Spot vs Futures) ──
+    basis_ok = True
+    basis_max = thresholds.get("basis_pct_max", ticker)
+    if isinstance(basis_result, Exception):
+        checks["basis_check"] = {"passed": True, "note": f"Skip: {basis_result}"}
+    else:
+        basis_data = basis_result
+        basis_pct = basis_data.get("basis_pct")
+
+        if basis_pct is not None:
+            basis_ok = abs(basis_pct) < basis_max
+
+        checks["basis_check"] = {
+            "passed": basis_ok,
+            "basis_pct": basis_pct,
+            "spot_price": basis_data.get("spot_price"),
+            "futures_price": basis_data.get("futures_price"),
+            "threshold": basis_max,
+        }
+        if not basis_ok:
+            soft_fail_reasons.append(f"Basis abnormal: {basis_pct:.3f}% (soft fail)")
+            checks["basis_check"]["soft_fail"] = True
+
+    # ── Check 25: Fear & Greed Index ──
+    fg_ok = True
+    fg_threshold = thresholds.get("fear_greed_extreme_threshold", ticker)
+    if isinstance(fg_result, Exception):
+        checks["fear_greed"] = {"passed": True, "note": f"Skip: {fg_result}"}
+    else:
+        fg_data = fg_result
+        fg_value = fg_data.get("value")
+        fg_class = fg_data.get("classification")
+
+        is_long = signal.direction in (SignalDirection.LONG,)
+        is_short = signal.direction in (SignalDirection.SHORT,)
+
+        if fg_value is not None:
+            if fg_value <= fg_threshold and is_long:
+                fg_ok = False
+            elif fg_value >= 80 and is_short:
+                fg_ok = False
+
+        checks["fear_greed"] = {
+            "passed": fg_ok,
+            "value": fg_value,
+            "classification": fg_class,
+            "threshold": fg_threshold,
+        }
+        if not fg_ok:
+            soft_fail_reasons.append(f"Fear & Greed extreme: {fg_value} ({fg_class})")
+            checks["fear_greed"]["soft_fail"] = True
 
     # ── Check 23: CVD Divergence ──
     cvd_ok = True
@@ -1023,62 +1102,11 @@ async def run_pre_filter_async(
             if not cvd_ok:
                 soft_fail_reasons.append(f"CVD divergence: {div_type} (${strength:.1f}%)")
                 checks["cvd_divergence"]["soft_fail"] = True
+        else:
+            checks["cvd_divergence"] = {"passed": True, "missing_data": True, "note": "Need at least 20 1h candles"}
+            missing_data_checks.append("cvd_divergence")
     except Exception as e:
         checks["cvd_divergence"] = {"passed": True, "note": f"Skip: {e}"}
-
-    # ── Check 24: Basis (Spot vs Futures) ──
-    basis_ok = True
-    basis_max = thresholds.get("basis_pct_max", ticker)
-    try:
-        from enhanced_market_data import fetch_basis_data
-        basis_data = await fetch_basis_data(ticker)
-        basis_pct = basis_data.get("basis_pct")
-
-        if basis_pct is not None:
-            basis_ok = abs(basis_pct) < basis_max
-
-        checks["basis_check"] = {
-            "passed": basis_ok,
-            "basis_pct": basis_pct,
-            "spot_price": basis_data.get("spot_price"),
-            "futures_price": basis_data.get("futures_price"),
-            "threshold": basis_max,
-        }
-        if not basis_ok:
-            soft_fail_reasons.append(f"Basis abnormal: {basis_pct:.3f}% (soft fail)")
-            checks["basis_check"]["soft_fail"] = True
-    except Exception as e:
-        checks["basis_check"] = {"passed": True, "note": f"Skip: {e}"}
-
-    # ── Check 25: Fear & Greed Index ──
-    fg_ok = True
-    fg_threshold = thresholds.get("fear_greed_extreme_threshold", ticker)
-    try:
-        from enhanced_market_data import fetch_fear_greed_index
-        fg_data = await fetch_fear_greed_index()
-        fg_value = fg_data.get("value")
-        fg_class = fg_data.get("classification")
-
-        is_long = signal.direction in (SignalDirection.LONG,)
-        is_short = signal.direction in (SignalDirection.SHORT,)
-
-        if fg_value is not None:
-            if fg_value <= fg_threshold and is_long:
-                fg_ok = False
-            elif fg_value >= 80 and is_short:
-                fg_ok = False
-
-        checks["fear_greed"] = {
-            "passed": fg_ok,
-            "value": fg_value,
-            "classification": fg_class,
-            "threshold": fg_threshold,
-        }
-        if not fg_ok:
-            soft_fail_reasons.append(f"Fear & Greed extreme: {fg_value} ({fg_class})")
-            checks["fear_greed"]["soft_fail"] = True
-    except Exception as e:
-        checks["fear_greed"] = {"passed": True, "note": f"Skip: {e}"}
 
     # ── Check 26: Volatility Regime ──
     regime_ok = True
@@ -1106,8 +1134,27 @@ async def run_pre_filter_async(
             if not regime_ok:
                 soft_fail_reasons.append(f"Volatility regime: {regime} - {suggestion}")
                 checks["volatility_regime"]["soft_fail"] = True
+        else:
+            checks["volatility_regime"] = {"passed": True, "missing_data": True, "note": "Need at least 100 1h candles"}
+            missing_data_checks.append("volatility_regime")
     except Exception as e:
         checks["volatility_regime"] = {"passed": True, "note": f"Skip: {e}"}
+
+    # ── Check 27: Market Data Completeness ──
+    missing_soft_fail_count = int(thresholds.get("data_completeness_soft_fail_count", ticker) or 5)
+    data_complete_ok = len(missing_data_checks) < missing_soft_fail_count
+    checks["data_completeness"] = {
+        "passed": data_complete_ok,
+        "missing_count": len(missing_data_checks),
+        "soft_fail_threshold": missing_soft_fail_count,
+        "missing_checks": missing_data_checks,
+    }
+    if not data_complete_ok:
+        soft_fail_reasons.append(
+            f"Market data incomplete: {len(missing_data_checks)} checks missing ({', '.join(missing_data_checks[:6])})"
+        )
+        checks["data_completeness"]["soft_fail"] = True
+        _record_filter_block("data_completeness", ticker)
 
     # ═══════════════════════════════════════════
     # Final Verdict
@@ -1185,10 +1232,16 @@ def _count_recent_same_direction(signal: TradingViewSignal, window_minutes: int 
     """Count how many signals of the same direction we received recently (thread-safe)."""
     cutoff = utcnow() - timedelta(minutes=window_minutes)
     scope = user_id or "admin"
+    target_key = position_symbol_key(signal.ticker)
     with _state_lock:
         return sum(
             1 for s in _recent_signals
-            if s["timestamp"] > cutoff and s.get("user_id", "admin") == scope and s["direction"] == signal.direction
+            if (
+                s["timestamp"] > cutoff
+                and s.get("user_id", "admin") == scope
+                and (s.get("ticker_key") or position_symbol_key(s.get("ticker", ""))) == target_key
+                and s["direction"] == signal.direction
+            )
         )
 
 
@@ -1196,9 +1249,15 @@ def _count_recent_opposite_direction(signal: TradingViewSignal, window_minutes: 
     """Count how many signals of the opposite direction we received recently (thread-safe)."""
     cutoff = utcnow() - timedelta(minutes=window_minutes)
     scope = user_id or "admin"
+    target_key = position_symbol_key(signal.ticker)
     opposite_direction = SignalDirection.SHORT if signal.direction == SignalDirection.LONG else SignalDirection.LONG
     with _state_lock:
         return sum(
             1 for s in _recent_signals
-            if s["timestamp"] > cutoff and s.get("user_id", "admin") == scope and s["direction"] == opposite_direction
+            if (
+                s["timestamp"] > cutoff
+                and s.get("user_id", "admin") == scope
+                and (s.get("ticker_key") or position_symbol_key(s.get("ticker", ""))) == target_key
+                and s["direction"] == opposite_direction
+            )
         )

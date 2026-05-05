@@ -433,7 +433,11 @@ Key rules:
 - Use "modify" only when the trade thesis is valid but entry quality is poor and you can provide a materially better `suggested_entry`
 - Use "reject" when the setup is invalid, structurally conflicted, or lacks a safe invalidation level
 - Use "hold" only when the data is insufficient or ambiguous; do not use "hold" as a synonym for reject
-- If you recommend "execute" or "modify", include a valid `suggested_stop_loss` and valid TP levels required by the server
+- If you recommend "execute" or "modify", include a valid `suggested_stop_loss` based on your multi-timeframe invalidation analysis plus valid TP levels required by the server
+- For "execute" or "modify", `suggested_stop_loss` must be a finite number, never null/0/equal to entry, and on the protective side of the final entry
+- ATR/timeframe SL ranges are guidance only; do not force SL to a fixed percentage if the structure gives a better invalidation level
+- If using "modify", calculate SL/TP from `suggested_entry`; if using "execute", calculate SL/TP from the signal price
+- If you cannot produce a valid stop loss, set recommendation="reject" instead of execute/modify
 - If you recommend "reject" or "hold", set `suggested_entry`, `suggested_stop_loss`, `suggested_take_profit`, and all `suggested_tp*` fields to null
 - If `suggested_direction` matches the incoming signal direction, return null instead of repeating the same direction
 
@@ -591,6 +595,8 @@ def _get_effective_system_prompt(user_settings: dict | None = None) -> str:
             f"You MUST generate suggested_tp1 through suggested_tp{num_tp} with valid prices. "
             f"tp1_qty_pct through tp{num_tp}_qty_pct should sum to 100% or less."
             f"{beyond_level_instruction} "
+            f"Use your multi-timeframe invalidation level for suggested_stop_loss; "
+            f"ATR/timeframe ranges are guidance, while the server only safety-validates direction and finite prices. "
             f"Obey the requested risk profile for exit levels."
         )
         base += tp_instruction
@@ -727,6 +733,11 @@ When market data is limited:
         "IMPORTANT: The server expects EXACTLY "
         f"{tp_config.num_levels} take-profit targets.",
         f"- Generate valid prices for suggested_tp1 through suggested_tp{tp_config.num_levels}",
+        "- If recommendation is 'execute' or 'modify', suggested_stop_loss must be a finite numeric price on the protective side of the final entry and should reflect your multi-timeframe invalidation level",
+        "- For LONG: stop loss must be below final entry; for SHORT: stop loss must be above final entry",
+        "- ATR/timeframe SL ranges are advisory only; do not change a stronger structural stop just to fit a fixed percentage range",
+        "- For recommendation='modify', calculate suggested_stop_loss and TP levels from suggested_entry, not from the raw signal price",
+        "- If no valid stop loss can be calculated, use recommendation='reject' instead of execute/modify",
         "- Use recommendation='modify' only if you also provide a valid suggested_entry different from the raw signal price",
         "- If recommendation is 'execute', suggested_entry may be null when the signal price is already acceptable",
         "- If recommendation is 'reject' or 'hold', set suggested_entry, suggested_stop_loss, and all TP fields to null",
@@ -790,6 +801,74 @@ When market data is limited:
 
 {smc_text}
 Should this signal be executed, modified, or rejected? If the entry price is suboptimal based on SMC analysis, recommend "modify" and provide a better suggested_entry price. Provide your analysis as JSON."""
+
+
+def validate_ai_analysis_against_signal(
+    signal: TradingViewSignal,
+    market: MarketContext,
+    analysis: AIAnalysis,
+    user_settings: dict | None = None,
+) -> AIAnalysis:
+    """Sanitize AI exits against the final signal direction before caching/use."""
+    if analysis.recommendation not in {"execute", "modify"}:
+        return analysis
+
+    risk_config = _effective_risk_config(user_settings)
+    if risk_config.exit_management_mode != "ai":
+        return analysis
+
+    result = analysis.model_copy(deep=True)
+    entry = result.suggested_entry if result.recommendation == "modify" and result.suggested_entry else signal.price
+    entry = safe_float(entry, safe_float(market.current_price, 0.0))
+    if entry <= 0:
+        result.recommendation = "reject"
+        result.reasoning = f"[AI SAFETY] Cannot validate exits without a valid entry price. Original: {result.reasoning}"
+        return result
+
+    is_long = signal.direction == SignalDirection.LONG
+    is_short = signal.direction == SignalDirection.SHORT
+    if not (is_long or is_short):
+        return result
+
+    def _finite_positive(value: float | None) -> float | None:
+        parsed = safe_float(value, 0.0)
+        return parsed if parsed > 0 and math.isfinite(parsed) else None
+
+    def _valid_sl(value: float | None) -> bool:
+        parsed = _finite_positive(value)
+        if parsed is None:
+            return False
+        return parsed < entry if is_long else parsed > entry
+
+    def _valid_tp(value: float | None) -> bool:
+        parsed = _finite_positive(value)
+        if parsed is None:
+            return False
+        return parsed > entry if is_long else parsed < entry
+
+    if not _valid_sl(result.suggested_stop_loss):
+        result.warnings.append("AI stop loss failed post-validation; server fallback will be used if possible")
+        result.suggested_stop_loss = None
+
+    tp_fields = ["suggested_tp1", "suggested_tp2", "suggested_tp3", "suggested_tp4"]
+    valid_tp_count = 0
+    for field in tp_fields:
+        if _valid_tp(getattr(result, field)):
+            valid_tp_count += 1
+        else:
+            setattr(result, field, None)
+
+    if valid_tp_count == 0 and _valid_tp(result.suggested_take_profit):
+        result.suggested_tp1 = result.suggested_take_profit
+        result.tp1_qty_pct = 100.0
+        result.tp2_qty_pct = result.tp3_qty_pct = result.tp4_qty_pct = 0.0
+        valid_tp_count = 1
+
+    if valid_tp_count == 0:
+        result.recommendation = "reject"
+        result.reasoning = f"[AI SAFETY] No valid take-profit target for execute/modify. Original: {result.reasoning}"
+
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -1362,6 +1441,28 @@ def _aggregate_legacy_voting_results(
     return {"action": action, "confidence": weighted_confidence, "reason": "Weighted voting aggregate"}
 
 
+def _analysis_has_exit_plan(analysis: AIAnalysis) -> bool:
+    if not analysis.suggested_stop_loss or analysis.suggested_stop_loss <= 0:
+        return False
+    return any(
+        tp and tp > 0
+        for tp in (analysis.suggested_tp1, analysis.suggested_tp2, analysis.suggested_tp3, analysis.suggested_tp4)
+    )
+
+
+def _best_exit_source(analyses: list[AIAnalysis], recommendation: str) -> AIAnalysis | None:
+    candidates = [
+        analysis
+        for analysis in analyses
+        if analysis.recommendation == recommendation and _analysis_has_exit_plan(analysis)
+    ]
+    if not candidates and recommendation in {"execute", "modify"}:
+        candidates = [analysis for analysis in analyses if _analysis_has_exit_plan(analysis)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.confidence)
+
+
 def _aggregate_voting_results(
     results: Any,
     strategy: Any,
@@ -1411,8 +1512,10 @@ async def _aggregate_voting_results_async(
 
         if execute_votes > majority_threshold:
             avg_confidence = sum(a.confidence for a in analyses) / len(analyses)
-            best_idx = max(range(len(analyses)), key=lambda i: analyses[i].confidence)
-            result = analyses[best_idx]
+            execute_candidates = [a for a in analyses if a.recommendation == "execute"]
+            exit_source = _best_exit_source(execute_candidates, "execute")
+            result = (exit_source or max(execute_candidates, key=lambda a: a.confidence)).model_copy(deep=True)
+            result.recommendation = "execute"
             result.confidence = avg_confidence
             result.reasoning = f"Consensus reached: {execute_votes}/{len(analyses)} vote execute. {result.reasoning}"
             logger.info(
@@ -1430,8 +1533,17 @@ async def _aggregate_voting_results_async(
             else:
                 final_rec = "hold"
             best_idx = max(range(len(analyses)), key=lambda i: analyses[i].confidence)
-            result = analyses[best_idx]
+            result = analyses[best_idx].model_copy(deep=True)
             result.recommendation = final_rec
+            if final_rec not in {"execute", "modify"}:
+                result.suggested_entry = None
+                result.suggested_stop_loss = None
+                result.suggested_take_profit = None
+                result.suggested_tp1 = None
+                result.suggested_tp2 = None
+                result.suggested_tp3 = None
+                result.suggested_tp4 = None
+                result.tp1_qty_pct = result.tp2_qty_pct = result.tp3_qty_pct = result.tp4_qty_pct = 0.0
             result.reasoning = f"Consensus failed: only {execute_votes}/{len(analyses)} vote execute. Majority is {final_rec}. {result.reasoning}"
             result.warnings = ["Voting consensus not reached"] + result.warnings
             logger.info(
@@ -1471,6 +1583,8 @@ async def _aggregate_voting_results_async(
 
         best_idx = max(range(len(analyses)), key=lambda i: analyses[i].confidence)
         best_analysis = analyses[best_idx]
+        exit_source = _best_exit_source(analyses, final_recommendation) or best_analysis
+        include_exits = final_recommendation in {"execute", "modify"}
 
         combined_reasoning = f"Weighted voting ({len(results)} models): "
         combined_reasoning += ", ".join(f"{mid}:{a.recommendation}({a.confidence:.2f})" for a, mid in results)
@@ -1479,25 +1593,25 @@ async def _aggregate_voting_results_async(
             confidence=weighted_confidence,
             recommendation=final_recommendation,
             reasoning=combined_reasoning,
-            suggested_direction=best_analysis.suggested_direction,
-            suggested_entry=best_analysis.suggested_entry,
-            suggested_stop_loss=best_analysis.suggested_stop_loss,
-            suggested_take_profit=best_analysis.suggested_take_profit,
-            suggested_tp1=best_analysis.suggested_tp1,
-            suggested_tp2=best_analysis.suggested_tp2,
-            suggested_tp3=best_analysis.suggested_tp3,
-            suggested_tp4=best_analysis.suggested_tp4,
-            tp1_qty_pct=best_analysis.tp1_qty_pct,
-            tp2_qty_pct=best_analysis.tp2_qty_pct,
-            tp3_qty_pct=best_analysis.tp3_qty_pct,
-            tp4_qty_pct=best_analysis.tp4_qty_pct,
+            suggested_direction=exit_source.suggested_direction if include_exits else None,
+            suggested_entry=exit_source.suggested_entry if include_exits else None,
+            suggested_stop_loss=exit_source.suggested_stop_loss if include_exits else None,
+            suggested_take_profit=exit_source.suggested_take_profit if include_exits else None,
+            suggested_tp1=exit_source.suggested_tp1 if include_exits else None,
+            suggested_tp2=exit_source.suggested_tp2 if include_exits else None,
+            suggested_tp3=exit_source.suggested_tp3 if include_exits else None,
+            suggested_tp4=exit_source.suggested_tp4 if include_exits else None,
+            tp1_qty_pct=exit_source.tp1_qty_pct if include_exits else 0.0,
+            tp2_qty_pct=exit_source.tp2_qty_pct if include_exits else 0.0,
+            tp3_qty_pct=exit_source.tp3_qty_pct if include_exits else 0.0,
+            tp4_qty_pct=exit_source.tp4_qty_pct if include_exits else 0.0,
             position_size_pct=min(weighted_position_pct, 1.0),
             recommended_leverage=min(weighted_leverage, 50.0),
             risk_score=weighted_risk,
-            market_condition=best_analysis.market_condition,
-            trend_strength=best_analysis.trend_strength,
-            recommended_trailing_stop_mode=best_analysis.recommended_trailing_stop_mode,
-            warnings=[f"Voting result from {len(results)} models"] + best_analysis.warnings,
+            market_condition=exit_source.market_condition,
+            trend_strength=exit_source.trend_strength,
+            recommended_trailing_stop_mode=exit_source.recommended_trailing_stop_mode,
+            warnings=[f"Voting result from {len(results)} models"] + exit_source.warnings,
             raw_response=f"Voting aggregate: {combined_reasoning}",
         )
 
@@ -1532,22 +1646,26 @@ async def analyze_signal(
     # P2-8: Add OHLCV signature to cache key to detect market structure changes
     ohlcv_htf = getattr(market, "_ohlcv_4h", None) or getattr(market, "_ohlcv_1h", None) or []
     ohlcv_signature = _ohlcv_signature(ohlcv_htf, samples=3) if ohlcv_htf else ""
+    cache_enabled = bool(price_bucket and ohlcv_signature)
 
     cache_key_suffix = ""
     if settings.ai.voting_enabled and settings.ai.voting_models:
         cache_key_suffix = ":voting"
 
-    cached = await _get_cached_analysis(
-        signal.ticker,
-        signal.direction.value + cache_key_suffix,
-        price_bucket,
-        timeframe,
-        config_signature,
-        ohlcv_signature,  # P2-8: Include OHLCV signature
-    )
-    if cached is not None:
-        logger.info(f"[AI] Using cached analysis for {signal.ticker} {signal.direction.value} @ {price_bucket}")
-        return cached
+    if cache_enabled:
+        cached = await _get_cached_analysis(
+            signal.ticker,
+            signal.direction.value + cache_key_suffix,
+            price_bucket,
+            timeframe,
+            config_signature,
+            ohlcv_signature,  # P2-8: Include OHLCV signature
+        )
+        if cached is not None:
+            logger.info(f"[AI] Using cached analysis for {signal.ticker} {signal.direction.value} @ {price_bucket}")
+            return cached
+    else:
+        logger.debug(f"[AI/Cache] Bypassing cache for {signal.ticker}: missing price bucket or OHLCV signature")
 
     smc_text = ""
     try:
@@ -1640,7 +1758,12 @@ async def analyze_signal(
                     continue
                 try:
                     raw_response, _returned_model_id = result
-                    analysis = _parse_response(raw_response)
+                    analysis = validate_ai_analysis_against_signal(
+                        signal,
+                        market,
+                        _parse_response(raw_response),
+                        user_settings,
+                    )
                     valid_results.append((analysis, model_id))
                 except Exception as e:
                     logger.warning(f"[AI/Voting] Failed to parse {model_id} response: {e}")
@@ -1655,15 +1778,16 @@ async def analyze_signal(
                 settings.ai.voting_weights,
             )
 
-            await _set_cached_analysis(
-                signal.ticker,
-                signal.direction.value + cache_key_suffix,
-                final_analysis,
-                price_bucket,
-                timeframe,
-                config_signature,
-                ohlcv_signature,  # P2-8: Include OHLCV signature
-            )
+            if cache_enabled:
+                await _set_cached_analysis(
+                    signal.ticker,
+                    signal.direction.value + cache_key_suffix,
+                    final_analysis,
+                    price_bucket,
+                    timeframe,
+                    config_signature,
+                    ohlcv_signature,  # P2-8: Include OHLCV signature
+                )
             return final_analysis
 
         except asyncio.TimeoutError:
@@ -1695,20 +1819,21 @@ async def analyze_signal(
         else:
             raise ValueError(f"Unknown AI provider: {provider}")
 
-        analysis = _parse_response(raw)
+        analysis = validate_ai_analysis_against_signal(signal, market, _parse_response(raw), user_settings)
         logger.info(
             f"[AI] Result: {analysis.recommendation} "
             f"(confidence={analysis.confidence:.2f}, risk={analysis.risk_score:.2f})"
         )
-        await _set_cached_analysis(
-            signal.ticker,
-            signal.direction.value + cache_key_suffix,
-            analysis,
-            price_bucket,
-            timeframe,
-            config_signature,
-            ohlcv_signature,  # P2-8: Include OHLCV signature
-        )
+        if cache_enabled:
+            await _set_cached_analysis(
+                signal.ticker,
+                signal.direction.value + cache_key_suffix,
+                analysis,
+                price_bucket,
+                timeframe,
+                config_signature,
+                ohlcv_signature,  # P2-8: Include OHLCV signature
+            )
         return analysis
 
     except httpx.HTTPStatusError as e:
@@ -1817,11 +1942,16 @@ def _parse_response(raw: str) -> AIAnalysis:
             recommendation = "reject"
             reasoning = f"[AI SAFETY] Confidence {confidence:.2f} below execute threshold 0.4. Original: {reasoning}"
 
-        suggested_stop_loss = _optional_float(data.get("suggested_stop_loss"))
-        if recommendation in ("execute", "modify") and (suggested_stop_loss is None or suggested_stop_loss <= 0):
-            logger.warning("[AI] Execute/modify without stop loss, forcing reject")
-            recommendation = "reject"
-            reasoning = f"[AI SAFETY] Missing stop loss for execute/modify. Original: {reasoning}"
+        raw_stop_loss = data.get("suggested_stop_loss")
+        suggested_stop_loss = _optional_float(raw_stop_loss)
+        if recommendation in ("execute", "modify") and suggested_stop_loss is None:
+            if raw_stop_loss not in (None, ""):
+                logger.warning("[AI] Execute/modify with non-finite stop loss, forcing reject")
+                recommendation = "reject"
+                reasoning = f"[AI SAFETY] Invalid stop loss for execute/modify. Original: {reasoning}"
+            else:
+                logger.warning("[AI] Execute/modify without stop loss; server will apply fallback or reject")
+                warnings.append("AI omitted stop loss; server will apply fallback or reject")
 
         return AIAnalysis(
             confidence=confidence,

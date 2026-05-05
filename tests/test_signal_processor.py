@@ -154,8 +154,8 @@ class TestSignalProcessorBuildDecision:
         assert "conflicting position" in conflict_reason.lower()
         assert conflicting_position is not None
 
-    def test_reject_no_stop_loss(self, processor, sample_signal, sample_market):
-        """Should reject when no valid stop loss for opening trade."""
+    def test_fallback_stop_loss_when_ai_omits_stop_loss(self, processor, sample_signal, sample_market):
+        """Should use bounded fallback SL when AI omits one."""
         analysis = AIAnalysis(
             confidence=0.8,
             recommendation="execute",
@@ -164,8 +164,9 @@ class TestSignalProcessorBuildDecision:
             suggested_tp1=51000,
         )
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
-        assert decision.execute is False
-        assert "stop loss" in decision.reason.lower()
+        assert decision.execute is True
+        assert decision.stop_loss == pytest.approx(49400.0)
+        assert len(decision.take_profit_levels) > 0
 
     def test_reject_no_take_profit(self, processor, sample_signal, sample_market):
         """Should reject when no valid take profit for opening trade."""
@@ -194,6 +195,34 @@ class TestSignalProcessorBuildDecision:
         assert decision.execute is True
         assert decision.stop_loss == 49000
         assert len(decision.take_profit_levels) > 0
+
+    def test_ai_stop_loss_survives_atr_timeframe_guidance_conflict(self, processor):
+        """AI structural SL should be accepted when ATR guidance exceeds timeframe cap."""
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timeframe="15",
+            strategy="test",
+            message="",
+        )
+        market = MarketContext(ticker="BTCUSDT", current_price=100.0, atr_pct=1.018)
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="15m structure invalidates below local swing",
+            suggested_stop_loss=99.4,
+            suggested_tp1=101.5,
+            tp1_qty_pct=100.0,
+        )
+
+        decision = processor._build_trade_decision(signal, analysis, market, None, {})
+
+        assert decision.execute is True
+        assert decision.stop_loss == pytest.approx(99.4)
+        assert any("below ATR/timeframe guidance" in warning for warning in analysis.warnings)
 
     @pytest.mark.parametrize(
         ("timeframe", "expected_timeout"),
@@ -399,6 +428,41 @@ class TestSignalProcessorBuildDecision:
         assert second.passed is False
         assert "cooldown" in second.reason.lower()
 
+    def test_signal_saturation_is_scoped_by_ticker(self):
+        with pre_filter._state_lock:
+            pre_filter._recent_signals.clear()
+            pre_filter._recent_signals.append({
+                "user_id": "user-1",
+                "ticker": "BTCUSDT",
+                "ticker_key": pre_filter.position_symbol_key("BTCUSDT"),
+                "direction": SignalDirection.LONG,
+                "timestamp": utcnow(),
+            })
+
+        intc_signal = TradingViewSignal(
+            secret="test",
+            ticker="INTCUSDT.P",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=30.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        btc_signal = TradingViewSignal(
+            secret="test",
+            ticker="BTC/USDT:USDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=50000.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+
+        assert pre_filter._count_recent_same_direction(intc_signal, user_id="user-1") == 0
+        assert pre_filter._count_recent_same_direction(btc_signal, user_id="user-1") == 1
+
     def test_modified_entry_within_range(self, processor, sample_signal, sample_market):
         """Should use AI modified entry when within 5% of signal price."""
         # Note: For 60min timeframe, SL max is 2.0%, TP min is 3.0%
@@ -501,6 +565,19 @@ class TestPositionSizeCalculation:
             )
             assert qty == 40.0
 
+    def test_position_size_caps_notional_by_accepted_stop_loss_risk(self, processor):
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.risk_per_trade_pct = 1.0
+            mock_settings.risk.position_sizing_mode = "percentage"
+            decision = TradeDecision(direction=SignalDirection.LONG, entry_price=100.0, stop_loss=80.0)
+
+            qty = processor._calculate_position_size(price=100, size_pct=1.0, leverage=1, decision=decision)
+
+            assert qty == 5.0
+
     def test_apply_position_limits_uses_user_account_equity(self, processor):
         with patch("services.signal_processor.settings") as mock_settings:
             mock_settings.risk.account_equity_usdt = 10000
@@ -547,14 +624,17 @@ class TestValidStopLoss:
         result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 0, timeframe="1D")
         assert result is None
 
-    def test_timeframe_limits_sl_distance(self):
-        """15m timeframe has tighter SL limits than 1D."""
-        # 5% SL on 15m timeframe (max 2%) should be rejected
+    def test_timeframe_sl_distance_is_advisory_for_ai_stop(self):
+        """Timeframe SL ranges should not override AI structural stops."""
         result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 95, timeframe="15")
-        assert result is None
-        # Same 5% SL on 1D timeframe (max 10%) should be accepted
+        assert result == 95
         result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 95, timeframe="1D")
         assert result == 95
+
+    def test_high_atr_min_sl_does_not_override_ai_stop(self):
+        """ATR-derived guidance above timeframe max should not move AI SL."""
+        result = SignalProcessor._valid_stop_loss(SignalDirection.LONG, 100, 99, atr_pct=5.0, timeframe="60")
+        assert result == pytest.approx(99.0)
 
 
 class TestValidTakeProfit:

@@ -773,6 +773,20 @@ def _valid_take_profit(direction: SignalDirection, entry: float, price: float | 
     return None
 
 
+def _decision_take_profit_plan(decision: TradeDecision, status: str = "pending") -> list[dict[str, Any]]:
+    """Serialize the final decision TP plan before exchange orders exist."""
+    return [
+        {
+            "level": i + 1,
+            "price": tp.price,
+            "qty_pct": tp.qty_pct,
+            "order_id": "",
+            "status": status,
+        }
+        for i, tp in enumerate(decision.take_profit_levels)
+    ]
+
+
 def _market_type_key(market_type: str | None) -> str:
     """Normalize exchange market type to spot vs contract."""
     value = str(market_type or "").lower().strip()
@@ -1081,6 +1095,9 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "exchange_order_status": order_status,
             "filled_quantity": actual_filled_qty,
             "is_partial_fill": is_partial_fill,
+            "stop_loss": decision.stop_loss,
+            "take_profit": decision.take_profit,
+            "take_profit_orders": _decision_take_profit_plan(decision),
         }
         if leverage:
             result["recommended_leverage"] = leverage
@@ -1590,14 +1607,7 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
 
 def _simulate_order(decision: TradeDecision) -> dict:
     """Simulate order execution for paper trading with intelligent entry tracking."""
-    tp_info = []
-    for i, tp in enumerate(decision.take_profit_levels):
-        tp_info.append({
-            "level": i + 1,
-            "price": tp.price,
-            "qty_pct": tp.qty_pct,
-            "status": "simulated",
-        })
+    tp_info = _decision_take_profit_plan(decision, status="simulated")
 
     trailing_mode = decision.trailing_stop.mode if decision.trailing_stop else TrailingStopMode.NONE
     order_type = str(getattr(decision, "order_type", "") or "").strip().lower()

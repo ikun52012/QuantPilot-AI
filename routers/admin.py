@@ -1420,6 +1420,7 @@ class FilterThresholdsRequest(BaseModel):
     oi_change_pct_max: float | None = None
     correlated_asset_change_max: float | None = None
     min_pass_score: float | None = None
+    data_completeness_soft_fail_count: int | None = None
 
 
 @router.get("/filter-thresholds")
@@ -1427,11 +1428,11 @@ async def get_filter_thresholds(
     admin: dict = Depends(require_admin),
 ):
     """Get current pre-filter thresholds."""
-    from pre_filter import get_thresholds
+    from pre_filter import FILTER_WEIGHTS, get_thresholds
     thresholds = get_thresholds()
     return {
         "thresholds": thresholds.to_dict(),
-        "weights": thresholds.DEFAULT_THRESHOLDS,
+        "weights": FILTER_WEIGHTS,
         "dynamic": thresholds.DYNAMIC_THRESHOLDS,
     }
 
