@@ -547,7 +547,7 @@ def _get_exchange() -> ccxt.Exchange:
         api_secret=settings.exchange.api_secret,
         password=settings.exchange.password,
         live=False,
-        sandbox=False,
+        sandbox=settings.exchange.sandbox_mode,
     )
 
 
