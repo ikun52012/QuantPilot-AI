@@ -4,7 +4,7 @@ Decoupled communication between components using EventBus pattern.
 """
 
 from .event_bus import EventBus, EventHandler
-from .event_types import EventTypes, Event, TradeEvent, PositionEvent, AIAnalysisEvent
+from .event_types import AIAnalysisEvent, Event, EventTypes, PositionEvent, TradeEvent
 
 __all__ = [
     "EventBus",

@@ -15,16 +15,16 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from loguru import logger
 
 
 class StructuredFormatter:
     """JSON-structured log formatter.
-    
+
     P3-FIX: Produces machine-readable logs for observability platforms.
-    
+
     Output format:
     {
         "timestamp": "2026-05-06T10:00:00.123Z",
@@ -43,7 +43,7 @@ class StructuredFormatter:
         "exception": {...}  // if error
     }
     """
-    
+
     def __init__(
         self,
         service_name: str = "QuantPilot",
@@ -53,13 +53,13 @@ class StructuredFormatter:
         self.service_name = service_name
         self.version = version
         self.environment = environment
-    
+
     def format(self, record: dict) -> str:
         """Format log record as JSON string.
-        
+
         Args:
             record: Loguru record dict
-            
+
         Returns:
             JSON-formatted log string
         """
@@ -79,38 +79,38 @@ class StructuredFormatter:
             "process_id": record["process"].id if record.get("process") else None,
             "thread_id": record["thread"].id if record.get("thread") else None,
         }
-        
+
         # Add contextual fields from extra
         extra = record.get("extra", {})
-        
+
         # Trace ID (for request tracing)
         log_data["trace_id"] = extra.get("trace_id", "")
-        
+
         # User context
         log_data["user_id"] = extra.get("user_id", "")
-        
+
         # Trading context
         log_data["exchange"] = extra.get("exchange", "")
         log_data["symbol"] = extra.get("symbol", "")
         log_data["direction"] = extra.get("direction", "")
         log_data["position_id"] = extra.get("position_id", "")
-        
+
         # Performance metrics (if present)
         log_data["duration_ms"] = extra.get("duration_ms", None)
         log_data["latency_seconds"] = extra.get("latency_seconds", None)
-        
+
         # Additional extra fields
         additional_extra = {}
         for key, value in extra.items():
             if key not in {
-                "trace_id", "user_id", "exchange", "symbol", 
+                "trace_id", "user_id", "exchange", "symbol",
                 "direction", "position_id", "duration_ms", "latency_seconds"
             }:
                 additional_extra[key] = value
-        
+
         if additional_extra:
             log_data["extra"] = additional_extra
-        
+
         # Exception information (if present)
         if record.get("exception"):
             exception_info = record["exception"]
@@ -120,7 +120,7 @@ class StructuredFormatter:
                 "traceback": exception_info.traceback if exception_info.traceback else "",
             }
             log_data["exception_type"] = exception_info.type.__name__ if exception_info.type else "Unknown"
-        
+
         # Convert to JSON
         try:
             return json.dumps(log_data, default=str, ensure_ascii=False, separators=(",", ":"))
@@ -147,9 +147,9 @@ def setup_structured_logging(
     environment: str = "production",
 ) -> None:
     """Setup structured logging with Loguru.
-    
+
     P3-FIX: Configures JSON-structured logs for production observability.
-    
+
     Args:
         log_dir: Directory for log files
         rotation: Rotation schedule (daily by default)
@@ -164,17 +164,17 @@ def setup_structured_logging(
     """
     # Remove default logger
     logger.remove()
-    
+
     # Create log directory
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
-    
+
     formatter = StructuredFormatter(
         service_name=service_name,
         version=version,
         environment=environment,
     )
-    
+
     # File logger (JSON structured)
     if json_logs:
         logger.add(
@@ -190,7 +190,7 @@ def setup_structured_logging(
             serialize=True,
         )
         logger.info(f"[P3-FIX] JSON structured logging enabled: {log_path}")
-    
+
     # Console logger (human-readable or JSON)
     if console_output:
         if console_json:
@@ -212,7 +212,7 @@ def setup_structured_logging(
                 level="INFO",
                 colorize=True,
             )
-    
+
     # Error-only log file (for quick error review)
     logger.add(
         str(log_path / "errors_{time:YYYY-MM-DD}.log"),
@@ -224,7 +224,7 @@ def setup_structured_logging(
         filter=lambda record: record["level"].no >= 40,  # ERROR and above
         enqueue=True,
     )
-    
+
     logger.info(
         f"[P3-FIX] Logging configured: "
         f"service={service_name}, version={version}, env={environment}, "
@@ -235,18 +235,18 @@ def setup_structured_logging(
 def log_with_context(
     level: str,
     message: str,
-    trace_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-    exchange: Optional[str] = None,
-    symbol: Optional[str] = None,
-    direction: Optional[str] = None,
-    position_id: Optional[str] = None,
+    trace_id: str | None = None,
+    user_id: str | None = None,
+    exchange: str | None = None,
+    symbol: str | None = None,
+    direction: str | None = None,
+    position_id: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Log with explicit context fields.
-    
+
     P3-FIX: Helper function for structured logging with context.
-    
+
     Args:
         level: Log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)
         message: Log message
@@ -272,10 +272,10 @@ def log_with_context(
         context["direction"] = direction
     if position_id:
         context["position_id"] = position_id
-    
+
     # Add additional kwargs
     context.update(kwargs)
-    
+
     # Log with context
     logger.bind(**context).log(level.upper(), message)
 
@@ -286,16 +286,16 @@ def log_trade_event(
     symbol: str,
     direction: str,
     status: str,
-    trace_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-    order_id: Optional[str] = None,
-    latency_seconds: Optional[float] = None,
+    trace_id: str | None = None,
+    user_id: str | None = None,
+    order_id: str | None = None,
+    latency_seconds: float | None = None,
     **kwargs: Any,
 ) -> None:
     """Log trade event with standardized fields.
-    
+
     P3-FIX: Standardized trade event logging for observability.
-    
+
     Args:
         action: Action name (execute/confirm/fail/skip)
         exchange: Exchange name
@@ -315,7 +315,7 @@ def log_trade_event(
         "direction": direction,
         "trade_status": status,
     }
-    
+
     if trace_id:
         context["trace_id"] = trace_id
     if user_id:
@@ -324,9 +324,9 @@ def log_trade_event(
         context["order_id"] = order_id
     if latency_seconds:
         context["latency_seconds"] = latency_seconds
-    
+
     context.update(kwargs)
-    
+
     # Determine log level based on status
     if status in {"failed", "error", "timeout"}:
         level = "ERROR"
@@ -334,7 +334,7 @@ def log_trade_event(
         level = "WARNING"
     else:
         level = "INFO"
-    
+
     logger.bind(**context).log(
         level,
         f"[TRADE] {action}: {symbol} {direction} on {exchange} - {status}",
@@ -348,15 +348,15 @@ def log_ai_analysis(
     direction: str,
     result: str,
     confidence: float,
-    cache_layer: Optional[str] = None,
-    latency_seconds: Optional[float] = None,
-    trace_id: Optional[str] = None,
+    cache_layer: str | None = None,
+    latency_seconds: float | None = None,
+    trace_id: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Log AI analysis event with standardized fields.
-    
+
     P3-FIX: Standardized AI logging for observability.
-    
+
     Args:
         provider: AI provider name
         model: Model name
@@ -377,16 +377,16 @@ def log_ai_analysis(
         "ai_result": result,
         "confidence": confidence,
     }
-    
+
     if cache_layer:
         context["cache_layer"] = cache_layer
     if latency_seconds:
         context["latency_seconds"] = latency_seconds
     if trace_id:
         context["trace_id"] = trace_id
-    
+
     context.update(kwargs)
-    
+
     # Determine log level
     if result in {"failed", "timeout", "error"}:
         level = "ERROR"
@@ -394,7 +394,7 @@ def log_ai_analysis(
         level = "DEBUG"
     else:
         level = "INFO"
-    
+
     logger.bind(**context).log(
         level,
         f"[AI] {provider}/{model}: {ticker} {direction} - {result} (confidence={confidence:.2f})",
@@ -406,14 +406,14 @@ def log_system_error(
     error_type: str,
     error_message: str,
     severity: str = "high",
-    trace_id: Optional[str] = None,
-    exception: Optional[Exception] = None,
+    trace_id: str | None = None,
+    exception: Exception | None = None,
     **kwargs: Any,
 ) -> None:
     """Log system error with standardized fields.
-    
+
     P3-FIX: Standardized error logging for observability.
-    
+
     Args:
         module: Module name
         error_type: Error type
@@ -428,12 +428,12 @@ def log_system_error(
         "error_type": error_type,
         "severity": severity,
     }
-    
+
     if trace_id:
         context["trace_id"] = trace_id
-    
+
     context.update(kwargs)
-    
+
     # Determine log level from severity
     severity_to_level = {
         "critical": "CRITICAL",
@@ -442,7 +442,7 @@ def log_system_error(
         "low": "WARNING",
     }
     level = severity_to_level.get(severity, "ERROR")
-    
+
     if exception:
         logger.bind(**context).log(
             level,

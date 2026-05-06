@@ -3,12 +3,12 @@ P3-FIX: Prometheus Metrics Definitions
 Comprehensive trading, AI, and system metrics for observability.
 """
 try:
-    from prometheus_client import Counter, Gauge, Histogram, Info, Registry, REGISTRY
-    
+    from prometheus_client import REGISTRY, Counter, Gauge, Histogram, Info, Registry
+
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
-    
+
     # Mock classes for development without prometheus_client
     class MockMetric:
         def __init__(self, name, *args, **kwargs):
@@ -23,14 +23,13 @@ except ImportError:
             pass
         def set(self, *args, **kwargs):
             pass
-    
+
     Counter = Gauge = Histogram = Info = MockMetric
     Registry = None
     REGISTRY = None
 
 
 from loguru import logger
-
 
 # ─────────────────────────────────────────────
 # Trading Metrics
@@ -105,6 +104,18 @@ GHOST_POSITION_COUNT = Gauge(
 LEVERAGE_SETUP_FAILURE = Counter(
     'quantpilot_leverage_setup_failure_total',
     'Leverage setup failures',
+    ['exchange', 'symbol', 'retry_attempt']
+)
+
+EXCHANGE_ERRORS = Counter(
+    'quantpilot_exchange_errors_total',
+    'Exchange API errors',
+    ['exchange', 'error_type']
+)
+
+LEVERAGE_SETUP_FAILURE = Counter(
+    'quantpilot_leverage_setup_failure_total',
+    'Leverage setup failures',
     ['exchange', 'symbol', 'leverage', 'retry_attempt']
 )
 
@@ -157,17 +168,17 @@ DB_QUERY_LATENCY = Histogram(
 
 def setup_metrics() -> None:
     """Initialize metrics system and set baseline values.
-    
+
     P3-FIX: Called during application startup.
     """
     if not PROMETHEUS_AVAILABLE:
         logger.warning("[P3-FIX] Prometheus client not installed, metrics disabled")
         return
-    
+
     # Set system info
     try:
         from core.config import settings
-        
+
         SYSTEM_INFO.info({
             'version': settings.app_version,
             'app_name': settings.app_name,
@@ -175,14 +186,14 @@ def setup_metrics() -> None:
             'ai_provider': settings.ai.provider,
             'live_trading': str(settings.exchange.live_trading),
         })
-        
+
         logger.info(
             f"[P3-FIX] Prometheus metrics initialized: "
             f"version={settings.app_version}, "
             f"exchange={settings.exchange.name}, "
             f"ai_provider={settings.ai.provider}"
         )
-        
+
     except Exception as e:
         logger.warning(f"[P3-FIX] Failed to set system info: {e}")
 
@@ -196,7 +207,7 @@ def record_trade_metrics(
     stage: str = "execute",
 ) -> None:
     """Helper to record trade metrics.
-    
+
     Args:
         exchange: Exchange name
         symbol: Trading symbol
@@ -211,7 +222,7 @@ def record_trade_metrics(
         direction=direction,
         result=result
     ).inc()
-    
+
     TRADE_LATENCY.labels(
         exchange=exchange,
         stage=stage
@@ -226,7 +237,7 @@ def record_ai_metrics(
     cache_layer: str = None,
 ) -> None:
     """Helper to record AI analysis metrics.
-    
+
     Args:
         provider: AI provider
         model: Model name
@@ -239,12 +250,12 @@ def record_ai_metrics(
         model=model,
         result=result
     ).inc()
-    
+
     AI_ANALYSIS_LATENCY.labels(
         provider=provider,
         model=model
     ).observe(latency_seconds)
-    
+
     if cache_layer:
         AI_CACHE_HIT.labels(layer=cache_layer).inc()
 
@@ -255,7 +266,7 @@ def record_error_metrics(
     severity: str = "medium",
 ) -> None:
     """Helper to record error metrics.
-    
+
     Args:
         module: Module name (ai_analyzer/exchange/position_monitor)
         error_type: Error type (NetworkError/Timeout/AuthenticationError)
@@ -275,7 +286,7 @@ def record_leverage_failure(
     retry_attempt: int,
 ) -> None:
     """Helper to record leverage setup failure.
-    
+
     Args:
         exchange: Exchange name
         symbol: Trading symbol
@@ -297,7 +308,7 @@ def update_position_metrics(
     count: int,
 ) -> None:
     """Helper to update position count.
-    
+
     Args:
         exchange: Exchange name
         symbol: Trading symbol
@@ -318,7 +329,7 @@ def update_cache_metrics(
     size: int,
 ) -> None:
     """Helper to update cache metrics.
-    
+
     Args:
         cache_name: Cache instance name
         layer: Cache layer (L1/L2/L3)
@@ -329,7 +340,7 @@ def update_cache_metrics(
         cache_name=cache_name,
         layer=layer
     ).set(hit_rate_pct)
-    
+
     CACHE_SIZE.labels(
         cache_name=cache_name,
         layer=layer
@@ -342,7 +353,7 @@ def update_ghost_position_metrics(
     count: int,
 ) -> None:
     """Helper to update ghost position count.
-    
+
     Args:
         exchange: Exchange name
         symbol: Trading symbol

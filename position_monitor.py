@@ -50,29 +50,30 @@ _GHOST_THRESHOLD_SMALL_POSITION = 3  # < $100
 _GHOST_THRESHOLD_MEDIUM_POSITION = 5  # $100 - $1000
 _GHOST_THRESHOLD_LARGE_POSITION = 7   # > $1000
 _GHOST_THRESHOLD_HUGE_POSITION = 10   # > $10,000
+_MAX_GHOST_THRESHOLD = _GHOST_THRESHOLD_HUGE_POSITION  # Backward compatibility alias
 _GHOST_CHECK_INTERVAL_SECS = 3600
 _POSITION_VALUE_THRESHOLDS = [100.0, 1000.0, 10000.0]  # USDT thresholds for dynamic thresholds
 
 
 def _calculate_ghost_threshold(position: PositionModel) -> int:
     """P0-FIX: Calculate dynamic ghost position threshold based on position value.
-    
+
     Larger positions need more confirmation attempts before auto-close to prevent
     premature closure of significant positions during temporary API/network issues.
-    
+
     Args:
         position: PositionModel instance
-        
+
     Returns:
         int: Dynamic threshold (3-10 based on position value)
     """
     entry_price = safe_float(position.entry_price, 0.0)
     quantity = safe_float(position.quantity, 0.0)
     leverage = max(1.0, safe_float(position.leverage, 1.0))
-    
+
     # Calculate position value (margin used)
     position_value = (entry_price * quantity) / leverage if entry_price > 0 and quantity > 0 else 0.0
-    
+
     # Dynamic thresholds based on position value
     if position_value < _POSITION_VALUE_THRESHOLDS[0]:  # < $100
         threshold = _GHOST_THRESHOLD_SMALL_POSITION
@@ -82,12 +83,12 @@ def _calculate_ghost_threshold(position: PositionModel) -> int:
         threshold = _GHOST_THRESHOLD_LARGE_POSITION
     else:  # > $10,000
         threshold = _GHOST_THRESHOLD_HUGE_POSITION
-    
+
     logger.debug(
         f"[P0-FIX] Ghost threshold for {position.ticker}: "
         f"value=${position_value:.2f}, threshold={threshold} attempts"
     )
-    
+
     return threshold
 
 
@@ -99,29 +100,29 @@ async def _reevaluate_trailing_stop_config(
     current_price: float,
 ) -> dict:
     """P1-FIX: Re-evaluate trailing_stop config when limit order fills.
-    
+
     CRITICAL BUG FIX:
     - Limit orders may wait hours before filling
     - Market conditions at fill time ≠ market conditions at signal time
     - Re-evaluate trailing_stop mode based on current market conditions
-    
+
     Args:
         session: Database session
         position: PositionModel instance
         exchange_config: Exchange configuration
         entry_price: Filled entry price
         current_price: Current market price
-        
+
     Returns:
         dict: Updated trailing_stop config
     """
-    from smart_trailing_stop import select_smart_trailing_stop, TrailingStopRecommendation
     from exchange import get_ticker
-    
+    from smart_trailing_stop import select_smart_trailing_stop
+
     # Check if user has explicit trailing_stop config (not "auto")
     trailing_config = loads_dict(position.trailing_stop_config_json)
     user_mode = str(trailing_config.get("mode") or "").lower()
-    
+
     # If user explicitly set a mode (not "auto" or empty), respect it
     if user_mode and user_mode not in {"auto", "", "none"}:
         logger.info(
@@ -129,7 +130,7 @@ async def _reevaluate_trailing_stop_config(
             f"user trailing_stop mode '{user_mode}' preserved (not re-evaluating)"
         )
         return trailing_config
-    
+
     # If global setting is explicit (not "auto"), respect it
     global_mode = str(settings.trailing_stop.mode or "").lower()
     if global_mode and global_mode not in {"auto", ""}:
@@ -138,20 +139,19 @@ async def _reevaluate_trailing_stop_config(
             f"global trailing_stop mode '{global_mode}' preserved"
         )
         return trailing_config
-    
+
     # Only re-evaluate if mode was "auto" or "none" (AI-selected at signal time)
     # Get current market data
     try:
         ticker = await get_ticker(position.ticker, {**exchange_config, "live_trading": False})
-        
+
         # Fetch market indicators (simplified - can be enhanced)
         price_change_1h = safe_float(ticker.get("price_change_1h") or 0)
         price_change_24h = safe_float(ticker.get("price_change_24h") or 0)
-        volume_24h = safe_float(ticker.get("volume_24h") or 0)
-        
+
         # Determine current market condition from price movements
         atr_pct = abs(price_change_24h) / max(current_price, 1.0) * 100
-        
+
         # Infer market condition
         if abs(price_change_1h) > 3.0:
             market_condition = "volatile"
@@ -163,7 +163,7 @@ async def _reevaluate_trailing_stop_config(
             market_condition = "calm"
         else:
             market_condition = "ranging"
-        
+
         # Infer trend strength
         if abs(price_change_24h) > 15.0:
             trend_strength = "strong"
@@ -173,19 +173,19 @@ async def _reevaluate_trailing_stop_config(
             trend_strength = "weak"
         else:
             trend_strength = "none"
-        
+
         # Get AI analysis data (from position metadata or defaults)
         # Try to load from position's stored data
         confidence = safe_float(trailing_config.get("_ai_confidence") or 0.65)
         risk_score = safe_float(trailing_config.get("_ai_risk_score") or 0.5)
-        
+
         # Get TP levels count
         tp_levels = loads_list(position.take_profit_json)
         num_tp_levels = len(tp_levels) if tp_levels else 1
-        
+
         # Get timeframe
         timeframe = str(position.strategy_name or "").split("_")[-1] if position.strategy_name else "60"
-        
+
         # Re-evaluate trailing_stop mode
         decision = select_smart_trailing_stop(
             confidence=confidence,
@@ -197,7 +197,7 @@ async def _reevaluate_trailing_stop_config(
             atr_pct=atr_pct,
             user_override=None,  # No override - let it re-evaluate
         )
-        
+
         # Build new trailing_stop config
         new_config = {
             "mode": decision.mode.value,
@@ -207,16 +207,16 @@ async def _reevaluate_trailing_stop_config(
             "_trend_strength_at_fill": trend_strength,
             "_atr_pct_at_fill": atr_pct,
         }
-        
+
         # Preserve other config parameters (trail_pct, activation_pct, etc.)
         for key, value in trailing_config.items():
             if key not in {"mode", "_reevaluated_at_fill", "_reasoning", "_market_condition", "_trend_strength"}:
                 new_config[key] = value
-        
+
         # Log the change
         old_mode = trailing_config.get("mode", "none")
         new_mode = decision.mode.value
-        
+
         if old_mode != new_mode:
             logger.info(
                 f"[P1-FIX] ⚠️ CRITICAL: Limit order filled - trailing_stop re-evaluated: "
@@ -233,9 +233,9 @@ async def _reevaluate_trailing_stop_config(
                 f"{position.ticker} mode '{new_mode}' "
                 f"(market condition still suitable)"
             )
-        
+
         return new_config
-        
+
     except Exception as e:
         logger.warning(
             f"[P1-FIX] Failed to re-evaluate trailing_stop for {position.ticker}: {e}. "
@@ -450,7 +450,7 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
                 position.status = "open"
                 position.last_price = entry_price
                 entry_filled = True
-                
+
                 # P1-FIX: CRITICAL - Re-evaluate trailing_stop config when limit order fills
                 # Market conditions at fill time may differ from signal time
                 new_trailing_config = await _reevaluate_trailing_stop_config(
@@ -460,11 +460,11 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
                     entry_price=entry_price,
                     current_price=close,
                 )
-                
+
                 # Update position with new trailing_stop config
                 position.trailing_stop_config_json = json.dumps(new_trailing_config, ensure_ascii=False)
                 position.updated_at = utcnow()
-                
+
                 logger.info(
                     f"[PositionMonitor] 📍 Paper LIMIT order FILLED: {position.ticker} "
                     f"{direction} @ {entry_price} (low={low}, high={high}) "
@@ -653,7 +653,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                 if filled_price > 0:
                     position.entry_price = filled_price
                     position.last_price = filled_price
-                    
+
                     # P1-FIX: CRITICAL - Re-evaluate trailing_stop config when limit order fills
                     # Market conditions at fill time may differ from signal time (hours later)
                     # Fetch current market price
@@ -661,7 +661,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         from exchange import get_ticker
                         ticker = await get_ticker(position.ticker, exchange_config)
                         current_price = safe_float(ticker.get("last") or ticker.get("bid") or ticker.get("ask") or filled_price)
-                        
+
                         new_trailing_config = await _reevaluate_trailing_stop_config(
                             session=session,
                             position=position,
@@ -669,10 +669,10 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                             entry_price=filled_price,
                             current_price=current_price,
                         )
-                        
+
                         # Update position with new trailing_stop config
                         position.trailing_stop_config_json = json.dumps(new_trailing_config, ensure_ascii=False)
-                        
+
                         logger.info(
                             f"[P1-FIX] Live LIMIT order filled: {position.ticker} "
                             f"@ {filled_price} - trailing_stop re-evaluated: "
@@ -957,10 +957,10 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
         missing_since = ghost_entry.get("first_missing_at", now)
         missing_elapsed = (now - missing_since).total_seconds() if missing_since else 0.0
-        
+
         # P0-FIX: Use dynamic threshold based on position value
         dynamic_threshold = _calculate_ghost_threshold(position)
-        
+
         if ghost_entry["fail_count"] >= dynamic_threshold and missing_elapsed >= _GHOST_CHECK_INTERVAL_SECS:
             # P0-FIX: Log with dynamic threshold info
             position_value = safe_float(position.entry_price, 0.0) * safe_float(position.quantity, 0.0) / max(1.0, safe_float(position.leverage, 1.0))

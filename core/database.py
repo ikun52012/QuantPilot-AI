@@ -264,7 +264,7 @@ class RedeemCodeModel(Base):
 
 class PositionModel(Base):
     """Position tracking model.
-    
+
     P1-FIX: Enhanced indexes for position_monitor and analytics queries.
     """
     __tablename__ = "positions"

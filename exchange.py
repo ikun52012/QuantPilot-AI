@@ -63,16 +63,16 @@ async def _close_exchange(exchange):
 
 async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_retries: int = _LEVERAGE_MAX_RETRIES) -> dict:
     """P0-FIX: Set leverage with exponential backoff retry mechanism.
-    
+
     Args:
         exchange: CCXT exchange instance
         leverage: Target leverage (e.g., 10 for 10x)
         symbol: Trading symbol (e.g., "BTC/USDT:USDT")
         max_retries: Maximum retry attempts (default: 3)
-    
+
     Returns:
         dict with "success": True/False and optional "error" message
-    
+
     Retry Strategy:
         - Retries on transient errors (NetworkError, Timeout, DDoSProtection)
         - Exponential backoff: 1s, 2s, 4s
@@ -82,27 +82,27 @@ async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_ret
     if leverage <= 1:
         logger.debug(f"[P0-FIX] Leverage {leverage}x <= 1x, skip setup for {symbol}")
         return {"success": True}
-    
+
     for attempt in range(max_retries):
         try:
             await asyncio.to_thread(exchange.set_leverage, leverage, symbol)
             logger.info(f"[P0-FIX] Leverage set successfully: {symbol} {leverage}x (attempt {attempt + 1}/{max_retries})")
             return {"success": True}
-            
+
         except ccxt.AuthenticationError as e:
             logger.error(f"[P0-FIX] Authentication error setting leverage for {symbol}: {e}")
             return {"success": False, "error": f"Authentication failed: {e}", "abort": True}
-            
+
         except ccxt.ExchangeError as e:
             error_name = type(e).__name__
             error_msg = str(e)
-            
+
             # Check if this is a retryable error
             is_retryable = any(
                 retryable_err.lower() in error_msg.lower() or retryable_err in error_name
                 for retryable_err in _LEVERAGE_RETRYABLE_ERRORS
             )
-            
+
             if is_retryable and attempt < max_retries - 1:
                 delay = _LEVERAGE_RETRY_DELAY_BASE * (2 ** attempt)
                 logger.warning(
@@ -118,11 +118,11 @@ async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_ret
                     f"[P0-FIX] Failed to set leverage {leverage}x for {symbol} after {attempt + 1} attempts: {error_name}: {error_msg}"
                 )
                 return {"success": False, "error": f"Exchange error: {error_msg}", "abort": leverage > 1}
-                
+
         except Exception as e:
             error_name = type(e).__name__
             error_msg = str(e)
-            
+
             # Generic error handling with retry for transient issues
             if attempt < max_retries - 1:
                 delay = _LEVERAGE_RETRY_DELAY_BASE * (2 ** attempt)
@@ -137,8 +137,10 @@ async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_ret
                 logger.error(
                     f"[P0-FIX] Failed to set leverage {leverage}x for {symbol} after {max_retries} attempts: {error_name}: {error_msg}"
                 )
-                return {"success": False, "error": f"Unexpected error: {error_msg}", "abort": False}
-    
+                # Abort for transient errors if leverage > 1, otherwise continue
+                is_transient = isinstance(e, (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.DDoSProtection))
+                return {"success": False, "error": f"Unexpected error: {error_msg}", "abort": leverage > 1 and is_transient}
+
     return {"success": False, "error": "Max retries exceeded without success", "abort": True}
 
 
@@ -1081,10 +1083,10 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
             max_leverage = max(1, min(int(exchange_config.get("max_leverage") or 125), 125))
             leverage = max(1, min(int(round(decision.ai_analysis.recommended_leverage)), max_leverage))
-            
+
             # P0-FIX: Use retry mechanism for leverage setup
             result = await _set_leverage_with_retry(exchange, leverage, symbol)
-            
+
             if not result["success"]:
                 # Leverage setup failed
                 if result.get("abort"):

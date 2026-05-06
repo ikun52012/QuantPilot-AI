@@ -33,6 +33,7 @@ dev = [
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+exclude = ["docs/P1_P5_USAGE_EXAMPLES.py"]
 
 [tool.ruff.lint]
 select = [

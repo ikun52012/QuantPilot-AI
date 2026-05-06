@@ -62,7 +62,7 @@ _SMC_CACHE_LOCK: asyncio.Lock | None = None  # P0-FIX: Singleton cache lock
 
 async def _get_ai_cache_lock() -> asyncio.Lock:
     """P0-FIX: Double-check locking for thread-safe singleton initialization.
-    
+
     Prevents race condition when multiple coroutines check lock is None simultaneously.
     Pattern: first check (no lock) -> acquire init lock -> second check (with lock) -> create.
     """

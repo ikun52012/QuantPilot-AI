@@ -5,6 +5,6 @@ L2: Redis cache (distributed, shared across instances)
 L3: Disk cache (persistent, for restart recovery)
 """
 
-from .multi_layer_cache import MultiLayerCache, CacheLayer
+from .multi_layer_cache import CacheLayer, MultiLayerCache
 
 __all__ = ["MultiLayerCache", "CacheLayer"]

@@ -2,12 +2,10 @@
 P4-FIX: QuantPilot Test Configuration
 Pytest configuration with fixtures for unit and integration tests.
 """
-import pytest
 import asyncio
-from pathlib import Path
-from typing import AsyncGenerator, Generator
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import AsyncMock, Mock
 
+import pytest
 
 # Configure pytest for async tests
 pytest_plugins = ('pytest_asyncio',)
@@ -66,8 +64,8 @@ def mock_ai_provider():
 @pytest.fixture
 def sample_signal():
     """Sample TradingView signal."""
-    from models import TradingViewSignal, SignalDirection
-    
+    from models import SignalDirection, TradingViewSignal
+
     signal = TradingViewSignal(
         ticker="BTCUSDT",
         direction=SignalDirection.LONG,
@@ -83,7 +81,7 @@ def sample_signal():
 def sample_market_context():
     """Sample market context."""
     from models import MarketContext
-    
+
     market = MarketContext(
         ticker="BTCUSDT",
         current_price=50000.0,
@@ -104,9 +102,10 @@ def sample_market_context():
 @pytest.fixture
 def sample_position():
     """Sample position model."""
-    from core.database import PositionModel
     from datetime import datetime
-    
+
+    from core.database import PositionModel
+
     position = PositionModel(
         id="pos123",
         ticker="BTCUSDT",

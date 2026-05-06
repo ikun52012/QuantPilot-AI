@@ -496,7 +496,7 @@ class Settings(BaseModel):
 
     def _validate_settings(self):
         """Validate settings for all environments.
-        
+
         P0-FIX: Enhanced validation for production safety.
         - CORS=['*'] blocked in production
         - Weak secrets/ passwords blocked
@@ -547,21 +547,21 @@ class Settings(BaseModel):
                 errors.append("Exchange API credentials required for live trading")
             if self.default_admin_password and self.default_admin_password.lower() in WEAK_PASSWORDS:
                 errors.append("DEFAULT_ADMIN_PASSWORD must be changed for live trading")
-            
+
             # P0-FIX: Validate app encryption key for production
             if not self.app_encryption_key:
                 errors.append("APP_ENCRYPTION_KEY must be set for live trading (user settings encryption)")
             elif len(self.app_encryption_key) < 32:
                 errors.append("APP_ENCRYPTION_KEY should be at least 32 characters (Fernet key requirement)")
-            
+
             # P0-FIX: Validate JWT expiry hours
             if self.jwt_expiry_hours <= 0 or self.jwt_expiry_hours > 168:
                 errors.append("JWT_EXPIRY_HOURS must be between 1 and 168 hours (1 week max)")
-            
+
             # P0-FIX: Validate database URL for production
             if "sqlite" in self.database.url.lower():
                 errors.append("SQLite is not recommended for production live trading. Use PostgreSQL or MySQL.")
-            
+
             # P0-FIX: Validate risk settings
             if self.risk.max_position_pct > 50.0:
                 warnings.append("MAX_POSITION_PCT > 50% is very risky for live trading")
