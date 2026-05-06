@@ -2393,9 +2393,31 @@ function renderAdminFilterThresholds(thresholds) {
         ['rsi_long_max', 'RSI Long Max', 'Block longs above this RSI'],
         ['rsi_short_min', 'RSI Short Min', 'Block shorts below this RSI'],
         ['funding_rate_threshold', 'Funding Rate Threshold', 'Extreme funding rate'],
+        ['orderbook_long_min', 'Orderbook Long Min', 'Min bid/ask ratio for long'],
+        ['orderbook_short_max', 'Orderbook Short Max', 'Max bid/ask ratio for short'],
+        ['signal_saturation_max', 'Signal Saturation', 'Max same-direction signals/h'],
+        ['ema_diff_pct_min', 'EMA Diff Min', 'Min EMA divergence pct'],
         ['consecutive_loss_max', 'Max Consecutive Losses', 'Cool-off after N losses'],
         ['cooldown_seconds', 'Cooldown Seconds', 'Duplicate signal cooldown'],
+        ['cooldown_win_multiplier', 'Cooldown Win Mult', 'Reduce cooldown after win'],
+        ['cooldown_loss_multiplier', 'Cooldown Loss Mult', 'Increase cooldown after loss'],
+        ['price_deviation_pct_max', 'Price Deviation Max', 'Max signal/market price diff'],
+        ['oi_change_pct_max', 'OI Change Max', 'Max open interest change pct'],
+        ['correlated_asset_change_max', 'Correlated Asset Max', 'Max BTC/ETH 1h change'],
+        ['whale_threshold_usd', 'Whale Threshold', 'Min whale transfer USD'],
+        ['liquidation_distance_pct_min', 'Liq Distance Min', 'Min distance to liquidation'],
+        ['long_short_ratio_extreme_high', 'L/S Ratio High', 'Extreme long ratio'],
+        ['long_short_ratio_extreme_low', 'L/S Ratio Low', 'Extreme short ratio'],
+        ['basis_pct_max', 'Basis Max', 'Max spot/futures difference'],
+        ['fear_greed_extreme_threshold', 'F&G Extreme', 'Fear & Greed extreme level'],
+        ['cvd_divergence_threshold', 'CVD Divergence', 'Min CVD divergence strength'],
+        ['volatility_regime_multiplier', 'Vol Regime Mult', 'Volatility regime threshold'],
+        ['position_reduce_on_loss_pct', 'Reduce on Loss', 'Position reduction after loss'],
         ['min_pass_score', 'Min Pass Score', 'Minimum score for scoring mode'],
+        ['data_completeness_soft_fail_count', 'Missing Data Limit', 'Max missing data checks'],
+        ['max_same_direction_positions', 'Max Same-Dir Positions', 'Correlation risk: max positions same direction'],
+        ['max_correlated_exposure_pct', 'Max Correlated Exp', 'Correlation risk: max exposure pct'],
+        ['max_live_missing_data_checks', 'Max Missing Checks', 'Live mode: max missing data'],
     ];
 
     const inputs = thresholdFields.map(([key, label, hint]) => {
@@ -2467,8 +2489,15 @@ async function loadFilterThresholds() {
 async function saveFilterThresholds() {
     const thresholdFields = [
         'atr_pct_max', 'spread_pct_max', 'volume_24h_min', 'price_change_1h_max',
-        'rsi_long_max', 'rsi_short_min', 'funding_rate_threshold', 'consecutive_loss_max',
-        'cooldown_seconds', 'min_pass_score'
+        'rsi_long_max', 'rsi_short_min', 'funding_rate_threshold', 'orderbook_long_min',
+        'orderbook_short_max', 'signal_saturation_max', 'ema_diff_pct_min',
+        'consecutive_loss_max', 'cooldown_seconds', 'cooldown_win_multiplier',
+        'cooldown_loss_multiplier', 'price_deviation_pct_max', 'oi_change_pct_max',
+        'correlated_asset_change_max', 'whale_threshold_usd', 'liquidation_distance_pct_min',
+        'long_short_ratio_extreme_high', 'long_short_ratio_extreme_low', 'basis_pct_max',
+        'fear_greed_extreme_threshold', 'cvd_divergence_threshold', 'volatility_regime_multiplier',
+        'position_reduce_on_loss_pct', 'min_pass_score', 'data_completeness_soft_fail_count',
+        'max_same_direction_positions', 'max_correlated_exposure_pct', 'max_live_missing_data_checks'
     ];
 
     const data = {};
@@ -2492,14 +2521,30 @@ async function resetFilterThresholds() {
 
     const thresholdFields = [
         'atr_pct_max', 'spread_pct_max', 'volume_24h_min', 'price_change_1h_max',
-        'rsi_long_max', 'rsi_short_min', 'funding_rate_threshold', 'consecutive_loss_max',
-        'cooldown_seconds', 'min_pass_score'
+        'rsi_long_max', 'rsi_short_min', 'funding_rate_threshold', 'orderbook_long_min',
+        'orderbook_short_max', 'signal_saturation_max', 'ema_diff_pct_min',
+        'consecutive_loss_max', 'cooldown_seconds', 'cooldown_win_multiplier',
+        'cooldown_loss_multiplier', 'price_deviation_pct_max', 'oi_change_pct_max',
+        'correlated_asset_change_max', 'whale_threshold_usd', 'liquidation_distance_pct_min',
+        'long_short_ratio_extreme_high', 'long_short_ratio_extreme_low', 'basis_pct_max',
+        'fear_greed_extreme_threshold', 'cvd_divergence_threshold', 'volatility_regime_multiplier',
+        'position_reduce_on_loss_pct', 'min_pass_score', 'data_completeness_soft_fail_count',
+        'max_same_direction_positions', 'max_correlated_exposure_pct', 'max_live_missing_data_checks'
     ];
 
     const defaults = {
         atr_pct_max: 15.0, spread_pct_max: 0.1, volume_24h_min: 1000000, price_change_1h_max: 8.0,
-        rsi_long_max: 80, rsi_short_min: 20, funding_rate_threshold: 0.0005, consecutive_loss_max: 3,
-        cooldown_seconds: 300, min_pass_score: 0.0
+        rsi_long_max: 80, rsi_short_min: 20, funding_rate_threshold: 0.0005,
+        orderbook_long_min: 0.4, orderbook_short_max: 2.5, signal_saturation_max: 3,
+        ema_diff_pct_min: 1.0, consecutive_loss_max: 3, cooldown_seconds: 300,
+        cooldown_win_multiplier: 0.5, cooldown_loss_multiplier: 2.0, price_deviation_pct_max: 2.0,
+        oi_change_pct_max: 15.0, correlated_asset_change_max: 5.0, whale_threshold_usd: 1000000,
+        liquidation_distance_pct_min: 1.0, long_short_ratio_extreme_high: 2.5,
+        long_short_ratio_extreme_low: 0.4, basis_pct_max: 0.5, fear_greed_extreme_threshold: 20,
+        cvd_divergence_threshold: 15.0, volatility_regime_multiplier: 1.5,
+        position_reduce_on_loss_pct: 50.0, min_pass_score: 0.0, data_completeness_soft_fail_count: 5,
+        max_same_direction_positions: 5, max_correlated_exposure_pct: 50.0,
+        max_live_missing_data_checks: 0
     };
 
     thresholdFields.forEach(key => {
