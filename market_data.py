@@ -553,43 +553,43 @@ def _get_exchange() -> ccxt.Exchange:
 
 def _get_public_market_exchange(exchange_id: str) -> ccxt.Exchange:
     """Create a public-only market-data exchange without user credentials.
-    
+
     For exchanges supporting perpetual contracts (funding_rate, open_interest),
     use 'swap' type to ensure derivative data is available.
     """
     exchange_cls = getattr(ccxt, exchange_id)
     exchange = exchange_cls({"enableRateLimit": True, "timeout": 12000})
     exchange.options["adjustForTimeDifference"] = True
-    
+
     if exchange_id in {"binance", "okx", "bybit"}:
         exchange.options["defaultType"] = "swap"
     elif exchange_id in {"bitget", "gate"}:
         exchange.options["defaultType"] = "spot"
-    
+
     return exchange
 
 
 def _market_data_exchange_ids() -> list[str]:
     """Use the configured exchange first, then public fallbacks for market data.
-    
+
     Priority order:
     1. Configured primary exchange (with user credentials if available)
     2. Binance public (best for perpetual contract data: funding_rate, open_interest)
     3. OKX public (good fallback for most pairs)
     4. Bybit public (supports derivatives)
     5. Bitget/Gate/Coinbase (limited derivative data)
-    
+
     Note: If primary exchange is sandbox/demo mode, skip its public API fallback
     to avoid duplicate failures (sandbox often has fewer trading pairs).
     """
     primary = settings.exchange.name
-    
+
     if settings.exchange.sandbox_mode:
         sandbox_exchanges = {"okx", "binance", "bybit"}
         if primary in sandbox_exchanges:
             filtered_fallbacks = [e for e in _PUBLIC_MARKET_DATA_FALLBACKS if e != primary]
             return list(dict.fromkeys(filtered_fallbacks))
-    
+
     return list(dict.fromkeys([primary, *_PUBLIC_MARKET_DATA_FALLBACKS]))
 
 
