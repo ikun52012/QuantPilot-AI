@@ -3,6 +3,11 @@ P3-FIX: Prometheus Metrics for QuantPilot
 Comprehensive observability metrics for trading, AI, and system monitoring.
 """
 
+# Create metrics endpoint (Prometheus exporter route)
+from fastapi import APIRouter
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.responses import Response
+
 from .prometheus_metrics import (
     AI_ANALYSIS_LATENCY,
     AI_ANALYSIS_TOTAL,
@@ -30,11 +35,6 @@ from .recorders import (
     update_exchange_pool_metrics,
     update_trading_control_mode,
 )
-
-# Create metrics endpoint (Prometheus exporter route)
-from fastapi import APIRouter
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from starlette.responses import Response
 
 metrics_router = APIRouter()
 

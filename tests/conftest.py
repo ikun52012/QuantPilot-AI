@@ -3,11 +3,10 @@ P4-FIX: QuantPilot Test Configuration
 Pytest configuration with fixtures for unit and integration tests.
 """
 import asyncio
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -63,8 +62,9 @@ async def db_session(db_engine):
 @pytest.fixture
 async def client(db_engine):
     """Create test HTTP client."""
-    from core.factory import create_app
     from httpx import ASGITransport
+
+    from core.factory import create_app
 
     app = create_app()
 
