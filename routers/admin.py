@@ -1416,11 +1416,34 @@ class FilterThresholdsRequest(BaseModel):
     ema_diff_pct_min: float | None = None
     consecutive_loss_max: int | None = None
     cooldown_seconds: int | None = None
+    cooldown_win_multiplier: float | None = None
+    cooldown_loss_multiplier: float | None = None
     price_deviation_pct_max: float | None = None
     oi_change_pct_max: float | None = None
     correlated_asset_change_max: float | None = None
+    whale_threshold_usd: float | None = None
+    liquidation_distance_pct_min: float | None = None
+    long_short_ratio_extreme_high: float | None = None
+    long_short_ratio_extreme_low: float | None = None
+    basis_pct_max: float | None = None
+    fear_greed_extreme_threshold: int | None = None
+    cvd_divergence_threshold: float | None = None
+    volatility_regime_multiplier: float | None = None
+    position_reduce_on_loss_pct: float | None = None
+    dynamic_cooldown_enabled: bool | None = None
     min_pass_score: float | None = None
     data_completeness_soft_fail_count: int | None = None
+
+
+class RiskThresholdsRequest(BaseModel):
+    max_same_direction_positions: int | None = None
+    max_correlated_exposure_pct: float | None = None
+    max_live_missing_data_checks: int | None = None
+    block_live_on_risk_check_error: bool | None = None
+    max_daily_trades: int | None = None
+    max_daily_loss_pct: float | None = None
+    max_position_pct: float | None = None
+    risk_per_trade_pct: float | None = None
 
 
 @router.get("/filter-thresholds")
@@ -1469,6 +1492,50 @@ async def update_filter_thresholds(
     await db.commit()
 
     await _add_audit_log(db, admin, "update_filter_thresholds", "settings", "", f"Updated {len(updates)} thresholds", request)
+
+    return {"status": "success", "updated": updates}
+
+
+@router.get("/risk-thresholds")
+async def get_risk_thresholds(
+    admin: dict = Depends(require_admin),
+):
+    """Get current risk thresholds including correlation risk limits."""
+    return {
+        "max_same_direction_positions": settings.risk.max_same_direction_positions,
+        "max_correlated_exposure_pct": settings.risk.max_correlated_exposure_pct,
+        "max_live_missing_data_checks": settings.risk.max_live_missing_data_checks,
+        "block_live_on_risk_check_error": settings.risk.block_live_on_risk_check_error,
+        "max_daily_trades": settings.risk.max_daily_trades,
+        "max_daily_loss_pct": settings.risk.max_daily_loss_pct,
+        "max_position_pct": settings.risk.max_position_pct,
+        "risk_per_trade_pct": settings.risk.risk_per_trade_pct,
+        "live_data_quality_mode": settings.risk.live_data_quality_mode,
+    }
+
+
+@router.post("/risk-thresholds")
+async def update_risk_thresholds(
+    req: RiskThresholdsRequest,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update risk thresholds including correlation risk limits.
+
+    These settings are persisted to database and can be hot-reloaded.
+    """
+    updates = req.model_dump(exclude_none=True)
+    if not updates:
+        return {"status": "success", "updated": {}}
+
+    # Persist each setting to admin_settings table
+    for key, value in updates.items():
+        await set_admin_setting(db, key, str(value))
+        setattr(settings.risk, key, value)
+
+    await db.commit()
+    await _add_audit_log(db, admin, "update_risk_thresholds", "settings", "", f"Updated {len(updates)} risk thresholds", request)
 
     return {"status": "success", "updated": updates}
 

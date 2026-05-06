@@ -170,6 +170,10 @@ class FilterThresholds:
         "position_reduce_on_loss_pct": 50.0,
         "dynamic_cooldown_enabled": True,
         "data_completeness_soft_fail_count": 5,
+        "max_same_direction_positions": 5,
+        "max_correlated_exposure_pct": 50.0,
+        "max_live_missing_data_checks": 0,
+        "block_live_on_risk_check_error": True,
     }
 
     DYNAMIC_THRESHOLDS: dict[str, dict[str, Any]] = {
