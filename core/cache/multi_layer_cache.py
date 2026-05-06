@@ -84,6 +84,7 @@ class MultiLayerCache:
             l3_ttl: TTL for L3 disk cache (seconds)
         """
         self.cache_name = cache_name
+        self._initialized = True  # Mark cache as initialized
 
         # L1 Memory Cache (OrderedDict for LRU)
         self._l1_cache: OrderedDict[str, tuple[float, float, Any]] = OrderedDict()
