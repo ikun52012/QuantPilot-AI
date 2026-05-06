@@ -6,6 +6,10 @@ import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from httpx import AsyncClient
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 # Configure pytest for async tests
 pytest_plugins = ('pytest_asyncio',)
@@ -19,14 +23,76 @@ def event_loop():
     loop.close()
 
 
+@pytest.fixture(scope="session")
+async def db_engine():
+    """Create test database engine."""
+    from core.database import Base
+
+    # Use in-memory SQLite for tests
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        future=True,
+    )
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    yield engine
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+    await engine.dispose()
+
+
 @pytest.fixture
-async def async_session():
-    """Mock async database session."""
-    session = AsyncMock()
-    session.execute = AsyncMock()
-    session.commit = AsyncMock()
-    session.flush = AsyncMock()
-    yield session
+async def db_session(db_engine):
+    """Create test database session."""
+    async_session_maker = sessionmaker(
+        db_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    async with async_session_maker() as session:
+        yield session
+        await session.rollback()
+
+
+@pytest.fixture
+async def client(db_engine):
+    """Create test HTTP client."""
+    from core.factory import create_app
+    from httpx import ASGITransport
+
+    app = create_app()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test"
+    ) as ac:
+        yield ac
+
+
+@pytest.fixture
+def test_user_data():
+    """Test user data fixture."""
+    return {
+        "username": "testuser",
+        "email": "test@example.com",
+        "password": "TestPass123!@#",
+    }
+
+
+@pytest.fixture
+def test_admin_data():
+    """Test admin data fixture."""
+    return {
+        "username": "admin",
+        "email": "admin@example.com",
+        "password": "AdminPass123!@#",
+    }
 
 
 @pytest.fixture

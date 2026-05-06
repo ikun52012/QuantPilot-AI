@@ -31,6 +31,21 @@ from .recorders import (
     update_trading_control_mode,
 )
 
+# Create metrics endpoint (Prometheus exporter route)
+from fastapi import APIRouter
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from starlette.responses import Response
+
+metrics_router = APIRouter()
+
+@metrics_router.get("/metrics")
+async def metrics_endpoint():
+    """Prometheus metrics endpoint."""
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
 __all__ = [
     "TRADE_TOTAL",
     "TRADE_LATENCY",
@@ -55,4 +70,6 @@ __all__ = [
     "update_trading_control_mode",
     "record_filter_performance",
     "update_exchange_pool_metrics",
+    "metrics_router",
+    "metrics_endpoint",
 ]
