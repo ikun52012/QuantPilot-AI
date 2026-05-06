@@ -739,7 +739,9 @@ async function loadPositions() {
     try {
         const [positions, balance] = await Promise.all([fetchAPI('/api/positions'), fetchAPI('/api/balance')]);
         const tbody = document.getElementById('positions-body');
-        if (!positions.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No open positions</td></tr>'; }
+        const badge = document.getElementById('open-count-badge');
+        if (badge) badge.textContent = positions.length;
+        if (!positions.length) { tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No open positions</td></tr>'; }
 else { tbody.innerHTML = positions.map(p => {
             const entry = firstDefined(p.entry_price, p.entryPrice);
             const mark = firstDefined(p.mark_price, p.markPrice);
@@ -751,7 +753,16 @@ else { tbody.innerHTML = positions.map(p => {
             const mode = p.source === 'exchange_live' ? 'Exchange' : (p.mode || 'paper');
             const statusText = p.status_text ? `<div class="hint">${escapeHtml(p.status_text)}</div>` : (p.status ? `<div class="hint">${escapeHtml(String(p.status).toUpperCase())}</div>` : '');
             const symbolDisplay = p.symbol_short || p.symbol || '--';
-            return `<tr><td><strong>${escapeHtml(symbolDisplay)}</strong><div class="hint">${escapeHtml(mode)}</div>${statusText}</td><td><span class="badge ${p.side==='long'?'badge-long':'badge-short'}">${escapeHtml(p.side||'--')}</span></td><td>${escapeHtml(p.contracts)}</td><td>$${formatNum(entry)}</td><td>$${formatNum(mark)}</td><td>${liq?'$'+formatNum(liq):'--'}</td><td>${margin?'$'+formatNum(margin):'--'}</td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">$${formatNum(pnl)}</td><td class="${pct == null || Number(pct)>=0?'pnl-positive':'pnl-negative'}">${pctText}</td><td>${escapeHtml(p.leverage||'--')}x</td></tr>`;
+            const posId = p.id || '';
+            const closeBtn = posId ? `
+                <button class="btn btn-sm btn-danger" onclick="closePosition('${escapeHtml(posId)}', '${escapeHtml(symbolDisplay)}')" title="Close position">
+                    <i class="ri-close-line"></i>
+                </button>
+                <button class="btn btn-sm btn-warning" onclick="closePositionPartial('${escapeHtml(posId)}', '${escapeHtml(symbolDisplay)}')" title="Close 50%">
+                    <i class="ri-percent-line"></i>
+                </button>
+            ` : '';
+            return `<tr><td><strong>${escapeHtml(symbolDisplay)}</strong><div class="hint">${escapeHtml(mode)}</div>${statusText}</td><td><span class="badge ${p.side==='long'?'badge-long':'badge-short'}">${escapeHtml(p.side||'--')}</span></td><td>${escapeHtml(p.contracts)}</td><td>$${formatNum(entry)}</td><td>$${formatNum(mark)}</td><td>${liq?'$'+formatNum(liq):'--'}</td><td>${margin?'$'+formatNum(margin):'--'}</td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">$${formatNum(pnl)}</td><td class="${pct == null || Number(pct)>=0?'pnl-positive':'pnl-negative'}">${pctText}</td><td>${escapeHtml(p.leverage||'--')}x</td><td>${closeBtn}</td></tr>`;
         }).join(''); }
         document.getElementById('bal-total').textContent = `$${formatNum(balance.total_quote ?? pickBalance(balance.total, balance.quote))}`;
         document.getElementById('bal-free').textContent = `$${formatNum(balance.free_quote ?? pickBalance(balance.free, balance.quote))}`;
@@ -803,6 +814,38 @@ async function cancelAllPendingOrders() {
         showToast(`Cancelled ${orders.length} orders`, 'success');
         await loadPendingOrders();
     } catch (err) { showToast(err.message, 'error', 'Cancel All Failed'); }
+}
+
+async function closePosition(positionId, symbol) {
+    if (!confirm(`Close entire position for ${symbol}?\nPosition ID: ${positionId}`)) return;
+    try {
+        const result = await fetchAPI(`/api/positions/${encodeURIComponent(positionId)}/close`, { method: 'POST' });
+        showToast(`Position closed: ${symbol} (PnL: ${result.pnl_pct ? result.pnl_pct.toFixed(2) : 'N/A'}%)`, 'success', 'Position Closed');
+        await loadPositions();
+    } catch (err) { showToast(err.message, 'error', 'Close Failed'); }
+}
+
+async function closePositionPartial(positionId, symbol) {
+    const pct = prompt('Close percentage (1-100):', '50');
+    if (!pct || isNaN(pct) || pct < 1 || pct > 100) return;
+    try {
+        const result = await fetchAPI(`/api/positions/${encodeURIComponent(positionId)}/close?close_pct=${pct}`, { method: 'POST' });
+        showToast(`Partial close: ${symbol} ${pct}% (${result.close_qty} contracts)`, 'success', 'Partial Close');
+        await loadPositions();
+    } catch (err) { showToast(err.message, 'error', 'Partial Close Failed'); }
+}
+
+async function closeAllPositions() {
+    if (!confirm('Close ALL open positions?\nThis will close both paper and live positions.')) return;
+    try {
+        const result = await fetchAPI('/api/positions/close-all', { method: 'POST' });
+        if (result.errors && result.errors.length > 0) {
+            showToast(`Closed ${result.closed}/${result.total} positions. Errors: ${result.errors.join(', ')}`, 'warning', 'Partial Close');
+        } else {
+            showToast(`All ${result.closed} positions closed`, 'success', 'Positions Closed');
+        }
+        await loadPositions();
+    } catch (err) { showToast(err.message, 'error', 'Close All Failed'); }
 }
 
 // ─── History ───
@@ -2418,10 +2461,37 @@ function renderAdminFilterThresholds(thresholds) {
         ['max_same_direction_positions', 'Max Same-Dir Positions', 'Correlation risk: max positions same direction'],
         ['max_correlated_exposure_pct', 'Max Correlated Exp', 'Correlation risk: max exposure pct'],
         ['max_live_missing_data_checks', 'Max Missing Checks', 'Live mode: max missing data'],
+        ['margin_mode', 'Margin Mode', 'cross (全仓) or isolated (逐仓) - affects position margin'],
     ];
 
     const inputs = thresholdFields.map(([key, label, hint]) => {
         const value = current[key] ?? defaults[key] ?? '';
+        // Special handling for margin_mode (select dropdown)
+        if (key === 'margin_mode') {
+            const crossSel = value === 'cross' ? 'selected' : '';
+            const isolatedSel = value === 'isolated' ? 'selected' : '';
+            return `<div class="form-group">
+                <label for="threshold-${key}">${escapeHtml(label)}</label>
+                <select id="threshold-${key}" class="text-input">
+                    <option value="cross" ${crossSel}>Cross (全仓)</option>
+                    <option value="isolated" ${isolatedSel}>Isolated (逐仓)</option>
+                </select>
+                <p class="hint">${escapeHtml(hint)}</p>
+            </div>`;
+        }
+        // Special handling for boolean fields
+        if (key === 'dynamic_cooldown_enabled' || key === 'block_live_on_risk_check_error') {
+            const trueSel = value === true || value === 'true' ? 'selected' : '';
+            const falseSel = value === false || value === 'false' ? 'selected' : '';
+            return `<div class="form-group">
+                <label for="threshold-${key}">${escapeHtml(label)}</label>
+                <select id="threshold-${key}" class="text-input">
+                    <option value="true" ${trueSel}>Enabled</option>
+                    <option value="false" ${falseSel}>Disabled</option>
+                </select>
+                <p class="hint">${escapeHtml(hint)}</p>
+            </div>`;
+        }
         return `<div class="form-group">
             <label for="threshold-${key}">${escapeHtml(label)}</label>
             <input type="number" id="threshold-${key}" class="text-input" value="${value}" step="0.1">
@@ -2497,7 +2567,8 @@ async function saveFilterThresholds() {
         'long_short_ratio_extreme_high', 'long_short_ratio_extreme_low', 'basis_pct_max',
         'fear_greed_extreme_threshold', 'cvd_divergence_threshold', 'volatility_regime_multiplier',
         'position_reduce_on_loss_pct', 'min_pass_score', 'data_completeness_soft_fail_count',
-        'max_same_direction_positions', 'max_correlated_exposure_pct', 'max_live_missing_data_checks'
+        'max_same_direction_positions', 'max_correlated_exposure_pct', 'max_live_missing_data_checks',
+        'margin_mode', 'dynamic_cooldown_enabled', 'block_live_on_risk_check_error'
     ];
 
     const data = {};
@@ -2505,7 +2576,14 @@ async function saveFilterThresholds() {
         const el = document.getElementById(`threshold-${key}`);
         if (!el) return;
         const raw = String(el.value ?? '').trim();
-        data[key] = raw === '' ? null : readNumberInput(`threshold-${key}`, null);
+        // Special handling for string/boolean fields
+        if (key === 'margin_mode') {
+            data[key] = raw === '' ? null : raw;
+        } else if (key === 'dynamic_cooldown_enabled' || key === 'block_live_on_risk_check_error') {
+            data[key] = raw === 'true';
+        } else {
+            data[key] = raw === '' ? null : readNumberInput(`threshold-${key}`, null);
+        }
     });
 
     try {
@@ -2544,7 +2622,8 @@ async function resetFilterThresholds() {
         cvd_divergence_threshold: 15.0, volatility_regime_multiplier: 1.5,
         position_reduce_on_loss_pct: 50.0, min_pass_score: 0.0, data_completeness_soft_fail_count: 5,
         max_same_direction_positions: 5, max_correlated_exposure_pct: 50.0,
-        max_live_missing_data_checks: 0
+        max_live_missing_data_checks: 0, margin_mode: 'cross',
+        dynamic_cooldown_enabled: true, block_live_on_risk_check_error: true
     };
 
     thresholdFields.forEach(key => {

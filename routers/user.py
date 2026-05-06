@@ -2,6 +2,7 @@
 Signal Server - User Router
 User-facing routes for dashboard, settings, and trading.
 """
+import asyncio
 import copy
 import json
 import uuid
@@ -483,6 +484,165 @@ async def get_positions(
             logger.warning(f"[User] Failed to fetch exchange positions: {exc}")
 
     return db_items + exchange_items
+
+
+@router.post("/positions/{position_id}/close")
+async def close_position(
+    position_id: str,
+    close_pct: float | None = None,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Close a position (full or partial).
+
+    Args:
+        position_id: Position ID from database or 'exchange::symbol::side' format
+        close_pct: Percentage to close (1-100). If None, close entire position.
+    """
+    from core.database import close_position_async
+    from exchange import _close_position, _get_or_create_exchange, _resolve_symbol
+
+    exchange_config = await _exchange_config_for_user(db, user)
+
+    if position_id.startswith("exchange::"):
+        parts = position_id.split("::")
+        if len(parts) < 3:
+            raise HTTPException(400, "Invalid exchange position ID format")
+        symbol = parts[1]
+        side = parts[2]
+
+        if not exchange_config.get("live_trading"):
+            raise HTTPException(400, "Cannot close exchange position without live trading enabled")
+
+        exchange = await asyncio.to_thread(
+            _get_or_create_exchange,
+            exchange_id=exchange_config.get("name") or exchange_config.get("exchange") or settings.exchange.name,
+            api_key=exchange_config.get("api_key"),
+            api_secret=exchange_config.get("api_secret"),
+            password=exchange_config.get("password"),
+            sandbox=exchange_config.get("sandbox_mode"),
+        )
+
+        close_quantity = None
+        if close_pct and close_pct > 0 and close_pct < 100:
+            positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
+            for pos in positions:
+                if pos["symbol"] != symbol:
+                    continue
+                pos_side = str(pos.get("side", "") or "").lower()
+                if not pos_side:
+                    pos_info = pos.get("info") or {}
+                    pos_side = str(pos_info.get("posSide") or "").lower()
+                if side.lower() in pos_side or (not pos_side and side.lower() == "long"):
+                    contracts = abs(float(pos.get("contracts", 0)))
+                    close_quantity = contracts * (close_pct / 100.0)
+                    break
+
+        result = await _close_position(exchange, symbol, position_side=side, close_quantity=close_quantity)
+        if result.get("status") == "error":
+            raise HTTPException(500, result.get("reason", "Failed to close position"))
+        return {"status": "success", "result": result, "position_id": position_id}
+
+    result = await db.execute(select(PositionModel).where(PositionModel.id == position_id))
+    position = result.scalar_one_or_none()
+    if not position:
+        raise HTTPException(404, "Position not found")
+
+    if not _is_admin(user) and position.user_id != user.get("sub"):
+        raise HTTPException(403, "Not authorized to close this position")
+
+    if position.status != "open":
+        raise HTTPException(400, f"Position is already {position.status}")
+
+    close_qty = None
+    if close_pct and close_pct > 0 and close_pct < 100:
+        total_qty = float(position.remaining_quantity or position.quantity or 0)
+        close_qty = total_qty * (close_pct / 100.0)
+
+    if position.live_trading and exchange_config.get("live_trading"):
+        exchange = await asyncio.to_thread(
+            _get_or_create_exchange,
+            exchange_id=exchange_config.get("name") or exchange_config.get("exchange") or settings.exchange.name,
+            api_key=exchange_config.get("api_key"),
+            api_secret=exchange_config.get("api_secret"),
+            password=exchange_config.get("password"),
+            sandbox=exchange_config.get("sandbox_mode"),
+        )
+        symbol = await asyncio.to_thread(_resolve_symbol, exchange, position.ticker)
+        result = await _close_position(exchange, symbol, position_side=position.direction, close_quantity=close_qty)
+        if result.get("status") == "error":
+            raise HTTPException(500, result.get("reason", "Failed to close position on exchange"))
+
+    final_close_qty = close_qty or float(position.remaining_quantity or position.quantity or 0)
+    pnl_pct = await close_position_async(
+        session=db,
+        position=position,
+        exit_price=position.last_price or position.entry_price,
+        exit_reason="manual_close",
+        close_quantity=final_close_qty,
+    )
+
+    await db.commit()
+    return {"status": "success", "position_id": position_id, "pnl_pct": pnl_pct, "close_qty": final_close_qty, "partial": close_pct is not None and close_pct < 100}
+
+
+@router.post("/positions/close-all")
+async def close_all_positions(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Close all open positions for the current user."""
+    from core.database import close_position_async
+    from exchange import _close_position, _get_or_create_exchange, _resolve_symbol
+
+    exchange_config = await _exchange_config_for_user(db, user)
+
+    filters = [PositionModel.status == "open"]
+    if not _is_admin(user):
+        filters.append(PositionModel.user_id == user.get("sub"))
+
+    result = await db.execute(select(PositionModel).where(*filters).limit(100))
+    positions = result.scalars().all()
+
+    if not positions:
+        return {"status": "success", "closed": 0, "message": "No open positions"}
+
+    closed_count = 0
+    errors = []
+
+    for position in positions:
+        try:
+            close_qty = float(position.remaining_quantity or position.quantity or 0)
+            if close_qty <= 0:
+                continue
+
+            if position.live_trading and exchange_config.get("live_trading"):
+                exchange = await asyncio.to_thread(
+                    _get_or_create_exchange,
+                    exchange_id=exchange_config.get("name") or exchange_config.get("exchange") or settings.exchange.name,
+                    api_key=exchange_config.get("api_key"),
+                    api_secret=exchange_config.get("api_secret"),
+                    password=exchange_config.get("password"),
+                    sandbox=exchange_config.get("sandbox_mode"),
+                )
+                symbol = await asyncio.to_thread(_resolve_symbol, exchange, position.ticker)
+                result = await _close_position(exchange, symbol, position_side=position.direction)
+                if result.get("status") == "error":
+                    errors.append(f"{position.ticker}: {result.get('reason')}")
+                    continue
+
+            await close_position_async(
+                session=db,
+                position=position,
+                exit_price=position.last_price or position.entry_price,
+                exit_reason="manual_close_all",
+            )
+            closed_count += 1
+        except Exception as e:
+            errors.append(f"{position.ticker}: {str(e)}")
+
+    await db.commit()
+    return {"status": "success", "closed": closed_count, "total": len(positions), "errors": errors[:5] if errors else []}
 
 
 @router.get("/balance")

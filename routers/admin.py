@@ -1444,6 +1444,7 @@ class RiskThresholdsRequest(BaseModel):
     max_daily_loss_pct: float | None = None
     max_position_pct: float | None = None
     risk_per_trade_pct: float | None = None
+    margin_mode: str | None = None
 
 
 @router.get("/filter-thresholds")
@@ -1510,6 +1511,7 @@ async def get_risk_thresholds(
         "max_daily_loss_pct": settings.risk.max_daily_loss_pct,
         "max_position_pct": settings.risk.max_position_pct,
         "risk_per_trade_pct": settings.risk.risk_per_trade_pct,
+        "margin_mode": settings.risk.margin_mode,
         "live_data_quality_mode": settings.risk.live_data_quality_mode,
     }
 

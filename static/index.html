@@ -319,6 +319,7 @@
                     <h3><i class="ri-stock-line"></i> Open Positions</h3>
                     <span class="badge badge-success" id="open-count-badge">0</span>
                     <button class="btn btn-sm btn-primary" onclick="loadPositions()"><i class="ri-refresh-line"></i> Refresh</button>
+                    <button class="btn btn-sm btn-danger" onclick="closeAllPositions()"><i class="ri-close-circle-line"></i> Close All</button>
                 </div>
                 <div class="table-wrapper">
                     <table class="data-table" id="positions-table">
@@ -334,10 +335,11 @@
                                 <th>Unrealized P&L</th>
                                 <th>ROE %</th>
                                 <th>Leverage</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="positions-body">
-                            <tr><td colspan="10" class="empty-state">No open positions</td></tr>
+                            <tr><td colspan="11" class="empty-state">No open positions</td></tr>
                         </tbody>
                     </table>
                 </div>
