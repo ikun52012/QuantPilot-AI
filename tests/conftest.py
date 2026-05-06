@@ -8,7 +8,6 @@ from unittest.mock import Mock
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 
 # Configure pytest for async tests
 pytest_plugins = ('pytest_asyncio',)
@@ -25,7 +24,7 @@ def event_loop():
 @pytest.fixture(scope="session")
 async def db_engine():
     """Create test database engine."""
-    from core.database import Base
+    from core.database import Base, db_manager
 
     # Use in-memory SQLite for tests
     engine = create_async_engine(
@@ -36,6 +35,21 @@ async def db_engine():
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Create partial index for payment tx_hash uniqueness (not created by metadata.create_all)
+        from sqlalchemy import text
+        await conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_tx_hash_non_empty "
+            "ON payments(tx_hash) WHERE tx_hash <> ''"
+        ))
+
+    # Set the global db_manager so app code uses the test database
+    db_manager.engine = engine
+    from sqlalchemy.orm import sessionmaker
+    db_manager.async_session_factory = sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
 
     yield engine
 
@@ -48,15 +62,44 @@ async def db_engine():
 @pytest.fixture
 async def db_session(db_engine):
     """Create test database session."""
-    async_session_maker = sessionmaker(
-        db_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
+    from core.database import db_manager
 
-    async with async_session_maker() as session:
+    async with db_manager.async_session_factory() as session:
         yield session
         await session.rollback()
+
+
+@pytest.fixture(autouse=True)
+async def cleanup_db(db_engine):
+    """Clean up database after each test to ensure isolation."""
+
+    yield
+
+    # Clean all tables after test
+    async with db_engine.begin() as conn:
+        from core.database import Base
+        for table in reversed(Base.metadata.sorted_tables):
+            await conn.execute(table.delete())
+
+
+@pytest.fixture(autouse=True)
+def isolate_global_settings():
+    """Save and restore global settings between tests to prevent state leakage."""
+    import copy
+
+    from core.config import settings
+
+    original_limit_timeout = copy.deepcopy(settings.exchange.limit_timeout_overrides)
+    original_exchange_name = settings.exchange.name
+    original_live_trading = settings.exchange.live_trading
+    original_sandbox = settings.exchange.sandbox_mode
+
+    yield
+
+    settings.exchange.limit_timeout_overrides = original_limit_timeout
+    settings.exchange.name = original_exchange_name
+    settings.exchange.live_trading = original_live_trading
+    settings.exchange.sandbox_mode = original_sandbox
 
 
 @pytest.fixture
@@ -81,7 +124,7 @@ def test_user_data():
     return {
         "username": "testuser",
         "email": "test@example.com",
-        "password": "TestPass123!@#",
+        "password": "Str0ng!Pass#2024",
     }
 
 

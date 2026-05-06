@@ -24,6 +24,11 @@ def sync_client(db_session):
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
+
+    # Save original values
+    original_factory = db_manager.async_session_factory
+    original_engine = db_manager.engine
+
     db_manager.async_session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
     db_manager.engine = db_session.bind
 
@@ -31,8 +36,10 @@ def sync_client(db_session):
         yield client
 
     app.dependency_overrides.clear()
-    db_manager.async_session_factory = None
-    db_manager.engine = None
+
+    # Restore original values instead of setting to None
+    db_manager.async_session_factory = original_factory
+    db_manager.engine = original_engine
 
 
 class TestServiceWorkerRoute:

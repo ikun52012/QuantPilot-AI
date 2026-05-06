@@ -477,6 +477,10 @@ class MultiLayerCache:
         async with self._metrics_lock:
             self._metrics["evictions"] += 1
 
+    async def init_async(self) -> None:
+        """Initialize cache (no-op for MultiLayerCache, already initialized in __init__)."""
+        pass
+
     async def initialize_redis(self) -> bool:
         """Initialize Redis client for L2 cache.
 

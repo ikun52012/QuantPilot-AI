@@ -125,11 +125,12 @@ class TestWebSocketPositions:
         ))
         await db_session.commit()
 
+        original_factory = db_manager.async_session_factory
         db_manager.async_session_factory = lambda: db_session
         try:
             result = await _fetch_user_positions("user123")
         finally:
-            db_manager.async_session_factory = None
+            db_manager.async_session_factory = original_factory
 
         assert len(result) == 0  # Pending orders should NOT appear in WebSocket positions
 
@@ -178,11 +179,12 @@ class TestWebSocketPrices:
         mock_verify.return_value = {"sub": "user123", "ver": 0}
         mock_get_user.return_value = Mock(id="user123", username="alice", role="user", email="a@example.com", is_active=False, token_version=0)
 
+        original_factory = db_manager.async_session_factory
         db_manager.async_session_factory = lambda: db_session
         try:
             assert await _authenticate_ws_user_or_none("token") is None
         finally:
-            db_manager.async_session_factory = None
+            db_manager.async_session_factory = original_factory
 
     @pytest.mark.asyncio
     @patch('routers.websocket.get_user_by_id')
@@ -193,11 +195,12 @@ class TestWebSocketPrices:
         mock_verify.return_value = {"sub": "user123", "ver": 1}
         mock_get_user.return_value = Mock(id="user123", username="alice", role="user", email="a@example.com", is_active=True, token_version=2)
 
+        original_factory = db_manager.async_session_factory
         db_manager.async_session_factory = lambda: db_session
         try:
             assert await _authenticate_ws_user_or_none("token") is None
         finally:
-            db_manager.async_session_factory = None
+            db_manager.async_session_factory = original_factory
 
 
 class TestWebSocketSystem:
