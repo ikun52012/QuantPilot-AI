@@ -352,3 +352,115 @@ def update_ghost_position_metrics(
         exchange=exchange,
         symbol=symbol
     ).set(count)
+
+
+# ─────────────────────────────────────────────
+# Additional Metrics for Recorders
+# ─────────────────────────────────────────────
+
+SIGNALS_RECEIVED = Counter(
+    'quantpilot_signals_received_total',
+    'Total number of signals received',
+    ['ticker', 'direction', 'user_id']
+)
+
+SIGNALS_PASSED_PREFILTER = Counter(
+    'quantpilot_signals_passed_prefilter_total',
+    'Signals that passed pre-filter',
+    ['ticker', 'direction']
+)
+
+SIGNALS_BLOCKED_PREFILTER = Counter(
+    'quantpilot_signals_blocked_prefilter_total',
+    'Signals blocked by pre-filter',
+    ['ticker', 'direction', 'reason']
+)
+
+AI_CONFIDENCE = Histogram(
+    'quantpilot_ai_confidence',
+    'AI analysis confidence distribution',
+    ['provider'],
+    buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+)
+
+TRADES_EXECUTED = Counter(
+    'quantpilot_trades_executed_total',
+    'Total number of trades executed (legacy)',
+    ['ticker', 'direction', 'status']
+)
+
+TRADES_PNL = Histogram(
+    'quantpilot_trades_pnl_usdt',
+    'Trade PnL distribution',
+    ['ticker', 'direction'],
+    buckets=[-100, -50, -20, -10, -5, -2, -1, 0, 1, 2, 5, 10, 20, 50, 100]
+)
+
+EXCHANGE_REQUESTS = Counter(
+    'quantpilot_exchange_requests_total',
+    'Exchange API requests',
+    ['exchange', 'endpoint', 'status']
+)
+
+EXCHANGE_LATENCY = Histogram(
+    'quantpilot_exchange_latency_seconds',
+    'Exchange API latency',
+    ['exchange', 'endpoint'],
+    buckets=[0.1, 0.5, 1, 2, 5, 10, 20]
+)
+
+HTTP_REQUESTS = Counter(
+    'quantpilot_http_requests_total',
+    'HTTP API requests',
+    ['method', 'path', 'status']
+)
+
+HTTP_LATENCY = Histogram(
+    'quantpilot_http_latency_seconds',
+    'HTTP request latency',
+    ['method', 'path'],
+    buckets=[0.01, 0.05, 0.1, 0.5, 1, 2, 5]
+)
+
+DB_POOL_SIZE = Gauge(
+    'quantpilot_db_pool_size',
+    'Database connection pool size',
+    ['pool_type']
+)
+
+DB_POOL_OVERFLOW = Gauge(
+    'quantpilot_db_pool_overflow',
+    'Database pool overflow connections',
+    ['pool_type']
+)
+
+DB_CONNECTIONS = Gauge(
+    'quantpilot_db_connections',
+    'Database connections count',
+    ['status']
+)
+
+AI_COST_USD = Counter(
+    'quantpilot_ai_cost_usd',
+    'AI API cost in USD',
+    ['provider']
+)
+
+TRADING_CONTROL_MODE = Gauge(
+    'quantpilot_trading_control_mode',
+    'Trading control mode',
+    ['mode']
+)
+
+FILTER_PERFORMANCE = Histogram(
+    'quantpilot_filter_performance_seconds',
+    'Pre-filter check latency',
+    ['check_name'],
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5]
+)
+
+EXCHANGE_POOL_SIZE = Gauge(
+    'quantpilot_exchange_pool_size',
+    'Exchange connection pool size',
+    ['exchange']
+)

@@ -2068,3 +2068,7 @@ def _fallback_analysis(error: str) -> AIAnalysis:
         risk_score=1.0,
         warnings=[f"AI error: {error}"],
     )
+
+
+# Alias for backward compatibility with tests
+analyze_signal_with_ai = analyze_signal
