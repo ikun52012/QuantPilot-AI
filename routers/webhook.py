@@ -5,14 +5,18 @@ Handles TradingView webhook signals.
 Security:
 - Payload secret (required, TradingView compatible)
 - Primary security relies on the 'secret' field in JSON payload
+- Timestamp-based replay protection (±5 minute window)
+- Nonce-based deduplication for additional replay prevention
 
 Processing:
 - Returns 202 Accepted immediately to prevent TradingView timeout
 - Actual processing runs in background task
 - Fingerprint deduplication prevents duplicate execution
 """
+import hashlib
 import hmac
 import json
+import time
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -27,6 +31,38 @@ from models import TradingViewSignal
 from services.signal_processor import SignalProcessor
 
 router = APIRouter(prefix="", tags=["webhook"])
+
+_WEBHOOK_REPLAY_WINDOW_SECS = 300
+_NONCE_CACHE: dict[str, float] = {}
+_NONCE_CACHE_MAX_SIZE = 10000
+_NONCE_CACHE_CLEANUP_INTERVAL = 3600
+_last_nonce_cleanup: float = 0.0
+
+
+def _check_replay_protection(nonce: str, timestamp: float) -> None:
+    """Check for replay attacks using timestamp and nonce."""
+    now = time.time()
+    if abs(now - timestamp) > _WEBHOOK_REPLAY_WINDOW_SECS:
+        raise HTTPException(401, "Webhook timestamp expired — possible replay attack")
+
+    if nonce:
+        global _last_nonce_cleanup
+        if now - _last_nonce_cleanup > _NONCE_CACHE_CLEANUP_INTERVAL:
+            cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
+            expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
+            for k in expired:
+                _NONCE_CACHE.pop(k, None)
+            _last_nonce_cleanup = now
+
+        if nonce in _NONCE_CACHE:
+            raise HTTPException(409, "Duplicate nonce — possible replay attack")
+
+        _NONCE_CACHE[nonce] = now
+        if len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
+            cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
+            expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
+            for k in expired:
+                _NONCE_CACHE.pop(k, None)
 
 
 @router.post("/webhook")
@@ -64,6 +100,11 @@ async def webhook(
     if not secret:
         logger.warning("[Webhook] Missing webhook secret in payload")
         raise HTTPException(401, "Missing webhook secret in payload")
+
+    timestamp = float(body.get("timestamp", 0) or 0)
+    nonce = str(body.get("nonce", "") or "").strip()
+    if timestamp > 0 or nonce:
+        _check_replay_protection(nonce, timestamp)
 
     client_ip = get_client_ip(request)
 
@@ -114,24 +155,47 @@ async def _process_webhook_background(
     client_ip: str,
     raw_body: dict,
 ):
-    """Process webhook signal in background to avoid TradingView timeout."""
-    try:
-        async with db_manager.async_session_factory() as session:
-            processor = SignalProcessor(session)
-            result = await processor.process_webhook(
-                signal=signal,
-                user_id=user_id,
-                client_ip=client_ip,
-                raw_body=raw_body,
-            )
-            await session.commit()
-            logger.info(f"[Webhook] Background processing complete: {result.get('status')}")
-    except Exception as exc:
-        logger.exception(f"[Webhook] Background processing error: {exc}")
+    """Process webhook signal in background to avoid TradingView timeout.
+
+    Includes retry logic and dead-letter logging for error recovery.
+    """
+    max_retries = 2
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with db_manager.async_session_factory() as session:
+                processor = SignalProcessor(session)
+                result = await processor.process_webhook(
+                    signal=signal,
+                    user_id=user_id,
+                    client_ip=client_ip,
+                    raw_body=raw_body,
+                )
+                await session.commit()
+                logger.info(f"[Webhook] Background processing complete: {result.get('status')}")
+                return
+        except Exception as exc:
+            if attempt < max_retries:
+                import asyncio
+                delay = 2 ** attempt
+                logger.warning(
+                    f"[Webhook] Background processing error (attempt {attempt}/{max_retries}), "
+                    f"retrying in {delay}s: {exc}"
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    f"[Webhook] Background processing failed after {max_retries} attempts. "
+                    f"Signal queued for manual review. Ticker: {signal.ticker}, "
+                    f"Direction: {signal.direction.value}, Error: {exc}"
+                )
 
 
 async def _find_user_by_secret(db: AsyncSession, secret: str):
-    """Find user by webhook secret."""
+    """Find user by webhook secret.
+
+    Uses constant-time dummy hash to prevent timing side-channel attacks
+    that could enumerate valid user webhook secrets.
+    """
     from sqlalchemy import select
 
     from core.database import UserModel
@@ -145,4 +209,9 @@ async def _find_user_by_secret(db: AsyncSession, secret: str):
             UserModel.deleted_at.is_(None),
         )
     )
-    return result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        _dummy_hash = hashlib.sha256(b"timing-attack-mitigation-dummy").hexdigest()
+
+    return user

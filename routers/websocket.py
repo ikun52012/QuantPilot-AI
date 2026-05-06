@@ -78,6 +78,22 @@ def _extract_ws_token(websocket: WebSocket) -> str:
     return websocket.cookies.get(AUTH_COOKIE_NAME, "")
 
 
+def _validate_ws_origin(websocket: WebSocket) -> bool:
+    """Validate WebSocket Origin header to prevent cross-site WebSocket hijacking."""
+    origin = websocket.headers.get("origin", "")
+    if not origin:
+        return True
+    allowed_origins = settings.server.cors_origins
+    if "*" in allowed_origins:
+        return True
+    for allowed in allowed_origins:
+        allowed_lower = allowed.lower().rstrip("/")
+        if origin.lower().rstrip("/") == allowed_lower:
+            return True
+    logger.warning(f"[WebSocket] Origin validation failed: {origin}")
+    return False
+
+
 def _ws_message(msg_type: str, data: dict, ticker: str | None = None) -> dict:
     """Create standardized WebSocket message format."""
     message = {
@@ -139,20 +155,20 @@ class ConnectionManager:
         for connection in connections:
             try:
                 await connection.send_json(message)
-            except (RuntimeError, OSError):
-                pass
-            except Exception:
-                pass
+            except (RuntimeError, OSError) as e:
+                logger.debug(f"[WebSocket] Broadcast to user {user_id} failed: {e}")
+            except Exception as e:
+                logger.debug(f"[WebSocket] Broadcast to user {user_id} unexpected error: {e}")
 
     async def broadcast_all(self, message: dict):
         for _user_id, connections in self.active_connections.items():
             for connection in connections:
                 try:
                     await connection.send_json(message)
-                except (RuntimeError, OSError):
-                    pass
-                except Exception:
-                    pass
+                except (RuntimeError, OSError) as e:
+                    logger.debug(f"[WebSocket] Broadcast to {_user_id} failed: {e}")
+                except Exception as e:
+                    logger.debug(f"[WebSocket] Broadcast to {_user_id} unexpected error: {e}")
 
     def get_user_count(self) -> int:
         return len(self.user_connections)
@@ -181,6 +197,10 @@ async def websocket_positions(websocket: WebSocket):
     user_id = None
 
     try:
+        if not _validate_ws_origin(websocket):
+            await websocket.close(code=4003, reason="Origin not allowed")
+            return
+
         token = _extract_ws_token(websocket)
         if not token:
             await websocket.close(code=4001, reason="Missing authentication token")
@@ -275,6 +295,10 @@ async def websocket_prices(websocket: WebSocket):
     user_id = None
 
     try:
+        if not _validate_ws_origin(websocket):
+            await websocket.close(code=4003, reason="Origin not allowed")
+            return
+
         token = _extract_ws_token(websocket)
         if not token:
             await websocket.close(code=4001, reason="Missing authentication token")
@@ -372,6 +396,10 @@ async def websocket_system(websocket: WebSocket):
     user_id = None
 
     try:
+        if not _validate_ws_origin(websocket):
+            await websocket.close(code=4003, reason="Origin not allowed")
+            return
+
         token = _extract_ws_token(websocket)
         if not token:
             await websocket.close(code=4001, reason="Missing authentication token")

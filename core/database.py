@@ -495,7 +495,8 @@ class DatabaseManager:
         }
         VALID_COLUMN_TYPES = {
             "FLOAT", "BOOLEAN", "TIMESTAMP", "TEXT", "VARCHAR", "INTEGER",
-            "DOUBLE PRECISION", "REAL",
+            "DOUBLE PRECISION", "REAL", "BIGINT", "NUMERIC", "DECIMAL",
+            "CHAR", "DATE", "TIME", "JSON", "JSONB", "UUID", "BYTEA",
         }
 
         # Map ANSI types to dialect-specific equivalents
@@ -515,8 +516,12 @@ class DatabaseManager:
             return bool(re.match(r'^[a-z_][a-z0-9_]*$', name))
 
         def validate_ddl(ddl: str) -> bool:
-            upper_ddl = ddl.upper()
-            return any(t in upper_ddl for t in VALID_COLUMN_TYPES)
+            upper_ddl = ddl.upper().strip()
+            if not any(t in upper_ddl for t in VALID_COLUMN_TYPES):
+                return False
+            if any(ch in upper_ddl for ch in (";", "--", "/*", "DROP", "DELETE", "INSERT", "UPDATE")):
+                return False
+            return True
 
         def add_missing_columns(table_name: str, columns: dict[str, str]) -> None:
             if table_name not in tables or table_name not in VALID_TABLES:

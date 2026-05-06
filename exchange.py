@@ -614,7 +614,7 @@ def _get_or_create_exchange(
     Includes health check to evict stale/unhealthy connections.
     """
     eid = (exchange_id or settings.exchange.name).lower().strip()
-    cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()[:16]
+    cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()
     sb = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
     market_key = str(market_type or settings.exchange.market_type or "contract").lower().strip()
     cache_key = f"{eid}:{sb}:{market_key}:{cred_hash}"
@@ -634,8 +634,8 @@ def _get_or_create_exchange(
                 close = getattr(existing, "close", None)
                 if close:
                     close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[Exchange] Error closing evicted cached instance: {e}")
         elif now - last_check > _HEALTH_CHECK_INTERVAL_SECS:
             try:
                 existing.fetch_time()
@@ -657,15 +657,15 @@ def _get_or_create_exchange(
                         close = getattr(existing, "close", None)
                         if close:
                             close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"[Exchange] Error closing unhealthy cached instance: {e}")
                 else:
                     try:
                         close = getattr(existing, "close", None)
                         if close:
                             close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"[Exchange] Error closing failed health check instance: {e}")
                     _exchange_pool.pop(cache_key, None)
                     _exchange_pool_health.pop(cache_key, None)
                     logger.info(f"[Exchange] Health check failed, rebuilding instance for {cache_key}")
@@ -697,8 +697,8 @@ def _get_or_create_exchange(
                     close = getattr(evicted, "close", None)
                     if close:
                         close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[Exchange] Error closing evicted pool instance: {e}")
 
         _exchange_pool[cache_key] = instance
         _exchange_pool_health[cache_key] = {

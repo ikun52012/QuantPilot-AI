@@ -138,6 +138,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return self._redis
         self._redis_checked = True
         if not settings.redis.enabled:
+            if settings.exchange.live_trading:
+                logger.error(
+                    "[RateLimit] Redis is required for production (LIVE_TRADING=true) "
+                    "rate limiting. Enable REDIS_ENABLED=true or rate limits will be per-process."
+                )
             return None
         try:
             from core.cache import cache
@@ -145,16 +150,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             if redis_obj and getattr(redis_obj, "is_connected", lambda: False)():
                 self._redis = redis_obj
                 return self._redis
-            # Try to connect
             if redis_obj:
                 await redis_obj._get_client()
                 if redis_obj.is_connected():
                     self._redis = redis_obj
                     return self._redis
         except (ConnectionError, TimeoutError):
-            pass
+            logger.warning("[RateLimit] Redis connection failed, using in-memory fallback")
         except Exception:
-            pass
+            logger.warning("[RateLimit] Redis connection failed, using in-memory fallback")
         return None
 
     async def _redis_check_rate(self, prefix: str, key: str, max_attempts: int, window_secs: int) -> bool:
@@ -200,9 +204,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             if client:
                 await client.delete(f"rl:{prefix}:{key}")
         except (ConnectionError, TimeoutError):
-            pass
+            logger.warning("[RateLimit] Redis clear failed due to connection error")
         except Exception:
-            pass
+            logger.warning("[RateLimit] Redis clear failed due to unexpected error")
 
     def _check_rate_memory(self, prefix: str, key: str, max_attempts: int, window_secs: int) -> bool:
         """Fallback in-memory rate limit check."""
@@ -400,9 +404,9 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
                             status_code=413,
                             content={"detail": "Request body too large"}
                         )
-                    return await call_next(request)
                 except ValueError:
-                    pass
+                    logger.debug("[RequestSize] Invalid content-length header")
+                return await call_next(request)
 
             body = await request.body()
             if len(body) > self.MAX_SIZE:

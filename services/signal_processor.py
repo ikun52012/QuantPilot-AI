@@ -69,6 +69,8 @@ from services.order_reconciler import record_order_event
 _WEBHOOK_LOCKS: dict[str, asyncio.Lock] = {}
 _WEBHOOK_LOCKS_GUARD = asyncio.Lock()
 _WEBHOOK_LOCK_MAX_SIZE = 5000
+_WEBHOOK_LOCK_TTL = 600
+_WEBHOOK_LOCK_CREATED: dict[str, float] = {}
 _SENSITIVE_EVENT_KEY_PARTS = ("secret", "token", "password", "api_key", "api_secret")
 
 # Per-ticker locks for concurrent signal handling
@@ -342,17 +344,35 @@ async def _release_ticker_lock(ticker: str, user_id: str | None = None) -> None:
 
 async def _fingerprint_lock(fingerprint: str) -> asyncio.Lock:
     async with _WEBHOOK_LOCKS_GUARD:
+        now = _time.time()
+        expired = [
+            k for k, t in _WEBHOOK_LOCK_CREATED.items()
+            if now - t > _WEBHOOK_LOCK_TTL and k != fingerprint
+        ]
+        for k in expired:
+            lock = _WEBHOOK_LOCKS.get(k)
+            if lock and not lock.locked():
+                _WEBHOOK_LOCKS.pop(k, None)
+                _WEBHOOK_LOCK_CREATED.pop(k, None)
+
         lock = _WEBHOOK_LOCKS.get(fingerprint)
         if lock is None:
             lock = asyncio.Lock()
             _WEBHOOK_LOCKS[fingerprint] = lock
-            # Prevent unbounded memory growth
+            _WEBHOOK_LOCK_CREATED[fingerprint] = now
+
             if len(_WEBHOOK_LOCKS) > _WEBHOOK_LOCK_MAX_SIZE:
-                keys_to_remove = list(_WEBHOOK_LOCKS.keys())[:_WEBHOOK_LOCK_MAX_SIZE // 2]
+                sorted_keys = sorted(_WEBHOOK_LOCK_CREATED, key=_WEBHOOK_LOCK_CREATED.get)
+                keys_to_remove = sorted_keys[:_WEBHOOK_LOCK_MAX_SIZE // 2]
                 for k in keys_to_remove:
+                    if k == fingerprint:
+                        continue
                     old_lock = _WEBHOOK_LOCKS.get(k)
                     if old_lock and not old_lock.locked():
                         _WEBHOOK_LOCKS.pop(k, None)
+                        _WEBHOOK_LOCK_CREATED.pop(k, None)
+        else:
+            _WEBHOOK_LOCK_CREATED[fingerprint] = now
         return lock
 
 
@@ -360,6 +380,7 @@ async def _release_fingerprint_lock(fingerprint: str, lock: asyncio.Lock) -> Non
     async with _WEBHOOK_LOCKS_GUARD:
         if not lock.locked() and _WEBHOOK_LOCKS.get(fingerprint) is lock:
             _WEBHOOK_LOCKS.pop(fingerprint, None)
+            _WEBHOOK_LOCK_CREATED.pop(fingerprint, None)
 
 
 def _safe_event_payload(value):

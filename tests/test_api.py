@@ -143,7 +143,10 @@ class TestAuthEndpoints:
         assert login.status_code == 200
         pending_token = login.json()["token"]
 
-        for _ in range(4):
+        from core.login_guard import _MAX_ATTEMPTS
+
+        attempts_before_lockout = _MAX_ATTEMPTS - 1
+        for _ in range(attempts_before_lockout):
             response = await client.post(
                 "/api/auth/2fa/verify",
                 headers={"Authorization": f"Bearer {pending_token}"},
@@ -787,7 +790,10 @@ class TestSocialEndpoints:
         db_session.add(user)
         await db_session.commit()
 
-        for _ in range(4):
+        from core.login_guard import _MAX_ATTEMPTS
+
+        attempts_before_lockout = _MAX_ATTEMPTS - 1
+        for _ in range(attempts_before_lockout):
             response = await client.post("/api/auth/login", json={
                 "username": test_user_data["username"],
                 "password": test_user_data["password"],

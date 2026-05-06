@@ -108,7 +108,7 @@ def _ohlcv_signature(ohlcv: list[list], samples: int = 5) -> str:
             signature_data.append(f"{candle[0]}:{candle[2]}:{candle[3]}:{candle[4]}")
         except (IndexError, TypeError):
             continue
-    return hashlib.md5("|".join(signature_data).encode()).hexdigest()[:16]
+    return hashlib.sha256("|".join(signature_data).encode()).hexdigest()[:16]
 
 
 async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, cache_key: str) -> dict[str, Any] | None:

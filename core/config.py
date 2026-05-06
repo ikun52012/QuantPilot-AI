@@ -378,14 +378,14 @@ class ServerConfig(BaseModel):
     public_base_url: str = ""
     host: str = "0.0.0.0"
     port: int = 8000
-    cors_origins: list[str] = ["*"]
+    cors_origins: list[str] = ["http://localhost:8000"]
     trusted_hosts: list[str] = ["*"]
     trust_proxy_headers: bool = False
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
         cors_raw = os.getenv("CORS_ORIGINS", "")
-        cors_origins = [s.strip() for s in cors_raw.split(",") if s.strip()] if cors_raw else ["*"]
+        cors_origins = [s.strip() for s in cors_raw.split(",") if s.strip()] if cors_raw else ["http://localhost:8000"]
         trusted_raw = os.getenv("TRUSTED_HOSTS", "")
         trusted_hosts = [s.strip() for s in trusted_raw.split(",") if s.strip()] if trusted_raw else ["*"]
         return cls(

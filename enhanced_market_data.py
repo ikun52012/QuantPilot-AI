@@ -152,9 +152,9 @@ def _get_hardcoded_crypto_events() -> list[dict[str, Any]]:
                     "days_until": days_diff,
                 })
         except (ValueError, TypeError, AttributeError):
-            pass
-        except Exception:
-            pass
+            logger.debug("[EnhancedMarketData] Failed to parse macro event date")
+        except Exception as e:
+            logger.debug(f"[EnhancedMarketData] Unexpected error parsing macro event: {e}")
 
     return events
 
@@ -174,9 +174,9 @@ async def check_macro_event_risk() -> tuple[bool, str | None]:
             if -1800 <= time_diff <= 1800:
                 return False, f"High-impact event '{event.get('event')}' at {event_time.strftime('%H:%M')} UTC"
         except (ValueError, TypeError, AttributeError):
-            pass
-        except Exception:
-            pass
+            logger.debug("[EnhancedMarketData] Failed to parse event time for risk check")
+        except Exception as e:
+            logger.debug(f"[EnhancedMarketData] Unexpected error in macro risk check: {e}")
 
     for event in events.get("crypto_specific", []):
         days_until = event.get("days_until", 999)
@@ -242,10 +242,10 @@ async def fetch_liquidation_heatmap(symbol: str) -> dict[str, Any]:
                                     heatmap["long_liquidations"].append({"price": price, "usd": liq_usd})
                                 elif side == "buy":
                                     heatmap["short_liquidations"].append({"price": price, "usd": liq_usd})
-                except (aiohttp.ClientError, OSError, asyncio.TimeoutError):
-                    pass
-                except Exception:
-                    pass
+                except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+                    logger.debug(f"[EnhancedMarketData] Liquidation API error for {symbol}: {e}")
+                except Exception as e:
+                    logger.debug(f"[EnhancedMarketData] Unexpected error fetching liquidation for {symbol}: {e}")
 
         except Exception as e:
             logger.warning(f"[EnhancedData] Failed to fetch liquidation heatmap for {symbol}: {e}")

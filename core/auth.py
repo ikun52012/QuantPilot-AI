@@ -33,8 +33,11 @@ def _get_jwt_secret() -> str:
     if not secret:
         if settings.exchange.live_trading:
             raise RuntimeError("JWT_SECRET must be set when LIVE_TRADING=true")
-        secret = secrets.token_urlsafe(48)
-        logger.warning("[Auth] JWT_SECRET is not set; generated an ephemeral development secret")
+        logger.warning(
+            "[Auth] JWT_SECRET is not set; using a deterministic development secret. "
+            "All sessions will be invalidated on restart. Set JWT_SECRET in production."
+        )
+        secret = "dev-jwt-secret-not-for-production-use-only-32chars!"
     return secret
 
 

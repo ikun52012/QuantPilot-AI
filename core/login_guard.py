@@ -11,9 +11,9 @@ from loguru import logger
 
 from core.config import settings
 
-_MAX_ATTEMPTS = 5
+_MAX_ATTEMPTS = settings.rate_limit.login_max_attempts
 _LOCKOUT_SECONDS = 900
-_WINDOW_SECONDS = 600
+_WINDOW_SECONDS = settings.rate_limit.login_window_secs
 
 _lock = threading.Lock()
 _attempts: dict[str, list[float]] = {}
@@ -48,7 +48,7 @@ def _redis_key_lockout(ip: str) -> str:
 
 def _cleanup_old_entries() -> None:
     """Remove expired entries to prevent memory growth."""
-    now = time.monotonic()
+    now = time.time()
     expired_lockouts = [k for k, v in _lockouts.items() if now - v > _LOCKOUT_SECONDS]
     for k in expired_lockouts:
         _lockouts.pop(k, None)
@@ -83,7 +83,7 @@ def is_locked_out(ip: str) -> bool:
         lockout_time = _lockouts.get(ip)
         if lockout_time is None:
             return False
-        if time.monotonic() - lockout_time > _LOCKOUT_SECONDS:
+        if time.time() - lockout_time > _LOCKOUT_SECONDS:
             _lockouts.pop(ip, None)
             _attempts.pop(ip, None)
             return False
@@ -109,7 +109,7 @@ def remaining_lockout_seconds(ip: str) -> int:
         lockout_time = _lockouts.get(ip)
         if lockout_time is None:
             return 0
-        remaining = _LOCKOUT_SECONDS - (time.monotonic() - lockout_time)
+        remaining = _LOCKOUT_SECONDS - (time.time() - lockout_time)
         return max(0, int(remaining))
 
 
@@ -147,12 +147,12 @@ def record_failed_attempt(ip: str) -> int | None:
     with _lock:
         _cleanup_old_entries()
         attempts = _attempts.setdefault(ip, [])
-        cutoff = time.monotonic() - _WINDOW_SECONDS
+        cutoff = time.time() - _WINDOW_SECONDS
         attempts[:] = [t for t in attempts if t > cutoff]
-        attempts.append(time.monotonic())
+        attempts.append(time.time())
 
         if len(attempts) >= _MAX_ATTEMPTS:
-            _lockouts[ip] = time.monotonic()
+            _lockouts[ip] = time.time()
             logger.warning(f"[LoginGuard] IP {ip} locked out after {_MAX_ATTEMPTS} failed attempts")
             return None
 

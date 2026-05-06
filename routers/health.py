@@ -3,9 +3,10 @@ QuantPilot AI - Health Check Router
 Provides system health monitoring and diagnostics API.
 """
 import asyncio
+import os
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel
 
@@ -13,6 +14,8 @@ from core.config import settings
 from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/health", tags=["Health"])
+
+_HEALTH_TOKEN = os.getenv("HEALTH_CHECK_TOKEN", "")
 
 
 class HealthCheckResult(BaseModel):
@@ -240,11 +243,17 @@ async def check_memory() -> HealthCheckResult:
 
 
 @router.get("/", response_model=HealthCheckResponse)
-async def health_check():
+async def health_check(request: Request):
     """
     Full health check of all system components.
     Returns status: healthy, degraded, or unhealthy.
+
+    Optional: Set HEALTH_CHECK_TOKEN env var to require a token for access.
     """
+    if _HEALTH_TOKEN:
+        token = request.headers.get("X-Health-Token") or request.query_params.get("token")
+        if token != _HEALTH_TOKEN:
+            raise HTTPException(401, "Health check token required")
     checks = await asyncio.gather(
         check_database(),
         check_redis(),

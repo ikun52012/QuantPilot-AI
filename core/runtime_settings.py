@@ -349,9 +349,9 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 if isinstance(enabled, bool):
                     settings.ai.openrouter_enabled = enabled
             except json.JSONDecodeError:
-                pass
-            except Exception:
-                pass
+                logger.debug("[RuntimeSettings] Invalid openrouter_enabled JSON")
+            except Exception as e:
+                logger.debug(f"[RuntimeSettings] Failed to load openrouter_enabled: {e}")
 
         custom_provider_enabled_raw = await get_admin_setting(session, "custom_ai_provider_enabled", "")
         if custom_provider_enabled_raw:
@@ -360,9 +360,9 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 if isinstance(enabled, bool):
                     settings.ai.custom_provider_enabled = enabled
             except json.JSONDecodeError:
-                pass
-            except Exception:
-                pass
+                logger.debug("[RuntimeSettings] Invalid custom_ai_provider_enabled JSON")
+            except Exception as e:
+                logger.debug(f"[RuntimeSettings] Failed to load custom_ai_provider_enabled: {e}")
 
         custom_provider_name_raw = await get_admin_setting(session, "custom_ai_provider_name", "")
         if custom_provider_name_raw:
@@ -387,9 +387,9 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 if 0 <= temp <= 2:
                     settings.ai.temperature = temp
             except (ValueError, TypeError):
-                pass
-            except Exception:
-                pass
+                logger.debug("[RuntimeSettings] Invalid ai_temperature value")
+            except Exception as e:
+                logger.debug(f"[RuntimeSettings] Failed to load ai_temperature: {e}")
 
         ai_max_tokens_raw = await get_admin_setting(session, "ai_max_tokens", "")
         if ai_max_tokens_raw:
@@ -398,9 +398,9 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 if 100 <= tokens <= 4000:
                     settings.ai.max_tokens = tokens
             except (ValueError, TypeError):
-                pass
-            except Exception:
-                pass
+                logger.debug("[RuntimeSettings] Invalid ai_max_tokens value")
+            except Exception as e:
+                logger.debug(f"[RuntimeSettings] Failed to load ai_max_tokens: {e}")
 
         external_keys_raw = await get_admin_setting(session, "external_api_keys", "")
         if external_keys_raw:

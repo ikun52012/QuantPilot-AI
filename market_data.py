@@ -879,10 +879,10 @@ async def _safe_fetch_open_interest(exchange: Any, symbol: str) -> tuple[float |
                 oi_change = ((oi - prev_oi) / prev_oi) * 100
                 return oi, oi_change
             return oi, None
-    except (OSError, ConnectionError, TimeoutError):
-        pass
-    except Exception:
-        pass
+    except (OSError, ConnectionError, TimeoutError) as e:
+        logger.debug(f"[MarketData] OI fetch network error for {symbol}: {e}")
+    except Exception as e:
+        logger.debug(f"[MarketData] OI fetch unexpected error for {symbol}: {e}")
     return None, None
 
 
@@ -892,10 +892,10 @@ async def _safe_fetch_long_short_ratio(exchange: Any, symbol: str) -> float | No
             ratio_data = await asyncio.to_thread(exchange.fetch_long_short_ratio, symbol)
             if isinstance(ratio_data, dict):
                 return _to_optional_float(ratio_data.get("longShortRatio"))
-    except (OSError, ConnectionError, TimeoutError):
-        pass
-    except Exception:
-        pass
+    except (OSError, ConnectionError, TimeoutError) as e:
+        logger.debug(f"[MarketData] Long/short ratio network error for {symbol}: {e}")
+    except Exception as e:
+        logger.debug(f"[MarketData] Long/short ratio unexpected error for {symbol}: {e}")
     return None
 
 

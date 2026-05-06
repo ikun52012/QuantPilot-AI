@@ -135,7 +135,9 @@ class TradingViewSignal(BaseModel):
     @field_validator("message")
     @classmethod
     def _strip_message(cls, value: str) -> str:
-        return value.strip()
+        value = value.strip()
+        value = "".join(ch for ch in value if ch.isprintable() or ch in "\n\r\t")
+        return value
 
 
 # ─────────────────────────────────────────────

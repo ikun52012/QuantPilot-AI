@@ -119,29 +119,15 @@ async def register(
         if not invite_code:
             raise HTTPException(400, "Invite code is required")
 
-        result = await db.execute(
-            select(InviteCodeModel).where(
-                InviteCodeModel.code == invite_code,
-                InviteCodeModel.is_active,
-            )
-        )
-        invite = result.scalar_one_or_none()
-
-        if not invite:
-            raise HTTPException(400, "Invalid or expired invite code")
-
-        if invite.expires_at and _to_naive_utc(invite.expires_at) < utcnow():
-            raise HTTPException(400, "Invite code has expired")
-
-        if invite.max_uses > 0 and invite.used_count >= invite.max_uses:
-            raise HTTPException(400, "Invite code has reached maximum uses")
-
     pw_hash = hash_password(req.password)
     try:
         invite = None
         if invite_required.lower() == "true" and invite_code:
             result = await db.execute(
-                select(InviteCodeModel).where(InviteCodeModel.code == invite_code).with_for_update()
+                select(InviteCodeModel).where(
+                    InviteCodeModel.code == invite_code,
+                    InviteCodeModel.is_active,
+                ).with_for_update()
             )
             invite = result.scalar_one_or_none()
             if not invite or not invite.is_active:
@@ -536,6 +522,7 @@ async def get_me(
 @router.post("/change-password")
 async def change_password(
     req: ChangePasswordRequest,
+    request: Request,
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -561,5 +548,22 @@ async def change_password(
     await update_user_password_hash(db, db_user.id, pw_hash)
 
     logger.info(f"[Auth] Password changed for user: {db_user.username}")
+
+    try:
+        from core.database import AdminAuditLogModel
+        from core.request_utils import client_ip as get_client_ip_util
+        audit_entry = AdminAuditLogModel(
+            admin_id=db_user.id if db_user.role == "admin" else None,
+            admin_username=db_user.username,
+            action="password_change",
+            target_type="user",
+            target_id=db_user.id,
+            summary=f"User {db_user.username} changed their password",
+            client_ip=get_client_ip_util(request) if 'request' in dir() else "",
+        )
+        db.add(audit_entry)
+        await db.flush()
+    except Exception as e:
+        logger.debug(f"[Auth] Failed to record password change audit log: {e}")
 
     return {"status": "ok"}
