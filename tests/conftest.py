@@ -1,97 +1,175 @@
 """
-Pytest configuration and fixtures.
+P4-FIX: QuantPilot Test Configuration
+Pytest configuration with fixtures for unit and integration tests.
 """
-import asyncio
-import os
-import sys
-from collections.abc import AsyncGenerator, Generator
-
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+import asyncio
+from pathlib import Path
+from typing import AsyncGenerator, Generator
+from unittest.mock import Mock, AsyncMock, patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.config import settings
-from core.database import Base, db_manager
-
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+# Configure pytest for async tests
+pytest_plugins = ('pytest_asyncio',)
 
 
 @pytest.fixture(scope="session")
-def event_loop() -> Generator:
+def event_loop():
+    """Create event loop for async tests."""
     loop = asyncio.get_event_loop_policy().new_event_loop()
     yield loop
     loop.close()
 
 
-@pytest_asyncio.fixture(scope="function")
-async def db_engine():
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_tx_hash_non_empty ON payments(tx_hash) WHERE tx_hash <> ''"))
-    yield engine
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture(scope="function")
-async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
-    async_session = async_sessionmaker(db_engine, expire_on_commit=False)
-    async with async_session() as session:
-        yield session
-
-
-@pytest_asyncio.fixture(scope="function")
-async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from core.database import get_db
-    from core.factory import create_app
-
-    app = create_app()
-
-    async def override_get_db():
-        yield db_session
-
-    app.dependency_overrides[get_db] = override_get_db
-    db_manager.async_session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
-    db_manager.engine = db_session.bind
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
-
-    app.dependency_overrides.clear()
-    db_manager.async_session_factory = None
-    db_manager.engine = None
+@pytest.fixture
+async def async_session():
+    """Mock async database session."""
+    session = AsyncMock()
+    session.execute = AsyncMock()
+    session.commit = AsyncMock()
+    session.flush = AsyncMock()
+    yield session
 
 
 @pytest.fixture
-def test_user_data():
-    return {
-        "username": "testuser",
-        "email": "member@example.com",
-        "password": "Str0ng!Pass123",
-    }
+def mock_exchange():
+    """Mock exchange instance."""
+    exchange = Mock()
+    exchange.id = "binance"
+    exchange.set_leverage = Mock(return_value={"leverage": 10})
+    exchange.create_order = Mock(return_value={"id": "order123", "status": "closed"})
+    exchange.fetch_order = Mock(return_value={"id": "order123", "status": "closed"})
+    exchange.cancel_order = Mock(return_value={"id": "order123"})
+    exchange.close = Mock()
+    yield exchange
 
 
 @pytest.fixture
-def test_admin_data():
-    return {
-        "username": "testadmin",
-        "email": "admin@example.com",
-        "password": "AdminPass123!",
+def mock_ai_provider():
+    """Mock AI provider response."""
+    response = {
+        "confidence": 0.85,
+        "recommendation": "execute",
+        "reasoning": "Strong bullish signal with good risk/reward",
+        "suggested_direction": None,
+        "suggested_entry": 50000.0,
+        "suggested_stop_loss": 48000.0,
+        "suggested_take_profit": 52000.0,
+        "position_size_pct": 0.5,
+        "recommended_leverage": 10,
+        "risk_score": 0.4,
+        "market_condition": "trending_up",
     }
+    yield response
 
 
-@pytest.fixture(autouse=True)
-def restore_runtime_settings_state():
-    snapshot = settings.model_copy(deep=True)
-    yield
-    for field_name in snapshot.__class__.model_fields:
-        setattr(settings, field_name, getattr(snapshot, field_name))
+@pytest.fixture
+def sample_signal():
+    """Sample TradingView signal."""
+    from models import TradingViewSignal, SignalDirection
+    
+    signal = TradingViewSignal(
+        ticker="BTCUSDT",
+        direction=SignalDirection.LONG,
+        price=50000.0,
+        timeframe="1h",
+        strategy="test_strategy",
+        message="Test signal",
+    )
+    yield signal
+
+
+@pytest.fixture
+def sample_market_context():
+    """Sample market context."""
+    from models import MarketContext
+    
+    market = MarketContext(
+        ticker="BTCUSDT",
+        current_price=50000.0,
+        price_change_1h=2.5,
+        price_change_4h=5.0,
+        price_change_24h=10.0,
+        volume_24h=1000000.0,
+        high_24h=52000.0,
+        low_24h=48000.0,
+        bid_ask_spread=0.01,
+        funding_rate=0.0001,
+        rsi_1h=60.0,
+        atr_pct=2.5,
+    )
+    yield market
+
+
+@pytest.fixture
+def sample_position():
+    """Sample position model."""
+    from core.database import PositionModel
+    from datetime import datetime
+    
+    position = PositionModel(
+        id="pos123",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=50000.0,
+        quantity=0.01,
+        remaining_quantity=0.01,
+        opened_at=datetime.utcnow(),
+        leverage=10.0,
+        margin=50.0,
+        stop_loss=48000.0,
+        take_profit_json='[{"price": 52000, "qty_pct": 100}]',
+    )
+    yield position
+
+
+@pytest.fixture
+def mock_redis_client():
+    """Mock Redis client."""
+    redis_client = Mock()
+    redis_client.get = Mock(return_value=None)
+    redis_client.set = Mock(return_value=True)
+    redis_client.setex = Mock(return_value=True)
+    redis_client.delete = Mock(return_value=1)
+    redis_client.ping = Mock(return_value=True)
+    redis_client.close = Mock()
+    yield redis_client
+
+
+@pytest.fixture
+def temp_cache_dir(tmp_path):
+    """Temporary cache directory for tests."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    yield cache_dir
+
+
+@pytest.fixture
+def temp_log_dir(tmp_path):
+    """Temporary log directory for tests."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    yield log_dir
+
+
+# Coverage configuration
+def pytest_configure(config):
+    """Configure pytest with coverage settings."""
+    config.addinivalue_line(
+        "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+    )
+    config.addinivalue_line(
+        "markers", "integration: marks tests as integration tests"
+    )
+    config.addinivalue_line(
+        "markers", "chaos: marks tests as chaos engineering tests"
+    )
+
+
+# Auto markers
+def pytest_collection_modifyitems(config, items):
+    """Auto-mark async tests."""
+    for item in items:
+        if asyncio.iscoroutinefunction(item.function):
+            item.add_marker(pytest.mark.asyncio)

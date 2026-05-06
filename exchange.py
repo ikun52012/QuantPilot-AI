@@ -2,6 +2,7 @@
 Signal Server - Multi-Exchange Executor
 Supports: Binance, OKX, Bybit, Bitget, Gate.io, Coinbase
 Enhanced with multi-TP and trailing-stop execution
+P0-FIX: Leverage setup retry mechanism for reliability
 """
 import asyncio
 import hashlib as _hashlib
@@ -18,6 +19,11 @@ from core.utils.common import safe_float as _safe_float_common
 from models import SignalDirection, TradeDecision, TrailingStopMode
 
 safe_float = _safe_float_common
+
+# P0-FIX: Leverage retry configuration
+_LEVERAGE_MAX_RETRIES = 3
+_LEVERAGE_RETRY_DELAY_BASE = 1.0  # seconds, exponential backoff
+_LEVERAGE_RETRYABLE_ERRORS = ["NetworkError", "Timeout", "ExchangeNotAvailable", "DDoSProtection"]
 
 try:
     import ccxt
@@ -53,6 +59,87 @@ async def _close_exchange(exchange):
     result = await asyncio.to_thread(close)
     if inspect.isawaitable(result):
         await result
+
+
+async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_retries: int = _LEVERAGE_MAX_RETRIES) -> dict:
+    """P0-FIX: Set leverage with exponential backoff retry mechanism.
+    
+    Args:
+        exchange: CCXT exchange instance
+        leverage: Target leverage (e.g., 10 for 10x)
+        symbol: Trading symbol (e.g., "BTC/USDT:USDT")
+        max_retries: Maximum retry attempts (default: 3)
+    
+    Returns:
+        dict with "success": True/False and optional "error" message
+    
+    Retry Strategy:
+        - Retries on transient errors (NetworkError, Timeout, DDoSProtection)
+        - Exponential backoff: 1s, 2s, 4s
+        - Does NOT retry on authentication errors or permanent exchange errors
+        - Logs all attempts for observability
+    """
+    if leverage <= 1:
+        logger.debug(f"[P0-FIX] Leverage {leverage}x <= 1x, skip setup for {symbol}")
+        return {"success": True}
+    
+    for attempt in range(max_retries):
+        try:
+            await asyncio.to_thread(exchange.set_leverage, leverage, symbol)
+            logger.info(f"[P0-FIX] Leverage set successfully: {symbol} {leverage}x (attempt {attempt + 1}/{max_retries})")
+            return {"success": True}
+            
+        except ccxt.AuthenticationError as e:
+            logger.error(f"[P0-FIX] Authentication error setting leverage for {symbol}: {e}")
+            return {"success": False, "error": f"Authentication failed: {e}", "abort": True}
+            
+        except ccxt.ExchangeError as e:
+            error_name = type(e).__name__
+            error_msg = str(e)
+            
+            # Check if this is a retryable error
+            is_retryable = any(
+                retryable_err.lower() in error_msg.lower() or retryable_err in error_name
+                for retryable_err in _LEVERAGE_RETRYABLE_ERRORS
+            )
+            
+            if is_retryable and attempt < max_retries - 1:
+                delay = _LEVERAGE_RETRY_DELAY_BASE * (2 ** attempt)
+                logger.warning(
+                    f"[P0-FIX] Retrying leverage setup for {symbol} {leverage}x "
+                    f"(attempt {attempt + 1}/{max_retries}) after {error_name}: {error_msg}. "
+                    f"Retry in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+                continue
+            else:
+                # Non-retryable error or max retries exceeded
+                logger.error(
+                    f"[P0-FIX] Failed to set leverage {leverage}x for {symbol} after {attempt + 1} attempts: {error_name}: {error_msg}"
+                )
+                return {"success": False, "error": f"Exchange error: {error_msg}", "abort": leverage > 1}
+                
+        except Exception as e:
+            error_name = type(e).__name__
+            error_msg = str(e)
+            
+            # Generic error handling with retry for transient issues
+            if attempt < max_retries - 1:
+                delay = _LEVERAGE_RETRY_DELAY_BASE * (2 ** attempt)
+                logger.warning(
+                    f"[P0-FIX] Unexpected error setting leverage for {symbol}, retrying "
+                    f"(attempt {attempt + 1}/{max_retries}): {error_name}: {error_msg}. "
+                    f"Retry in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+                continue
+            else:
+                logger.error(
+                    f"[P0-FIX] Failed to set leverage {leverage}x for {symbol} after {max_retries} attempts: {error_name}: {error_msg}"
+                )
+                return {"success": False, "error": f"Unexpected error: {error_msg}", "abort": False}
+    
+    return {"success": False, "error": "Max retries exceeded without success", "abort": True}
 
 
 _MISSING = object()
@@ -994,27 +1081,28 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
             max_leverage = max(1, min(int(exchange_config.get("max_leverage") or 125), 125))
             leverage = max(1, min(int(round(decision.ai_analysis.recommended_leverage)), max_leverage))
-            try:
-                await asyncio.to_thread(exchange.set_leverage, leverage, symbol)
-                logger.info(f"[Exchange] Leverage set: {symbol} {leverage}x")
-            except ccxt.AuthenticationError as e:
-                logger.error(f"[Exchange] Authentication error setting leverage for {symbol}: {e}")
-                return {"status": "error", "reason": f"Authentication failed: {e}"}
-            except ccxt.ExchangeError as e:
-                # Some exchanges reject leverage changes when positions exist or due to margin mode.
-                # If leverage was explicitly requested (>1x) and we cannot set it, abort for safety.
-                if leverage > 1:
+            
+            # P0-FIX: Use retry mechanism for leverage setup
+            result = await _set_leverage_with_retry(exchange, leverage, symbol)
+            
+            if not result["success"]:
+                # Leverage setup failed
+                if result.get("abort"):
+                    # P0-FIX: Abort trade when leverage > 1x setup fails for safety
                     logger.error(
-                        f"[Exchange] CRITICAL: Could not set requested leverage {leverage}x for {symbol}: {e}. "
+                        f"[P0-FIX] CRITICAL: Could not set requested leverage {leverage}x for {symbol}. "
+                        f"{result.get('error', 'Unknown error')}. "
                         f"Aborting trade to prevent unintended risk exposure."
                     )
                     return {
                         "status": "error",
-                        "reason": f"Leverage setup failed ({leverage}x): {e}. Trade aborted for safety.",
+                        "reason": f"Leverage setup failed ({leverage}x): {result.get('error', 'Unknown')}. Trade aborted for safety.",
                     }
-                logger.warning(f"[Exchange] Could not set leverage for {symbol}: {e}. Continuing with default leverage.")
-            except Exception as e:
-                logger.warning(f"[Exchange] Unexpected error setting leverage for {symbol}: {e}. Continuing with caution.")
+                else:
+                    # Non-critical failure, continue with default leverage
+                    logger.warning(f"[P0-FIX] Could not set leverage for {symbol}: {result.get('error', 'Unknown')}. Continuing with default leverage.")
+            else:
+                logger.info(f"[Exchange] Leverage set: {symbol} {leverage}x")
 
         if decision.direction in [SignalDirection.LONG]:
             side = "buy"
@@ -1148,6 +1236,13 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 "trail_pct": decision.trailing_stop.trail_pct,
                 "activation_profit_pct": decision.trailing_stop.activation_profit_pct,
                 "trailing_step_pct": decision.trailing_stop.trailing_step_pct,
+                # P1-FIX: Store AI confidence and risk_score for later re-evaluation
+                # These values are needed when limit order fills hours later
+                "_ai_confidence": decision.ai_analysis.confidence if decision.ai_analysis else 0.65,
+                "_ai_risk_score": decision.ai_analysis.risk_score if decision.ai_analysis else 0.5,
+                "_ai_market_condition": decision.ai_analysis.market_condition if decision.ai_analysis else "unknown",
+                "_ai_trend_strength": decision.ai_analysis.trend_strength if decision.ai_analysis else "moderate",
+                "_signal_reasoning": decision.ai_analysis.reasoning if decision.ai_analysis else "",
             }
 
         # ── Multi Take-Profit Orders ──

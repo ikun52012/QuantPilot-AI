@@ -263,10 +263,23 @@ class RedeemCodeModel(Base):
 
 
 class PositionModel(Base):
-    """Position tracking model."""
+    """Position tracking model.
+    
+    P1-FIX: Enhanced indexes for position_monitor and analytics queries.
+    """
     __tablename__ = "positions"
     __table_args__ = (
         Index("idx_positions_user_status", "user_id", "status"),
+        # P1-FIX: Index for position_monitor ORDER BY opened_at ASC
+        Index("idx_positions_status_opened_at", "status", "opened_at"),
+        # P1-FIX: Index for ticker+status queries (reconciliation)
+        Index("idx_positions_ticker_status", "ticker", "status"),
+        # P1-FIX: Index for exchange+status queries (multi-exchange monitoring)
+        Index("idx_positions_exchange_status", "exchange", "status", "live_trading"),
+        # P1-FIX: Index for open positions with leverage (risk monitoring)
+        Index("idx_positions_status_leverage", "status", "leverage"),
+        # P1-FIX: Index for time-based cleanup (closed_at for archiving)
+        Index("idx_positions_closed_at", "closed_at"),
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

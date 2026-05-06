@@ -1,0 +1,426 @@
+# P3-FIX: Prometheus Alerting Rules for QuantPilot AI
+# Comprehensive alert configuration for trading, AI, and system monitoring
+
+groups:
+  # ─────────────────────────────────────────────
+  # Trading Alerts (Critical Priority)
+  # ─────────────────────────────────────────────
+  - name: trading_critical_alerts
+    rules:
+      # High trade failure rate
+      - alert: HighTradeFailureRate
+        expr: |
+          rate(quantpilot_trade_total{result="failed"}[5m]) 
+          / 
+          rate(quantpilot_trade_total[5m]) 
+          > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          category: trading
+        annotations:
+          summary: "High trade failure rate detected"
+          description: |
+            Trade failure rate is {{ $value | humanizePercentage }} 
+            on exchange {{ $labels.exchange }}.
+            This may indicate exchange connectivity issues or configuration problems.
+          action: "Check exchange API status and credentials"
+
+      # Leverage setup failures
+      - alert: LeverageSetupFailureSpike
+        expr: rate(quantpilot_leverage_setup_failure_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: high
+          category: trading
+        annotations:
+          summary: "Leverage setup failures increasing"
+          description: |
+            Leverage setup failures detected on {{ $labels.exchange }} 
+            for {{ $labels.symbol }} (leverage={{ $labels.leverage }}x).
+            Failure rate: {{ $value }} per second.
+          action: "Review leverage retry logs, check margin mode settings"
+
+      # Trade execution latency too high
+      - alert: HighTradeExecutionLatency
+        expr: |
+          histogram_quantile(0.95, 
+            rate(quantpilot_trade_latency_seconds_bucket{stage="execute"}[10m])
+          ) > 10
+        for: 5m
+        labels:
+          severity: high
+          category: trading
+        annotations:
+          summary: "Trade execution latency too high"
+          description: |
+            95th percentile trade execution latency is {{ $value }}s 
+            on {{ $labels.exchange }}.
+            This may cause missed opportunities or slippage.
+          action: "Check network connectivity, exchange API response times"
+
+  # ─────────────────────────────────────────────
+  # Position Alerts (High Priority)
+  # ─────────────────────────────────────────────
+  - name: position_alerts
+    rules:
+      # Ghost position detected
+      - alert: GhostPositionDetected
+        expr: quantpilot_ghost_position_count > 0
+        for: 1m
+        labels:
+          severity: high
+          category: position
+        annotations:
+          summary: "Ghost position detected"
+          description: |
+            {{ $value }} ghost position(s) detected on {{ $labels.exchange }} 
+            for {{ $labels.symbol }}.
+            Position exists in database but not on exchange.
+          action: "Check position_monitor logs, verify exchange state"
+
+      # Too many open positions (risk limit)
+      - alert: TooManyOpenPositions
+        expr: |
+          sum(quantpilot_position_count) 
+          by (exchange, direction) 
+          > 10
+        for: 5m
+        labels:
+          severity: medium
+          category: position
+        annotations:
+          summary: "Too many open positions"
+          description: |
+            {{ $value }} open {{ $labels.direction }} positions 
+            on {{ $labels.exchange }}.
+            This may exceed risk management limits.
+          action: "Review position management, consider reducing exposure"
+
+      # Large unrealized loss
+      - alert: LargeUnrealizedLoss
+        expr: |
+          sum(quantpilot_pnl_total_usdt) 
+          by (user_id) 
+          < -500
+        for: 3m
+        labels:
+          severity: high
+          category: position
+        annotations:
+          summary: "Large unrealized loss detected"
+          description: |
+            User {{ $labels.user_id }} has unrealized loss of {{ $value }} USDT.
+            Consider manual intervention or position review.
+          action: "Review user positions, notify user if configured"
+
+  # ─────────────────────────────────────────────
+  # AI Analysis Alerts (High Priority)
+  # ─────────────────────────────────────────────
+  - name: ai_analysis_alerts
+    rules:
+      # AI analysis timeout rate high
+      - alert: AIAnalysisTimeoutRateHigh
+        expr: |
+          rate(quantpilot_ai_analysis_total{result="timeout"}[5m]) 
+          / 
+          rate(quantpilot_ai_analysis_total[5m]) 
+          > 0.2
+        for: 3m
+        labels:
+          severity: high
+          category: ai
+        annotations:
+          summary: "AI analysis timeout rate too high"
+          description: |
+            {{ $value | humanizePercentage }} of AI analyses timing out 
+            for provider {{ $labels.provider }}.
+            This may affect trade decision quality.
+          action: "Review AI timeout settings, check provider status"
+
+      # AI analysis failure rate
+      - alert: AIAnalysisFailureRateHigh
+        expr: |
+          rate(quantpilot_ai_analysis_total{result="failed"}[10m]) 
+          / 
+          rate(quantpilot_ai_analysis_total[10m]) 
+          > 0.15
+        for: 5m
+        labels:
+          severity: medium
+          category: ai
+        annotations:
+          summary: "AI analysis failure rate elevated"
+          description: |
+            AI analysis failure rate is {{ $value | humanizePercentage }} 
+            for {{ $labels.provider }}/{{ $labels.model }}.
+          action: "Check AI provider API status, review error logs"
+
+      # AI analysis latency too high
+      - alert: AIAnalysisLatencyTooHigh
+        expr: |
+          histogram_quantile(0.90, 
+            rate(quantpilot_ai_analysis_latency_seconds_bucket[10m])
+          ) > 30
+        for: 5m
+        labels:
+          severity: medium
+          category: ai
+        annotations:
+          summary: "AI analysis latency too high"
+          description: |
+            90th percentile AI analysis latency is {{ $value }}s.
+            This delays trade decisions significantly.
+          action: "Review AI timeout config, consider faster model or caching"
+
+      # AI cache hit rate too low
+      - alert: AICacheHitRateLow
+        expr: |
+          (
+            rate(quantpilot_ai_cache_hit_total{layer="L1_memory"}[30m])
+            /
+            rate(quantpilot_ai_analysis_total[30m])
+          ) < 0.3
+        for: 10m
+        labels:
+          severity: low
+          category: ai
+        annotations:
+          summary: "AI cache hit rate below optimal"
+          description: |
+            L1 cache hit rate is {{ $value | humanizePercentage }}.
+            Target is >50% for optimal performance.
+          action: "Review cache TTL settings, check cache size limits"
+
+  # ─────────────────────────────────────────────
+  # System Health Alerts (Critical Priority)
+  # ─────────────────────────────────────────────
+  - name: system_health_alerts
+    rules:
+      # Critical error spike
+      - alert: CriticalErrorSpike
+        expr: |
+          rate(quantpilot_error_rate_total{severity="critical"}[5m]) > 0.1
+        for: 1m
+        labels:
+          severity: critical
+          category: system
+        annotations:
+          summary: "Critical error spike detected"
+          description: |
+            {{ $value }} critical errors/sec from {{ $labels.module }}.
+            Error type: {{ $labels.error_type }}.
+          action: "Immediate investigation required, check error logs"
+
+      # Authentication errors
+      - alert: AuthenticationErrorsDetected
+        expr: |
+          rate(quantpilot_error_rate_total{error_type="AuthenticationError"}[5m]) > 0.02
+        for: 2m
+        labels:
+          severity: critical
+          category: system
+        annotations:
+          summary: "Authentication errors detected"
+          description: |
+            Authentication failures from {{ $labels.module }}.
+            This may indicate credential issues or security breach.
+          action: "Verify API credentials, check for unauthorized access"
+
+      # High error rate from exchange module
+      - alert: ExchangeModuleErrorRateHigh
+        expr: |
+          rate(quantpilot_error_rate_total{module="exchange"}[5m]) > 0.5
+        for: 3m
+        labels:
+          severity: high
+          category: system
+        annotations:
+          summary: "Exchange module error rate elevated"
+          description: |
+            Exchange module experiencing {{ $value }} errors/sec.
+            Most common error: {{ $labels.error_type }}.
+          action: "Check exchange connectivity, review ccxt logs"
+
+  # ─────────────────────────────────────────────
+  # Database Alerts (Medium Priority)
+  # ─────────────────────────────────────────────
+  - name: database_alerts
+    rules:
+      # Database connection pool exhaustion
+      - alert: DatabaseConnectionPoolExhausted
+        expr: |
+          quantpilot_db_connection_pool_used 
+          / 
+          quantpilot_db_connection_pool_size 
+          > 0.9
+        for: 2m
+        labels:
+          severity: high
+          category: database
+        annotations:
+          summary: "Database connection pool near exhaustion"
+          description: |
+            {{ $value | humanizePercentage }} of database connections in use.
+            Pool size: {{ $labels.pool_size }}.
+          action: "Increase pool size, optimize slow queries, check for connection leaks"
+
+      # Slow database queries
+      - alert: SlowDatabaseQueries
+        expr: |
+          histogram_quantile(0.95, 
+            rate(quantpilot_db_query_latency_seconds_bucket[10m])
+          ) > 2
+        for: 5m
+        labels:
+          severity: medium
+          category: database
+        annotations:
+          summary: "Slow database queries detected"
+          description: |
+            95th percentile query latency is {{ $value }}s.
+            This affects system responsiveness.
+          action: "Review slow query logs, add missing indexes"
+
+  # ─────────────────────────────────────────────
+  # Cache Performance Alerts (Low Priority)
+  # ─────────────────────────────────────────────
+  - name: cache_performance_alerts
+    rules:
+      # Cache eviction rate high (LRU working hard)
+      - alert: CacheEvictionRateHigh
+        expr: |
+          rate(quantpilot_cache_eviction_total[10m]) 
+          / 
+          quantpilot_cache_size 
+          > 0.5
+        for: 10m
+        labels:
+          severity: low
+          category: cache
+        annotations:
+          summary: "Cache eviction rate elevated"
+          description: |
+            Cache {{ $labels.cache_name }} layer {{ $labels.layer }} 
+            experiencing high eviction rate.
+            Cache may be undersized.
+          action: "Increase cache max_size, review TTL settings"
+
+      # Cache size approaching limit
+      - alert: CacheSizeApproachingLimit
+        expr: |
+          quantpilot_cache_size 
+          / 
+          quantpilot_cache_max_size 
+          > 0.95
+        for: 5m
+        labels:
+          severity: low
+          category: cache
+        annotations:
+          summary: "Cache size near limit"
+          description: |
+            Cache {{ $labels.cache_name }} is {{ $value | humanizePercentage }} full.
+            Consider increasing max_size.
+          action: "Review cache usage patterns, increase max_size if needed"
+
+  # ─────────────────────────────────────────────
+  # Business Logic Alerts (Medium Priority)
+  # ─────────────────────────────────────────────
+  - name: business_logic_alerts
+    rules:
+      # Daily loss limit approaching
+      - alert: DailyLossLimitApproaching
+        expr: |
+          sum(rate(quantpilot_pnl_total_usdt[24h])) 
+          by (user_id) 
+          < -400
+        for: 30m
+        labels:
+          severity: medium
+          category: business
+        annotations:
+          summary: "Daily loss limit approaching"
+          description: |
+            User {{ $labels.user_id }} approaching daily loss limit.
+            Current daily PnL: {{ $value }} USDT.
+          action: "Notify user, consider pausing trading for this user"
+
+      # High trade volume (potential spam or automation issue)
+      - alert: HighTradeVolume
+        expr: |
+          sum(rate(quantpilot_trade_total{result="success"}[1h])) 
+          by (user_id) 
+          > 50
+        for: 10m
+        labels:
+          severity: low
+          category: business
+        annotations:
+          summary: "Unusually high trade volume"
+          description: |
+            User {{ $labels.user_id }} executing {{ $value }} trades/hour.
+            This may indicate automation or strategy issue.
+          action: "Review user strategy, check for stuck loops"
+
+  # ─────────────────────────────────────────────
+  # Composite Alerts (Multi-condition)
+  # ─────────────────────────────────────────────
+  - name: composite_alerts
+    rules:
+      # Multiple system failures (cascading failure detection)
+      - alert: MultipleSystemFailures
+        expr: |
+          (
+            rate(quantpilot_error_rate_total{severity="critical"}[5m]) > 0.05
+          ) 
+          AND 
+          (
+            rate(quantpilot_trade_total{result="failed"}[5m]) > 0.1
+          )
+          AND
+          (
+            rate(quantpilot_ai_analysis_total{result="failed"}[5m]) > 0.1
+          )
+        for: 2m
+        labels:
+          severity: critical
+          category: system
+        annotations:
+          summary: "Multiple system failures detected - potential cascading failure"
+          description: |
+            System experiencing simultaneous failures across multiple modules:
+            - Critical errors: elevated
+            - Trade failures: elevated
+            - AI failures: elevated
+            
+            This may indicate a systemic issue or infrastructure problem.
+          action: "Immediate investigation, consider temporary trading halt"
+
+      # Low cache hit AND high AI latency (performance degradation)
+      - alert: PerformanceDegradation
+        expr: |
+          (
+            histogram_quantile(0.90, 
+              rate(quantpilot_ai_analysis_latency_seconds_bucket[10m])
+            ) > 20
+          )
+          AND
+          (
+            rate(quantpilot_ai_cache_hit_total{layer="L1_memory"}[30m])
+            / rate(quantpilot_ai_analysis_total[30m])
+            < 0.4
+          )
+        for: 10m
+        labels:
+          severity: medium
+          category: performance
+        annotations:
+          summary: "Performance degradation detected"
+          description: |
+            Both AI latency and cache hit rate degraded:
+            - AI latency P90: high
+            - Cache hit rate: low
+            
+            System performance is degraded, affecting trade timing.
+          action: "Review cache configuration, check AI provider performance"

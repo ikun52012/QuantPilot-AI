@@ -38,44 +38,62 @@ _AI_SEMAPHORE = asyncio.Semaphore(settings.ai.max_concurrent_calls)
 
 # ─────────────────────────────────────────────
 # AI analysis result cache (#18) with dynamic TTL (Optimization 3)
+# P0-FIX: Double-check locking for thread-safe singleton initialization
 # ─────────────────────────────────────────────
 _AI_CACHE_BASE_TTL = 60
 _AI_CACHE_MAX_SIZE = 500
 _AI_CACHE: dict[str, tuple[float, float, "AIAnalysis"]] = {}  # (timestamp, ttl, analysis)
-_AI_CACHE_LOCK: asyncio.Lock | None = None  # BUG-1 FIX: Lazy init to avoid race condition
+_AI_CACHE_LOCK_INIT_LOCK = asyncio.Lock()  # P0-FIX: Init lock for double-check locking
+_AI_CACHE_LOCK: asyncio.Lock | None = None  # P0-FIX: Singleton cache lock
 _VOLATILITY_TRACKER: dict[str, float] = {}  # ticker -> recent volatility pct
-_VOLATILITY_TRACKER_LOCK: asyncio.Lock | None = None  # BUG-1 FIX: Lazy init
+_VOLATILITY_TRACKER_INIT_LOCK = asyncio.Lock()  # P0-FIX: Init lock
+_VOLATILITY_TRACKER_LOCK: asyncio.Lock | None = None  # P0-FIX: Singleton lock
 
 # ─────────────────────────────────────────────
 # SMC analysis cache (P1-5: Performance optimization)
+# P0-FIX: Double-check locking for thread-safe singleton initialization
 # ─────────────────────────────────────────────
 _SMC_CACHE_BASE_TTL = 120  # 2 minutes (SMC structure changes slower than price)
 _SMC_CACHE_MAX_SIZE = 200
 _SMC_CACHE: dict[str, tuple[float, float, dict[str, Any]]] = {}  # (timestamp, ttl, smc_dict)
-_SMC_CACHE_LOCK: asyncio.Lock | None = None  # BUG-1 FIX: Lazy init to avoid race condition
+_SMC_CACHE_INIT_LOCK = asyncio.Lock()  # P0-FIX: Init lock for double-check locking
+_SMC_CACHE_LOCK: asyncio.Lock | None = None  # P0-FIX: Singleton cache lock
 
 
 async def _get_ai_cache_lock() -> asyncio.Lock:
-    """BUG-1 FIX: Lazy initialize AI cache lock to avoid race condition."""
+    """P0-FIX: Double-check locking for thread-safe singleton initialization.
+    
+    Prevents race condition when multiple coroutines check lock is None simultaneously.
+    Pattern: first check (no lock) -> acquire init lock -> second check (with lock) -> create.
+    """
     global _AI_CACHE_LOCK
-    if _AI_CACHE_LOCK is None:
-        _AI_CACHE_LOCK = asyncio.Lock()
+    if _AI_CACHE_LOCK is None:  # First check (outside lock - fast path)
+        async with _AI_CACHE_LOCK_INIT_LOCK:  # Acquire initialization lock
+            if _AI_CACHE_LOCK is None:  # Second check (inside lock - safe path)
+                _AI_CACHE_LOCK = asyncio.Lock()
+                logger.debug("[P0-FIX] AI cache lock initialized with double-check pattern")
     return _AI_CACHE_LOCK
 
 
 async def _get_smc_cache_lock() -> asyncio.Lock:
-    """BUG-1 FIX: Lazy initialize SMC cache lock to avoid race condition."""
+    """P0-FIX: Double-check locking for thread-safe SMC cache lock initialization."""
     global _SMC_CACHE_LOCK
-    if _SMC_CACHE_LOCK is None:
-        _SMC_CACHE_LOCK = asyncio.Lock()
+    if _SMC_CACHE_LOCK is None:  # First check
+        async with _SMC_CACHE_INIT_LOCK:  # Init lock
+            if _SMC_CACHE_LOCK is None:  # Second check
+                _SMC_CACHE_LOCK = asyncio.Lock()
+                logger.debug("[P0-FIX] SMC cache lock initialized with double-check pattern")
     return _SMC_CACHE_LOCK
 
 
 async def _get_volatility_lock() -> asyncio.Lock:
-    """BUG-1 FIX: Lazy initialize volatility tracker lock."""
+    """P0-FIX: Double-check locking for volatility tracker lock initialization."""
     global _VOLATILITY_TRACKER_LOCK
-    if _VOLATILITY_TRACKER_LOCK is None:
-        _VOLATILITY_TRACKER_LOCK = asyncio.Lock()
+    if _VOLATILITY_TRACKER_LOCK is None:  # First check
+        async with _VOLATILITY_TRACKER_INIT_LOCK:  # Init lock
+            if _VOLATILITY_TRACKER_LOCK is None:  # Second check
+                _VOLATILITY_TRACKER_LOCK = asyncio.Lock()
+                logger.debug("[P0-FIX] Volatility tracker lock initialized with double-check pattern")
     return _VOLATILITY_TRACKER_LOCK
 
 
