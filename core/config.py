@@ -494,7 +494,7 @@ class Settings(BaseModel):
     def is_production(self) -> bool:
         return self.exchange.live_trading
 
-def _validate_settings(self):
+    def _validate_settings(self):
         """Validate settings for all environments.
         
         P0-FIX: Enhanced validation for production safety.
