@@ -1198,16 +1198,17 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                         "reason": f"Market order ambiguous after 3s: {order_status}",
                         "order_id": order_id,
                         "cancel_result": cancel_result,
+                        "requires_reconciliation": True,
                     }
             except ccxt.OrderNotFound as e:
                 logger.error(f"[Exchange] Re-fetch order not found: {e}")
-                return {"status": "error", "reason": f"Order not found during verification: {e}", "order_id": order_id}
+                return {"status": "error", "reason": f"Order not found during verification: {e}", "order_id": order_id, "requires_reconciliation": True}
             except ccxt.NetworkError as e:
                 logger.error(f"[Exchange] Network error re-fetching order: {e}")
-                return {"status": "error", "reason": f"Network error verifying market order fill: {e}", "order_id": order_id}
+                return {"status": "error", "reason": f"Network error verifying market order fill: {e}", "order_id": order_id, "requires_reconciliation": True}
             except Exception as e:
                 logger.error(f"[Exchange] Failed to re-fetch order: {e}")
-                return {"status": "error", "reason": f"Cannot verify market order fill: {e}", "order_id": order_id}
+                return {"status": "error", "reason": f"Cannot verify market order fill: {e}", "order_id": order_id, "requires_reconciliation": True}
         if result_status == "error":
             logger.warning(f"[Exchange] Order status '{order_status}' treated as error")
             return {"status": "error", "reason": f"Order failed with status: {order_status}", "order_id": order_id}

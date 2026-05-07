@@ -768,12 +768,21 @@ class SignalProcessor:
         client_ip: str,
         payload: dict,
     ):
-        """Reserve a webhook fingerprint before slow processing starts."""
+        """Reserve a webhook fingerprint before slow processing starts.
+
+        C1-FIX: If an event exists with status 'received' or 'reserved',
+        return it instead of None to allow retries to proceed.
+        """
         lock = await _fingerprint_lock(fingerprint)
         try:
             async with lock:
-                if await has_recent_webhook_event(self.session, fingerprint, window_secs=300):
+                existing = await has_recent_webhook_event(self.session, fingerprint, window_secs=300)
+                if existing:
+                    if existing.status in {"received", "reserved", "retrying"}:
+                        existing.status = "retrying"
+                        return existing
                     return None
+
                 event = await record_webhook_event(
                     session=self.session,
                     user_id=user_id,
@@ -786,7 +795,7 @@ class SignalProcessor:
                     client_ip=client_ip,
                     payload=_safe_event_payload(payload),
                 )
-                await self.session.commit()
+                await self.session.flush()
                 return event
         finally:
             await _release_fingerprint_lock(fingerprint, lock)
@@ -2512,10 +2521,9 @@ class SignalProcessor:
                 else:
                     logger.warning(f"[Signal] Failed to close position on exchange: {close_result}")
                     result["exchange_close_error"] = close_result
-                    if not is_synthetic:
-                        result["status"] = "error"
-                        result["reason"] = f"Failed to close on exchange: {close_result.get('reason')}"
-                        return result
+                    result["status"] = "error"
+                    result["reason"] = f"Failed to close on exchange: {close_result.get('reason')}"
+                    return result
 
             # Step 2: Record close in database (only for non-synthetic positions)
             if not is_synthetic and exit_price > 0:

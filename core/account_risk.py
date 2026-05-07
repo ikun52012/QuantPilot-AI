@@ -6,10 +6,14 @@ When limits are breached, new trades are blocked until the next trading day.
 
 FIX: Daily loss % should be calculated relative to account equity, NOT by summing
 individual position PnL percentages (which are relative to position margin).
+
+C5-FIX: Persist daily tracker to disk to survive server restarts.
 """
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -19,8 +23,38 @@ from core.utils.datetime import utcnow
 
 _ACCOUNT_DAILY_TRACKER: dict[str, dict[str, Any]] = {}
 _ACCOUNT_TRACKER_GUARD = asyncio.Lock()
+_ACCOUNT_TRACKER_FILE = Path(__file__).parent.parent / "data" / "account_risk_tracker.json"
 
 _GLOBAL_ACCOUNT_KEY = "__global__"
+
+
+def _load_tracker_from_disk() -> dict[str, dict[str, Any]]:
+    """C5-FIX: Load tracker state from disk on startup."""
+    if not _ACCOUNT_TRACKER_FILE.exists():
+        return {}
+    try:
+        data = json.loads(_ACCOUNT_TRACKER_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            logger.info(f"[AccountRisk] Loaded tracker from disk: {len(data)} entries")
+            return data
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"[AccountRisk] Failed to load tracker from disk: {e}")
+    return {}
+
+
+def _save_tracker_to_disk() -> None:
+    """C5-FIX: Persist tracker state to disk."""
+    try:
+        _ACCOUNT_TRACKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _ACCOUNT_TRACKER_FILE.write_text(
+            json.dumps(_ACCOUNT_DAILY_TRACKER, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        logger.warning(f"[AccountRisk] Failed to save tracker to disk: {e}")
+
+
+_ACCOUNT_DAILY_TRACKER.update(_load_tracker_from_disk())
 
 
 async def record_position_pnl(
@@ -70,6 +104,7 @@ async def record_position_pnl(
             f"after position close (position PnL: {pnl_pct:+.2f}%, {pnl_usdt:+.2f} USDT)"
         )
 
+        _save_tracker_to_disk()
         return tracker.copy()
 
 

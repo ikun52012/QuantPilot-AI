@@ -256,7 +256,13 @@ async def _verify_solana(
     expected_amount: float | None,
     expected_address: str | None,
 ) -> dict:
-    """Verify Solana transaction."""
+    """Verify Solana transaction with amount and address validation.
+
+    C4-FIX: Now verifies:
+    - Transaction is finalized
+    - Amount matches expected amount (within 0.01 tolerance)
+    - Recipient address matches expected address
+    """
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             "https://api.mainnet-beta.solana.com",
@@ -279,17 +285,78 @@ async def _verify_solana(
 
         status = result[0]
 
-        if status.get("confirmationStatus") == "finalized":
-            return {
-                "verified": True,
-                "status": "confirmed",
-                "slot": status.get("slot"),
-            }
-        elif status.get("err"):
+        if status.get("err"):
             return {"verified": False, "status": "failed", "error": status.get("err")}
-        else:
+
+        if status.get("confirmationStatus") != "finalized":
             return {
                 "verified": False,
                 "status": "pending",
                 "confirmations": status.get("confirmations", 0),
             }
+
+        if not expected_amount or not expected_address:
+            return {
+                "verified": True,
+                "status": "confirmed",
+                "slot": status.get("slot"),
+                "warning": "Amount/address verification skipped (not configured)",
+            }
+
+        tx_resp = await client.post(
+            "https://api.mainnet-beta.solana.com",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTransaction",
+                "params": [tx_hash, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            },
+        )
+
+        if tx_resp.status_code != 200:
+            return {"verified": False, "status": "error", "reason": "Failed to fetch transaction details"}
+
+        tx_data = tx_resp.json()
+        tx_result = tx_data.get("result", {})
+        if not tx_result:
+            return {"verified": False, "status": "error", "reason": "Transaction details unavailable"}
+
+        meta = tx_result.get("meta", {})
+        if meta.get("err"):
+            return {"verified": False, "status": "failed", "error": meta.get("err")}
+
+        post_balances = meta.get("postBalances", [])
+        pre_balances = meta.get("preBalances", [])
+        account_keys = tx_result.get("transaction", {}).get("message", {}).get("accountKeys", [])
+
+        if len(post_balances) != len(pre_balances) or not account_keys:
+            return {"verified": False, "status": "error", "reason": "Incomplete transaction data"}
+
+        expected_address_lower = expected_address.lower().strip()
+        amount_found = False
+        amount_received = 0.0
+
+        for idx, account in enumerate(account_keys):
+            addr = account.get("pubkey", "") if isinstance(account, dict) else str(account)
+            if addr.lower().strip() == expected_address_lower:
+                lamports_received = post_balances[idx] - pre_balances[idx]
+                amount_received = lamports_received / 1e9
+                if abs(amount_received - expected_amount) <= 0.01:
+                    amount_found = True
+                break
+
+        if not amount_found:
+            return {
+                "verified": False,
+                "status": "amount_mismatch",
+                "expected": expected_amount,
+                "received": amount_received,
+                "reason": "Payment amount or recipient address does not match",
+            }
+
+        return {
+            "verified": True,
+            "status": "confirmed",
+            "slot": status.get("slot"),
+            "amount": amount_received,
+        }

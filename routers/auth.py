@@ -246,9 +246,10 @@ async def login(
             remaining = record_failed_attempt(ip)
             if remaining is None:
                 raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
-            raise HTTPException(401, f"Invalid 2FA code. {remaining} attempts remaining.")
+            raise HTTPException(401, f"Invalid 2FA code or recovery code. {remaining} attempts remaining.")
 
         # No code provided — issue a short-lived pending token
+        record_successful_login(ip)
         pending_token = create_token(
             user.id, user.username, user.role,
             user.token_version or 0, pending_2fa=True,
@@ -365,8 +366,13 @@ async def setup_2fa(
     if getattr(db_user, "totp_enabled", False):
         raise HTTPException(400, "2FA is already enabled. Disable it first to reconfigure.")
 
-    secret = generate_totp_secret()
-    db_user.totp_secret = encrypt_totp_secret(secret)
+    existing_secret = decrypt_totp_secret(db_user.totp_secret) if db_user.totp_secret else ""
+    if existing_secret and not existing_secret.startswith("enc:"):
+        secret = existing_secret
+        logger.info(f"[Auth] 2FA setup resumed for user: {db_user.username} (existing secret)")
+    else:
+        secret = generate_totp_secret()
+        db_user.totp_secret = encrypt_totp_secret(secret)
 
     uri = get_totp_uri(secret, db_user.username)
     qr_base64 = generate_qr_code_base64(uri)
@@ -566,4 +572,4 @@ async def change_password(
     except Exception as e:
         logger.debug(f"[Auth] Failed to record password change audit log: {e}")
 
-    return {"status": "ok"}
+    return {"status": "ok", "message": "Password changed successfully. Please log in again with your new password."}
