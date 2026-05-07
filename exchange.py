@@ -195,6 +195,10 @@ def _order_create_attempts(exchange, side: str, params: dict[str, Any] | None = 
     if exchange_id != "okx":
         return [base]
 
+    # Read margin mode from exchange options (defaults to "cross" if not set)
+    exchange_options = getattr(exchange, "options", {}) or {}
+    margin_mode = str(exchange_options.get("defaultMarginMode") or "cross").lower().strip()
+
     # For OKX hedge mode, posSide should match the POSITION being operated on
     # - Opening LONG: side=buy, position_side=long (or derived from side)
     # - Opening SHORT: side=sell, position_side=short
@@ -211,8 +215,8 @@ def _order_create_attempts(exchange, side: str, params: dict[str, Any] | None = 
         pos_side = _okx_position_side(side)
 
     return [
-        {**base, "tdMode": base.get("tdMode") or "cross"},
-        {**base, "tdMode": base.get("tdMode") or "cross", "posSide": pos_side},
+        {**base, "tdMode": base.get("tdMode") or margin_mode},
+        {**base, "tdMode": base.get("tdMode") or margin_mode, "posSide": pos_side},
     ]
 
 
@@ -605,6 +609,7 @@ def _get_or_create_exchange(
     live: bool = False,
     sandbox: bool | None = None,
     market_type: str | None = None,
+    margin_mode: str | None = None,
 ) -> ccxt.Exchange:
     """Return a cached CCXT instance or create a new one.
 
@@ -617,7 +622,8 @@ def _get_or_create_exchange(
     cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()
     sb = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
     market_key = str(market_type or settings.exchange.market_type or "contract").lower().strip()
-    cache_key = f"{eid}:{sb}:{market_key}:{cred_hash}"
+    margin_key = str(margin_mode or settings.risk.margin_mode or "cross").lower().strip()
+    cache_key = f"{eid}:{sb}:{market_key}:{margin_key}:{cred_hash}"
 
     existing = _exchange_pool.get(cache_key)
     if existing is not None:
@@ -677,6 +683,7 @@ def _get_or_create_exchange(
                         live=live,
                         sandbox=sandbox,
                         market_type=market_type,
+                        margin_mode=margin_mode,
                     )
         else:
             return existing
@@ -686,7 +693,7 @@ def _get_or_create_exchange(
         if existing is not None:
             return existing
 
-        instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox, market_type)
+        instance = _build_exchange(exchange_id, api_key, api_secret, password, live, sandbox, market_type, margin_mode)
 
         if len(_exchange_pool) >= settings.exchange.pool_max_size:
             oldest_key = next(iter(_exchange_pool))
@@ -760,6 +767,7 @@ def _build_exchange(
     live: bool = False,
     sandbox: bool | None = None,
     market_type: str | None = None,
+    margin_mode: str | None = None,
 ) -> ccxt.Exchange:
     """Build CCXT exchange instance with proper configuration."""
     if not _CCXT_AVAILABLE:
@@ -778,6 +786,12 @@ def _build_exchange(
     options: dict[str, object] = dict(config.get("futures_option", {}))
     if selected_market_type == "spot":
         options["defaultType"] = "spot"
+
+    # Set margin mode (cross/isolated) for contract trading
+    effective_margin_mode = str(margin_mode or settings.risk.margin_mode or "cross").lower().strip()
+    if effective_margin_mode not in ("cross", "isolated"):
+        effective_margin_mode = "cross"
+    options["defaultMarginMode"] = effective_margin_mode
 
     # Build exchange config
     resolved_api_key = _credential_value(api_key, settings.exchange.api_key)
@@ -813,6 +827,10 @@ def _build_exchange(
     # Set default market type
     if "defaultType" in options:
         exchange.options["defaultType"] = options["defaultType"]
+
+    # Set margin mode on exchange instance for OKX and other exchanges that support it
+    if effective_margin_mode == "isolated" and hasattr(exchange, "options"):
+        exchange.options["defaultMarginMode"] = "isolated"
 
     return exchange
 
@@ -1070,6 +1088,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         live=live_trading,
         sandbox=sandbox_mode,
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     symbol = await asyncio.to_thread(
         _resolve_symbol,
@@ -1615,6 +1634,7 @@ async def cancel_order(order_id: str, ticker: str, exchange_config: dict | None 
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         symbol = await asyncio.to_thread(
@@ -1652,6 +1672,7 @@ async def place_protective_stop(
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         symbol = await asyncio.to_thread(
@@ -1818,6 +1839,7 @@ async def get_account_balance(exchange_config: dict | None = None) -> dict:
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         balance = await asyncio.to_thread(exchange.fetch_balance)
@@ -1857,6 +1879,7 @@ async def get_balance(exchange_config: dict | None = None) -> dict:
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         balance = await asyncio.to_thread(exchange.fetch_balance)
@@ -1884,6 +1907,7 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
         live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         resolved_symbol = await asyncio.to_thread(
@@ -1920,6 +1944,7 @@ async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config:
         live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         resolved_symbol = await asyncio.to_thread(
@@ -1961,6 +1986,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         positions = await asyncio.to_thread(exchange.fetch_positions)
@@ -2037,6 +2063,7 @@ async def get_open_orders(symbol: str | None = None, exchange_config: dict | Non
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         if symbol:
@@ -2086,6 +2113,7 @@ async def get_recent_orders(symbol: str | None = None, limit: int = 50, exchange
         live=True,
         sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
     try:
         if symbol:

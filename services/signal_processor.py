@@ -2656,6 +2656,7 @@ class SignalProcessor:
             "default_order_type": settings.exchange.default_order_type,
             "stop_loss_order_type": settings.exchange.stop_loss_order_type,
             "limit_timeout_overrides": settings.exchange.limit_timeout_overrides,
+            "margin_mode": settings.risk.margin_mode,
         }
 
         if user_id and user_settings:
@@ -2672,6 +2673,7 @@ class SignalProcessor:
                 "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
                 "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
                 "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
+                "margin_mode": user_exchange.get("margin_mode") or settings.risk.margin_mode,
             })
 
         return exchange_config
