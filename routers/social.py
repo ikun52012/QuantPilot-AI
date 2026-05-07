@@ -29,6 +29,21 @@ class SharedSignal(BaseModel):
     confidence: float = 0.0
     strategy_name: str = ""
 
+    @staticmethod
+    def _validate_ticker(v: str) -> str:
+        import re
+        normalized = v.upper().strip()
+        if not re.match(r"^[A-Z0-9/:._-]{1,40}$", normalized):
+            raise ValueError("Invalid ticker format")
+        return normalized
+
+    @staticmethod
+    def _validate_direction(v: str) -> str:
+        normalized = v.lower().strip()
+        if normalized not in ("long", "short"):
+            raise ValueError("Direction must be 'long' or 'short'")
+        return normalized
+
 
 class SignalSubscription(BaseModel):
     signal_id: str

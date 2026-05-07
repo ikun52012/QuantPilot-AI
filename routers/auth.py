@@ -64,7 +64,7 @@ class TotpEnableRequest(BaseModel):
 
 class TotpVerifyRequest(BaseModel):
     """Verify 2FA during login."""
-    code: str = Field(min_length=1, max_length=20)
+    code: str = Field(min_length=6, max_length=12)
 
 
 class TotpDisableRequest(BaseModel):
@@ -104,7 +104,9 @@ async def register(
     if not ok:
         raise HTTPException(400, reason)
 
-    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+    import re
+    email_regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    if not re.match(email_regex, email):
         raise HTTPException(400, "Invalid email address")
 
     if await get_user_by_username(db, username):
@@ -147,6 +149,7 @@ async def register(
 
         await db.commit()
     except ValueError as err:
+        await db.rollback()
         raise HTTPException(400, str(err)) from err
     except IntegrityError as err:
         await db.rollback()
@@ -178,15 +181,15 @@ async def login(
     """Login to an existing account. If 2FA is enabled, returns a pending token."""
     username = req.username.lower().strip()
 
-    # Brute-force protection
+    # Brute-force protection (password phase)
     ip = client_ip(request)
-    if is_locked_out(ip):
-        secs = remaining_lockout_seconds(ip)
+    if is_locked_out(ip, "password"):
+        secs = remaining_lockout_seconds(ip, "password")
         raise HTTPException(429, f"Too many failed attempts. Try again in {secs} seconds.")
 
     user = await get_user_by_username(db, username)
     if not user or not verify_password(req.password, user.password_hash):
-        remaining = record_failed_attempt(ip)
+        remaining = record_failed_attempt(ip, "password")
         if remaining is None:
             raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
         raise HTTPException(401, f"Invalid username or password. {remaining} attempts remaining.")
@@ -243,7 +246,7 @@ async def login(
                     }
                 }
 
-            remaining = record_failed_attempt(ip)
+            remaining = record_failed_attempt(ip, "2fa")
             if remaining is None:
                 raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
             raise HTTPException(401, f"Invalid 2FA code or recovery code. {remaining} attempts remaining.")
@@ -294,8 +297,8 @@ async def verify_2fa(
     from core.totp import decrypt_totp_secret, verify_recovery_code, verify_totp_code
 
     ip = client_ip(request)
-    if is_locked_out(ip):
-        secs = remaining_lockout_seconds(ip)
+    if is_locked_out(ip, "2fa"):
+        secs = remaining_lockout_seconds(ip, "2fa")
         raise HTTPException(429, f"Too many failed attempts. Try again in {secs} seconds.")
 
     db_user = await get_user_by_id(db, user["sub"])
@@ -344,7 +347,7 @@ async def verify_2fa(
             }
         }
 
-    remaining = record_failed_attempt(ip)
+    remaining = record_failed_attempt(ip, "2fa")
     if remaining is None:
         raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
     raise HTTPException(401, f"Invalid 2FA code or recovery code. {remaining} attempts remaining.")

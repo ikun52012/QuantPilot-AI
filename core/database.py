@@ -833,9 +833,12 @@ async def create_user(
 
 
 async def get_user_by_username(session: AsyncSession, username: str) -> UserModel | None:
-    """Get user by username."""
+    """Get user by username. Excludes soft-deleted users."""
     result = await session.execute(
-        select(UserModel).where(UserModel.username == username.lower().strip())
+        select(UserModel).where(
+            UserModel.username == username.lower().strip(),
+            UserModel.deleted_at.is_(None),
+        )
     )
     return result.scalar_one_or_none()
 
@@ -857,9 +860,12 @@ async def lock_user_by_id(session: AsyncSession, user_id: str) -> UserModel | No
 
 
 async def get_user_by_email(session: AsyncSession, email: str) -> UserModel | None:
-    """Get user by email."""
+    """Get user by email. Excludes soft-deleted users."""
     result = await session.execute(
-        select(UserModel).where(UserModel.email == email.lower().strip())
+        select(UserModel).where(
+            UserModel.email == email.lower().strip(),
+            UserModel.deleted_at.is_(None),
+        )
     )
     return result.scalar_one_or_none()
 

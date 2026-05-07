@@ -2,6 +2,7 @@
 Chart Router - dashboard chart data endpoints.
 Provides OHLCV, realtime price, indicators, and marker data for the frontend.
 """
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,16 @@ from core.utils.common import position_symbol_key
 from market_data import fetch_ohlcv_history
 
 router = APIRouter(prefix="/api/chart", tags=["Chart"])
+
+_TICKER_RE = re.compile(r"^[A-Z0-9/:._-]{1,40}$")
+
+
+def _validate_ticker(ticker: str) -> str:
+    """Validate ticker format to prevent injection."""
+    normalized = ticker.upper().strip()
+    if not _TICKER_RE.match(normalized):
+        raise HTTPException(400, "Invalid ticker format")
+    return normalized
 
 
 class ChartDataRequest(BaseModel):
@@ -39,6 +50,7 @@ async def get_chart_ohlcv(
     user: dict = Depends(get_current_user),
 ):
     """Get OHLCV data for chart rendering."""
+    ticker = _validate_ticker(ticker)
     try:
         ohlcv = await fetch_ohlcv_history(ticker, timeframe, days)
 
@@ -82,6 +94,7 @@ async def get_realtime_price(
     user: dict = Depends(get_current_user),
 ):
     """Get current real-time price for live chart updates."""
+    ticker = _validate_ticker(ticker)
     try:
         from market_data import fetch_market_context
 
@@ -107,6 +120,7 @@ async def get_chart_indicators(
     user: dict = Depends(get_current_user),
 ):
     """Get technical indicators for chart overlay."""
+    ticker = _validate_ticker(ticker)
     try:
         from market_data import fetch_market_context
 
@@ -138,6 +152,7 @@ async def get_position_markers(
     user: dict = Depends(get_current_user),
 ):
     """Get position markers for chart display (filled positions only)."""
+    ticker = _validate_ticker(ticker)
     try:
         user_id = user.get("sub") or user.get("id")
 
@@ -182,6 +197,7 @@ async def get_signal_markers(
     user: dict = Depends(get_current_user),
 ):
     """Get historical signal markers for chart."""
+    ticker = _validate_ticker(ticker)
     try:
         from datetime import timedelta
 

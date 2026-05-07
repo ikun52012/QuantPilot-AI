@@ -448,7 +448,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
     return runtime
 
 
-async def save_exchange_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
+async def save_exchange_settings(session: AsyncSession, data: dict[str, Any], apply_immediately: bool = True) -> dict[str, Any]:
     current = await _load_encrypted_dict(session, EXCHANGE_KEY)
     updated = {
         "name": _coalesce_str(data.get("exchange"), data.get("name"), current.get("name"), settings.exchange.name).lower().strip(),
@@ -467,7 +467,8 @@ async def save_exchange_settings(session: AsyncSession, data: dict[str, Any]) ->
         ),
     }
     await _save_encrypted_dict(session, EXCHANGE_KEY, updated)
-    apply_runtime_settings({"exchange": updated})
+    if apply_immediately:
+        apply_runtime_settings({"exchange": updated})
     return updated
 
 

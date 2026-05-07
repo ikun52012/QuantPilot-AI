@@ -2,6 +2,9 @@
 Login brute-force protection.
 Tracks failed login attempts per IP and locks out after threshold.
 Supports Redis persistence when available to survive service restarts.
+
+H2-FIX: Supports separate counters for password-phase and 2FA-phase failures
+to prevent attackers from exhausting the counter across phases.
 """
 import json
 import threading
@@ -38,12 +41,12 @@ def _init_redis():
         _redis_client = None
 
 
-def _redis_key_attempts(ip: str) -> str:
-    return f"login_guard:attempts:{ip}"
+def _redis_key_attempts(ip: str, phase: str = "password") -> str:
+    return f"login_guard:{phase}:attempts:{ip}"
 
 
-def _redis_key_lockout(ip: str) -> str:
-    return f"login_guard:lockout:{ip}"
+def _redis_key_lockout(ip: str, phase: str = "password") -> str:
+    return f"login_guard:{phase}:lockout:{ip}"
 
 
 def _cleanup_old_entries() -> None:
@@ -61,42 +64,46 @@ def _cleanup_old_entries() -> None:
         _attempts.pop(k, None)
 
 
-def is_locked_out(ip: str) -> bool:
-    """Check if an IP is currently locked out."""
+def is_locked_out(ip: str, phase: str = "password") -> bool:
+    """Check if an IP is currently locked out for a specific phase."""
     _init_redis()
+    lockout_key = _redis_key_lockout(ip, phase)
+    attempts_key = _redis_key_attempts(ip, phase)
 
     if _redis_client:
         try:
-            lockout_data = _redis_client.get(_redis_key_lockout(ip))
+            lockout_data = _redis_client.get(lockout_key)
             if lockout_data:
                 lockout_time = float(lockout_data)
                 remaining = _LOCKOUT_SECONDS - (time.time() - lockout_time)
                 if remaining > 0:
                     return True
-                _redis_client.delete(_redis_key_lockout(ip))
-                _redis_client.delete(_redis_key_attempts(ip))
+                _redis_client.delete(lockout_key)
+                _redis_client.delete(attempts_key)
             return False
         except Exception as exc:
             logger.debug(f"[LoginGuard] Redis read failed, falling back to memory: {exc}")
 
     with _lock:
-        lockout_time = _lockouts.get(ip)
+        composite_key = f"{phase}:{ip}"
+        lockout_time = _lockouts.get(composite_key)
         if lockout_time is None:
             return False
         if time.time() - lockout_time > _LOCKOUT_SECONDS:
-            _lockouts.pop(ip, None)
-            _attempts.pop(ip, None)
+            _lockouts.pop(composite_key, None)
+            _attempts.pop(composite_key, None)
             return False
         return True
 
 
-def remaining_lockout_seconds(ip: str) -> int:
+def remaining_lockout_seconds(ip: str, phase: str = "password") -> int:
     """Return seconds remaining in lockout, or 0 if not locked."""
     _init_redis()
+    lockout_key = _redis_key_lockout(ip, phase)
 
     if _redis_client:
         try:
-            lockout_data = _redis_client.get(_redis_key_lockout(ip))
+            lockout_data = _redis_client.get(lockout_key)
             if lockout_data:
                 lockout_time = float(lockout_data)
                 remaining = _LOCKOUT_SECONDS - (time.time() - lockout_time)
@@ -106,26 +113,27 @@ def remaining_lockout_seconds(ip: str) -> int:
             logger.debug(f"[LoginGuard] Redis read failed, falling back to memory: {exc}")
 
     with _lock:
-        lockout_time = _lockouts.get(ip)
+        composite_key = f"{phase}:{ip}"
+        lockout_time = _lockouts.get(composite_key)
         if lockout_time is None:
             return 0
         remaining = _LOCKOUT_SECONDS - (time.time() - lockout_time)
         return max(0, int(remaining))
 
 
-def record_failed_attempt(ip: str) -> int | None:
+def record_failed_attempt(ip: str, phase: str = "password") -> int | None:
     """
-    Record a failed login attempt.
+    Record a failed login attempt for a specific phase.
     Returns the number of remaining attempts, or None if now locked out.
     """
     _init_redis()
     now = time.time()
+    attempts_key = _redis_key_attempts(ip, phase)
+    lockout_key = _redis_key_lockout(ip, phase)
+    composite_key = f"{phase}:{ip}"
 
     if _redis_client:
         try:
-            attempts_key = _redis_key_attempts(ip)
-            lockout_key = _redis_key_lockout(ip)
-
             existing = _redis_client.get(attempts_key)
             attempts = json.loads(existing) if existing else []
             cutoff = now - _WINDOW_SECONDS
@@ -135,7 +143,7 @@ def record_failed_attempt(ip: str) -> int | None:
             if len(attempts) >= _MAX_ATTEMPTS:
                 _redis_client.setex(lockout_key, _LOCKOUT_SECONDS, str(now))
                 _redis_client.delete(attempts_key)
-                logger.warning(f"[LoginGuard] IP {ip} locked out after {_MAX_ATTEMPTS} failed attempts (Redis)")
+                logger.warning(f"[LoginGuard] IP {ip} locked out after {_MAX_ATTEMPTS} failed {phase} attempts (Redis)")
                 return None
 
             _redis_client.setex(attempts_key, _WINDOW_SECONDS, json.dumps(attempts))
@@ -146,14 +154,14 @@ def record_failed_attempt(ip: str) -> int | None:
 
     with _lock:
         _cleanup_old_entries()
-        attempts = _attempts.setdefault(ip, [])
+        attempts = _attempts.setdefault(composite_key, [])
         cutoff = time.time() - _WINDOW_SECONDS
         attempts[:] = [t for t in attempts if t > cutoff]
         attempts.append(time.time())
 
         if len(attempts) >= _MAX_ATTEMPTS:
-            _lockouts[ip] = time.time()
-            logger.warning(f"[LoginGuard] IP {ip} locked out after {_MAX_ATTEMPTS} failed attempts")
+            _lockouts[composite_key] = time.time()
+            logger.warning(f"[LoginGuard] IP {ip} locked out after {_MAX_ATTEMPTS} failed {phase} attempts")
             return None
 
         remaining = _MAX_ATTEMPTS - len(attempts)
@@ -161,20 +169,23 @@ def record_failed_attempt(ip: str) -> int | None:
 
 
 def record_successful_login(ip: str) -> None:
-    """Clear failed attempts on successful login."""
+    """Clear failed attempts for all phases on successful login."""
     _init_redis()
 
     if _redis_client:
         try:
-            _redis_client.delete(_redis_key_attempts(ip))
-            _redis_client.delete(_redis_key_lockout(ip))
+            for phase in ("password", "2fa"):
+                _redis_client.delete(_redis_key_attempts(ip, phase))
+                _redis_client.delete(_redis_key_lockout(ip, phase))
             return
         except Exception as exc:
             logger.debug(f"[LoginGuard] Redis delete failed, falling back to memory: {exc}")
 
     with _lock:
-        _attempts.pop(ip, None)
-        _lockouts.pop(ip, None)
+        for phase in ("password", "2fa"):
+            composite_key = f"{phase}:{ip}"
+            _attempts.pop(composite_key, None)
+            _lockouts.pop(composite_key, None)
 
 
 def get_stats() -> dict:
@@ -183,11 +194,16 @@ def get_stats() -> dict:
 
     if _redis_client:
         try:
-            lockout_keys = _redis_client.keys("login_guard:lockout:*")
-            attempt_keys = _redis_client.keys("login_guard:attempts:*")
+            total_attempts = 0
+            total_lockouts = 0
+            for phase in ("password", "2fa"):
+                lockout_keys = _redis_client.keys(f"login_guard:{phase}:lockout:*")
+                attempt_keys = _redis_client.keys(f"login_guard:{phase}:attempts:*")
+                total_lockouts += len(lockout_keys)
+                total_attempts += len(attempt_keys)
             return {
-                "tracked_ips": len(attempt_keys),
-                "locked_out_ips": len(lockout_keys),
+                "tracked_ips": total_attempts,
+                "locked_out_ips": total_lockouts,
                 "backend": "redis",
             }
         except Exception as exc:

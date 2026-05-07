@@ -1015,8 +1015,9 @@ async def save_exchange_settings(
 ):
     """Save exchange settings."""
     if _is_admin(user) and request.url.path.endswith("/api/settings/exchange"):
-        await runtime_settings.save_exchange_settings(db, req.model_dump(exclude_unset=True))
+        updated = await runtime_settings.save_exchange_settings(db, req.model_dump(exclude_unset=True), apply_immediately=False)
         await db.commit()
+        runtime_settings.apply_runtime_settings({"exchange": updated})
         return {"status": "ok"}
 
     db_user = await get_user_by_id(db, user["sub"])
