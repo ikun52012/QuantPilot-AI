@@ -357,7 +357,13 @@ async def setup_2fa(
 ):
     """Begin 2FA setup — returns QR code and secret. Does NOT enable 2FA yet."""
     from core.database import get_user_by_id
-    from core.totp import encrypt_totp_secret, generate_qr_code_base64, generate_totp_secret, get_totp_uri
+    from core.totp import (
+        decrypt_totp_secret,
+        encrypt_totp_secret,
+        generate_qr_code_base64,
+        generate_totp_secret,
+        get_totp_uri,
+    )
 
     db_user = await get_user_by_id(db, user["sub"])
     if not db_user:
