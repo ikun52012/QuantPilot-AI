@@ -131,16 +131,10 @@ async def _reevaluate_trailing_stop_config(
         )
         return trailing_config
 
-    # If global setting is explicit (not "auto"), respect it
-    global_mode = str(settings.trailing_stop.mode or "").lower()
-    if global_mode and global_mode not in {"auto", ""}:
-        logger.info(
-            f"[P1-FIX] Limit order filled: {position.ticker} - "
-            f"global trailing_stop mode '{global_mode}' preserved"
-        )
-        return trailing_config
-
-    # Only re-evaluate if mode was "auto" or "none" (AI-selected at signal time)
+    # Re-evaluate trailing_stop mode based on current market conditions.
+    # Even if global/user mode is "none", limit orders may fill hours later
+    # when market conditions have changed significantly. Re-evaluation ensures
+    # appropriate protection is applied at fill time.
     # Get current market data
     try:
         ticker = await get_ticker(position.ticker, {**exchange_config, "live_trading": False})
