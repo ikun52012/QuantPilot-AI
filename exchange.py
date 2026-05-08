@@ -1266,6 +1266,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "stop_loss": decision.stop_loss,
             "take_profit": decision.take_profit,
             "take_profit_orders": _decision_take_profit_plan(decision),
+            # Notional value for correct margin calculation (handles contract markets)
+            "notional_value": safe_float(order.get("cost")) or (actual_avg_price * actual_filled_qty if actual_avg_price > 0 and actual_filled_qty > 0 else 0),
         }
         if leverage:
             result["recommended_leverage"] = leverage
@@ -1837,6 +1839,8 @@ def _simulate_order(decision: TradeDecision) -> dict:
         "order_type": order_type,
         "limit_timeout_secs": decision.limit_timeout_secs,
         "note": note,
+        # Notional value for correct margin calculation
+        "notional_value": (decision.quantity * decision.entry_price) if decision.quantity and decision.entry_price else 0,
     }
 
 

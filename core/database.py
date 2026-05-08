@@ -1456,7 +1456,8 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
                 live_trading=live_trading,
                 sandbox_mode=_safe_bool(exchange_config.get("sandbox_mode"), False),
                 leverage=max(1.0, leverage),
-                margin=(entry_price * quantity / leverage) if entry_price > 0 and quantity > 0 else 0,
+                # Use notional_value from exchange for correct margin (handles contract markets)
+                margin=_safe_float(order_details.get("notional_value"), entry_price * quantity) / max(1.0, leverage) if entry_price > 0 and quantity > 0 else 0,
                 liquidation_price=_safe_float(order_details.get("liquidation_price")),
                 strategy_name=str(entry.get("strategy_name") or ""),
                 user_risk_profile=str(entry.get("user_risk_profile") or "balanced"),
