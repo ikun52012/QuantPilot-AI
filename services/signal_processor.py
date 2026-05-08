@@ -2311,6 +2311,18 @@ class SignalProcessor:
         risk_settings = self._resolved_risk_settings(user_settings)
         sizing_mode = risk_settings.get("position_sizing_mode", "percentage")
 
+        # Get contract size for correct notional calculation
+        contract_size = 1.0
+        try:
+            from exchange import get_market_limits
+            exchange_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
+            market_type = exchange_config.get("market_type") or settings.exchange.market_type
+            limits = get_market_limits(exchange_id, decision.ticker, market_type)
+            if limits and limits.get("contract_size", 1.0) > 1.0:
+                contract_size = float(limits.get("contract_size", 1.0))
+        except Exception:
+            pass
+
         # Fixed mode: ensure quantity matches the configured fixed amount
         # Skip the max_position_pct limit since user explicitly set the amount
         if sizing_mode == "fixed":
@@ -2319,13 +2331,15 @@ class SignalProcessor:
             if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
                 leverage = max(1.0, float(decision.ai_analysis.recommended_leverage))
             expected_notional = fixed_amount * leverage
-            current_notional = decision.quantity * decision.entry_price
+            # For contract markets: notional = quantity * price * contractSize
+            current_notional = decision.quantity * decision.entry_price * contract_size
             if abs(current_notional - expected_notional) > 1.0:
                 logger.warning(
                     f"[Signal] Fixed mode: correcting notional from {current_notional:.2f}USDT "
-                    f"to {expected_notional:.2f}USDT (margin={fixed_amount}USDT, leverage={leverage})"
+                    f"to {expected_notional:.2f}USDT (margin={fixed_amount}USDT, leverage={leverage}, "
+                    f"contractSize={contract_size})"
                 )
-                decision.quantity = round(expected_notional / decision.entry_price, 6)
+                decision.quantity = round(expected_notional / (decision.entry_price * contract_size), 6)
             return
 
         # Percentage/risk_ratio mode: apply max_position_pct limit

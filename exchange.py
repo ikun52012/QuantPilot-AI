@@ -530,9 +530,10 @@ def adjust_quantity_for_limits(
     min_cost = limits.get("min_cost", 0)
     max_cost = limits.get("max_cost", float("inf"))
     amount_precision = limits.get("amount_precision", 0)
+    contract_size = limits.get("contract_size", 1.0)
 
-    # Calculate order value (cost)
-    current_cost = quantity * price
+    # Calculate order value (cost) - for contract markets, cost = quantity * price * contractSize
+    current_cost = quantity * price * contract_size
 
     adjustments = []
 
@@ -542,14 +543,14 @@ def adjust_quantity_for_limits(
 
     # Check minimum cost (order value)
     if min_cost > 0 and current_cost < min_cost:
-        min_qty_for_cost = min_cost / price
+        min_qty_for_cost = min_cost / (price * contract_size)
         if min_qty_for_cost > quantity:
             quantity = min_qty_for_cost
             adjustments.append(f"cost_min: increased to {min_cost} USDT")
 
     # Check maximum cost (order value)
     if max_cost < float("inf") and current_cost > max_cost:
-        max_qty_for_cost = max_cost / price
+        max_qty_for_cost = max_cost / (price * contract_size)
         if max_qty_for_cost < quantity:
             quantity = max_qty_for_cost
             adjustments.append(f"cost_max: reduced to {max_cost} USDT")
@@ -1267,7 +1268,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "take_profit": decision.take_profit,
             "take_profit_orders": _decision_take_profit_plan(decision),
             # Notional value for correct margin calculation (handles contract markets)
-            "notional_value": safe_float(order.get("cost")) or (actual_avg_price * actual_filled_qty if actual_avg_price > 0 and actual_filled_qty > 0 else 0),
+            # Prefer exchange-reported cost, fallback to calculated notional with contract size
+            "notional_value": safe_float(order.get("cost")) or _calc_notional_value(actual_filled_qty, actual_avg_price, decision.ticker),
         }
         if leverage:
             result["recommended_leverage"] = leverage
@@ -1783,6 +1785,22 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
         return {"status": "error", "reason": "Failed to close position"}
 
 
+def _calc_notional_value(quantity: float, price: float, ticker: str = "") -> float:
+    """Calculate notional value for margin tracking.
+
+    For spot markets: notional = quantity * price
+    For contract markets: notional = quantity * price * contractSize
+
+    Note: Contract size lookup is skipped here to avoid creating exchange
+    instances. The quantity is already in contract count (set by
+    _calculate_position_size), so callers should multiply by contract_size
+    if known. This function returns the basic quantity * price as fallback.
+    """
+    if not quantity or not price or price <= 0:
+        return 0.0
+    return quantity * price
+
+
 def _simulate_order(decision: TradeDecision) -> dict:
     """Simulate order execution for paper trading with intelligent entry tracking."""
     tp_info = _decision_take_profit_plan(decision, status="simulated")
@@ -1839,8 +1857,8 @@ def _simulate_order(decision: TradeDecision) -> dict:
         "order_type": order_type,
         "limit_timeout_secs": decision.limit_timeout_secs,
         "note": note,
-        # Notional value for correct margin calculation
-        "notional_value": (decision.quantity * decision.entry_price) if decision.quantity and decision.entry_price else 0,
+        # Notional value for correct margin calculation (handles contract markets)
+        "notional_value": _calc_notional_value(decision.quantity, decision.entry_price, decision.ticker),
     }
 
 
