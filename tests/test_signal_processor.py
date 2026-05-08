@@ -886,6 +886,45 @@ class TestPositionSizeCalculation:
 
             assert decision.quantity == pytest.approx(20.0)
 
+    def test_fixed_position_limits_reject_large_exchange_min_deviation(self, processor):
+        """Fixed sizing should reject when exchange minimums would break the configured margin."""
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.position_sizing_mode = "fixed"
+            mock_settings.exchange.name = "okx"
+            mock_settings.exchange.market_type = "contract"
+
+            decision = TradeDecision(
+                execute=True,
+                ticker="XAUUSDT.P",
+                direction=SignalDirection.LONG,
+                entry_price=2000.0,
+                quantity=0.05,
+                ai_analysis=AIAnalysis(recommendation="execute", confidence=0.8, recommended_leverage=1),
+            )
+
+            with patch(
+                "exchange.get_market_limits",
+                return_value={
+                    "symbol": "XAU/USDT:USDT",
+                    "min_amount": 1.0,
+                    "max_amount": 10000.0,
+                    "min_cost": 0.0,
+                    "max_cost": float("inf"),
+                    "amount_precision": 0,
+                    "contract_size": 1.0,
+                },
+            ):
+                processor._apply_position_limits(
+                    decision,
+                    {"exchange": "okx", "market_type": "contract", "max_leverage": 20},
+                )
+
+            assert decision.execute is False
+            assert "Fixed margin deviation too large" in decision.reason
+
 
 class TestValidStopLoss:
     """Tests for stop loss validation."""

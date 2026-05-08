@@ -2246,21 +2246,24 @@ class SignalProcessor:
                             pass
 
         self._apply_position_limits(decision, exchange_config, user_settings)
-        control_state = await trading_allowed(
-            self.session,
-            user_id=user_id,
-            live_trading=bool(exchange_config.get("live_trading")),
-        )
-        if not control_state.get("allowed"):
-            reason = control_state.get("block_reason") or "Trading is currently disabled"
-            logger.warning(f"[Signal] Trade blocked by control mode: {reason}")
-            return {
-                "status": "rejected",
-                "reason": reason,
-                "trading_control": control_state,
-            }
+        if not decision.execute:
+            raw_result = {"status": "rejected", "reason": decision.reason}
+        else:
+            control_state = await trading_allowed(
+                self.session,
+                user_id=user_id,
+                live_trading=bool(exchange_config.get("live_trading")),
+            )
+            if not control_state.get("allowed"):
+                reason = control_state.get("block_reason") or "Trading is currently disabled"
+                logger.warning(f"[Signal] Trade blocked by control mode: {reason}")
+                return {
+                    "status": "rejected",
+                    "reason": reason,
+                    "trading_control": control_state,
+                }
 
-        raw_result = await execute_trade(decision, exchange_config)
+            raw_result = await execute_trade(decision, exchange_config)
         result: dict[str, object] = dict(raw_result) if isinstance(raw_result, dict) else {}
         order_status = str(result.get("status", "unknown"))
 
@@ -2363,6 +2366,7 @@ class SignalProcessor:
 
         # Get contract size for correct notional calculation
         contract_size = 1.0
+        limits = None
         try:
             from exchange import get_market_limits
             exchange_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
@@ -2388,6 +2392,39 @@ class SignalProcessor:
                     f"contractSize={contract_size})"
                 )
                 decision.quantity = round(expected_notional / (decision.entry_price * contract_size), 6)
+            if limits:
+                try:
+                    from exchange import adjust_quantity_for_limits
+
+                    adjusted_quantity = adjust_quantity_for_limits(
+                        float(decision.quantity),
+                        float(decision.entry_price),
+                        limits,
+                    )
+                    adjusted_notional = adjusted_quantity * float(decision.entry_price) * contract_size
+                    adjusted_margin = adjusted_notional / max(1.0, leverage)
+                    deviation_pct = (
+                        abs(adjusted_margin - fixed_amount) / fixed_amount * 100.0
+                        if fixed_amount > 0
+                        else 0.0
+                    )
+                    max_deviation_pct = 20.0
+                    if deviation_pct > max_deviation_pct:
+                        decision.execute = False
+                        decision.reason = (
+                            f"Fixed margin deviation too large after exchange limits: "
+                            f"configured={fixed_amount:.2f}USDT, actual={adjusted_margin:.2f}USDT "
+                            f"({deviation_pct:.2f}% > {max_deviation_pct:.2f}%)"
+                        )
+                        logger.warning(
+                            f"[Signal] {decision.reason} "
+                            f"(ticker={decision.ticker}, qty={decision.quantity}, adjusted_qty={adjusted_quantity}, "
+                            f"contractSize={contract_size})"
+                        )
+                        return
+                    decision.quantity = round(adjusted_quantity, 6)
+                except Exception as exc:
+                    logger.warning(f"[Signal] Could not verify fixed margin deviation: {exc}")
             return
 
         # Percentage/risk_ratio mode: apply max_position_pct limit
