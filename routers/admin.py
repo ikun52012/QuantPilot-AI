@@ -661,7 +661,10 @@ async def update_settings(
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update admin settings."""
+    """Update admin settings.
+
+    Includes validation for critical settings to prevent accidental misconfiguration.
+    """
     if not isinstance(settings_data, dict):
         raise HTTPException(400, "Settings data must be a JSON object")
 
@@ -673,6 +676,17 @@ async def update_settings(
     MAX_VALUE_LENGTH = 10_000
     SAFE_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 
+    # Protected settings that require special handling
+    PROTECTED_KEYS = {"webhook_secret", "app_encryption_key"}
+
+    # Validate critical risk settings
+    RISK_SETTING_RANGES = {
+        "max_daily_loss_pct": (0.1, 50.0),  # Min 0.1%, Max 50%
+        "max_correlated_exposure_pct": (10.0, 200.0),  # Min 10%, Max 200%
+        "risk_per_trade_pct": (0.1, 25.0),  # Min 0.1%, Max 25%
+        "max_position_pct": (1.0, 100.0),  # Min 1%, Max 100%
+    }
+
     for key, value in settings_data.items():
         if not isinstance(key, str):
             raise HTTPException(400, f"Setting key must be a string: {key!r}")
@@ -680,6 +694,27 @@ async def update_settings(
             raise HTTPException(400, f"Setting key too long (max {MAX_KEY_LENGTH} chars): {key[:50]}...")
         if not SAFE_KEY_PATTERN.match(key):
             raise HTTPException(400, f"Setting key contains invalid characters: {key!r}")
+
+        # Block protected settings from bulk update
+        if key in PROTECTED_KEYS:
+            raise HTTPException(
+                400,
+                f"Setting '{key}' cannot be updated via bulk settings. Use the dedicated endpoint."
+            )
+
+        # Validate risk setting ranges
+        if key in RISK_SETTING_RANGES:
+            try:
+                num_value = float(value)
+                min_val, max_val = RISK_SETTING_RANGES[key]
+                if num_value < min_val or num_value > max_val:
+                    raise HTTPException(
+                        400,
+                        f"Setting '{key}' must be between {min_val} and {max_val}, got {num_value}"
+                    )
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"Setting '{key}' must be a number, got {value!r}")
+
         value_str = str(value)
         if len(value_str) > MAX_VALUE_LENGTH:
             raise HTTPException(400, f"Setting value too long (max {MAX_VALUE_LENGTH} chars): {key}")
@@ -1320,15 +1355,50 @@ async def restore_postgresql_backup(
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Restore a PostgreSQL backup using pg_restore. Only works with PostgreSQL databases."""
+    """Restore a PostgreSQL backup using pg_restore.
+
+    SAFETY: This endpoint requires explicit confirmation and blocks if there
+    are open positions. After restore, the application MUST be restarted to
+    reload the restored data into memory.
+    """
     from backups import restore_postgresql
+
+    # Parse confirmation from request body
+    body = await request.json() if request.method == "POST" else {}
+    confirm = body.get("confirm", "").lower()
+    if confirm != "restore":
+        raise HTTPException(
+            400,
+            "PostgreSQL restore requires explicit confirmation. "
+            "Send POST with body: {\"confirm\": \"restore\"}. "
+            "WARNING: This will overwrite the current database. "
+            "You MUST restart the application after restore."
+        )
+
+    # Check for open positions - block restore if any exist
+    from sqlalchemy import func, select
+    from core.database import PositionModel
+    result = await db.execute(
+        select(func.count(PositionModel.id)).where(PositionModel.status == "open")
+    )
+    open_count = result.scalar() or 0
+    if open_count > 0:
+        raise HTTPException(
+            400,
+            f"Cannot restore while {open_count} positions are open. "
+            f"Close all positions before restoring."
+        )
 
     backup_name = Path(filename).stem
     result = await restore_postgresql(backup_name)
     if result.get("status") == "error":
         raise HTTPException(400, result.get("reason", "Restore failed"))
+
     await _add_audit_log(db, admin, "restore_postgresql", "backup", backup_name, "Restored PostgreSQL backup", request)
-    return result
+    return {
+        **result,
+        "warning": "Database restored. You MUST restart the application to reload data into memory.",
+    }
 
 
 @router.get("/position-monitor")

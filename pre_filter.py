@@ -462,7 +462,12 @@ async def run_pre_filter_async(
         reasons.append(f"Daily trade limit reached ({daily_count_snapshot}/{max_daily_trades})")
         _record_filter_block("daily_trade_limit", ticker)
 
-    account_equity = float(getattr(market, 'account_equity_usdt', 0) or 10000)
+    # Use user's actual balance from database, not stale market context equity
+    from core.database import get_user_balance_async
+    account_equity = await get_user_balance_async(user_id) if user_id else 10000.0
+    if account_equity <= 0:
+        account_equity = 10000.0  # Fallback for paper trading without user account
+
     current_pnl = await get_today_pnl_async(user_id=user_id, account_equity_usdt=account_equity)
     loss_ok = current_pnl > -max_daily_loss_pct
     checks["daily_loss_limit"] = {

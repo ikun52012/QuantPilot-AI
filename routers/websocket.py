@@ -29,6 +29,13 @@ _WS_MAX_RECONNECT_ATTEMPTS = 5
 _ws_connection_times: dict[str, list[float]] = defaultdict(list)
 _ws_reconnect_counts: dict[str, int] = defaultdict(int)
 
+# Shared price cache to prevent unbounded exchange API calls
+# A single background task updates prices for ALL tickers, all WS connections read from this cache
+_price_cache: dict[str, dict] = {}
+_price_cache_lock = asyncio.Lock()
+_price_cache_task: asyncio.Task | None = None
+_PRICE_CACHE_UPDATE_INTERVAL = 5  # seconds
+
 
 def _verify_ws_token_or_none(token: str) -> dict | None:
     """Reject expired, invalid, or still-pending-2FA tokens for WebSockets."""
@@ -509,24 +516,35 @@ async def _fetch_user_positions(user_id: str) -> list[dict]:
 
 
 async def _stream_prices(websocket: WebSocket, tickers: set[str]):
-    """Stream prices for subscribed tickers."""
-    from market_data import fetch_market_context
+    """Stream prices for subscribed tickers.
+
+    Uses a shared price cache to prevent unbounded exchange API calls.
+    A single background task updates prices for all tickers once every 5 seconds.
+    """
+    global _price_cache_task
+
+    # Start the shared price cache updater if not already running
+    if _price_cache_task is None or _price_cache_task.done():
+        _price_cache_task = asyncio.create_task(_update_price_cache())
 
     while True:
         try:
             for ticker in tickers:
                 try:
-                    context = await fetch_market_context(ticker)
+                    # Read from shared cache instead of making API calls
+                    async with _price_cache_lock:
+                        cached = _price_cache.get(ticker)
 
-                    await manager.send_personal({
-                        "type": "price_update",
-                        "ticker": ticker,
-                        "price": context.current_price,
-                        "change_1h_pct": context.price_change_1h,
-                        "volume_24h": context.volume_24h,
-                        "rsi_1h": context.rsi_1h,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }, websocket)
+                    if cached:
+                        await manager.send_personal({
+                            "type": "price_update",
+                            "ticker": ticker,
+                            "price": cached.get("current_price", 0),
+                            "change_1h_pct": cached.get("price_change_1h", 0),
+                            "volume_24h": cached.get("volume_24h", 0),
+                            "rsi_1h": cached.get("rsi_1h"),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }, websocket)
 
                 except Exception as e:
                     logger.debug(f"[WebSocket/Prices] Failed for {ticker}: {e}")
@@ -539,6 +557,50 @@ async def _stream_prices(websocket: WebSocket, tickers: set[str]):
         except Exception as e:
             logger.error(f"[WebSocket/Prices] Stream error: {e}")
             await asyncio.sleep(10)
+
+
+async def _update_price_cache():
+    """Background task that updates the shared price cache for all subscribed tickers.
+
+    This runs once every 5 seconds regardless of how many WebSocket connections exist,
+    preventing exchange API rate limit issues.
+    """
+    from market_data import fetch_market_context
+
+    while True:
+        try:
+            # Collect all unique tickers from active subscriptions
+            all_tickers = set()
+            for subscriptions in manager.subscriptions.values():
+                all_tickers.update(subscriptions.get("prices", set()))
+
+            if not all_tickers:
+                await asyncio.sleep(_PRICE_CACHE_UPDATE_INTERVAL)
+                continue
+
+            # Fetch prices for all tickers
+            for ticker in all_tickers:
+                try:
+                    context = await fetch_market_context(ticker)
+                    async with _price_cache_lock:
+                        _price_cache[ticker] = {
+                            "current_price": context.current_price,
+                            "price_change_1h": context.price_change_1h,
+                            "volume_24h": context.volume_24h,
+                            "rsi_1h": context.rsi_1h,
+                            "updated_at": time.time(),
+                        }
+                except Exception as e:
+                    logger.debug(f"[WebSocket/PriceCache] Failed to update {ticker}: {e}")
+
+            await asyncio.sleep(_PRICE_CACHE_UPDATE_INTERVAL)
+
+        except asyncio.CancelledError:
+            break
+
+        except Exception as e:
+            logger.error(f"[WebSocket/PriceCache] Cache update error: {e}")
+            await asyncio.sleep(30)
 
 
 async def _stream_system_status(websocket: WebSocket):

@@ -852,6 +852,25 @@ async def get_user_by_id(session: AsyncSession, user_id: str) -> UserModel | Non
     return result.scalar_one_or_none()
 
 
+async def get_user_balance_async(user_id: str) -> float:
+    """Get user's current balance from database.
+
+    Creates its own session to avoid dependency on caller's session.
+    Returns 0.0 if user not found or database error.
+    """
+    if not db_manager.async_session_factory:
+        return 0.0
+    try:
+        async with db_manager.async_session_factory() as session:
+            result = await session.execute(
+                select(UserModel.balance_usdt).where(UserModel.id == user_id)
+            )
+            balance = result.scalar_one_or_none()
+            return _safe_float(balance, 0.0)
+    except Exception:
+        return 0.0
+
+
 async def lock_user_by_id(session: AsyncSession, user_id: str) -> UserModel | None:
     """Get and lock a user row for transactional updates."""
     result = await session.execute(
@@ -1485,25 +1504,46 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
 
     # Closing a position
     open_direction = "long" if direction == "close_long" else "short"
+    position = None
 
-    # Find the matching open position
-    query = select(PositionModel).where(
-        PositionModel.status.in_(["open", "pending"]),
-        PositionModel.direction == open_direction,
-    )
-    if user_id:
-        query = query.where(PositionModel.user_id == user_id)
-    else:
-        query = query.where(PositionModel.user_id.is_(None))
-    query = query.order_by(PositionModel.opened_at.desc())
+    # First try to match by open_trade_id for precise position matching
+    open_trade_id = entry.get("open_trade_id") or order_details.get("open_trade_id")
+    if open_trade_id:
+        result = await session.execute(
+            select(PositionModel).where(
+                PositionModel.open_trade_id == open_trade_id,
+                PositionModel.status.in_(["open", "pending"]),
+            )
+        )
+        position = result.scalar_one_or_none()
+        if position:
+            # Found exact match by trade ID
+            pass
+        else:
+            logger.warning(
+                f"[Database] Position with open_trade_id={open_trade_id} not found, "
+                f"falling back to ticker+direction matching"
+            )
 
-    result = await session.execute(query)
-    target_key = position_symbol_key(ticker)
-    candidates = [
-        row for row in result.scalars().all()
-        if position_symbol_key(row.ticker) == target_key
-    ]
-    position = candidates[0] if candidates else None
+    # Fallback: match by ticker+direction (for legacy signals without open_trade_id)
+    if not position:
+        query = select(PositionModel).where(
+            PositionModel.status.in_(["open", "pending"]),
+            PositionModel.direction == open_direction,
+        )
+        if user_id:
+            query = query.where(PositionModel.user_id == user_id)
+        else:
+            query = query.where(PositionModel.user_id.is_(None))
+        query = query.order_by(PositionModel.opened_at.desc())
+
+        result = await session.execute(query)
+        target_key = position_symbol_key(ticker)
+        candidates = [
+            row for row in result.scalars().all()
+            if position_symbol_key(row.ticker) == target_key
+        ]
+        position = candidates[0] if candidates else None
 
     if not position:
         return entry
