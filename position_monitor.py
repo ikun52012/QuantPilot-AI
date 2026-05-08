@@ -1064,25 +1064,47 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 f"not found on exchange after {ghost_entry['fail_count']} attempts over "
                 f"{missing_elapsed:.0f}s - forcing close"
             )
-            ticker = await get_ticker(position.ticker, exchange_config)
-            exit_price = safe_float(ticker.get("last") or position.last_price or position.entry_price)
-            if exit_price > 0:
-                await record_position_close_trade_async(
-                    session=session,
-                    position=position,
-                    exit_price=exit_price,
-                    close_reason="ghost_position_auto_close",
-                    order_status="ghost_closed",
-                    order_details={
-                        "fail_count": ghost_entry["fail_count"],
-                        "dynamic_threshold": dynamic_threshold,
-                        "position_value_usdt": position_value,
-                        "missing_elapsed_secs": missing_elapsed,
-                    },
+            # SAFETY: Only close if we can get a valid market price
+            try:
+                ticker = await get_ticker(position.ticker, exchange_config)
+                exit_price = safe_float(ticker.get("last"))
+                if not exit_price or exit_price <= 0:
+                    logger.warning(
+                        f"[P0-FIX] Ghost position {position.id[:8]} ticker fetch returned invalid price, "
+                        f"deferring close to next cycle"
+                    )
+                    return stats
+                # Validate price is within 50% of entry (sanity check against stale/corrupt data)
+                entry_price = safe_float(position.entry_price, 0.0)
+                if entry_price > 0 and (exit_price < entry_price * 0.5 or exit_price > entry_price * 2.0):
+                    logger.warning(
+                        f"[P0-FIX] Ghost position {position.id[:8]} exit price ${exit_price} too far from "
+                        f"entry ${entry_price}, deferring close to next cycle"
+                    )
+                    return stats
+            except Exception as e:
+                logger.warning(
+                    f"[P0-FIX] Ghost position {position.id[:8]} ticker fetch failed: {e}, "
+                    f"deferring close to next cycle"
                 )
-                _GHOST_POSITION_TRACKER.pop(position.id, None)
-                stats["closed"] += 1
                 return stats
+
+            await record_position_close_trade_async(
+                session=session,
+                position=position,
+                exit_price=exit_price,
+                close_reason="ghost_position_auto_close",
+                order_status="ghost_closed",
+                order_details={
+                    "fail_count": ghost_entry["fail_count"],
+                    "dynamic_threshold": dynamic_threshold,
+                    "position_value_usdt": position_value,
+                    "missing_elapsed_secs": missing_elapsed,
+                },
+            )
+            _GHOST_POSITION_TRACKER.pop(position.id, None)
+            stats["closed"] += 1
+            return stats
 
         ticker = await get_ticker(position.ticker, exchange_config)
         mark_price = safe_float(ticker.get("last") or position.last_price)

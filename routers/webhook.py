@@ -158,6 +158,8 @@ async def _process_webhook_background(
     """Process webhook signal in background to avoid TradingView timeout.
 
     Includes retry logic and dead-letter logging for error recovery.
+    On final failure, updates the webhook event status to 'failed' for
+    later recovery via admin dashboard or manual re-processing.
     """
     max_retries = 2
     for attempt in range(1, max_retries + 1):
@@ -188,6 +190,19 @@ async def _process_webhook_background(
                     f"Signal queued for manual review. Ticker: {signal.ticker}, "
                     f"Direction: {signal.direction.value}, Error: {exc}"
                 )
+                # Mark the webhook event as failed for recovery
+                try:
+                    from core.database import has_recent_webhook_event, db_manager
+                    async with db_manager.async_session_factory() as session:
+                        fingerprint = compute_webhook_fingerprint(raw_body, user_id)
+                        existing = await has_recent_webhook_event(session, fingerprint, window_secs=3600)
+                        if existing and existing.status in {"received", "reserved", "retrying"}:
+                            existing.status = "failed"
+                            existing.reason = str(exc)[:500]
+                            await session.commit()
+                            logger.info(f"[Webhook] Marked event {fingerprint[:12]}... as failed for recovery")
+                except Exception:
+                    pass
 
 
 async def _find_user_by_secret(db: AsyncSession, secret: str):

@@ -4,6 +4,7 @@ Sends trading notifications to Telegram with i18n support.
 Includes retry mechanism for network resilience.
 """
 import asyncio
+import html
 
 import httpx
 from loguru import logger
@@ -13,6 +14,11 @@ from models import AIAnalysis, TradeDecision
 
 _TELEGRAM_MAX_RETRIES = 2
 _TELEGRAM_RETRY_DELAY_SECS = 2.0
+
+
+def _safe_html(text: str) -> str:
+    """Escape text for safe embedding in Telegram HTML messages."""
+    return html.escape(str(text))
 
 
 def _lang() -> str:
@@ -140,8 +146,8 @@ async def notify_signal_received(ticker: str, direction: str, price: float):
     text = (
         f"{_t('signal_received')}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"{_t('ticker')}: <code>{ticker}</code>\n"
-        f"{_t('direction')}: <b>{direction.upper()}</b>\n"
+        f"{_t('ticker')}: <code>{_safe_html(ticker)}</code>\n"
+        f"{_t('direction')}: <b>{_safe_html(direction).upper()}</b>\n"
         f"{_t('price')}: <code>{price}</code>\n"
         f"{_t('status')}: {_t('analyzing')}"
     )
@@ -153,9 +159,9 @@ async def notify_pre_filter_blocked(ticker: str, direction: str, reason: str):
     text = (
         f"{_t('signal_blocked')}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"{_t('ticker')}: <code>{ticker}</code>\n"
-        f"{_t('direction')}: {direction.upper()}\n"
-        f"{_t('reason')}: {reason}"
+        f"{_t('ticker')}: <code>{_safe_html(ticker)}</code>\n"
+        f"{_t('direction')}: {_safe_html(direction).upper()}\n"
+        f"{_t('reason')}: {_safe_html(reason)}"
     )
     await send_telegram(text)
 
@@ -165,8 +171,8 @@ async def notify_signal_batched(ticker: str, direction: str, batch_count: int, w
     text = (
         f"{_t('signal_batched')}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"{_t('ticker')}: <code>{ticker}</code>\n"
-        f"{_t('direction')}: {direction.upper()}\n"
+        f"{_t('ticker')}: <code>{_safe_html(ticker)}</code>\n"
+        f"{_t('direction')}: {_safe_html(direction).upper()}\n"
         f"📊 Batch count: {batch_count}\n"
         f"⏱️ Window: {window_secs}s\n"
         f"💡 Reason: Too many same-direction signals within window"
@@ -179,9 +185,9 @@ async def notify_signal_queued(ticker: str, direction: str, reason: str):
     text = (
         f"{_t('signal_queued')}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"{_t('ticker')}: <code>{ticker}</code>\n"
-        f"{_t('direction')}: {direction.upper()}\n"
-        f"{_t('reason')}: {reason}"
+        f"{_t('ticker')}: <code>{_safe_html(ticker)}</code>\n"
+        f"{_t('direction')}: {_safe_html(direction).upper()}\n"
+        f"{_t('reason')}: {_safe_html(reason)}"
     )
     await send_telegram(text)
 
@@ -198,7 +204,7 @@ async def notify_ai_analysis(ticker: str, analysis: AIAnalysis):
 
     warnings_text = ""
     if analysis.warnings:
-        warnings_text = f"\n⚠️ {_t('warnings')}:\n" + "\n".join(f"  • {w}" for w in analysis.warnings)
+        warnings_text = f"\n⚠️ {_t('warnings')}:\n" + "\n".join(f"  • {_safe_html(w)}" for w in analysis.warnings)
 
     tp_levels = [
         value
@@ -208,15 +214,15 @@ async def notify_ai_analysis(ticker: str, analysis: AIAnalysis):
     tp_text = f"\n{_t('take_profit')}: <code>{', '.join(str(v) for v in tp_levels)}</code>" if tp_levels else ""
 
     text = (
-        f"{emoji} <b>{_t('ai_analysis')}: {analysis.recommendation.upper()}</b>\n"
+        f"{emoji} <b>{_t('ai_analysis')}: {_safe_html(analysis.recommendation).upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"{_t('ticker')}: <code>{ticker}</code>\n"
+        f"{_t('ticker')}: <code>{_safe_html(ticker)}</code>\n"
         f"{_t('confidence')}: <b>{analysis.confidence:.0%}</b>\n"
         f"{_t('risk_score')}: {analysis.risk_score:.0%}\n"
-        f"{_t('market')}: {analysis.market_condition}\n"
+        f"{_t('market')}: {_safe_html(analysis.market_condition)}\n"
         f"{_t('position_size')}: {analysis.position_size_pct:.0%}\n"
         f"{tp_text}"
-        f"\n💬 {analysis.reasoning}"
+        f"\n💬 {_safe_html(analysis.reasoning)}"
         f"{warnings_text}"
     )
     await send_telegram(text)

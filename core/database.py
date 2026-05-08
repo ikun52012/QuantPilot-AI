@@ -1193,22 +1193,41 @@ async def close_position_async(
     """Close a tracked position and return realised leveraged PnL percentage.
 
     Deducts trading fees from user balance for paper trading to reflect true costs.
+
+    Safety: Re-checks position status before closing to prevent double-close
+    race conditions (e.g., TP hit + manual close happening concurrently).
     """
+    # SAFETY: Re-fetch position with row-level lock to prevent concurrent closes
+    result = await session.execute(
+        select(PositionModel)
+        .where(PositionModel.id == position.id)
+        .with_for_update(nowait=True)
+    )
+    locked_position = result.scalar_one_or_none()
+    if not locked_position:
+        raise ValueError(f"Position {position.id} not found")
+
+    # If already closed by another process (TP hit, SL, etc.), abort
+    if locked_position.status == "closed":
+        logger.info(f"[Database] Position {position.id} already closed (status=closed), skipping")
+        return _safe_float(locked_position.pnl_pct, 0.0)
+
+    # Use the locked position for all calculations
     exit_price = _safe_float(exit_price)
-    opened_qty = max(_safe_float(position.quantity), 0.0)
-    remaining_qty = _effective_remaining_quantity(position, opened_qty)
+    opened_qty = max(_safe_float(locked_position.quantity), 0.0)
+    remaining_qty = _effective_remaining_quantity(locked_position, opened_qty)
     remaining_weight = min(1.0, max(0.0, remaining_qty / opened_qty)) if opened_qty > 0 else 1.0
     remaining_pnl = _position_pnl_pct(
-        str(position.direction or "long").lower(),
-        _safe_float(position.entry_price),
+        str(locked_position.direction or "long").lower(),
+        _safe_float(locked_position.entry_price),
         exit_price,
-        _safe_float(position.leverage, 1.0),
+        _safe_float(locked_position.leverage, 1.0),
     ) * remaining_weight
-    pnl_pct = round(_safe_float(position.realized_pnl_pct) + remaining_pnl, 6)
+    pnl_pct = round(_safe_float(locked_position.realized_pnl_pct) + remaining_pnl, 6)
 
     # Calculate actual USDT PnL for balance update
-    entry_price = _safe_float(position.entry_price)
-    leverage = _safe_float(position.leverage, 1.0)
+    entry_price = _safe_float(locked_position.entry_price)
+    leverage = _safe_float(locked_position.leverage, 1.0)
     if entry_price > 0 and opened_qty > 0:
         # Margin used = (entry_price * quantity) / leverage
         margin_used = (entry_price * opened_qty) / max(1.0, leverage)
@@ -1218,36 +1237,36 @@ async def close_position_async(
         pnl_usdt = 0.0
 
     now = closed_at or utcnow()
-    position.status = "closed"
-    position.exit_price = exit_price
-    position.pnl_pct = pnl_pct
-    position.current_pnl_pct = pnl_pct
-    position.remaining_quantity = 0.0
-    position.close_reason = close_reason
-    position.closed_at = now
-    position.updated_at = now
+    locked_position.status = "closed"
+    locked_position.exit_price = exit_price
+    locked_position.pnl_pct = pnl_pct
+    locked_position.current_pnl_pct = pnl_pct
+    locked_position.remaining_quantity = 0.0
+    locked_position.close_reason = close_reason
+    locked_position.closed_at = now
+    locked_position.updated_at = now
     if close_trade_id:
-        position.close_trade_id = close_trade_id
+        locked_position.close_trade_id = close_trade_id
 
     # Update user balance with realized PnL for paper trading
-    if not position.live_trading and position.user_id:
+    if not locked_position.live_trading and locked_position.user_id:
         if pnl_usdt != 0.0:
-            await update_user_balance(session, position.user_id, pnl_usdt)
+            await update_user_balance(session, locked_position.user_id, pnl_usdt)
         # Deduct trading fees from balance (fees are real costs even in paper trading)
-        fees_total = _safe_float(position.fees_total_usdt, 0.0)
+        fees_total = _safe_float(locked_position.fees_total_usdt, 0.0)
         if fees_total > 0:
-            await update_user_balance(session, position.user_id, -fees_total)
+            await update_user_balance(session, locked_position.user_id, -fees_total)
 
     # Record PnL in account risk tracker for loss-limit enforcement
     try:
         await record_position_pnl(
-            user_id=position.user_id,
+            user_id=locked_position.user_id,
             pnl_pct=pnl_pct,
             pnl_usdt=pnl_usdt,
             equity_usdt=(entry_price * opened_qty) / max(1.0, leverage) if entry_price > 0 and opened_qty > 0 else 0.0,
         )
     except Exception:
-        logger.warning(f"[Database] Failed to record account risk PnL for position {position.id}")
+        logger.warning(f"[Database] Failed to record account risk PnL for position {locked_position.id}")
 
     await session.flush()
     return pnl_pct
@@ -1551,44 +1570,21 @@ async def record_webhook_event(
     client_ip: str,
     payload: dict,
 ) -> WebhookEventModel:
-    """Record a webhook event.
-
-    Handles duplicate fingerprint conflicts by updating existing record.
-    Rolls back session on error to prevent invalid transaction state.
-    """
-    try:
-        event = WebhookEventModel(
-            user_id=user_id,
-            fingerprint=fingerprint,
-            ticker=ticker,
-            direction=direction,
-            status=status,
-            status_code=status_code,
-            reason=reason,
-            client_ip=client_ip,
-            payload_json=json.dumps(payload, default=str),
-        )
-        session.add(event)
-        await session.flush()
-        return event
-    except Exception as e:
-        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-            # Rollback only the failed insert using savepoint semantics.
-            # Note: session.rollback() rolls back ALL pending changes, so we
-            # handle duplicates by querying first in the caller when possible.
-            await session.rollback()
-            result = await session.execute(
-                select(WebhookEventModel).where(WebhookEventModel.fingerprint == fingerprint).order_by(WebhookEventModel.created_at.desc()).limit(1)
-            )
-            existing = result.scalar_one_or_none()
-            if existing:
-                existing.status = status
-                existing.status_code = status_code
-                existing.reason = reason
-                existing.payload_json = json.dumps(payload, default=str)
-                await session.flush()
-                return existing
-        raise
+    """Record a webhook event."""
+    event = WebhookEventModel(
+        user_id=user_id,
+        fingerprint=fingerprint,
+        ticker=ticker,
+        direction=direction,
+        status=status,
+        status_code=status_code,
+        reason=reason,
+        client_ip=client_ip,
+        payload_json=json.dumps(payload, default=str),
+    )
+    session.add(event)
+    await session.flush()
+    return event
 
 
 async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, window_secs: int = 300) -> WebhookEventModel | None:

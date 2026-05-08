@@ -785,7 +785,9 @@ class SignalProcessor:
         lock = await _fingerprint_lock(fingerprint)
         try:
             async with lock:
-                existing = await has_recent_webhook_event(self.session, fingerprint, window_secs=300)
+                # Extended to 30 minutes to cover TradingView's retry window
+                # (TradingView may retry webhooks for up to 30 minutes)
+                existing = await has_recent_webhook_event(self.session, fingerprint, window_secs=1800)
                 if existing:
                     if existing.status in {"received", "reserved", "retrying"}:
                         existing.status = "retrying"
@@ -2276,7 +2278,11 @@ class SignalProcessor:
         return result
 
     async def _load_user_settings(self, user_id: str | None) -> dict:
-        """Load decrypted per-user settings once for this webhook."""
+        """Load decrypted per-user settings once for this webhook.
+
+        Logs at ERROR level if decryption fails so admins are alerted.
+        Returns empty dict as fallback — signal processing continues with defaults.
+        """
         if not user_id:
             return {}
         user = await get_user_by_id(self.session, user_id)
@@ -2287,7 +2293,10 @@ class SignalProcessor:
             settings_data = decrypt_settings_payload(raw_settings)
             return dict(settings_data) if isinstance(settings_data, dict) else {}
         except Exception as exc:
-            logger.warning(f"[Signal] Could not load user settings: {exc}")
+            logger.error(
+                f"[Signal] Could not load user settings for user {user_id}: {exc}. "
+                f"Signal will process with default settings — verify user configuration."
+            )
             return {}
 
     def _apply_position_limits(

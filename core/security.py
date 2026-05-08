@@ -110,10 +110,7 @@ def _derive_fernet_key(raw: str) -> bytes:
     try:
         Fernet(raw.encode())
         return raw.encode()
-    except (ValueError, TypeError):
-        digest = hashlib.sha256(raw.encode()).digest()
-        return base64.urlsafe_b64encode(digest)
-    except Exception:
+    except (ValueError, TypeError, Exception):
         digest = hashlib.sha256(raw.encode()).digest()
         return base64.urlsafe_b64encode(digest)
 

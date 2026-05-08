@@ -510,6 +510,14 @@ async def close_position(
         position_id: Position ID from database or 'exchange::symbol::side' format
         close_pct: Percentage to close (1-100). If None, close entire position.
     """
+    # Validate close_pct if provided
+    if close_pct is not None:
+        if close_pct <= 0 or close_pct > 100:
+            raise HTTPException(400, "close_pct must be between 0 and 100")
+        if close_pct >= 99.9:
+            # Treat >= 99.9% as full close to avoid rounding issues
+            close_pct = None
+
     from core.database import close_position_async
     from exchange import _close_position, _get_or_create_exchange, _resolve_symbol
 
