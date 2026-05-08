@@ -386,6 +386,33 @@ class TestSignalProcessorBuildDecision:
         assert passed_settings["_prefilter_summary"]["hard_fail_count"] == 0
         assert passed_settings["_prefilter_summary"]["notable_checks"] == ["spread", "funding_rate"]
 
+    @patch("services.signal_processor.analyze_signal", new_callable=AsyncMock)
+    @pytest.mark.asyncio
+    async def test_run_ai_analysis_excludes_disabled_prefilter_checks(self, mock_analyze_signal, processor, sample_signal, sample_market):
+        mock_analyze_signal.return_value = AIAnalysis(confidence=0.8, recommendation="execute", reasoning="ok")
+        prefilter_result = PreFilterResult(
+            passed=True,
+            reason="disabled issue ignored",
+            score=100.0,
+            checks={
+                "spread": {"passed": True, "soft_fail": True, "disabled": True},
+                "funding_rate": {"passed": False, "soft_fail": True},
+                "data_completeness": {"passed": True, "missing_data": True, "disabled": True},
+            },
+        )
+
+        await processor._run_ai_analysis(
+            sample_signal,
+            sample_market,
+            {"risk": {"ai_risk_profile": "balanced"}},
+            prefilter_result=prefilter_result,
+        )
+
+        passed_settings = mock_analyze_signal.await_args.args[2]
+        assert passed_settings["_prefilter_summary"]["soft_fail_count"] == 1
+        assert passed_settings["_prefilter_summary"]["missing_data_count"] == 0
+        assert passed_settings["_prefilter_summary"]["notable_checks"] == ["funding_rate"]
+
     @patch("services.signal_processor.run_pre_filter_async", new_callable=AsyncMock)
     @pytest.mark.asyncio
     async def test_run_prefilter_enables_scoring_when_min_pass_score_positive(

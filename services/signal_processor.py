@@ -899,15 +899,20 @@ class SignalProcessor:
 
         scoped_user_settings = dict(user_settings or {})
         if prefilter_result is not None:
-            soft_fail_count = sum(1 for check in prefilter_result.checks.values() if check.get("soft_fail", False))
+            active_prefilter_checks = {
+                check_name: check
+                for check_name, check in prefilter_result.checks.items()
+                if not check.get("disabled", False)
+            }
+            soft_fail_count = sum(1 for check in active_prefilter_checks.values() if check.get("soft_fail", False))
             hard_fail_count = sum(
                 1
-                for check in prefilter_result.checks.values()
-                if not check.get("passed", True) and not check.get("disabled", False) and not check.get("soft_fail", False)
+                for check in active_prefilter_checks.values()
+                if not check.get("passed", True) and not check.get("soft_fail", False)
             )
-            missing_data_count = sum(1 for check in prefilter_result.checks.values() if check.get("missing_data", False))
+            missing_data_count = sum(1 for check in active_prefilter_checks.values() if check.get("missing_data", False))
             notable_checks = []
-            for check_name, check in prefilter_result.checks.items():
+            for check_name, check in active_prefilter_checks.items():
                 if check.get("soft_fail", False) or not check.get("passed", True) or check.get("missing_data", False):
                     notable_checks.append(check_name)
             scoped_user_settings["_prefilter_summary"] = {
