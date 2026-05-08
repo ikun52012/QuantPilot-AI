@@ -1061,6 +1061,19 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str, market_type: str | Non
     return candidates[0]
 
 
+def _effective_order_leverage(decision: TradeDecision, exchange_config: dict | None = None) -> int | None:
+    """Return the leverage that will actually be requested for this order."""
+    exchange_config = exchange_config or {}
+    if not decision.ai_analysis or not decision.ai_analysis.recommended_leverage:
+        return None
+    try:
+        max_leverage = int(float(exchange_config.get("max_leverage") or 125))
+    except (TypeError, ValueError):
+        max_leverage = 125
+    max_leverage = max(1, min(max_leverage, 125))
+    return max(1, min(int(round(decision.ai_analysis.recommended_leverage)), max_leverage))
+
+
 async def execute_trade(decision: TradeDecision, exchange_config: dict | None = None) -> dict:
     """
     Execute a trade on the configured exchange.
@@ -1076,7 +1089,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
 
     if not live_trading:
         logger.warning("[Exchange] 🔶 PAPER TRADING MODE - not sending real orders")
-        return _simulate_order(decision)
+        return _simulate_order(decision, exchange_config)
 
     if not _CCXT_AVAILABLE:
         return {
@@ -1105,11 +1118,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
     )
 
     try:
-        leverage = None
-        if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
-            max_leverage = max(1, min(int(exchange_config.get("max_leverage") or 125), 125))
-            leverage = max(1, min(int(round(decision.ai_analysis.recommended_leverage)), max_leverage))
-
+        leverage = _effective_order_leverage(decision, exchange_config)
+        if leverage:
             # P0-FIX: Use retry mechanism for leverage setup
             result = await _set_leverage_with_retry(exchange, leverage, symbol)
 
@@ -1251,6 +1261,16 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             logger.warning(f"[Exchange] Order status '{order_status}' treated as error")
             return {"status": "error", "reason": f"Order failed with status: {order_status}", "order_id": order_id}
 
+        contract_size = 1.0
+        try:
+            ex_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
+            mkt_type = exchange_config.get("market_type") or settings.exchange.market_type
+            limits = get_market_limits(ex_id, decision.ticker, mkt_type)
+            if limits and limits.get("contract_size", 1.0) > 1.0:
+                contract_size = float(limits.get("contract_size", 1.0))
+        except Exception:
+            contract_size = 1.0
+
         result = {
             "status": result_status,
             "order_id": order_id,
@@ -1269,17 +1289,9 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "take_profit_orders": _decision_take_profit_plan(decision),
             # Notional value for correct margin calculation (handles contract markets)
             # Prefer exchange-reported cost, fallback to calculated notional with contract size
-            "notional_value": safe_float(order.get("cost")) or _calc_notional_value(actual_filled_qty, actual_avg_price, decision.ticker),
+            "notional_value": safe_float(order.get("cost")) or (actual_filled_qty * actual_avg_price * contract_size),
+            "contract_size": contract_size,
         }
-        # Add contract_size for correct PnL/margin calculations downstream
-        try:
-            ex_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
-            mkt_type = exchange_config.get("market_type") or settings.exchange.market_type
-            limits = get_market_limits(ex_id, decision.ticker, mkt_type)
-            if limits and limits.get("contract_size", 1.0) > 1.0:
-                result["contract_size"] = float(limits.get("contract_size", 1.0))
-        except Exception:
-            pass
         if leverage:
             result["recommended_leverage"] = leverage
 
@@ -1810,9 +1822,28 @@ def _calc_notional_value(quantity: float, price: float, ticker: str = "") -> flo
     return quantity * price
 
 
-def _simulate_order(decision: TradeDecision) -> dict:
+def _simulate_order(decision: TradeDecision, exchange_config: dict | None = None) -> dict:
     """Simulate order execution for paper trading with intelligent entry tracking."""
+    exchange_config = exchange_config or {}
     tp_info = _decision_take_profit_plan(decision, status="simulated")
+    leverage = _effective_order_leverage(decision, exchange_config)
+
+    contract_size = 1.0
+    try:
+        limits = get_market_limits(
+            exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+            decision.ticker,
+            exchange_config.get("market_type") or settings.exchange.market_type,
+        )
+        contract_size = float(limits.get("contract_size", 1.0) or 1.0) if limits else 1.0
+    except Exception:
+        contract_size = 1.0
+
+    notional_value = (
+        float(decision.quantity or 0.0) * float(decision.entry_price or 0.0) * contract_size
+        if decision.quantity and decision.entry_price
+        else 0.0
+    )
 
     trailing_mode = decision.trailing_stop.mode if decision.trailing_stop else TrailingStopMode.NONE
     order_type = str(getattr(decision, "order_type", "") or "").strip().lower()
@@ -1850,7 +1881,7 @@ def _simulate_order(decision: TradeDecision) -> dict:
             f"qty={decision.quantity} entry={decision.entry_price} SL={decision.stop_loss} TPs={len(decision.take_profit_levels)} "
         )
 
-    return {
+    result = {
         "status": status,
         "symbol": decision.ticker,
         "direction": decision.direction.value if decision.direction else "unknown",
@@ -1867,9 +1898,12 @@ def _simulate_order(decision: TradeDecision) -> dict:
         "limit_timeout_secs": decision.limit_timeout_secs,
         "note": note,
         # Notional value for correct margin calculation (handles contract markets)
-        "notional_value": _calc_notional_value(decision.quantity, decision.entry_price, decision.ticker),
-        "contract_size": 1.0,  # Paper trading uses spot-like sizing
+        "notional_value": notional_value,
+        "contract_size": contract_size,
     }
+    if leverage:
+        result["recommended_leverage"] = leverage
+    return result
 
 
 async def get_account_balance(exchange_config: dict | None = None) -> dict:

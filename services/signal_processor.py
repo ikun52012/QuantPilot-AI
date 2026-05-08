@@ -967,10 +967,17 @@ class SignalProcessor:
             limit_timeout_overrides,
         )
 
+        recommendation = str(analysis.recommendation or "hold").lower().strip()
+
         # Check AI recommendation
-        if analysis.recommendation == "reject":
+        if recommendation == "reject":
             decision.execute = False
             decision.reason = f"AI rejected: {analysis.reasoning}"
+            return decision
+
+        if recommendation not in {"execute", "modify"}:
+            decision.execute = False
+            decision.reason = f"AI did not approve execution ({recommendation}): {analysis.reasoning}"
             return decision
 
         if analysis.confidence < 0.4:
@@ -991,13 +998,13 @@ class SignalProcessor:
             return decision
 
         # Set execute flag
-        decision.execute = analysis.recommendation in ("execute", "modify")
+        decision.execute = recommendation in ("execute", "modify")
 
         # ── SMC/FVG entry optimization ──
         # When AI recommends "modify" and provides a suggested_entry, use it
         # as the optimal entry price instead of the raw signal price.
         # BUG FIX: If modify fails validation, fallback to original price instead of rejecting
-        if decision.execute and analysis.recommendation == "modify":
+        if decision.execute and recommendation == "modify":
             suggested = float(analysis.suggested_entry or 0)
 
             if suggested > 0:
@@ -1833,20 +1840,31 @@ class SignalProcessor:
                 return result
 
             # Notional exposure limit
-            equity = float(self._resolved_risk_settings(user_settings).get("account_equity_usdt") or 1000)
-            # Get contract_size for new position notional calculation
-            new_contract_size = 1.0
-            try:
-                from exchange import get_market_limits
-                exchange_config = self._get_exchange_config(user_settings)
-                exchange_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
-                market_type = exchange_config.get("market_type") or settings.exchange.market_type
-                limits = get_market_limits(exchange_id, decision.ticker, market_type)
-                if limits and limits.get("contract_size", 1.0) > 1.0:
-                    new_contract_size = float(limits.get("contract_size", 1.0))
-            except Exception:
-                pass
-            new_notional = decision.entry_price * decision.quantity * new_contract_size if decision.entry_price and decision.quantity else 0
+            risk_settings = self._resolved_risk_settings(user_settings)
+            equity = float(risk_settings.get("account_equity_usdt") or 1000)
+            if risk_settings.get("position_sizing_mode") == "fixed":
+                max_leverage = 125
+                if user_id:
+                    user = await get_user_by_id(self.session, user_id)
+                    max_leverage = int(getattr(user, "max_leverage", None) or max_leverage) if user else max_leverage
+                new_notional = float(risk_settings.get("fixed_position_size_usdt") or 100.0) * self._effective_leverage(
+                    decision.ai_analysis,
+                    max_leverage,
+                )
+            else:
+                # Get contract_size for new position notional calculation
+                new_contract_size = 1.0
+                try:
+                    from exchange import get_market_limits
+                    exchange_config = self._get_exchange_config(user_settings)
+                    exchange_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
+                    market_type = exchange_config.get("market_type") or settings.exchange.market_type
+                    limits = get_market_limits(exchange_id, decision.ticker, market_type)
+                    if limits and limits.get("contract_size", 1.0) > 1.0:
+                        new_contract_size = float(limits.get("contract_size", 1.0))
+                except Exception:
+                    pass
+                new_notional = decision.entry_price * decision.quantity * new_contract_size if decision.entry_price and decision.quantity else 0
             total_notional_after = current_notional + new_notional
             exposure_pct = total_notional_after / equity * 100 if equity > 0 else 0
 
@@ -1906,6 +1924,15 @@ class SignalProcessor:
         else:
             parsed = default
         return max(min_value, min(parsed, max_value))
+
+    @classmethod
+    def _effective_leverage(cls, ai_analysis: AIAnalysis | None, max_leverage: float | int | None = None) -> float:
+        """Return the leverage that execution will actually be allowed to use."""
+        raw_leverage = 1.0
+        if ai_analysis and ai_analysis.recommended_leverage:
+            raw_leverage = cls._coerce_risk_float(ai_analysis.recommended_leverage, 1.0, 1.0, 125.0)
+        leverage_cap = cls._coerce_risk_float(max_leverage, 125.0, 1.0, 125.0)
+        return max(1.0, min(raw_leverage, leverage_cap, 125.0))
 
     @classmethod
     def _resolved_risk_settings(cls, user_settings: dict | None = None) -> dict[str, float | str]:
@@ -2345,9 +2372,7 @@ class SignalProcessor:
         # Skip the max_position_pct limit since user explicitly set the amount
         if sizing_mode == "fixed":
             fixed_amount = float(risk_settings.get("fixed_position_size_usdt", 100.0))
-            leverage = 1.0
-            if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
-                leverage = max(1.0, float(decision.ai_analysis.recommended_leverage))
+            leverage = self._effective_leverage(decision.ai_analysis, exchange_config.get("max_leverage"))
             expected_notional = fixed_amount * leverage
             # For contract markets: notional = quantity * price * contractSize
             current_notional = decision.quantity * decision.entry_price * contract_size
@@ -2370,9 +2395,7 @@ class SignalProcessor:
         )
         max_position_pct = min(exchange_cap, float(risk_settings["max_position_pct"]))
         max_leverage = max(1.0, min(float(exchange_config.get("max_leverage") or 125.0), 125.0))
-        leverage = 1.0
-        if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
-            leverage = max(1.0, min(float(decision.ai_analysis.recommended_leverage), max_leverage))
+        leverage = self._effective_leverage(decision.ai_analysis, max_leverage)
         max_notional = account_equity * (max_position_pct / 100.0) * leverage
         # For contract markets: max_quantity = max_notional / (price * contract_size)
         max_quantity = max_notional / (float(decision.entry_price) * contract_size)

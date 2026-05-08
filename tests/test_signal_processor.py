@@ -106,6 +106,21 @@ class TestSignalProcessorBuildDecision:
         assert decision.execute is False
         assert "AI rejected" in decision.reason
 
+    def test_hold_recommendation_does_not_build_trade(self, processor, sample_signal, sample_market):
+        """AI hold means stand aside, even with high confidence."""
+        analysis = AIAnalysis(
+            confidence=0.9,
+            recommendation="hold",
+            reasoning="Market data is ambiguous",
+            suggested_stop_loss=49000,
+            suggested_tp1=51000,
+            recommended_leverage=20,
+        )
+        decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
+        assert decision.execute is False
+        assert not decision.quantity
+        assert "did not approve execution" in decision.reason
+
     def test_reject_low_confidence(self, processor, sample_signal, sample_market):
         """Should reject when confidence is below 0.4."""
         analysis = AIAnalysis(
@@ -783,6 +798,32 @@ class TestPositionSizeCalculation:
                 )
 
                 assert qty == pytest.approx(4166.666667)
+
+    def test_fixed_position_limits_use_capped_execution_leverage(self, processor):
+        """Fixed sizing should keep margin fixed after max_leverage caps AI leverage."""
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.position_sizing_mode = "fixed"
+            mock_settings.exchange.name = "binance"
+            mock_settings.exchange.market_type = "contract"
+
+            decision = TradeDecision(
+                ticker="BTCUSDT",
+                direction=SignalDirection.LONG,
+                entry_price=100.0,
+                quantity=50.0,
+                ai_analysis=AIAnalysis(recommendation="execute", confidence=0.8, recommended_leverage=50),
+            )
+
+            with patch("exchange.get_market_limits", return_value={"contract_size": 1.0}):
+                processor._apply_position_limits(
+                    decision,
+                    {"exchange": "binance", "market_type": "contract", "max_leverage": 20},
+                )
+
+            assert decision.quantity == pytest.approx(20.0)
 
 
 class TestValidStopLoss:
