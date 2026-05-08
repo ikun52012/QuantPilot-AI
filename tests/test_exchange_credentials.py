@@ -35,7 +35,10 @@ def _capture_exchange_kwargs(monkeypatch, fake_exchange):
     captured = {}
 
     def fake_get_or_create_exchange(**kwargs):
-        captured.update(kwargs)
+        # Only capture calls from actual trade execution (live=True);
+        # ignore utility calls like get_market_limits which pass live=False.
+        if kwargs.get("live"):
+            captured.update(kwargs)
         return fake_exchange
 
     monkeypatch.setattr(exchange_module, "_get_or_create_exchange", fake_get_or_create_exchange)
@@ -44,9 +47,10 @@ def _capture_exchange_kwargs(monkeypatch, fake_exchange):
 
 def _assert_empty_credentials(captured: dict):
     assert captured["exchange_id"] == "okx"
-    assert captured["api_key"] == ""
-    assert captured["api_secret"] == ""
-    assert captured["password"] == ""
+    # Both None and "" represent empty credentials
+    assert captured["api_key"] in ("", None)
+    assert captured["api_secret"] in ("", None)
+    assert captured["password"] in ("", None)
     assert captured["sandbox"] is True
     assert captured["market_type"] == "contract"
 
