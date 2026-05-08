@@ -583,12 +583,22 @@ async def close_position(
         result = await _close_position(exchange, symbol, position_side=position.direction, close_quantity=close_qty)
         if result.get("status") == "error":
             raise HTTPException(500, result.get("reason", "Failed to close position on exchange"))
+        # Use exchange-reported fill price if available
+        exit_price = result.get("average") or result.get("price") or position.last_price or position.entry_price
+    else:
+        # Paper trading: fetch current market price for accurate PnL
+        try:
+            from exchange import get_ticker
+            ticker_data = await get_ticker(position.ticker, exchange_config)
+            exit_price = ticker_data.get("last") or ticker_data.get("bid") or position.last_price or position.entry_price
+        except Exception:
+            exit_price = position.last_price or position.entry_price
 
     final_close_qty = close_qty or float(position.remaining_quantity or position.quantity or 0)
     pnl_pct = await close_position_async(
         session=db,
         position=position,
-        exit_price=position.last_price or position.entry_price,
+        exit_price=exit_price,
         exit_reason="manual_close",
         close_quantity=final_close_qty,
     )
@@ -965,9 +975,21 @@ async def get_user_settings(
     webhook = response_data.setdefault("webhook", {})
     base_url = public_base_url(request)
     webhook.setdefault("url", f"{base_url}/webhook")
+    # SECURITY: Mask webhook secret in API response to prevent exposure
+    # Only show first 4 and last 4 characters if secret is long enough
     if webhook.get("secret"):
+        secret = webhook["secret"]
+        if len(secret) > 8:
+            masked_secret = secret[:4] + "***" + secret[-4:]
+        else:
+            masked_secret = "***"
+        webhook["secret_masked"] = masked_secret
+        # Only include full secret if explicitly requested with ?reveal=true
+        reveal = request.query_params.get("reveal", "").lower() == "true"
+        if not reveal:
+            webhook.pop("secret", None)
         webhook.setdefault("template", json.dumps({
-            "secret": webhook.get("secret"),
+            "secret": secret if reveal else masked_secret,
             "ticker": "{{ticker}}",
             "exchange": "{{exchange}}",
             "direction": "long",

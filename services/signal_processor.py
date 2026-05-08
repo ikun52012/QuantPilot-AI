@@ -2185,6 +2185,13 @@ class SignalProcessor:
                         f"[Signal] User {user_id} requested live trading without permission/subscription; using paper mode"
                     )
                     exchange_config["live_trading"] = False
+                    # Notify user if subscription just expired
+                    if user.live_trading_allowed and not subscription:
+                        try:
+                            from notifier import notify_subscription_expired
+                            await notify_subscription_expired(user_id)
+                        except Exception:
+                            pass
 
         self._apply_position_limits(decision, exchange_config, user_settings)
         control_state = await trading_allowed(

@@ -300,3 +300,17 @@ async def notify_daily_summary(trades: int, win_rate: float, pnl: float):
         f"{_t('pnl')}: <b>{pnl:+.2f}%</b>"
     )
     await send_telegram(text)
+
+
+async def notify_subscription_expired(user_id: str):
+    """Notify user when their subscription expires."""
+    text = (
+        "⚠️ <b>Subscription Expired</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Your trading subscription has expired.\n"
+        "• Live trading has been disabled\n"
+        "• Existing positions will continue to be monitored\n"
+        "• New signals will be processed in paper mode only\n\n"
+        "Please renew your subscription to restore live trading."
+    )
+    await send_telegram(text)

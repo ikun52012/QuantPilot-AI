@@ -1190,7 +1190,10 @@ async def close_position_async(
     close_trade_id: str | None = None,
     closed_at: datetime | None = None,
 ) -> float:
-    """Close a tracked position and return realised leveraged PnL percentage."""
+    """Close a tracked position and return realised leveraged PnL percentage.
+
+    Deducts trading fees from user balance for paper trading to reflect true costs.
+    """
     exit_price = _safe_float(exit_price)
     opened_qty = max(_safe_float(position.quantity), 0.0)
     remaining_qty = _effective_remaining_quantity(position, opened_qty)
@@ -1227,8 +1230,13 @@ async def close_position_async(
         position.close_trade_id = close_trade_id
 
     # Update user balance with realized PnL for paper trading
-    if not position.live_trading and position.user_id and pnl_usdt != 0.0:
-        await update_user_balance(session, position.user_id, pnl_usdt)
+    if not position.live_trading and position.user_id:
+        if pnl_usdt != 0.0:
+            await update_user_balance(session, position.user_id, pnl_usdt)
+        # Deduct trading fees from balance (fees are real costs even in paper trading)
+        fees_total = _safe_float(position.fees_total_usdt, 0.0)
+        if fees_total > 0:
+            await update_user_balance(session, position.user_id, -fees_total)
 
     # Record PnL in account risk tracker for loss-limit enforcement
     try:
@@ -1247,7 +1255,11 @@ async def close_position_async(
 
 async def update_user_balance(session: AsyncSession, user_id: str, delta_usdt: float) -> float:
     """Update user balance by adding delta (positive for profit, negative for loss).
-    Uses row-level locking to prevent race conditions during concurrent updates."""
+    Uses row-level locking to prevent race conditions during concurrent updates.
+
+    For paper trading, allows negative balances to reflect true PnL history.
+    Silently clamping to 0 would discard loss data and misrepresent performance.
+    """
     from sqlalchemy import select
 
     result = await session.execute(
@@ -1259,7 +1271,15 @@ async def update_user_balance(session: AsyncSession, user_id: str, delta_usdt: f
     if user:
         current_balance = _safe_float(user.balance_usdt, 0.0)
         new_balance = round(current_balance + delta_usdt, 2)
-        user.balance_usdt = max(0.0, new_balance)
+        # Allow negative balances to track true PnL in paper trading
+        # For live trading, the exchange handles margin/liquidation natively
+        user.balance_usdt = new_balance
+        if new_balance < 0:
+            from loguru import logger
+            logger.warning(
+                f"[Balance] User {user_id} balance went negative: "
+                f"${current_balance} + ${delta_usdt} = ${new_balance}"
+            )
         return user.balance_usdt
     return 0.0
 
