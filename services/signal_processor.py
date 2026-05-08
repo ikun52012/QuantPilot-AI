@@ -1783,8 +1783,11 @@ class SignalProcessor:
                 entry = safe_float(pos.entry_price)
                 qty = safe_float(pos.remaining_quantity or pos.quantity)
                 safe_float(pos.leverage, 1.0)
+                # Get contract_size from position's trailing_stop_config
+                pos_ts_config = loads_dict(pos.trailing_stop_config_json)
+                pos_contract_size = safe_float(pos_ts_config.get("_contract_size"), 1.0)
 
-                notional = entry * qty if entry > 0 and qty > 0 else 0
+                notional = entry * qty * pos_contract_size if entry > 0 and qty > 0 else 0
 
                 if pos_dir == "long":
                     long_positions.append({"ticker": pos.ticker, "notional": notional})
@@ -1828,7 +1831,19 @@ class SignalProcessor:
 
             # Notional exposure limit
             equity = float(self._resolved_risk_settings(user_settings).get("account_equity_usdt") or 1000)
-            new_notional = decision.entry_price * decision.quantity if decision.entry_price and decision.quantity else 0
+            # Get contract_size for new position notional calculation
+            new_contract_size = 1.0
+            try:
+                from exchange import get_market_limits
+                exchange_config = self._get_exchange_config(user_settings)
+                exchange_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
+                market_type = exchange_config.get("market_type") or settings.exchange.market_type
+                limits = get_market_limits(exchange_id, decision.ticker, market_type)
+                if limits and limits.get("contract_size", 1.0) > 1.0:
+                    new_contract_size = float(limits.get("contract_size", 1.0))
+            except Exception:
+                pass
+            new_notional = decision.entry_price * decision.quantity * new_contract_size if decision.entry_price and decision.quantity else 0
             total_notional_after = current_notional + new_notional
             exposure_pct = total_notional_after / equity * 100 if equity > 0 else 0
 
@@ -2356,7 +2371,8 @@ class SignalProcessor:
         if decision.ai_analysis and decision.ai_analysis.recommended_leverage:
             leverage = max(1.0, min(float(decision.ai_analysis.recommended_leverage), max_leverage))
         max_notional = account_equity * (max_position_pct / 100.0) * leverage
-        max_quantity = max_notional / float(decision.entry_price)
+        # For contract markets: max_quantity = max_notional / (price * contract_size)
+        max_quantity = max_notional / (float(decision.entry_price) * contract_size)
         if max_quantity > 0 and decision.quantity > max_quantity:
             logger.warning(
                 f"[Signal] Quantity capped by max_position_pct: {decision.quantity} -> {max_quantity:.6f}"

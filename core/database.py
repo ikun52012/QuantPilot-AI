@@ -1227,9 +1227,16 @@ async def close_position_async(
     # Calculate actual USDT PnL for balance update
     entry_price = _safe_float(locked_position.entry_price)
     leverage = _safe_float(locked_position.leverage, 1.0)
+    # Get contract_size from trailing_stop_config (stored when position was created)
+    try:
+        ts_config = json.loads(locked_position.trailing_stop_config_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        ts_config = {}
+    contract_size = _safe_float(ts_config.get("_contract_size"), 1.0)
     if entry_price > 0 and opened_qty > 0:
-        # Margin used = (entry_price * quantity) / leverage
-        margin_used = (entry_price * opened_qty) / max(1.0, leverage)
+        # Margin used = (entry_price * quantity * contract_size) / leverage
+        # For spot markets contract_size=1, for contracts it reflects the actual contract multiplier
+        margin_used = (entry_price * opened_qty * contract_size) / max(1.0, leverage)
         # PnL in USDT = margin_used * (pnl_pct / 100) * remaining_weight
         pnl_usdt = margin_used * (remaining_pnl / 100.0)
     else:
@@ -1434,6 +1441,12 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
                         "trailing_step_pct": _safe_float(order_details.get("trailing_step_pct"), 0.5),
                     }
 
+            # Store contract_size in config for later PnL/margin calculations
+            contract_size = _safe_float(order_details.get("contract_size"), 1.0)
+            if trailing_stop_config:
+                trailing_stop_config["_contract_size"] = contract_size
+            fallback_notional = entry_price * quantity * contract_size if entry_price > 0 and quantity > 0 else 0
+
             position = PositionModel(
                 user_id=user_id,
                 ticker=ticker,
@@ -1456,8 +1469,8 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
                 live_trading=live_trading,
                 sandbox_mode=_safe_bool(exchange_config.get("sandbox_mode"), False),
                 leverage=max(1.0, leverage),
-                # Use notional_value from exchange for correct margin (handles contract markets)
-                margin=_safe_float(order_details.get("notional_value"), entry_price * quantity) / max(1.0, leverage) if entry_price > 0 and quantity > 0 else 0,
+                # Use notional_value from exchange (includes contract_size), fallback to calculated
+                margin=_safe_float(order_details.get("notional_value"), fallback_notional) / max(1.0, leverage) if entry_price > 0 and quantity > 0 else 0,
                 liquidation_price=_safe_float(order_details.get("liquidation_price")),
                 strategy_name=str(entry.get("strategy_name") or ""),
                 user_risk_profile=str(entry.get("user_risk_profile") or "balanced"),

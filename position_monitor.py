@@ -70,9 +70,12 @@ def _calculate_ghost_threshold(position: PositionModel) -> int:
     entry_price = safe_float(position.entry_price, 0.0)
     quantity = safe_float(position.quantity, 0.0)
     leverage = max(1.0, safe_float(position.leverage, 1.0))
+    # Get contract_size from trailing_stop_config for correct position value
+    ts_config = loads_dict(position.trailing_stop_config_json)
+    contract_size = safe_float(ts_config.get("_contract_size"), 1.0)
 
-    # Calculate position value (margin used)
-    position_value = (entry_price * quantity) / leverage if entry_price > 0 and quantity > 0 else 0.0
+    # Calculate position value (margin used) - includes contract_size for contracts
+    position_value = (entry_price * quantity * contract_size) / leverage if entry_price > 0 and quantity > 0 else 0.0
 
     # Dynamic thresholds based on position value
     if position_value < _POSITION_VALUE_THRESHOLDS[0]:  # < $100
@@ -603,8 +606,12 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
             # Calculate USDT PnL for this partial close
             entry_price = safe_float(position.entry_price)
             leverage = safe_float(position.leverage, 1.0)
+            # Get contract_size from trailing_stop_config
+            ts_config = loads_dict(position.trailing_stop_config_json)
+            contract_size = safe_float(ts_config.get("_contract_size"), 1.0)
             if entry_price > 0 and qty > 0:
-                margin_used = (entry_price * qty) / max(1.0, leverage)
+                # Margin = (entry_price * qty * contract_size) / leverage
+                margin_used = (entry_price * qty * contract_size) / max(1.0, leverage)
                 level_pnl_usdt = margin_used * (level_pnl / 100.0)
                 total_level_pnl_usdt += level_pnl_usdt
 
@@ -1328,8 +1335,12 @@ def _update_unrealized(position: PositionModel, mark_price: float) -> None:
     open_pnl = _price_pnl_pct(position.direction, position.entry_price, mark_price, leverage)
     entry_price = safe_float(position.entry_price)
     remaining_weight = remaining_qty / opened_qty if opened_qty > 0 else 1.0
+    # Get contract_size from trailing_stop_config
+    ts_config = loads_dict(position.trailing_stop_config_json)
+    contract_size = safe_float(ts_config.get("_contract_size"), 1.0)
     if entry_price > 0 and remaining_qty > 0:
-        margin_used = (entry_price * remaining_qty) / leverage
+        # Margin = (entry_price * remaining_qty * contract_size) / leverage
+        margin_used = (entry_price * remaining_qty * contract_size) / leverage
         position.unrealized_pnl_usdt = round(margin_used * (open_pnl / 100.0), 8)
     else:
         position.unrealized_pnl_usdt = 0.0

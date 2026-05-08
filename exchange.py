@@ -1271,6 +1271,13 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             # Prefer exchange-reported cost, fallback to calculated notional with contract size
             "notional_value": safe_float(order.get("cost")) or _calc_notional_value(actual_filled_qty, actual_avg_price, decision.ticker),
         }
+        # Add contract_size for correct PnL/margin calculations downstream
+        try:
+            limits = get_market_limits(exchange_id, decision.ticker, market_type)
+            if limits and limits.get("contract_size", 1.0) > 1.0:
+                result["contract_size"] = float(limits.get("contract_size", 1.0))
+        except Exception:
+            pass
         if leverage:
             result["recommended_leverage"] = leverage
 
@@ -1859,6 +1866,7 @@ def _simulate_order(decision: TradeDecision) -> dict:
         "note": note,
         # Notional value for correct margin calculation (handles contract markets)
         "notional_value": _calc_notional_value(decision.quantity, decision.entry_price, decision.ticker),
+        "contract_size": 1.0,  # Paper trading uses spot-like sizing
     }
 
 
