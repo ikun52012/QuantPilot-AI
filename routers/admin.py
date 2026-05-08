@@ -712,8 +712,8 @@ async def update_settings(
                         400,
                         f"Setting '{key}' must be between {min_val} and {max_val}, got {num_value}"
                     )
-            except (TypeError, ValueError):
-                raise HTTPException(400, f"Setting '{key}' must be a number, got {value!r}")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(400, f"Setting '{key}' must be a number, got {value!r}") from exc
 
         value_str = str(value)
         if len(value_str) > MAX_VALUE_LENGTH:
@@ -1377,6 +1377,7 @@ async def restore_postgresql_backup(
 
     # Check for open positions - block restore if any exist
     from sqlalchemy import func, select
+
     from core.database import PositionModel
     result = await db.execute(
         select(func.count(PositionModel.id)).where(PositionModel.status == "open")

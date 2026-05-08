@@ -1784,7 +1784,10 @@ class SignalProcessor:
                 qty = safe_float(pos.remaining_quantity or pos.quantity)
                 safe_float(pos.leverage, 1.0)
                 # Get contract_size from position's trailing_stop_config
-                pos_ts_config = loads_dict(pos.trailing_stop_config_json)
+                try:
+                    pos_ts_config = json.loads(pos.trailing_stop_config_json or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pos_ts_config = {}
                 pos_contract_size = safe_float(pos_ts_config.get("_contract_size"), 1.0)
 
                 notional = entry * qty * pos_contract_size if entry > 0 and qty > 0 else 0
