@@ -250,12 +250,23 @@ class OfflineTradeSyncRequest(BaseModel):
 
 
 def _is_admin(user: dict) -> bool:
+    """Check if user has admin role with proper validation."""
     return user.get("role") == "admin"
 
 
 def _require_admin(user: dict) -> None:
+    """Require admin role - raises 403 if not admin."""
     if not _is_admin(user):
         raise HTTPException(403, "Admin access required")
+
+
+async def _require_admin_or_self(user: dict, target_user_id: str | None) -> None:
+    """Require admin OR the user accessing their own data."""
+    if _is_admin(user):
+        return
+    if user.get("id") and target_user_id and str(user["id"]) == str(target_user_id):
+        return
+    raise HTTPException(403, "Admin access required or must be the target user")
 
 
 def _load_user_settings(db_user) -> dict:

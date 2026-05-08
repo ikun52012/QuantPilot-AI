@@ -168,6 +168,27 @@ async def list_backups() -> list[dict]:
     return sorted(backups, key=lambda x: x.get("created_at", ""), reverse=True)
 
 
+async def cleanup_old_backups(max_backups: int = 7) -> dict:
+    """Delete oldest backups, keeping only the most recent `max_backups`."""
+    backups = await list_backups()
+    if len(backups) <= max_backups:
+        return {"deleted": 0, "kept": len(backups)}
+
+    to_delete = backups[max_backups:]
+    deleted = 0
+    for backup in to_delete:
+        try:
+            backup_file = Path(backup["file"])
+            if backup_file.exists():
+                backup_file.unlink()
+                deleted += 1
+                logger.info(f"[Backup] Deleted old backup: {backup['name']}")
+        except Exception as e:
+            logger.warning(f"[Backup] Failed to delete {backup.get('name', 'unknown')}: {e}")
+
+    return {"deleted": deleted, "kept": len(backups) - deleted}
+
+
 async def delete_backup(backup_name: str) -> bool:
     """Delete a backup."""
     backup_file = backup_path / f"{backup_name}.zip"

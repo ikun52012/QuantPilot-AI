@@ -23,7 +23,9 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    delete,
     event,
+    func,
     inspect,
     select,
     text,
@@ -1033,14 +1035,14 @@ async def log_trade_db(
 async def count_today_executed_trades(session: AsyncSession, user_id: str | None = None) -> int:
     """Count today's executed trades."""
     today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    query = select(TradeModel).where(
+    query = select(func.count(TradeModel.id)).where(
         TradeModel.timestamp >= today_start,
         TradeModel.execute,
     )
     if user_id:
         query = query.where(TradeModel.user_id == user_id)
     result = await session.execute(query)
-    return len(list(result.scalars().all()))
+    return result.scalar() or 0
 
 
 # ─────────────────────────────────────────────
@@ -1529,7 +1531,11 @@ async def record_webhook_event(
     client_ip: str,
     payload: dict,
 ) -> WebhookEventModel:
-    """Record a webhook event."""
+    """Record a webhook event.
+
+    Handles duplicate fingerprint conflicts by updating existing record.
+    Rolls back session on error to prevent invalid transaction state.
+    """
     try:
         event = WebhookEventModel(
             user_id=user_id,
@@ -1547,6 +1553,10 @@ async def record_webhook_event(
         return event
     except Exception as e:
         if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            # Rollback only the failed insert using savepoint semantics.
+            # Note: session.rollback() rolls back ALL pending changes, so we
+            # handle duplicates by querying first in the caller when possible.
+            await session.rollback()
             result = await session.execute(
                 select(WebhookEventModel).where(WebhookEventModel.fingerprint == fingerprint).order_by(WebhookEventModel.created_at.desc()).limit(1)
             )
@@ -1561,15 +1571,18 @@ async def record_webhook_event(
         raise
 
 
-async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, window_secs: int = 300) -> bool:
-    """Check if a webhook with this fingerprint was recently processed."""
+async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, window_secs: int = 300) -> WebhookEventModel | None:
+    """Check if a webhook with this fingerprint was recently processed.
+
+    Returns the existing WebhookEventModel if found, otherwise None.
+    """
     cutoff = utcnow() - timedelta(seconds=window_secs)
     result = await session.execute(
         select(WebhookEventModel)
         .where(WebhookEventModel.fingerprint == fingerprint, WebhookEventModel.created_at >= cutoff)
         .limit(1)
     )
-    return result.scalar_one_or_none() is not None
+    return result.scalar_one_or_none()
 
 
 async def record_signal_decision_audit(
@@ -1597,9 +1610,7 @@ async def record_signal_decision_audit(
             reason=str(reason or ""),
             payload_json=json.dumps(payload or {}, default=str),
         )
-        maybe_added = session.add(audit)
-        if hasattr(maybe_added, "__await__"):
-            await maybe_added
+        session.add(audit)
         await session.flush()
         return audit
     except Exception as exc:
@@ -1772,3 +1783,136 @@ async def seed_defaults(session: AsyncSession):
         for plan in plans:
             session.add(plan)
         logger.info("[Database] Default subscription plans created")
+
+
+async def cleanup_old_records(
+    session: AsyncSession,
+    *,
+    positions_retention_days: int = 90,
+    trades_retention_days: int = 90,
+    order_events_retention_days: int = 90,
+    audit_logs_retention_days: int = 30,
+    webhook_events_retention_days: int = 30,
+    admin_audit_logs_retention_days: int = 90,
+    batch_size: int = 1000,
+) -> dict:
+    """Delete old records to prevent unbounded database growth.
+
+    Uses bulk DELETE with batching to avoid loading all rows into memory.
+
+    Args:
+        session: Database session.
+        positions_retention_days: Keep closed positions for this many days.
+        trades_retention_days: Keep trade logs for this many days.
+        order_events_retention_days: Keep order events for this many days.
+        audit_logs_retention_days: Keep signal decision audits for this many days.
+        webhook_events_retention_days: Keep webhook events for this many days.
+        admin_audit_logs_retention_days: Keep admin audit logs for this many days.
+        batch_size: Number of rows to delete per batch.
+
+    Returns:
+        dict with counts of deleted records per table.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import delete
+
+    from core.utils.datetime import utcnow
+
+    now = utcnow()
+    deleted = {}
+
+    def _bulk_delete(model, where_clause, table_name: str) -> int:
+        """Delete rows in batches to avoid memory issues.
+
+        Uses a subquery approach compatible with both SQLite and PostgreSQL.
+        PostgreSQL does not support DELETE ... LIMIT directly.
+        """
+        total_deleted = 0
+        while True:
+            subq = (
+                select(model.id)
+                .where(where_clause)
+                .limit(batch_size)
+            )
+            stmt = delete(model).where(model.id.in_(subq))
+            result = session.execute(stmt)
+            session.flush()
+            count = result.rowcount or 0
+            total_deleted += count
+            if count < batch_size:
+                break
+        return total_deleted
+
+    # 1. Closed positions older than retention period
+    cutoff = now - timedelta(days=positions_retention_days)
+    count = _bulk_delete(
+        PositionModel,
+        (PositionModel.status == "closed") &
+        (PositionModel.closed_at.isnot(None)) &
+        (PositionModel.closed_at < cutoff),
+        "positions"
+    )
+    if count > 0:
+        deleted["positions"] = count
+
+    # 2. Trade logs older than retention period
+    cutoff = now - timedelta(days=trades_retention_days)
+    count = _bulk_delete(
+        TradeModel,
+        TradeModel.timestamp < cutoff,
+        "trades"
+    )
+    if count > 0:
+        deleted["trades"] = count
+
+    # 3. Order events older than retention period
+    cutoff = now - timedelta(days=order_events_retention_days)
+    count = _bulk_delete(
+        OrderEventModel,
+        OrderEventModel.created_at < cutoff,
+        "order_events"
+    )
+    if count > 0:
+        deleted["order_events"] = count
+
+    # 4. Signal decision audits older than retention period
+    cutoff = now - timedelta(days=audit_logs_retention_days)
+    count = _bulk_delete(
+        SignalDecisionAuditModel,
+        SignalDecisionAuditModel.created_at < cutoff,
+        "signal_decision_audits"
+    )
+    if count > 0:
+        deleted["signal_decision_audits"] = count
+
+    # 5. Webhook events older than retention period
+    cutoff = now - timedelta(days=webhook_events_retention_days)
+    count = _bulk_delete(
+        WebhookEventModel,
+        WebhookEventModel.created_at < cutoff,
+        "webhook_events"
+    )
+    if count > 0:
+        deleted["webhook_events"] = count
+
+    # 6. Admin audit logs older than retention period
+    cutoff = now - timedelta(days=admin_audit_logs_retention_days)
+    count = _bulk_delete(
+        AdminAuditLogModel,
+        AdminAuditLogModel.created_at < cutoff,
+        "admin_audit_logs"
+    )
+    if count > 0:
+        deleted["admin_audit_logs"] = count
+
+    if deleted:
+        total = sum(deleted.values())
+        logger.info(
+            f"[Database] Cleanup: deleted {total} old records: "
+            + ", ".join(f"{k}={v}" for k, v in deleted.items())
+        )
+    else:
+        logger.debug("[Database] Cleanup: no old records to delete")
+
+    return deleted

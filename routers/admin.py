@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
@@ -510,8 +510,8 @@ async def reset_user_password(
 ):
     """Reset a user's password to a random value.
 
-    The new password is returned once in the response so the admin can
-    deliver it over a secure channel.
+    The temporary password is returned in the response over HTTPS.
+    Admins must deliver it to the user immediately and instruct them to change it.
     """
     user = await get_user_by_id(db, user_id)
     if not user:
@@ -526,11 +526,17 @@ async def reset_user_password(
 
     logger.info(f"[Admin] Password reset for user {user.username} by {admin['username']}")
 
-    return {
-        "status": "success",
-        "message": "Password has been reset. Deliver the temporary password to the user over a secure channel.",
-        "temporary_password": new_password,
-    }
+    return Response(
+        content=json.dumps({
+            "status": "success",
+            "message": "Password has been reset. Deliver this temporary password to the user immediately.",
+            "user_id": user_id,
+            "username": user.username,
+            "temporary_password": new_password,
+        }),
+        media_type="application/json",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+    )
 
 
 # ─────────────────────────────────────────────

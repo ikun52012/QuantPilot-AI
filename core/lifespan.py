@@ -90,6 +90,26 @@ async def _init_scheduler():
         except Exception as e:
             logger.error(f"[Scheduler] Daily backup failed: {e}")
 
+    async def _cleanup_old_records_job():
+        try:
+            from core.database import cleanup_old_records, db_manager
+            async with db_manager.async_session_factory() as session:
+                deleted = await cleanup_old_records(session)
+                await session.commit()
+            if deleted:
+                logger.info(f"[Scheduler] Database cleanup: deleted {sum(deleted.values())} old records")
+        except Exception as e:
+            logger.error(f"[Scheduler] Database cleanup failed: {e}")
+
+    async def _cleanup_old_backups_job():
+        try:
+            from backups import cleanup_old_backups
+            result = await cleanup_old_backups(max_backups=7)
+            if result.get("deleted"):
+                logger.info(f"[Scheduler] Backup cleanup: deleted {result['deleted']} old backups, kept {result['kept']}")
+        except Exception as e:
+            logger.error(f"[Scheduler] Backup cleanup failed: {e}")
+
     async def _position_monitor_job():
         from position_monitor import run_position_monitor_once
         result = await run_position_monitor_once()
@@ -107,6 +127,18 @@ async def _init_scheduler():
         CronTrigger(hour=2, minute=0, second=0, timezone="UTC"),
         id="daily_backup",
         name="Daily database backup",
+    )
+    scheduler.add_job(
+        _cleanup_old_records_job,
+        CronTrigger(hour=3, minute=0, second=0, timezone="UTC"),
+        id="cleanup_old_records",
+        name="Daily database cleanup",
+    )
+    scheduler.add_job(
+        _cleanup_old_backups_job,
+        CronTrigger(hour=3, minute=30, second=0, timezone="UTC"),
+        id="cleanup_old_backups",
+        name="Daily backup cleanup",
     )
     scheduler.add_job(
         _position_monitor_job,

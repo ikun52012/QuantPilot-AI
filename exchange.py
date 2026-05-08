@@ -139,7 +139,7 @@ async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_ret
                 )
                 # Abort for transient errors if leverage > 1, otherwise continue
                 is_transient = isinstance(e, (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.DDoSProtection))
-                return {"success": False, "error": f"Unexpected error: {error_msg}", "abort": leverage > 1 and is_transient}
+                return {"success": False, "error": f"Unexpected error: {error_msg}", "abort": leverage > 1 and not is_transient}
 
     return {"success": False, "error": "Max retries exceeded without success", "abort": True}
 
@@ -619,7 +619,13 @@ def _get_or_create_exchange(
     Includes health check to evict stale/unhealthy connections.
     """
     eid = (exchange_id or settings.exchange.name).lower().strip()
-    cred_hash = _hashlib.sha256(f"{api_key}:{api_secret}:{password}".encode()).hexdigest()
+    # SECURITY: Hash credentials individually to avoid plaintext concatenation in memory
+    key_parts = []
+    for part in [api_key, api_secret, password]:
+        h = _hashlib.sha256()
+        h.update(str(part or "").encode())
+        key_parts.append(h.hexdigest())
+    cred_hash = _hashlib.sha256(":".join(key_parts).encode()).hexdigest()
     sb = settings.exchange.sandbox_mode if sandbox is None else bool(sandbox)
     market_key = str(market_type or settings.exchange.market_type or "contract").lower().strip()
     margin_key = str(margin_mode or settings.risk.margin_mode or "cross").lower().strip()
@@ -1164,7 +1170,15 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 amount=decision.quantity,
             )
 
-        order_id = order.get("id", "unknown")
+        order_id = order.get("id")
+        if not order_id:
+            logger.warning(f"[Exchange] Order placed but returned no ID for {symbol}. Status: {order.get('status')}")
+            return {
+                "status": "error",
+                "reason": "Exchange returned order without ID - cannot track position safely",
+                "order_response": {k: v for k, v in order.items() if k not in {"info"}},
+            }
+        order_id = str(order_id)
         raw_status = order.get("status")
         order_status = raw_status if raw_status is not None else "open"
         actual_filled_qty = safe_float(order.get("filled") or 0)
@@ -1172,7 +1186,11 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             logger.info(f"[Exchange] OKX sandbox returned status=None for limit order {order_id}, treating as 'open' (pending)")
         requested_qty = safe_float(decision.quantity or 0)
         if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
-            actual_filled_qty = safe_float(order.get("amount") or decision.quantity)
+            actual_filled_qty = safe_float(order.get("amount") or 0)
+            if actual_filled_qty == 0:
+                logger.warning(f"[Exchange] Order {order_id} shows filled status but zero amount - treating as pending")
+                order_status = "open"
+                actual_filled_qty = 0
         is_partial_fill = (
             actual_filled_qty > 0
             and actual_filled_qty < requested_qty
@@ -1258,13 +1276,12 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 "trail_pct": decision.trailing_stop.trail_pct,
                 "activation_profit_pct": decision.trailing_stop.activation_profit_pct,
                 "trailing_step_pct": decision.trailing_stop.trailing_step_pct,
-                # P1-FIX: Store AI confidence and risk_score for later re-evaluation
-                # These values are needed when limit order fills hours later
                 "_ai_confidence": decision.ai_analysis.confidence if decision.ai_analysis else 0.65,
                 "_ai_risk_score": decision.ai_analysis.risk_score if decision.ai_analysis else 0.5,
                 "_ai_market_condition": decision.ai_analysis.market_condition if decision.ai_analysis else "unknown",
                 "_ai_trend_strength": decision.ai_analysis.trend_strength if decision.ai_analysis else "moderate",
                 "_signal_reasoning": decision.ai_analysis.reasoning if decision.ai_analysis else "",
+                "_signal_timeframe": str(getattr(decision.signal, "timeframe", "60") or "60"),
             }
 
         # ── Multi Take-Profit Orders ──
@@ -1780,6 +1797,12 @@ def _simulate_order(decision: TradeDecision) -> dict:
             "trail_pct": decision.trailing_stop.trail_pct,
             "activation_profit_pct": decision.trailing_stop.activation_profit_pct,
             "trailing_step_pct": decision.trailing_stop.trailing_step_pct,
+            "_ai_confidence": decision.ai_analysis.confidence if decision.ai_analysis else 0.65,
+            "_ai_risk_score": decision.ai_analysis.risk_score if decision.ai_analysis else 0.5,
+            "_ai_market_condition": decision.ai_analysis.market_condition if decision.ai_analysis else "unknown",
+            "_ai_trend_strength": decision.ai_analysis.trend_strength if decision.ai_analysis else "moderate",
+            "_signal_reasoning": decision.ai_analysis.reasoning if decision.ai_analysis else "",
+            "_signal_timeframe": str(getattr(decision.signal, "timeframe", "60") or "60"),
         }
 
     if order_type == "limit" and decision.entry_price and decision.entry_price > 0:

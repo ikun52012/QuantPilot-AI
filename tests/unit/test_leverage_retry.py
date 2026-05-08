@@ -99,7 +99,7 @@ class TestLeverageRetryMechanism:
 
     async def test_max_retries_exceeded(self, mock_exchange):
         """Test failure after max retries exceeded."""
-        # All attempts fail
+        # All attempts fail with transient error - should NOT abort (should retry)
         mock_exchange.set_leverage.side_effect = ccxt.NetworkError("Network error")
 
         result = await _set_leverage_with_retry(
@@ -110,7 +110,7 @@ class TestLeverageRetryMechanism:
         )
 
         assert not result["success"]
-        assert result["abort"]
+        assert not result["abort"]  # Transient errors should not abort
         assert mock_exchange.set_leverage.call_count == 3
 
     async def test_exponential_backoff_delay(self, mock_exchange):

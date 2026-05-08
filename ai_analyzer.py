@@ -988,6 +988,8 @@ async def _with_retry(coro_factory: Callable[[], Awaitable[str]], label: str) ->
 async def _call_openai(system: str, user: str, model: str | None = None) -> str:
     """Call OpenAI/compatible API with automatic retry."""
     model_name = model or settings.ai.openai_model
+    if not settings.ai.openai_api_key:
+        raise ValueError("OpenAI API key is not configured")
     async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
@@ -1022,6 +1024,8 @@ async def _call_openai(system: str, user: str, model: str | None = None) -> str:
 async def _call_anthropic(system: str, user: str, model: str | None = None) -> str:
     """Call Anthropic Claude API with automatic retry."""
     model_name = model or settings.ai.anthropic_model
+    if not settings.ai.anthropic_api_key:
+        raise ValueError("Anthropic API key is not configured")
     async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
@@ -1046,6 +1050,14 @@ async def _call_anthropic(system: str, user: str, model: str | None = None) -> s
             content = data["content"][0]["text"]
             if content is None:
                 raise ValueError(f"Anthropic API returned null content for model {model_name}")
+            # Track token usage (including cache tokens for accurate cost reporting)
+            usage = data.get("usage", {})
+            pt = usage.get("input_tokens", 0)
+            ct = usage.get("output_tokens", 0)
+            cache_creation = usage.get("cache_creation_input_tokens", 0)
+            cache_read = usage.get("cache_read_input_tokens", 0)
+            tt = pt + ct + cache_creation + cache_read
+            ai_costs.record("anthropic", model_name, pt, ct, tt)
             return str(content)
 
     return await _with_retry(_do, "anthropic")
@@ -1054,6 +1066,8 @@ async def _call_anthropic(system: str, user: str, model: str | None = None) -> s
 async def _call_deepseek(system: str, user: str, model: str | None = None) -> str:
     """Call DeepSeek API (OpenAI-compatible) with automatic retry."""
     model_name = model or settings.ai.deepseek_model
+    if not settings.ai.deepseek_api_key:
+        raise ValueError("DeepSeek API key is not configured")
     async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
@@ -1087,6 +1101,8 @@ async def _call_deepseek(system: str, user: str, model: str | None = None) -> st
 async def _call_mistral(system: str, user: str, model: str | None = None) -> str:
     """Call Mistral API (OpenAI-compatible) with automatic retry."""
     model_name = model or settings.ai.mistral_model
+    if not settings.ai.mistral_api_key:
+        raise ValueError("Mistral API key is not configured")
     async def _do() -> str:
         async with httpx.AsyncClient(timeout=_AI_TIMEOUT) as client:
             resp = await client.post(
@@ -1318,12 +1334,12 @@ def _local_rule_analysis(system: str, user: str) -> str:
         # Extract ticker
         ticker_match = re.search(r"Ticker:\s*(\w+)", user)
         if ticker_match:
-            ticker_match.group(1).upper()
+            signal_ticker = ticker_match.group(1).upper()
 
         # Extract timeframe
         tf_match = re.search(r"Timeframe:\s*(\w+)", user)
         if tf_match:
-            tf_match.group(1)
+            signal_timeframe = tf_match.group(1)
 
     except (TypeError, AttributeError):
         pass
@@ -1939,26 +1955,50 @@ def _parse_response(raw: str) -> AIAnalysis:
         # Try to extract JSON from the response
         raw_clean = raw.strip()
 
-        # Handle markdown code blocks
+        # Handle markdown code blocks - extract all blocks and try each
         if raw_clean.startswith("```"):
             lines = raw_clean.split("\n")
-            json_lines = []
+            json_blocks = []
+            current_block = []
             in_block = False
             for line in lines:
-                if line.strip().startswith("```") and not in_block:
+                stripped = line.strip()
+                if stripped.startswith("```") and not in_block:
                     in_block = True
                     continue
-                elif line.strip().startswith("```") and in_block:
-                    break
+                elif stripped.startswith("```") and in_block:
+                    if current_block:
+                        json_blocks.append("\n".join(current_block))
+                        current_block = []
+                    in_block = False
+                    continue
                 elif in_block:
-                    json_lines.append(line)
-            raw_clean = "\n".join(json_lines)
+                    current_block.append(line)
+            if current_block:
+                json_blocks.append("\n".join(current_block))
+
+            # Try each block until we find valid JSON
+            last_error = None
+            for block in json_blocks:
+                try:
+                    parsed = json.loads(block.strip())
+                    if isinstance(parsed, dict):
+                        raw_clean = block.strip()
+                        break
+                except json.JSONDecodeError as e:
+                    last_error = e
+            else:
+                if last_error:
+                    raise ValueError(f"AI response contained no valid JSON blocks: {last_error}")
+                raw_clean = ""
 
         if not raw_clean.startswith("{"):
             start = raw_clean.find("{")
             end = raw_clean.rfind("}")
             if start != -1 and end != -1 and end > start:
                 raw_clean = raw_clean[start:end + 1]
+            else:
+                raise ValueError("AI response contained no JSON object")
 
         parsed = json.loads(raw_clean)
         if not isinstance(parsed, dict):

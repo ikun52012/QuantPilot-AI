@@ -92,6 +92,63 @@ def _calculate_ghost_threshold(position: PositionModel) -> int:
     return threshold
 
 
+async def _fetch_market_price_changes(symbol: str, exchange_config: dict, current_price: float) -> dict:
+    """Fetch OHLCV data to calculate price_change_1h and price_change_24h.
+
+    The get_ticker() function does NOT return price_change_1h/24h, so we
+    fetch OHLCV candles directly and compute the changes ourselves.
+    """
+    from exchange import _close_exchange, _get_or_create_exchange, _resolve_symbol
+
+    exchange = _get_or_create_exchange(
+        exchange_id=exchange_config.get("exchange", settings.exchange.name),
+        api_key=exchange_config.get("api_key", settings.exchange.api_key),
+        api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
+        password=exchange_config.get("password", settings.exchange.password),
+        live=bool(exchange_config.get("live_trading", False)),
+        sandbox=bool(exchange_config.get("sandbox_mode", False)),
+        market_type=exchange_config.get("market_type", settings.exchange.market_type),
+    )
+
+    try:
+        resolved_symbol = await asyncio.to_thread(
+            _resolve_symbol,
+            exchange,
+            symbol,
+            exchange_config.get("market_type", settings.exchange.market_type),
+        )
+
+        ohlcv_1h = await asyncio.to_thread(exchange.fetch_ohlcv, resolved_symbol, "1h", None, 25)
+        ohlcv_4h = await asyncio.to_thread(exchange.fetch_ohlcv, resolved_symbol, "4h", None, 8)
+
+        price_change_1h = 0.0
+        price_change_24h = 0.0
+
+        if len(ohlcv_1h) >= 2:
+            price_1h_ago = ohlcv_1h[-2][4]
+            if price_1h_ago > 0:
+                price_change_1h = ((current_price - price_1h_ago) / price_1h_ago) * 100
+
+        if len(ohlcv_4h) >= 7:
+            price_24h_ago = ohlcv_4h[-7][4]
+            if price_24h_ago > 0:
+                price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
+        elif len(ohlcv_1h) >= 24:
+            price_24h_ago = ohlcv_1h[-24][4]
+            if price_24h_ago > 0:
+                price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
+
+        return {
+            "price_change_1h": price_change_1h,
+            "price_change_24h": price_change_24h,
+        }
+    except Exception as e:
+        logger.warning(f"[P1-FIX] Failed to fetch OHLCV for price changes: {e}")
+        return {"price_change_1h": 0.0, "price_change_24h": 0.0}
+    finally:
+        await _close_exchange(exchange)
+
+
 async def _reevaluate_trailing_stop_config(
     session: AsyncSession,
     position: PositionModel,
@@ -116,14 +173,11 @@ async def _reevaluate_trailing_stop_config(
     Returns:
         dict: Updated trailing_stop config
     """
-    from exchange import get_ticker
     from smart_trailing_stop import select_smart_trailing_stop
 
-    # Check if user has explicit trailing_stop config (not "auto")
     trailing_config = loads_dict(position.trailing_stop_config_json)
     user_mode = str(trailing_config.get("mode") or "").lower()
 
-    # If user explicitly set a mode (not "auto" or empty), respect it
     if user_mode and user_mode not in {"auto", "", "none"}:
         logger.info(
             f"[P1-FIX] Limit order filled: {position.ticker} - "
@@ -131,34 +185,24 @@ async def _reevaluate_trailing_stop_config(
         )
         return trailing_config
 
-    # Re-evaluate trailing_stop mode based on current market conditions.
-    # Even if global/user mode is "none", limit orders may fill hours later
-    # when market conditions have changed significantly. Re-evaluation ensures
-    # appropriate protection is applied at fill time.
-    # Get current market data
     try:
-        ticker = await get_ticker(position.ticker, {**exchange_config, "live_trading": False})
+        market_changes = await _fetch_market_price_changes(position.ticker, exchange_config, current_price)
+        price_change_1h = market_changes["price_change_1h"]
+        price_change_24h = market_changes["price_change_24h"]
 
-        # Fetch market indicators (simplified - can be enhanced)
-        price_change_1h = safe_float(ticker.get("price_change_1h") or 0)
-        price_change_24h = safe_float(ticker.get("price_change_24h") or 0)
+        atr_pct = abs(price_change_24h)
 
-        # Determine current market condition from price movements
-        atr_pct = abs(price_change_24h) / max(current_price, 1.0) * 100
-
-        # Infer market condition
-        if abs(price_change_1h) > 3.0:
-            market_condition = "volatile"
-        elif abs(price_change_24h) > 10.0 and price_change_24h > 0:
+        if price_change_24h > 10.0:
             market_condition = "trending_up"
-        elif abs(price_change_24h) > 10.0 and price_change_24h < 0:
+        elif price_change_24h < -10.0:
             market_condition = "trending_down"
+        elif abs(price_change_1h) > 3.0:
+            market_condition = "volatile"
         elif atr_pct < 1.0:
             market_condition = "calm"
         else:
             market_condition = "ranging"
 
-        # Infer trend strength
         if abs(price_change_24h) > 15.0:
             trend_strength = "strong"
         elif abs(price_change_24h) > 5.0:
@@ -168,19 +212,14 @@ async def _reevaluate_trailing_stop_config(
         else:
             trend_strength = "none"
 
-        # Get AI analysis data (from position metadata or defaults)
-        # Try to load from position's stored data
         confidence = safe_float(trailing_config.get("_ai_confidence") or 0.65)
         risk_score = safe_float(trailing_config.get("_ai_risk_score") or 0.5)
 
-        # Get TP levels count
+        timeframe = str(trailing_config.get("_signal_timeframe") or "60")
+
         tp_levels = loads_list(position.take_profit_json)
         num_tp_levels = len(tp_levels) if tp_levels else 1
 
-        # Get timeframe
-        timeframe = str(position.strategy_name or "").split("_")[-1] if position.strategy_name else "60"
-
-        # Re-evaluate trailing_stop mode
         decision = select_smart_trailing_stop(
             confidence=confidence,
             market_condition=market_condition,
@@ -189,10 +228,9 @@ async def _reevaluate_trailing_stop_config(
             timeframe=timeframe,
             num_tp_levels=num_tp_levels,
             atr_pct=atr_pct,
-            user_override=None,  # No override - let it re-evaluate
+            user_override=None,
         )
 
-        # Build new trailing_stop config
         new_config = {
             "mode": decision.mode.value,
             "_reevaluated_at_fill": True,
@@ -202,20 +240,18 @@ async def _reevaluate_trailing_stop_config(
             "_atr_pct_at_fill": atr_pct,
         }
 
-        # Preserve other config parameters (trail_pct, activation_pct, etc.)
         for key, value in trailing_config.items():
-            if key not in {"mode", "_reevaluated_at_fill", "_reasoning", "_market_condition", "_trend_strength"}:
+            if key not in {"mode", "_reevaluated_at_fill", "_reasoning", "_market_condition", "_trend_strength", "_market_condition_at_fill", "_trend_strength_at_fill"}:
                 new_config[key] = value
 
-        # Log the change
         old_mode = trailing_config.get("mode", "none")
         new_mode = decision.mode.value
 
         if old_mode != new_mode:
             logger.info(
-                f"[P1-FIX] ⚠️ CRITICAL: Limit order filled - trailing_stop re-evaluated: "
+                f"[P1-FIX] Limit order filled - trailing_stop re-evaluated: "
                 f"{position.ticker} {position.direction} "
-                f"mode '{old_mode}' → '{new_mode}' "
+                f"mode '{old_mode}' -> '{new_mode}' "
                 f"(market: {market_condition}, trend: {trend_strength}, ATR: {atr_pct:.1f}%)"
             )
             logger.info(
@@ -253,6 +289,7 @@ def _paper_trailing_stop_price(position: PositionModel, mark_price: float) -> fl
 
     direction = str(position.direction or "long").lower()
     entry_price = safe_float(position.entry_price)
+    leverage = max(1.0, safe_float(position.leverage, 1.0))
     if mark_price <= 0 or entry_price <= 0:
         return None
 
@@ -261,7 +298,7 @@ def _paper_trailing_stop_price(position: PositionModel, mark_price: float) -> fl
         1.0,
     )
     trail_pct = safe_float(first_valid(trailing_config.get("trail_pct"), settings.trailing_stop.trail_pct), 1.0)
-    profit_pct = _price_pnl_pct(direction, entry_price, mark_price, 1.0)
+    profit_pct = _price_pnl_pct(direction, entry_price, mark_price, leverage)
     if profit_pct < activation_pct:
         return None
 
@@ -288,6 +325,17 @@ def _effective_remaining_quantity(position: PositionModel, opened_qty: float) ->
         and not _has_partial_position_fills(position)
     ):
         return opened_qty
+    # If partial fills exist but remaining_quantity is 0, calculate from TP levels
+    if _has_partial_position_fills(position) and opened_qty > 0:
+        tp_levels = loads_list(position.take_profit_json)
+        filled_qty = sum(
+            opened_qty * (safe_float(level.get("qty_pct"), 0) / 100.0)
+            for level in tp_levels
+            if isinstance(level, dict) and str(level.get("status") or "").lower() in {"hit", "filled", "closed"}
+        )
+        calculated_remaining = max(0.0, opened_qty - filled_qty)
+        if calculated_remaining > 0:
+            return calculated_remaining
     return 0.0
 
 
@@ -724,6 +772,31 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         position.margin = filled_cost / leverage
                     elif filled_amount > 0 and filled_price > 0 and leverage > 0:
                         position.margin = (filled_amount * filled_price) / leverage
+
+                    # P1-FIX: Re-evaluate trailing_stop for partial fill on cancel/expire
+                    try:
+                        from exchange import get_ticker
+                        ticker_data = await get_ticker(position.ticker, exchange_config)
+                        current_price = safe_float(ticker_data.get("last") or ticker_data.get("bid") or ticker_data.get("ask") or filled_price)
+
+                        new_trailing_config = await _reevaluate_trailing_stop_config(
+                            session=session,
+                            position=position,
+                            exchange_config=exchange_config,
+                            entry_price=filled_price,
+                            current_price=current_price,
+                        )
+                        position.trailing_stop_config_json = json.dumps(new_trailing_config, ensure_ascii=False)
+
+                        logger.info(
+                            f"[P1-FIX] Partial fill on {order_status} - trailing_stop re-evaluated: "
+                            f"{position.ticker} mode={new_trailing_config.get('mode', 'none')}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[P1-FIX] Failed to re-evaluate trailing_stop for partial fill: {e}"
+                        )
+
                     position.updated_at = utcnow()
                     logger.warning(
                         f"[PositionMonitor] Limit order {order_status} with partial fill for {position.ticker}: "
@@ -757,6 +830,31 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         position.margin = filled_cost / leverage
                     elif filled_amount > 0 and filled_price > 0 and leverage > 0:
                         position.margin = (filled_amount * filled_price) / leverage
+
+                    # P1-FIX: Re-evaluate trailing_stop for partial fill
+                    try:
+                        from exchange import get_ticker
+                        ticker_data = await get_ticker(position.ticker, exchange_config)
+                        current_price = safe_float(ticker_data.get("last") or ticker_data.get("bid") or ticker_data.get("ask") or filled_price)
+
+                        new_trailing_config = await _reevaluate_trailing_stop_config(
+                            session=session,
+                            position=position,
+                            exchange_config=exchange_config,
+                            entry_price=filled_price,
+                            current_price=current_price,
+                        )
+                        position.trailing_stop_config_json = json.dumps(new_trailing_config, ensure_ascii=False)
+
+                        logger.info(
+                            f"[P1-FIX] Partial fill detected - trailing_stop re-evaluated: "
+                            f"{position.ticker} mode={new_trailing_config.get('mode', 'none')}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[P1-FIX] Failed to re-evaluate trailing_stop for partial fill: {e}"
+                        )
+
                     position.updated_at = utcnow()
                     logger.info(
                         f"[PositionMonitor] Limit order partially filled for {position.ticker}: "
@@ -772,16 +870,18 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     order_age_secs = (time.time() * 1000 - created_at) / 1000
                     limit_timeout = _position_limit_timeout_secs(position)
                     if order_age_secs > limit_timeout:
-                        # Only close the local pending position after cancellation is confirmed.
                         cancel_confirmed = False
+                        order_gone = False
                         try:
                             await asyncio.to_thread(exchange.cancel_order, position.entry_order_id, symbol)
                             cancel_confirmed = True
                         except ccxt.OrderNotFound:
                             logger.warning(
                                 f"[PositionMonitor] Limit order not found during timeout cancel for {position.ticker}; "
-                                "keeping position pending until exchange state can be confirmed"
+                                "treating as expired (order already removed from exchange)"
                             )
+                            order_gone = True
+                            cancel_confirmed = True
                         except ccxt.NetworkError as e:
                             logger.warning(f"[PositionMonitor] Network error cancelling limit order: {e}")
                         except Exception as e:
@@ -1038,7 +1138,7 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
             level_status = str(level.get("status") or "pending").lower()
             if level_status in {"hit", "filled", "closed"}:
                 continue
-            if abs(order_price - level_price) / level_price < 0.001:
+            if level_price > 0 and abs(order_price - level_price) / level_price < 0.001:
                 level_qty_pct = safe_float(level.get("qty_pct"), 100.0)
 
                 hit_info = {
@@ -1231,6 +1331,7 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
 
     direction = str(position.direction or "long").lower()
     entry_price = safe_float(position.entry_price)
+    leverage = max(1.0, safe_float(position.leverage, 1.0))
     current_stop = safe_float(position.stop_loss)
     remaining_qty = _effective_remaining_quantity(position, safe_float(position.quantity))
 
@@ -1242,7 +1343,7 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
             first_valid(trailing_config.get("activation_profit_pct"), settings.trailing_stop.activation_profit_pct),
             0.5,
         )
-        profit_pct = _price_pnl_pct(direction, entry_price, mark_price, 1.0)
+        profit_pct = _price_pnl_pct(direction, entry_price, mark_price, leverage)
         if profit_pct < activation_pct:
             return False
         if direction == "short":
@@ -1256,7 +1357,7 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
             1.0,
         )
         trail_pct = safe_float(first_valid(trailing_config.get("trail_pct"), settings.trailing_stop.trail_pct), 0.5)
-        profit_pct = _price_pnl_pct(direction, entry_price, mark_price, 1.0)
+        profit_pct = _price_pnl_pct(direction, entry_price, mark_price, leverage)
         if profit_pct < activation_pct:
             return False
         if direction == "short":

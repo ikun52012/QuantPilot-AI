@@ -85,7 +85,10 @@ _TICKER_PENDING_GUARD = asyncio.Lock()
 # Global processing semaphore and interval control
 _GLOBAL_PROCESSING_SEMAPHORE: asyncio.Semaphore | None = None
 _GLOBAL_PROCESSING_GUARD = asyncio.Lock()
-_LAST_SIGNAL_PROCESS_TIME: float = 0.0
+# Per-user processing interval tracking (was global, now user-isolated)
+# Uses "_admin_" sentinel for admin signals to avoid collision with user_id=None
+_ADMIN_RATE_LIMIT_KEY = "_admin_"
+_LAST_SIGNAL_PROCESS_TIME: dict[str, float] = {}
 _PROCESSING_INTERVAL_SEMAPHORE = asyncio.Lock()
 
 # Dynamic interval tracking (Optimization 1)
@@ -93,8 +96,8 @@ _AI_RESPONSE_TIMES: list[float] = []
 _AI_RESPONSE_TIMES_GUARD = asyncio.Lock()
 _AI_RESPONSE_TIMES_MAX_SAMPLES = 20
 
-# Batch processing state (Optimization 4)
-_PENDING_BATCH_SIGNALS: dict[str, list[tuple[TradingViewSignal, float, dict | None]]] = {}
+# Batch processing state (Optimization 4) - keyed by (ticker, user_id) for user isolation
+_PENDING_BATCH_SIGNALS: dict[tuple[str, str | None], list[tuple[TradingViewSignal, float, dict | None]]] = {}
 _BATCH_SIGNALS_GUARD = asyncio.Lock()
 
 # Prefetch market data cache (Optimization 5) with TTL
@@ -151,11 +154,12 @@ async def _get_global_semaphore() -> asyncio.Semaphore:
         return _GLOBAL_PROCESSING_SEMAPHORE
 
 
-async def _wait_processing_interval(skip_interval: bool = False) -> None:
+async def _wait_processing_interval(skip_interval: bool = False, user_id: str | None = None) -> None:
     """Wait for processing interval after completing a signal (Optimization 1 & 2).
 
     Args:
         skip_interval: If True, skip waiting (for high-confidence signals)
+        user_id: User ID for per-user rate limiting (prevents cross-user throttling)
     """
     global _LAST_SIGNAL_PROCESS_TIME
     if skip_interval:
@@ -166,14 +170,18 @@ async def _wait_processing_interval(skip_interval: bool = False) -> None:
     if interval <= 0:
         return
 
+    # Use sentinel key for admin signals to avoid collision with user_id=None
+    rate_key = user_id if user_id is not None else _ADMIN_RATE_LIMIT_KEY
+
     async with _PROCESSING_INTERVAL_SEMAPHORE:
         now = _time.time()
-        elapsed = now - _LAST_SIGNAL_PROCESS_TIME
+        last_time = _LAST_SIGNAL_PROCESS_TIME.get(rate_key, 0.0)
+        elapsed = now - last_time
         if elapsed < interval:
             wait_time = interval - elapsed
-            logger.debug(f"[SignalProcessor] Waiting {wait_time:.1f}s before next signal")
+            logger.debug(f"[SignalProcessor] Waiting {wait_time:.1f}s before next signal (user={user_id})")
             await asyncio.sleep(wait_time)
-        _LAST_SIGNAL_PROCESS_TIME = _time.time()
+        _LAST_SIGNAL_PROCESS_TIME[rate_key] = _time.time()
 
 
 async def _prefetch_market_data_async(ticker: str) -> MarketContext | None:
@@ -215,23 +223,24 @@ async def _prefetch_market_data_async(ticker: str) -> MarketContext | None:
         return None
 
 
-async def _check_batch_signals(ticker: str, signal: TradingViewSignal, raw_body: dict | None) -> bool:
+async def _check_batch_signals(ticker: str, signal: TradingViewSignal, raw_body: dict | None, user_id: str | None = None) -> bool:
     """Check if signal should be batched with similar pending signals (Optimization 4).
 
     Returns True if signal was batched (should not process individually).
+    Uses (ticker, user_id) key for user isolation.
     """
     if not settings.ai.batch_signals_enabled:
         return False
 
-    key = ticker.upper().strip()
+    key = (ticker.upper().strip(), user_id)
     now = _time.time()
 
     async with _BATCH_SIGNALS_GUARD:
         pending = _PENDING_BATCH_SIGNALS.get(key, [])
 
         expired = [(s, t, b) for s, t, b in pending if now - t > settings.ai.batch_signals_window_secs]
-        for s, t, b in expired:
-            pending.remove((s, t, b))
+        for item in expired:
+            pending.remove(item)
 
         same_direction = [
             (s, t, b) for s, t, b in pending
@@ -242,10 +251,10 @@ async def _check_batch_signals(ticker: str, signal: TradingViewSignal, raw_body:
             logger.info(
                 f"[SignalProcessor] Batch triggered for {ticker} {signal.direction.value}: "
                 f"{len(same_direction) + 1} signals within {settings.ai.batch_signals_window_secs}s window. "
-                f"Skipping individual processing."
+                f"Skipping individual processing (user={user_id})."
             )
-            for s, t, b in same_direction:
-                pending.remove((s, t, b))
+            for item in same_direction:
+                pending.remove(item)
             _PENDING_BATCH_SIGNALS[key] = pending
             return True
 
@@ -255,7 +264,7 @@ async def _check_batch_signals(ticker: str, signal: TradingViewSignal, raw_body:
         if len(same_direction) >= 1:
             logger.debug(
                 f"[SignalProcessor] Signal batching pending for {ticker}: "
-                f"{len(same_direction) + 1}/{settings.ai.batch_signals_max_count} same-direction signals"
+                f"{len(same_direction) + 1}/{settings.ai.batch_signals_max_count} same-direction signals (user={user_id})"
             )
 
         return False
@@ -503,8 +512,8 @@ class SignalProcessor:
         8. Wait dynamic interval
         9. Release semaphore and lock
         """
-        # Optimization 4: Check batch signals
-        batched = await _check_batch_signals(signal.ticker, signal, raw_body)
+        # Optimization 4: Check batch signals (with user isolation)
+        batched = await _check_batch_signals(signal.ticker, signal, raw_body, user_id)
         if batched:
             await notify_signal_batched(
                 signal.ticker,
@@ -557,8 +566,8 @@ class SignalProcessor:
                             f"skips interval for faster next signal"
                         )
 
-                # Optimization 1: Wait dynamic interval
-                await _wait_processing_interval(skip_interval=skip_interval)
+                # Optimization 1: Wait dynamic interval (per-user)
+                await _wait_processing_interval(skip_interval=skip_interval, user_id=user_id)
 
                 return result
             finally:

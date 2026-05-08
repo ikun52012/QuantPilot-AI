@@ -211,7 +211,7 @@ async def test_exchange_execute_trade_preserves_explicit_empty_credentials(monke
     monkeypatch.setattr(
         exchange_module,
         "_create_exchange_order",
-        AsyncMock(return_value={"id": "entry-1", "status": "closed", "average": 100.0}),
+        AsyncMock(return_value={"id": "entry-1", "status": "closed", "filled": 1.0, "average": 100.0}),
     )
 
     result = await exchange_module.execute_trade(

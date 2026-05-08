@@ -562,6 +562,16 @@ async def change_password(
     pw_hash = hash_password(req.new_password)
     await update_user_password_hash(db, db_user.id, pw_hash)
 
+    # SECURITY: Delete bootstrap admin password file if it exists
+    if db_user.role == "admin":
+        try:
+            from core.database import _BOOTSTRAP_PASSWORD_FILE
+            if _BOOTSTRAP_PASSWORD_FILE.exists():
+                _BOOTSTRAP_PASSWORD_FILE.unlink()
+                logger.info("[Auth] Bootstrap admin password file deleted after password change")
+        except Exception as e:
+            logger.warning(f"[Auth] Failed to delete bootstrap password file: {e}")
+
     logger.info(f"[Auth] Password changed for user: {db_user.username}")
 
     try:
