@@ -464,7 +464,6 @@ class TestSignalProcessorBuildDecision:
     async def test_live_prefilter_blocks_when_data_quality_missing(self, processor, monkeypatch):
         with pre_filter._state_lock:
             pre_filter._recent_signals.clear()
-        before_stats = dict(pre_filter._filter_stats_buffer.get("daily_trade_limit", {}))
 
         monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=0))
         monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
@@ -499,6 +498,7 @@ class TestSignalProcessorBuildDecision:
     async def test_prefilter_disabled_hard_check_does_not_leave_failure_reason(self, processor, monkeypatch):
         with pre_filter._state_lock:
             pre_filter._recent_signals.clear()
+        before_stats = dict(pre_filter._filter_stats_buffer.get("daily_trade_limit", {}))
 
         monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=1))
         monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
