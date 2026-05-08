@@ -192,7 +192,8 @@ async def _process_webhook_background(
                 )
                 # Mark the webhook event as failed for recovery
                 try:
-                    from core.database import has_recent_webhook_event, db_manager
+                    from core.database import has_recent_webhook_event
+                    from services.signal_processor import compute_webhook_fingerprint
                     async with db_manager.async_session_factory() as session:
                         fingerprint = compute_webhook_fingerprint(raw_body, user_id)
                         existing = await has_recent_webhook_event(session, fingerprint, window_secs=3600)

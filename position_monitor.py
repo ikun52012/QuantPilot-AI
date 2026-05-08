@@ -871,7 +871,6 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     limit_timeout = _position_limit_timeout_secs(position)
                     if order_age_secs > limit_timeout:
                         cancel_confirmed = False
-                        order_gone = False
                         try:
                             await asyncio.to_thread(exchange.cancel_order, position.entry_order_id, symbol)
                             cancel_confirmed = True
@@ -880,7 +879,6 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                                 f"[PositionMonitor] Limit order not found during timeout cancel for {position.ticker}; "
                                 "treating as expired (order already removed from exchange)"
                             )
-                            order_gone = True
                             cancel_confirmed = True
                         except ccxt.NetworkError as e:
                             logger.warning(f"[PositionMonitor] Network error cancelling limit order: {e}")

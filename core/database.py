@@ -23,7 +23,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    delete,
     event,
     func,
     inspect,

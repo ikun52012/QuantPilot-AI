@@ -1331,16 +1331,6 @@ def _local_rule_analysis(system: str, user: str) -> str:
         if dir_match:
             signal_direction = dir_match.group(1).lower()
 
-        # Extract ticker
-        ticker_match = re.search(r"Ticker:\s*(\w+)", user)
-        if ticker_match:
-            signal_ticker = ticker_match.group(1).upper()
-
-        # Extract timeframe
-        tf_match = re.search(r"Timeframe:\s*(\w+)", user)
-        if tf_match:
-            signal_timeframe = tf_match.group(1)
-
     except (TypeError, AttributeError):
         pass
     except Exception:
