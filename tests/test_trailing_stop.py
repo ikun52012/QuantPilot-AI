@@ -18,6 +18,7 @@ from position_monitor import (
     _loads_dict,
     _loads_list,
     _maybe_adjust_trailing_stop,
+    _filled_margin_from_order,
     _paper_trailing_stop_price,
     _position_limit_timeout_secs,
     _price_pnl_pct,
@@ -577,6 +578,25 @@ def test_find_exchange_position_matches_alias_but_not_different_contract_family(
 
     assert match is not None
     assert match["symbol"] == "SHIB/USDT:USDT"
+
+
+def test_filled_margin_fallback_uses_contract_size():
+    position = PositionModel(
+        entry_price=100.0,
+        quantity=2.0,
+        leverage=10.0,
+        margin=0.0,
+        trailing_stop_config_json=json.dumps({"_contract_size": 10.0}),
+    )
+
+    margin = _filled_margin_from_order(
+        position,
+        filled_cost=0.0,
+        filled_amount=2.0,
+        filled_price=100.0,
+    )
+
+    assert margin == pytest.approx(200.0)
 
 
 @pytest.mark.asyncio

@@ -437,6 +437,7 @@ class TestSignalProcessorBuildDecision:
     async def test_live_prefilter_blocks_when_data_quality_missing(self, processor, monkeypatch):
         with pre_filter._state_lock:
             pre_filter._recent_signals.clear()
+        before_stats = dict(pre_filter._filter_stats_buffer.get("daily_trade_limit", {}))
 
         monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=0))
         monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
@@ -466,6 +467,39 @@ class TestSignalProcessorBuildDecision:
         assert result.passed is False
         assert result.checks["live_data_quality"]["passed"] is False
         assert "Live data quality gate failed" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_prefilter_disabled_hard_check_does_not_leave_failure_reason(self, processor, monkeypatch):
+        with pre_filter._state_lock:
+            pre_filter._recent_signals.clear()
+
+        monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=1))
+        monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
+        monkeypatch.setattr("pre_filter.get_recent_trade_results_async", AsyncMock(return_value=[]))
+
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=50000.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        market = MarketContext(ticker="BTCUSDT", current_price=50000.0)
+
+        result = await pre_filter.run_pre_filter_async(
+            signal,
+            market,
+            max_daily_trades=1,
+            disabled_checks={"Daily_Trade_Limit"},
+        )
+
+        assert result.passed is True
+        assert result.checks["daily_trade_limit"]["disabled"] is True
+        assert "Daily trade limit reached" not in result.reason
+        assert pre_filter._filter_stats_buffer.get("daily_trade_limit", {}) == before_stats
 
     @pytest.mark.asyncio
     async def test_correlation_risk_error_blocks_live_mode(self, processor, sample_signal):

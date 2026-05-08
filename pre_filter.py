@@ -422,6 +422,11 @@ async def run_pre_filter_async(
     reasons: list[str] = []
     soft_fail_reasons: list[str] = []
     ticker = signal.ticker.upper()
+    disabled = {str(item).strip().lower() for item in (disabled_checks or []) if str(item).strip()}
+
+    def record_filter_block(check_name: str) -> None:
+        if check_name.lower() not in disabled:
+            _record_filter_block(check_name, ticker)
 
     has_price_data = market.current_price > 0
     has_volume_data = market.volume_24h > 0
@@ -460,7 +465,7 @@ async def run_pre_filter_async(
     }
     if not daily_ok:
         reasons.append(f"Daily trade limit reached ({daily_count_snapshot}/{max_daily_trades})")
-        _record_filter_block("daily_trade_limit", ticker)
+        record_filter_block("daily_trade_limit")
 
     # Use user's actual balance from database, not stale market context equity
     from core.database import get_user_balance_async
@@ -483,7 +488,7 @@ async def run_pre_filter_async(
             f"Daily loss limit reached ({current_pnl:.2f}% / {abs(pnl_usdt):.2f} USDT / {account_equity:.2f} USDT equity "
             f"/ -{max_daily_loss_pct}%)"
         )
-        _record_filter_block("daily_loss_limit", ticker)
+        record_filter_block("daily_loss_limit")
 
     loss_allowed, loss_reason = await check_account_loss_limits(
         user_id=user_id,
@@ -497,7 +502,7 @@ async def run_pre_filter_async(
     }
     if not loss_allowed:
         reasons.append(loss_reason)
-        _record_filter_block("account_daily_loss_limit", ticker)
+        record_filter_block("account_daily_loss_limit")
 
     # ── Check 3: Duplicate signal cooldown (Dynamic) ──
     base_cooldown = thresholds.get("cooldown_seconds", ticker)
@@ -534,7 +539,7 @@ async def run_pre_filter_async(
     }
     if not cooldown_ok:
         reasons.append(f"Duplicate signal within {cooldown_secs}s cooldown (dynamic)")
-        _record_filter_block("cooldown", ticker)
+        record_filter_block("cooldown")
 
     # ── Check 4: Price sanity check ──
     price_ok = True
@@ -551,7 +556,7 @@ async def run_pre_filter_async(
         }
         if not price_ok:
             reasons.append(f"Signal price deviates {price_diff:.2f}% from market")
-            _record_filter_block("price_sanity", ticker)
+            record_filter_block("price_sanity")
     elif not has_price_data:
         checks["price_sanity"] = {"passed": True, "missing_data": True, "note": "No price data available"}
         missing_data_checks.append("price_sanity")
@@ -568,7 +573,7 @@ async def run_pre_filter_async(
         }
         if not vol_ok:
             reasons.append(f"Extreme volatility: ATR% = {market.atr_pct:.2f}% > {atr_max}%")
-            _record_filter_block("volatility_guard", ticker)
+            record_filter_block("volatility_guard")
     elif not has_atr_data:
         checks["volatility_guard"] = {"passed": True, "missing_data": True, "note": "No ATR data available"}
         missing_data_checks.append("volatility_guard")
@@ -619,7 +624,7 @@ async def run_pre_filter_async(
         }
         if not sudden_move_ok:
             reasons.append(f"Sudden move: {market.price_change_1h:+.2f}% in 1h")
-            _record_filter_block("sudden_move", ticker)
+            record_filter_block("sudden_move")
 
     # ═══════════════════════════════════════════
     # ENHANCED CHECKS (v3)
@@ -647,7 +652,7 @@ async def run_pre_filter_async(
         if not rsi_ok:
             soft_fail_reasons.append(f"RSI extreme: {market.rsi_1h:.1f} conflicts with {signal.direction.value} (soft fail)")
             checks["rsi_extreme"]["soft_fail"] = True
-            _record_filter_block("rsi_extreme", ticker)
+            record_filter_block("rsi_extreme")
     elif not has_rsi_data:
         checks["rsi_extreme"] = {"passed": True, "missing_data": True, "note": "No RSI data available"}
         missing_data_checks.append("rsi_extreme")
@@ -699,7 +704,7 @@ async def run_pre_filter_async(
         if not ob_ok:
             soft_fail_reasons.append(f"Orderbook imbalance {market.orderbook_imbalance:.2f} against {signal.direction.value} (soft fail)")
             checks["orderbook_imbalance"]["soft_fail"] = True
-            _record_filter_block("orderbook_imbalance", ticker)
+            record_filter_block("orderbook_imbalance")
     elif not has_orderbook_data:
         checks["orderbook_imbalance"] = {"passed": True, "missing_data": True, "note": "No orderbook data available"}
         missing_data_checks.append("orderbook_imbalance")
@@ -759,7 +764,7 @@ async def run_pre_filter_async(
         }
         if not consec_ok:
             reasons.append(f"{consec_max} consecutive losses — cooling off, suggest {position_suggestion}")
-            _record_filter_block("consecutive_loss", ticker)
+            record_filter_block("consecutive_loss")
         elif consec_losses >= 2:
             soft_fail_reasons.append(f"{consec_losses} recent losses — suggest reduce position by {position_reduce_pct}%")
             checks["consecutive_loss"]["soft_fail"] = True
@@ -857,7 +862,7 @@ async def run_pre_filter_async(
             if not structure_ok:
                 soft_fail_reasons.append(f"HTF structure {structure.trend} conflicts (no CHoCH) (soft fail)")
                 checks["market_structure"]["soft_fail"] = True
-                _record_filter_block("market_structure", ticker)
+                record_filter_block("market_structure")
     except Exception as e:
         checks["market_structure"] = {"passed": True, "note": f"Skip: {e}"}
 
@@ -980,7 +985,7 @@ async def run_pre_filter_async(
         }
         if not macro_ok:
             reasons.append(f"Macro event risk: {macro_reason}")
-            _record_filter_block("macro_events", ticker)
+            record_filter_block("macro_events")
 
     # ── Check 21: Liquidation Heatmap ──
     liq_ok = True
@@ -1180,7 +1185,7 @@ async def run_pre_filter_async(
             f"Market data incomplete: {len(missing_data_checks)} checks missing ({', '.join(missing_data_checks[:6])})"
         )
         checks["data_completeness"]["soft_fail"] = True
-        _record_filter_block("data_completeness", ticker)
+        record_filter_block("data_completeness")
 
     # ── Live trading data quality gate ──
     live_quality_mode = str(data_quality_mode or "warn").lower().strip()
@@ -1203,17 +1208,17 @@ async def run_pre_filter_async(
             f"Live data quality gate failed: {live_quality_issues} unavailable/missing checks "
             f"(max {live_missing_limit})"
         )
-        _record_filter_block("live_data_quality", ticker)
+        record_filter_block("live_data_quality")
 
     # ═══════════════════════════════════════════
     # Final Verdict
     # ═══════════════════════════════════════════
 
-    disabled = {str(item).strip() for item in (disabled_checks or []) if str(item).strip()}
     for name in disabled:
-        if name in checks:
-            checks[name]["disabled"] = True
-            checks[name]["passed"] = True
+        for check_name, check in checks.items():
+            if check_name.lower() == name:
+                check["disabled"] = True
+                check["passed"] = True
 
     score = calculate_filter_score(checks)
 
@@ -1228,7 +1233,7 @@ async def run_pre_filter_async(
     total_checks = len(checks)
     passed_count = sum(1 for c in checks.values() if c.get("passed", True) or c.get("disabled", False))
 
-    all_reasons = reasons + soft_fail_reasons
+    all_reasons = (reasons if not all_passed else []) + soft_fail_reasons
 
     if all_passed:
         ticker_key = position_symbol_key(signal.ticker)

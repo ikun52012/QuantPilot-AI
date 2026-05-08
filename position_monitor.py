@@ -95,6 +95,34 @@ def _calculate_ghost_threshold(position: PositionModel) -> int:
     return threshold
 
 
+def _position_contract_size(position: PositionModel) -> float:
+    """Return stored contract multiplier for margin/PnL calculations."""
+    ts_config = loads_dict(position.trailing_stop_config_json)
+    return max(0.0, safe_float(ts_config.get("_contract_size"), 1.0))
+
+
+def _filled_margin_from_order(
+    position: PositionModel,
+    filled_cost: float,
+    filled_amount: float,
+    filled_price: float,
+) -> float:
+    """Calculate margin for a filled entry order.
+
+    Exchange-reported cost already represents notional. If it is missing, rebuild
+    notional from amount, price, and the stored contract multiplier.
+    """
+    leverage = safe_float(position.leverage, 1.0)
+    if leverage <= 0:
+        return safe_float(position.margin, 0.0)
+    if filled_cost > 0:
+        return filled_cost / leverage
+    if filled_amount > 0 and filled_price > 0:
+        contract_size = _position_contract_size(position) or 1.0
+        return (filled_amount * filled_price * contract_size) / leverage
+    return safe_float(position.margin, 0.0)
+
+
 async def _fetch_market_price_changes(symbol: str, exchange_config: dict, current_price: float) -> dict:
     """Fetch OHLCV data to calculate price_change_1h and price_change_24h.
 
@@ -739,12 +767,8 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     position.quantity = filled_amount
                     position.remaining_quantity = filled_amount
 
-                # Update margin based on actual filled cost
-                leverage = safe_float(position.leverage, 1.0)
-                if filled_cost > 0 and leverage > 0:
-                    position.margin = filled_cost / leverage
-                elif filled_amount > 0 and filled_price > 0 and leverage > 0:
-                    position.margin = (filled_amount * filled_price) / leverage
+                # Update margin based on actual filled cost or contract-aware fallback
+                position.margin = _filled_margin_from_order(position, filled_cost, filled_amount, filled_price)
 
                 # Log fee if available
                 fee_info = order.get("fee", {})
@@ -774,11 +798,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         position.entry_price = filled_price
                         position.last_price = filled_price
                     filled_cost = safe_float(order.get("cost") or 0)
-                    leverage = safe_float(position.leverage, 1.0)
-                    if filled_cost > 0 and leverage > 0:
-                        position.margin = filled_cost / leverage
-                    elif filled_amount > 0 and filled_price > 0 and leverage > 0:
-                        position.margin = (filled_amount * filled_price) / leverage
+                    position.margin = _filled_margin_from_order(position, filled_cost, filled_amount, filled_price)
 
                     # P1-FIX: Re-evaluate trailing_stop for partial fill on cancel/expire
                     try:
@@ -832,11 +852,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         position.entry_price = filled_price
                         position.last_price = filled_price
                     filled_cost = safe_float(order.get("cost") or 0)
-                    leverage = safe_float(position.leverage, 1.0)
-                    if filled_cost > 0 and leverage > 0:
-                        position.margin = filled_cost / leverage
-                    elif filled_amount > 0 and filled_price > 0 and leverage > 0:
-                        position.margin = (filled_amount * filled_price) / leverage
+                    position.margin = _filled_margin_from_order(position, filled_cost, filled_amount, filled_price)
 
                     # P1-FIX: Re-evaluate trailing_stop for partial fill
                     try:
@@ -1062,7 +1078,13 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
         if ghost_entry["fail_count"] >= dynamic_threshold and missing_elapsed >= _GHOST_CHECK_INTERVAL_SECS:
             # P0-FIX: Log with dynamic threshold info
-            position_value = safe_float(position.entry_price, 0.0) * safe_float(position.quantity, 0.0) / max(1.0, safe_float(position.leverage, 1.0))
+            contract_size = _position_contract_size(position) or 1.0
+            position_value = (
+                safe_float(position.entry_price, 0.0)
+                * safe_float(position.quantity, 0.0)
+                * contract_size
+                / max(1.0, safe_float(position.leverage, 1.0))
+            )
             logger.warning(
                 f"[P0-FIX] GHOST POSITION: {position.id[:8]} on {position.ticker} "
                 f"(value=${position_value:.2f}, threshold={dynamic_threshold}) "
