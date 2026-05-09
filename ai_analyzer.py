@@ -1084,6 +1084,7 @@ async def _call_deepseek(system: str, user: str, model: str | None = None) -> st
                     ],
                     "temperature": settings.ai.temperature,
                     "max_tokens": settings.ai.max_tokens,
+                    "response_format": {"type": "json_object"},
                 },
             )
             resp.raise_for_status()

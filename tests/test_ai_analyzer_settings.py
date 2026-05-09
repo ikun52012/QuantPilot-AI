@@ -9,6 +9,7 @@ from ai_analyzer import (
     _analysis_config_signature,
     _build_user_prompt,
     _cached_analyze_smc_single_tf,
+    _call_deepseek,
     _get_cached_analysis,
     _get_effective_system_prompt,
     _parse_response,
@@ -162,6 +163,45 @@ def test_build_user_prompt_includes_entry_exit_indicators(sample_signal, sample_
     assert "Volume Profile" in prompt
     assert "UTC Session Levels" in prompt
     assert "bullish_low_sweep" in prompt
+
+
+@pytest.mark.asyncio
+async def test_deepseek_call_requests_json_output(monkeypatch):
+    captured_payload = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": '{"recommendation":"hold"}'}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured_payload.update(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(settings.ai, "deepseek_api_key", "deepseek-key")
+    monkeypatch.setattr(settings.ai, "deepseek_model", "deepseek-v4-pro")
+    monkeypatch.setattr("ai_analyzer.httpx.AsyncClient", FakeAsyncClient)
+
+    raw = await _call_deepseek("Return JSON only.", "Analyze this signal.")
+
+    assert raw == '{"recommendation":"hold"}'
+    assert captured_payload["model"] == "deepseek-v4-pro"
+    assert captured_payload["response_format"] == {"type": "json_object"}
 
 
 def test_analysis_config_signature_changes_with_prefilter_summary():
