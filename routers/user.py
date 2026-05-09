@@ -946,6 +946,22 @@ async def get_user_settings(
     db: AsyncSession = Depends(get_db),
 ):
     """Get user settings."""
+    if _is_admin(user) and request.url.path.endswith("/api/settings"):
+        status = runtime_settings.runtime_status()
+        return {
+            "exchange": {
+                "name": status.get("exchange") or settings.exchange.name,
+                "exchange": status.get("exchange") or settings.exchange.name,
+                "live_trading": bool(status.get("live_trading")),
+                "sandbox_mode": bool(status.get("exchange_sandbox_mode")),
+                "market_type": status.get("exchange_market_type") or settings.exchange.market_type,
+                "default_order_type": status.get("exchange_default_order_type") or settings.exchange.default_order_type,
+                "stop_loss_order_type": status.get("exchange_stop_loss_order_type") or settings.exchange.stop_loss_order_type,
+                "limit_timeout_overrides": status.get("exchange_limit_timeout_overrides") or {},
+                "api_configured": bool(status.get("exchange_api_configured")),
+            }
+        }
+
     db_user = await get_user_by_id(db, user["sub"])
     if not db_user:
         raise HTTPException(404, "User not found")

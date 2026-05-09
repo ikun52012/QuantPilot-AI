@@ -484,6 +484,54 @@ class TestUserEndpoints:
         assert status["exchange_default_order_type"] == "limit"
         assert status["exchange_limit_timeout_overrides"] == {"1h": 7200}
 
+        settings_response = await client.get("/api/settings", headers=headers)
+        assert settings_response.status_code == 200
+        exchange = settings_response.json()["exchange"]
+        assert exchange["live_trading"] is True
+        assert exchange["sandbox_mode"] is False
+        assert exchange["api_configured"] is True
+
+    @pytest.mark.asyncio
+    async def test_admin_ai_settings_do_not_reset_exchange_runtime_mode(self, client: AsyncClient, db_session, test_admin_data):
+        headers = await _login_admin(client, db_session, test_admin_data)
+
+        exchange_response = await client.post(
+            "/api/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "exchange-key",
+                "api_secret": "exchange-secret",
+                "password": "exchange-pass",
+                "live_trading": True,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "limit",
+                "stop_loss_order_type": "market",
+            },
+        )
+        assert exchange_response.status_code == 200
+
+        ai_response = await client.post(
+            "/api/settings/ai",
+            headers=headers,
+            json={
+                "provider": "deepseek",
+                "api_key": "deepseek-key",
+                "temperature": 0.3,
+                "max_tokens": 1000,
+                "deepseek_model": "deepseek-v4-pro",
+            },
+        )
+        assert ai_response.status_code == 200
+
+        status_response = await client.get("/api/status", headers=headers)
+        assert status_response.status_code == 200
+        status = status_response.json()
+        assert status["live_trading"] is True
+        assert status["exchange_sandbox_mode"] is True
+        assert status["deepseek_api_configured"] is True
+
     @pytest.mark.asyncio
     async def test_admin_exchange_settings_allow_clearing_credentials(self, client: AsyncClient, db_session, test_admin_data):
         headers = await _login_admin(client, db_session, test_admin_data)

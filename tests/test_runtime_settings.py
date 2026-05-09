@@ -24,6 +24,21 @@ def test_runtime_settings_accepts_mistral_provider(monkeypatch):
     assert runtime_settings._current_ai_key("mistral") == "mistral-key"
 
 
+def test_runtime_status_reports_provider_specific_ai_keys(monkeypatch):
+    monkeypatch.setattr(runtime_settings.settings.ai, "openai_api_key", "")
+    monkeypatch.setattr(runtime_settings.settings.ai, "anthropic_api_key", "")
+    monkeypatch.setattr(runtime_settings.settings.ai, "deepseek_api_key", "deep-key")
+    monkeypatch.setattr(runtime_settings.settings.ai, "mistral_api_key", "")
+    monkeypatch.setattr(runtime_settings.settings.ai, "openrouter_api_key", "")
+    monkeypatch.setattr(runtime_settings.settings.ai, "custom_provider_api_key", "")
+
+    status = runtime_settings.runtime_status()
+
+    assert status["ai_api_configured"] is True
+    assert status["openai_api_configured"] is False
+    assert status["deepseek_api_configured"] is True
+
+
 def test_apply_runtime_settings_allows_empty_voting_collections(monkeypatch):
     monkeypatch.setattr(runtime_settings.settings.ai, "voting_models", ["openai/gpt-5.5"])
     monkeypatch.setattr(runtime_settings.settings.ai, "voting_weights", {"openai/gpt-5.5": 1.0})

@@ -990,7 +990,7 @@ async function loadSettings() {
             fetchAPI('/api/status'),
             fetchAPI('/api/settings').catch(() => ({})),
         ]);
-        const userExchange = userSettings.exchange || {};
+        const userExchange = isAdmin() ? {} : (userSettings.exchange || {});
         if (document.getElementById('set-exchange') && status.exchange) document.getElementById('set-exchange').value = status.exchange;
         setFieldValue('set-live-trading', String(Boolean(status.live_trading)));
         const sandbox = document.getElementById('set-exchange-sandbox');
@@ -1007,9 +1007,7 @@ async function loadSettings() {
         setSecretPlaceholder('set-api-secret', Boolean(userExchange.api_configured) || status.exchange_api_configured, 'Enter API Secret');
         setSecretPlaceholder('set-password', status.exchange_password_configured, 'Enter Passphrase');
         if (document.getElementById('set-ai-provider') && status.ai_provider) document.getElementById('set-ai-provider').value = status.ai_provider;
-        const aiKeyConfigured = status.ai_provider === 'openrouter'
-            ? Boolean(status.openrouter_api_configured)
-            : Boolean(status.ai_api_configured);
+        const aiKeyConfigured = aiKeyConfiguredForProvider(status, status.ai_provider);
         setSecretPlaceholder('set-ai-key', aiKeyConfigured, 'Enter AI API Key');
         if (document.getElementById('set-custom-provider-enabled')) document.getElementById('set-custom-provider-enabled').checked = Boolean(status.custom_provider_enabled);
         if (document.getElementById('set-custom-provider-name')) document.getElementById('set-custom-provider-name').value = status.custom_provider_name || 'custom';
@@ -1814,7 +1812,7 @@ async function saveAIProviderConfig() {
     try {
         await fetchAPI('/api/admin/ai/provider-config', {
             method: 'POST',
-            body: JSON.stringify({ default_provider: provider }),
+            body: JSON.stringify({ provider }),
         });
         showToast('Default provider updated.', 'success', 'Saved');
         await loadAIProviderConfig();
@@ -3295,6 +3293,16 @@ function firstDefined(...values) { return values.find(v => v !== undefined && v 
 function setFieldValue(id, value) {
     const el = document.getElementById(id);
     if (el) el.value = value ?? '';
+}
+function aiKeyConfiguredForProvider(status, provider) {
+    const normalized = String(provider || '').toLowerCase();
+    if (normalized === 'openai') return Boolean(status.openai_api_configured);
+    if (normalized === 'anthropic') return Boolean(status.anthropic_api_configured);
+    if (normalized === 'deepseek') return Boolean(status.deepseek_api_configured);
+    if (normalized === 'mistral') return Boolean(status.mistral_api_configured);
+    if (normalized === 'openrouter') return Boolean(status.openrouter_api_configured);
+    if (normalized === 'custom') return Boolean(status.custom_provider_api_configured);
+    return Boolean(status.ai_api_configured);
 }
 function setSecretPlaceholder(id, configured, emptyText) {
     const el = document.getElementById(id);

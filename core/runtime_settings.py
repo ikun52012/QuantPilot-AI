@@ -606,6 +606,9 @@ def runtime_status() -> dict[str, Any]:
             or settings.ai.openrouter_api_key
             or settings.ai.custom_provider_api_key
         ),
+        "openai_api_configured": _public_secret_configured(settings.ai.openai_api_key),
+        "anthropic_api_configured": _public_secret_configured(settings.ai.anthropic_api_key),
+        "deepseek_api_configured": _public_secret_configured(settings.ai.deepseek_api_key),
         "ai_temperature": settings.ai.temperature,
         "ai_max_tokens": settings.ai.max_tokens,
         "ai_custom_system_prompt": settings.ai.custom_system_prompt,
@@ -618,6 +621,7 @@ def runtime_status() -> dict[str, Any]:
         "openrouter_api_configured": _public_secret_configured(settings.ai.openrouter_api_key),
         "mistral_model": settings.ai.mistral_model,
         "mistral_api_configured": _public_secret_configured(settings.ai.mistral_api_key),
+        "custom_provider_api_configured": _public_secret_configured(settings.ai.custom_provider_api_key),
         "openai_model": settings.ai.openai_model,
         "anthropic_model": settings.ai.anthropic_model,
         "deepseek_model": settings.ai.deepseek_model,
