@@ -37,6 +37,7 @@ def test_runtime_status_reports_provider_specific_ai_keys(monkeypatch):
     assert status["ai_api_configured"] is True
     assert status["openai_api_configured"] is False
     assert status["deepseek_api_configured"] is True
+    assert status["deepseek_api_key_masked"] == "de****ey"
 
 
 def test_apply_runtime_settings_allows_empty_voting_collections(monkeypatch):

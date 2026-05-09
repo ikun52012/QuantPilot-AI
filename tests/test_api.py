@@ -490,6 +490,11 @@ class TestUserEndpoints:
         assert exchange["live_trading"] is True
         assert exchange["sandbox_mode"] is False
         assert exchange["api_configured"] is True
+        assert exchange["api_key_masked"] == "ke****ey"
+        assert exchange["api_secret_masked"] == "keep****cret"
+        assert exchange["password_masked"] == "keep****word"
+        assert "api_key" not in exchange
+        assert "api_secret" not in exchange
 
     @pytest.mark.asyncio
     async def test_admin_ai_settings_do_not_reset_exchange_runtime_mode(self, client: AsyncClient, db_session, test_admin_data):
@@ -531,6 +536,8 @@ class TestUserEndpoints:
         assert status["live_trading"] is True
         assert status["exchange_sandbox_mode"] is True
         assert status["deepseek_api_configured"] is True
+        assert status["deepseek_api_key_masked"] == "deep****-key"
+        assert status["exchange_api_key_masked"] == "exch****-key"
 
     @pytest.mark.asyncio
     async def test_admin_exchange_settings_allow_clearing_credentials(self, client: AsyncClient, db_session, test_admin_data):

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_admin_setting, set_admin_setting
-from core.security import decrypt_settings_payload, encrypt_settings_payload
+from core.security import decrypt_settings_payload, encrypt_settings_payload, mask_secret
 from core.utils.common import first_valid, normalize_limit_timeout_overrides
 
 EXCHANGE_KEY = "runtime_exchange"
@@ -596,7 +596,10 @@ def runtime_status() -> dict[str, Any]:
         "exchange_stop_loss_order_type": settings.exchange.stop_loss_order_type,
         "exchange_limit_timeout_overrides": normalize_limit_timeout_overrides(settings.exchange.limit_timeout_overrides),
         "exchange_api_configured": _public_secret_configured(settings.exchange.api_key),
+        "exchange_api_key_masked": mask_secret(settings.exchange.api_key),
+        "exchange_api_secret_masked": mask_secret(settings.exchange.api_secret),
         "exchange_password_configured": _public_secret_configured(settings.exchange.password),
+        "exchange_password_masked": mask_secret(settings.exchange.password),
         "ai_provider": settings.ai.provider,
         "ai_api_configured": _public_secret_configured(
             settings.ai.openai_api_key
@@ -607,8 +610,11 @@ def runtime_status() -> dict[str, Any]:
             or settings.ai.custom_provider_api_key
         ),
         "openai_api_configured": _public_secret_configured(settings.ai.openai_api_key),
+        "openai_api_key_masked": mask_secret(settings.ai.openai_api_key),
         "anthropic_api_configured": _public_secret_configured(settings.ai.anthropic_api_key),
+        "anthropic_api_key_masked": mask_secret(settings.ai.anthropic_api_key),
         "deepseek_api_configured": _public_secret_configured(settings.ai.deepseek_api_key),
+        "deepseek_api_key_masked": mask_secret(settings.ai.deepseek_api_key),
         "ai_temperature": settings.ai.temperature,
         "ai_max_tokens": settings.ai.max_tokens,
         "ai_custom_system_prompt": settings.ai.custom_system_prompt,
@@ -619,15 +625,19 @@ def runtime_status() -> dict[str, Any]:
         "openrouter_enabled": settings.ai.openrouter_enabled,
         "openrouter_model": settings.ai.openrouter_model,
         "openrouter_api_configured": _public_secret_configured(settings.ai.openrouter_api_key),
+        "openrouter_api_key_masked": mask_secret(settings.ai.openrouter_api_key),
         "mistral_model": settings.ai.mistral_model,
         "mistral_api_configured": _public_secret_configured(settings.ai.mistral_api_key),
+        "mistral_api_key_masked": mask_secret(settings.ai.mistral_api_key),
         "custom_provider_api_configured": _public_secret_configured(settings.ai.custom_provider_api_key),
+        "custom_provider_api_key_masked": mask_secret(settings.ai.custom_provider_api_key),
         "openai_model": settings.ai.openai_model,
         "anthropic_model": settings.ai.anthropic_model,
         "deepseek_model": settings.ai.deepseek_model,
         "telegram": {
             "configured": bool(settings.telegram.bot_token and settings.telegram.chat_id),
             "bot_configured": _public_secret_configured(settings.telegram.bot_token),
+            "bot_token_masked": mask_secret(settings.telegram.bot_token),
             "chat_id": settings.telegram.chat_id,
         },
         "take_profit": {

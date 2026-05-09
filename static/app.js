@@ -14,6 +14,7 @@ const USDT_PAYMENT_NETWORKS = [
 ];
 
 let currentUserSettings = null;
+let currentRuntimeStatus = null;
 let _strategyTemplates = [];
 let _systemSocket = null;
 let _priceSocket = null;
@@ -953,6 +954,14 @@ function toggleCustomAIFields() {
     if (openaiFields) openaiFields.style.display = provider === 'openai' ? 'block' : 'none';
     if (anthropicFields) anthropicFields.style.display = provider === 'anthropic' ? 'block' : 'none';
     if (deepseekFields) deepseekFields.style.display = provider === 'deepseek' ? 'block' : 'none';
+    if (currentRuntimeStatus) {
+        setSecretPlaceholder(
+            'set-ai-key',
+            aiKeyConfiguredForProvider(currentRuntimeStatus, provider),
+            'Enter AI API Key',
+            aiKeyMaskedForProvider(currentRuntimeStatus, provider)
+        );
+    }
 }
 
 function toggleExitModeFields() {
@@ -990,6 +999,7 @@ async function loadSettings() {
             fetchAPI('/api/status'),
             fetchAPI('/api/settings').catch(() => ({})),
         ]);
+        currentRuntimeStatus = status;
         const userExchange = isAdmin() ? {} : (userSettings.exchange || {});
         if (document.getElementById('set-exchange') && status.exchange) document.getElementById('set-exchange').value = status.exchange;
         setFieldValue('set-live-trading', String(Boolean(status.live_trading)));
@@ -1003,12 +1013,27 @@ async function loadSettings() {
         setFieldValue('set-stop-loss-order-type', userExchange.stop_loss_order_type || status.exchange_stop_loss_order_type || 'market');
         applyTimeoutOverrideFields('set', userExchange.limit_timeout_overrides || status.exchange_limit_timeout_overrides || {});
         toggleExchangePasswordField();
-        setSecretPlaceholder('set-api-key', Boolean(userExchange.api_configured) || status.exchange_api_configured, 'Enter API Key');
-        setSecretPlaceholder('set-api-secret', Boolean(userExchange.api_configured) || status.exchange_api_configured, 'Enter API Secret');
-        setSecretPlaceholder('set-password', status.exchange_password_configured, 'Enter Passphrase');
+        setSecretPlaceholder(
+            'set-api-key',
+            Boolean(userExchange.api_configured) || status.exchange_api_configured,
+            'Enter API Key',
+            userExchange.api_key_masked || status.exchange_api_key_masked
+        );
+        setSecretPlaceholder(
+            'set-api-secret',
+            Boolean(userExchange.api_configured) || status.exchange_api_configured,
+            'Enter API Secret',
+            userExchange.api_secret_masked || status.exchange_api_secret_masked
+        );
+        setSecretPlaceholder(
+            'set-password',
+            Boolean(userExchange.password_masked) || status.exchange_password_configured,
+            'Enter Passphrase',
+            userExchange.password_masked || status.exchange_password_masked
+        );
         if (document.getElementById('set-ai-provider') && status.ai_provider) document.getElementById('set-ai-provider').value = status.ai_provider;
         const aiKeyConfigured = aiKeyConfiguredForProvider(status, status.ai_provider);
-        setSecretPlaceholder('set-ai-key', aiKeyConfigured, 'Enter AI API Key');
+        setSecretPlaceholder('set-ai-key', aiKeyConfigured, 'Enter AI API Key', aiKeyMaskedForProvider(status, status.ai_provider));
         if (document.getElementById('set-custom-provider-enabled')) document.getElementById('set-custom-provider-enabled').checked = Boolean(status.custom_provider_enabled);
         if (document.getElementById('set-custom-provider-name')) document.getElementById('set-custom-provider-name').value = status.custom_provider_name || 'custom';
         if (document.getElementById('set-custom-provider-model')) document.getElementById('set-custom-provider-model').value = status.custom_provider_model || '';
@@ -1022,7 +1047,7 @@ async function loadSettings() {
         setFieldValue('set-ai-tokens', status.ai_max_tokens ?? 1000);
         setFieldValue('set-ai-prompt', status.ai_custom_system_prompt || '');
         setFieldValue('set-tg-chat', status.telegram?.chat_id || '');
-        setSecretPlaceholder('set-tg-token', status.telegram?.bot_configured, 'Enter Telegram Bot Token');
+        setSecretPlaceholder('set-tg-token', status.telegram?.bot_configured, 'Enter Telegram Bot Token', status.telegram?.bot_token_masked);
         toggleCustomAIFields();
         const tp = status.take_profit || {};
         setFieldValue('set-tp-levels', tp.num_levels ?? status.tp_levels ?? 1);
@@ -1387,7 +1412,11 @@ function renderUserSettings(data) {
     if (sandbox) sandbox.checked = Boolean(ex.sandbox_mode);
     const liveSelect = document.getElementById('user-live-trading');
     if (liveSelect) liveSelect.disabled = !controls.live_trading_allowed;
-    setText('user-api-configured', `${ex.api_configured ? 'Configured' : 'Not configured'} · Live ${controls.live_trading_allowed ? 'allowed' : 'disabled'} · ${ex.sandbox_mode ? 'Sandbox' : 'Live endpoints'} · Max ${controls.max_leverage || 20}x`);
+    const savedKey = ex.api_key_masked ? ` · Key ${ex.api_key_masked}` : '';
+    setText('user-api-configured', `${ex.api_configured ? 'Configured' : 'Not configured'}${savedKey} · Live ${controls.live_trading_allowed ? 'allowed' : 'disabled'} · ${ex.sandbox_mode ? 'Sandbox' : 'Live endpoints'} · Max ${controls.max_leverage || 20}x`);
+    setSecretPlaceholder('user-api-key', Boolean(ex.api_configured), 'Leave blank to keep saved key', ex.api_key_masked);
+    setSecretPlaceholder('user-api-secret', Boolean(ex.api_configured), 'Leave blank to keep saved secret', ex.api_secret_masked);
+    setSecretPlaceholder('user-api-password', Boolean(ex.password_masked), 'OKX / Bitget optional', ex.password_masked);
     setFieldValue('user-tp-levels', tp.num_levels || 1);
     ['tp1_pct','tp2_pct','tp3_pct','tp4_pct','tp1_qty','tp2_qty','tp3_qty','tp4_qty'].forEach(key => {
         const id = `user-${key.replace('_','-')}`;
@@ -3304,11 +3333,23 @@ function aiKeyConfiguredForProvider(status, provider) {
     if (normalized === 'custom') return Boolean(status.custom_provider_api_configured);
     return Boolean(status.ai_api_configured);
 }
-function setSecretPlaceholder(id, configured, emptyText) {
+function aiKeyMaskedForProvider(status, provider) {
+    const normalized = String(provider || '').toLowerCase();
+    if (normalized === 'openai') return status.openai_api_key_masked || '';
+    if (normalized === 'anthropic') return status.anthropic_api_key_masked || '';
+    if (normalized === 'deepseek') return status.deepseek_api_key_masked || '';
+    if (normalized === 'mistral') return status.mistral_api_key_masked || '';
+    if (normalized === 'openrouter') return status.openrouter_api_key_masked || '';
+    if (normalized === 'custom') return status.custom_provider_api_key_masked || '';
+    return '';
+}
+function setSecretPlaceholder(id, configured, emptyText, maskedValue = '') {
     const el = document.getElementById(id);
     if (!el) return;
     el.value = '';
-    el.placeholder = configured ? 'Saved securely. Leave blank to keep existing value.' : emptyText;
+    const masked = String(maskedValue || '').trim();
+    el.placeholder = configured ? (masked || '********') : emptyText;
+    el.title = configured ? `Saved: ${el.placeholder}` : '';
 }
 
 function selectPaymentNetwork(button, subscriptionId, amount) {

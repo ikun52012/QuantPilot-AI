@@ -25,7 +25,7 @@ from core.database import (
     get_user_by_id,
 )
 from core.request_utils import public_base_url
-from core.security import decrypt_settings_payload, encrypt_settings_payload
+from core.security import decrypt_settings_payload, encrypt_settings_payload, mask_secret
 from core.utils.common import normalize_limit_timeout_overrides, position_symbol_key
 from core.utils.datetime import utcnow
 
@@ -959,6 +959,9 @@ async def get_user_settings(
                 "stop_loss_order_type": status.get("exchange_stop_loss_order_type") or settings.exchange.stop_loss_order_type,
                 "limit_timeout_overrides": status.get("exchange_limit_timeout_overrides") or {},
                 "api_configured": bool(status.get("exchange_api_configured")),
+                "api_key_masked": status.get("exchange_api_key_masked") or "",
+                "api_secret_masked": status.get("exchange_api_secret_masked") or "",
+                "password_masked": status.get("exchange_password_masked") or "",
             }
         }
 
@@ -992,6 +995,9 @@ async def get_user_settings(
         normalize_limit_timeout_overrides(settings.exchange.limit_timeout_overrides),
     )
     exchange["api_configured"] = bool(exchange.get("api_key") and exchange.get("api_secret"))
+    exchange["api_key_masked"] = mask_secret(exchange.get("api_key"))
+    exchange["api_secret_masked"] = mask_secret(exchange.get("api_secret"))
+    exchange["password_masked"] = mask_secret(exchange.get("password"))
     exchange.pop("api_key", None)
     exchange.pop("api_secret", None)
     exchange.pop("password", None)

@@ -100,6 +100,19 @@ def has_secure_api_key(key_name: str) -> bool:
         return key_name in _secure_keys or bool(os.getenv(key_name.upper(), ""))
 
 
+def mask_secret(value: Any, *, front: int = 4, back: int = 4) -> str:
+    """Return a safe masked representation of a stored secret."""
+    secret = str(value or "").strip()
+    if not secret:
+        return ""
+    if len(secret) <= front + back:
+        if len(secret) <= 4:
+            return "****"
+        edge = min(2, max(1, len(secret) // 4))
+        return f"{secret[:edge]}****{secret[-edge:]}"
+    return f"{secret[:front]}****{secret[-back:]}"
+
+
 # ─────────────────────────────────────────────
 # Encryption
 # ─────────────────────────────────────────────
