@@ -886,8 +886,48 @@ class TestPositionSizeCalculation:
 
             assert decision.quantity == pytest.approx(20.0)
 
-    def test_fixed_position_limits_reject_large_exchange_min_deviation(self, processor):
-        """Fixed sizing should reject when exchange minimums would break the configured margin."""
+    def test_fixed_position_limits_adjusts_leverage_for_exchange_minimums(self, processor):
+        """Fixed sizing should prefer matching margin over the AI's too-low leverage."""
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.position_sizing_mode = "fixed"
+            mock_settings.exchange.name = "okx"
+            mock_settings.exchange.market_type = "contract"
+
+            decision = TradeDecision(
+                execute=True,
+                ticker="XPTUSDT.P",
+                direction=SignalDirection.SHORT,
+                entry_price=410.75,
+                quantity=0.243457,
+                ai_analysis=AIAnalysis(recommendation="execute", confidence=0.8, recommended_leverage=1),
+            )
+
+            with patch(
+                "exchange.get_market_limits",
+                return_value={
+                    "symbol": "XPT/USDT:USDT",
+                    "min_amount": 1.0,
+                    "max_amount": 10000.0,
+                    "min_cost": 0.0,
+                    "max_cost": float("inf"),
+                    "amount_precision": 0,
+                    "contract_size": 1.0,
+                },
+            ):
+                processor._apply_position_limits(
+                    decision,
+                    {"exchange": "okx", "market_type": "contract", "max_leverage": 20},
+                )
+
+            assert decision.execute is True
+            assert decision.quantity == pytest.approx(1.0)
+            assert decision.ai_analysis.recommended_leverage == 4
+
+    def test_fixed_position_limits_reject_when_max_leverage_cannot_match_exchange_minimum(self, processor):
+        """Fixed sizing should reject if max leverage still cannot keep margin near the fixed amount."""
         with patch("services.signal_processor.settings") as mock_settings:
             mock_settings.risk.account_equity_usdt = 10000
             mock_settings.risk.max_position_pct = 10.0
@@ -919,7 +959,7 @@ class TestPositionSizeCalculation:
             ):
                 processor._apply_position_limits(
                     decision,
-                    {"exchange": "okx", "market_type": "contract", "max_leverage": 20},
+                    {"exchange": "okx", "market_type": "contract", "max_leverage": 10},
                 )
 
             assert decision.execute is False

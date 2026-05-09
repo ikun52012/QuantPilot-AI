@@ -1940,6 +1940,34 @@ class SignalProcessor:
         return max(1.0, min(raw_leverage, leverage_cap, 125.0))
 
     @classmethod
+    def _best_fixed_margin_leverage(
+        cls,
+        notional_value: float,
+        fixed_margin: float,
+        max_leverage: float | int | None = None,
+        preferred_leverage: float | int | None = None,
+    ) -> int:
+        """Pick the integer leverage that keeps fixed margin closest after exchange limits."""
+        leverage_cap = int(cls._coerce_risk_float(max_leverage, 125.0, 1.0, 125.0))
+        preferred = int(round(cls._coerce_risk_float(preferred_leverage, 1.0, 1.0, leverage_cap)))
+        if notional_value <= 0 or fixed_margin <= 0:
+            return max(1, min(preferred, leverage_cap))
+
+        ideal = notional_value / fixed_margin
+        candidate_values = {
+            1,
+            leverage_cap,
+            preferred,
+            int(math.floor(ideal)),
+            int(round(ideal)),
+            int(math.ceil(ideal)),
+        }
+        candidates = [max(1, min(leverage_cap, value)) for value in candidate_values if value > 0]
+        if not candidates:
+            return max(1, min(preferred, leverage_cap))
+        return min(candidates, key=lambda value: (abs((notional_value / value) - fixed_margin), abs(value - preferred)))
+
+    @classmethod
     def _resolved_risk_settings(cls, user_settings: dict | None = None) -> dict[str, float | str]:
         risk_cfg = (user_settings or {}).get("risk") or {}
         default_mode = str(getattr(settings.risk, "position_sizing_mode", "percentage") or "percentage").lower().strip()
@@ -2381,7 +2409,8 @@ class SignalProcessor:
         # Skip the max_position_pct limit since user explicitly set the amount
         if sizing_mode == "fixed":
             fixed_amount = float(risk_settings.get("fixed_position_size_usdt", 100.0))
-            leverage = self._effective_leverage(decision.ai_analysis, exchange_config.get("max_leverage"))
+            max_leverage = exchange_config.get("max_leverage")
+            leverage = self._effective_leverage(decision.ai_analysis, max_leverage)
             expected_notional = fixed_amount * leverage
             # For contract markets: notional = quantity * price * contractSize
             current_notional = decision.quantity * decision.entry_price * contract_size
@@ -2402,6 +2431,22 @@ class SignalProcessor:
                         limits,
                     )
                     adjusted_notional = adjusted_quantity * float(decision.entry_price) * contract_size
+                    selected_leverage = self._best_fixed_margin_leverage(
+                        adjusted_notional,
+                        fixed_amount,
+                        max_leverage,
+                        leverage,
+                    )
+                    previous_leverage = int(round(leverage))
+                    if selected_leverage != previous_leverage:
+                        logger.info(
+                            f"[Signal] Fixed mode: adjusted leverage {previous_leverage}x -> "
+                            f"{selected_leverage}x to keep margin near {fixed_amount:.2f}USDT "
+                            f"after exchange limits"
+                        )
+                    if decision.ai_analysis:
+                        decision.ai_analysis.recommended_leverage = selected_leverage
+                    leverage = float(selected_leverage)
                     adjusted_margin = adjusted_notional / max(1.0, leverage)
                     deviation_pct = (
                         abs(adjusted_margin - fixed_amount) / fixed_amount * 100.0
