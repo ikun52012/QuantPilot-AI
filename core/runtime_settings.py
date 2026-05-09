@@ -25,6 +25,7 @@ TELEGRAM_KEY = "runtime_telegram"
 RISK_KEY = "runtime_risk"
 TAKE_PROFIT_KEY = "runtime_take_profit"
 TRAILING_STOP_KEY = "runtime_trailing_stop"
+ORDER_EXECUTION_KEY = "runtime_order_execution"
 
 
 def _to_bool(value: Any, default: bool = False) -> bool:
@@ -120,6 +121,7 @@ async def load_admin_runtime_settings(session: AsyncSession) -> dict[str, dict[s
         "risk": await _load_encrypted_dict(session, RISK_KEY),
         "take_profit": await _load_encrypted_dict(session, TAKE_PROFIT_KEY),
         "trailing_stop": await _load_encrypted_dict(session, TRAILING_STOP_KEY),
+        "order_execution": await _load_encrypted_dict(session, ORDER_EXECUTION_KEY),
     }
 
 
@@ -570,6 +572,19 @@ async def save_trailing_stop_settings(session: AsyncSession, data: dict[str, Any
     return updated
 
 
+async def save_order_execution_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
+    current = await _load_encrypted_dict(session, ORDER_EXECUTION_KEY)
+    updated = {
+        "auto_approve_failed_orders": _to_bool(data.get("auto_approve_failed_orders"), _to_bool(current.get("auto_approve_failed_orders"), False)),
+        "auto_reject_failed_orders": _to_bool(data.get("auto_reject_failed_orders"), _to_bool(current.get("auto_reject_failed_orders"), False)),
+        "auto_retry_leverage_errors": _to_bool(data.get("auto_retry_leverage_errors"), _to_bool(current.get("auto_retry_leverage_errors"), False)),
+        "max_leverage_retry_attempts": _to_int(data.get("max_leverage_retry_attempts"), _to_int(current.get("max_leverage_retry_attempts"), 3), 1, 10),
+        "leverage_retry_delay_secs": _to_int(data.get("leverage_retry_delay_secs"), _to_int(current.get("leverage_retry_delay_secs"), 5), 1, 60),
+    }
+    await _save_encrypted_dict(session, ORDER_EXECUTION_KEY, updated)
+    return updated
+
+
 def runtime_status() -> dict[str, Any]:
     """Return non-secret runtime status for the dashboard."""
     return {
@@ -648,3 +663,8 @@ def runtime_status() -> dict[str, Any]:
             "strategy": settings.ai.voting_strategy,
         },
     }
+
+
+async def get_order_execution_settings(session: AsyncSession) -> dict[str, Any]:
+    """Get order execution auto-approve/auto-reject settings."""
+    return await _load_encrypted_dict(session, ORDER_EXECUTION_KEY)

@@ -500,16 +500,29 @@ body {
 
 .order-event {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr auto auto;
     gap: 8px;
     padding: 10px;
     border: 1px solid rgba(148, 163, 184, 0.1);
     border-radius: 7px;
     background: rgba(8, 13, 21, 0.64);
+    align-items: center;
 }
 
 .order-event strong { font-size: 13px; }
 .order-event span { color: var(--text-secondary); font-size: 12px; }
+
+.order-event-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.order-event-actions .btn {
+    padding: 4px 8px;
+    font-size: 11px;
+    min-width: auto;
+}
 
 .segmented {
     padding: 3px;

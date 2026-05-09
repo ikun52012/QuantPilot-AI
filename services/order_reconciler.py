@@ -156,3 +156,77 @@ async def run_order_reconciliation(session: AsyncSession) -> dict:
         "replayed_orders": 0,
         "note": "No duplicate orders were submitted during reconciliation.",
     }
+
+
+async def approve_order_event(session: AsyncSession, event_id: str, admin_notes: str = "") -> dict:
+    """Approve a manual review order event and mark it for re-execution."""
+    result = await session.execute(
+        select(OrderEventModel).where(OrderEventModel.id == event_id)
+    )
+    event = result.scalar_one_or_none()
+    if not event:
+        return {"success": False, "error": "Order event not found"}
+    if event.status != "manual_review":
+        return {"success": False, "error": f"Order event status is '{event.status}', must be 'manual_review' to approve"}
+
+    event.status = "approved"
+    event.retry_state = "approved"
+    event.updated_at = utcnow()
+    if admin_notes:
+        payload = json.loads(event.payload_json or "{}")
+        payload["admin_notes"] = admin_notes
+        event.payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+
+    await session.flush()
+    logger.info(f"[OrderReconciler] Order event {event_id} approved by admin")
+    return {"success": True, "event_id": event_id, "status": "approved"}
+
+
+async def reject_order_event(session: AsyncSession, event_id: str, admin_notes: str = "") -> dict:
+    """Reject a manual review order event permanently."""
+    result = await session.execute(
+        select(OrderEventModel).where(OrderEventModel.id == event_id)
+    )
+    event = result.scalar_one_or_none()
+    if not event:
+        return {"success": False, "error": "Order event not found"}
+    if event.status != "manual_review":
+        return {"success": False, "error": f"Order event status is '{event.status}', must be 'manual_review' to reject"}
+
+    event.status = "rejected"
+    event.retry_state = "not_required"
+    event.updated_at = utcnow()
+    if admin_notes:
+        payload = json.loads(event.payload_json or "{}")
+        payload["admin_notes"] = admin_notes
+        event.payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+
+    await session.flush()
+    logger.info(f"[OrderReconciler] Order event {event_id} rejected by admin")
+    return {"success": True, "event_id": event_id, "status": "rejected"}
+
+
+async def retry_order_event(session: AsyncSession, event_id: str, admin_notes: str = "") -> dict:
+    """Retry a manual review order event by resetting retry state."""
+    result = await session.execute(
+        select(OrderEventModel).where(OrderEventModel.id == event_id)
+    )
+    event = result.scalar_one_or_none()
+    if not event:
+        return {"success": False, "error": "Order event not found"}
+    if event.status not in ("manual_review", "retryable", "failed", "error", "rejected"):
+        return {"success": False, "error": f"Order event status is '{event.status}', cannot retry"}
+
+    event.status = "retryable"
+    event.retry_state = "pending"
+    event.attempt_count = 0
+    event.next_retry_at = utcnow()
+    event.updated_at = utcnow()
+    if admin_notes:
+        payload = json.loads(event.payload_json or "{}")
+        payload["admin_notes"] = admin_notes
+        event.payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+
+    await session.flush()
+    logger.info(f"[OrderReconciler] Order event {event_id} queued for retry by admin")
+    return {"success": True, "event_id": event_id, "status": "retryable"}

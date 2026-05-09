@@ -1285,6 +1285,94 @@ async def reconcile_order_events(
     return result
 
 
+@router.post("/order-events/{event_id}/approve")
+async def approve_order_event(
+    event_id: str,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve a manual review order event for re-execution."""
+    from services.order_reconciler import approve_order_event as _approve
+    body = await request.json() if request.body else {}
+    admin_notes = body.get("admin_notes", "")
+    result = await _approve(db, event_id, admin_notes)
+    await _add_audit_log(
+        db, admin, "approve_order_event", "order_event", event_id,
+        f"Approved order event {event_id}", request,
+    )
+    await db.commit()
+    return result
+
+
+@router.post("/order-events/{event_id}/reject")
+async def reject_order_event(
+    event_id: str,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reject a manual review order event permanently."""
+    from services.order_reconciler import reject_order_event as _reject
+    body = await request.json() if request.body else {}
+    admin_notes = body.get("admin_notes", "")
+    result = await _reject(db, event_id, admin_notes)
+    await _add_audit_log(
+        db, admin, "reject_order_event", "order_event", event_id,
+        f"Rejected order event {event_id}", request,
+    )
+    await db.commit()
+    return result
+
+
+@router.post("/order-events/{event_id}/retry")
+async def retry_order_event(
+    event_id: str,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue a manual review order event for retry."""
+    from services.order_reconciler import retry_order_event as _retry
+    body = await request.json() if request.body else {}
+    admin_notes = body.get("admin_notes", "")
+    result = await _retry(db, event_id, admin_notes)
+    await _add_audit_log(
+        db, admin, "retry_order_event", "order_event", event_id,
+        f"Queued order event {event_id} for retry", request,
+    )
+    await db.commit()
+    return result
+
+
+@router.get("/order-execution-settings")
+async def get_order_execution_settings(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get order execution auto-approve/auto-reject settings."""
+    from core.runtime_settings import get_order_execution_settings
+    return await get_order_execution_settings(db)
+
+
+@router.post("/order-execution-settings")
+async def update_order_execution_settings(
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update order execution auto-approve/auto-reject settings."""
+    from core.runtime_settings import save_order_execution_settings
+    body = await request.json()
+    result = await save_order_execution_settings(db, body)
+    await _add_audit_log(
+        db, admin, "update_order_execution_settings", "settings", "order_execution",
+        "Updated order execution settings", request,
+    )
+    await db.commit()
+    return result
+
+
 @router.get("/backups")
 async def get_backups(
     admin: dict = Depends(require_admin),

@@ -1832,6 +1832,7 @@ async function loadAdminRiskConsole() {
         ]);
         renderTradingControls(controls || {});
         renderOrderEvents(orderData.events || []);
+        loadOrderExecutionSettings();
     } catch (err) {
         setText('admin-control-mode', 'Unavailable');
         setText('admin-control-reason', err.message);
@@ -1863,7 +1864,16 @@ function renderOrderEvents(events = []) {
         const status = event.status || 'unknown';
         const title = `${event.ticker || '--'} · ${(event.direction || '--').toUpperCase()}`;
         const meta = `${status} · attempts ${event.attempt_count || 0} · ${formatDateTime(event.updated_at || event.created_at)}`;
-        return `<div class="order-event"><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(meta)}</span>${event.last_error ? `<span>${escapeHtml(event.last_error)}</span>` : ''}</div><span class="badge badge-${safeClassToken(status)}">${escapeHtml(status)}</span></div>`;
+        let actions = '';
+        if (status === 'manual_review') {
+            const jsId = escapeJsSingle(event.id);
+            actions = `<div class="order-event-actions">
+                <button class="btn btn-sm btn-success" onclick="approveOrderEvent('${jsId}')"><i class="ri-check-line"></i> Approve</button>
+                <button class="btn btn-sm btn-warning" onclick="retryOrderEvent('${jsId}')"><i class="ri-loop-left-line"></i> Retry</button>
+                <button class="btn btn-sm btn-danger" onclick="rejectOrderEvent('${jsId}')"><i class="ri-close-line"></i> Reject</button>
+            </div>`;
+        }
+        return `<div class="order-event"><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(meta)}</span>${event.last_error ? `<span>${escapeHtml(event.last_error)}</span>` : ''}</div><span class="badge badge-${safeClassToken(status)}">${escapeHtml(status)}</span>${actions}</div>`;
     }).join('');
 }
 
@@ -1899,6 +1909,129 @@ async function runOrderReconciliation() {
         showToast(`Checked ${result.checked || 0}, manual review ${result.marked_manual_review || 0}.`, 'success', 'Reconciliation Complete');
     } catch (err) {
         showToast(err.message, 'error', 'Reconciliation Failed');
+    }
+}
+
+async function approveOrderEvent(eventId) {
+    if (!confirm('Approve this order for re-execution?')) return;
+    try {
+        const result = await fetchAPI(`/api/admin/order-events/${eventId}/approve`, {
+            method: 'POST',
+            body: JSON.stringify({ admin_notes: 'Approved from admin console' }),
+        });
+        await loadAdminRiskConsole();
+        showToast('Order approved for re-execution', 'success', 'Order Approved');
+    } catch (err) {
+        showToast(err.message, 'error', 'Approval Failed');
+    }
+}
+
+async function retryOrderEvent(eventId) {
+    if (!confirm('Queue this order for retry?')) return;
+    try {
+        const result = await fetchAPI(`/api/admin/order-events/${eventId}/retry`, {
+            method: 'POST',
+            body: JSON.stringify({ admin_notes: 'Retried from admin console' }),
+        });
+        await loadAdminRiskConsole();
+        showToast('Order queued for retry', 'success', 'Order Retried');
+    } catch (err) {
+        showToast(err.message, 'error', 'Retry Failed');
+    }
+}
+
+async function rejectOrderEvent(eventId) {
+    if (!confirm('Reject this order permanently?')) return;
+    try {
+        const result = await fetchAPI(`/api/admin/order-events/${eventId}/reject`, {
+            method: 'POST',
+            body: JSON.stringify({ admin_notes: 'Rejected from admin console' }),
+        });
+        await loadAdminRiskConsole();
+        showToast('Order rejected', 'warning', 'Order Rejected');
+    } catch (err) {
+        showToast(err.message, 'error', 'Rejection Failed');
+    }
+}
+
+function renderOrderExecutionSettings(settings = {}) {
+    const el = document.getElementById('admin-order-execution');
+    if (!el) return;
+    const autoApprove = settings.auto_approve_failed_orders || false;
+    const autoReject = settings.auto_reject_failed_orders || false;
+    const autoRetryLeverage = settings.auto_retry_leverage_errors || false;
+    const maxRetryAttempts = settings.max_leverage_retry_attempts || 3;
+    const retryDelay = settings.leverage_retry_delay_secs || 5;
+    el.innerHTML = `<div class="settings-form">
+        <div class="form-row">
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="auto-approve-failed" ${autoApprove ? 'checked' : ''}>
+                    <span>Auto-approve failed orders for manual review</span>
+                </label>
+                <span class="hint">Automatically approve orders that fail execution and move them to retry queue</span>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="auto-reject-failed" ${autoReject ? 'checked' : ''}>
+                    <span>Auto-reject failed orders permanently</span>
+                </label>
+                <span class="hint">Automatically reject orders that fail execution without manual review</span>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="auto-retry-leverage" ${autoRetryLeverage ? 'checked' : ''}>
+                    <span>Auto-retry leverage setup failures (OKX error 11045, etc.)</span>
+                </label>
+                <span class="hint">Automatically retry orders when leverage setup fails due to exchange errors</span>
+            </div>
+        </div>
+        <div class="form-row two-col">
+            <div class="form-group">
+                <label for="max-leverage-retry">Max leverage retry attempts</label>
+                <input type="number" id="max-leverage-retry" class="text-input" value="${maxRetryAttempts}" min="1" max="10">
+            </div>
+            <div class="form-group">
+                <label for="leverage-retry-delay">Retry delay (seconds)</label>
+                <input type="number" id="leverage-retry-delay" class="text-input" value="${retryDelay}" min="1" max="60">
+            </div>
+        </div>
+        <div class="form-row">
+            <button class="btn btn-primary" onclick="saveOrderExecutionSettings()"><i class="ri-save-line"></i> Save Automation Settings</button>
+        </div>
+    </div>`;
+}
+
+async function loadOrderExecutionSettings() {
+    try {
+        const settings = await fetchAPI('/api/admin/order-execution-settings');
+        renderOrderExecutionSettings(settings);
+    } catch (err) {
+        console.error('Failed to load order execution settings:', err);
+    }
+}
+
+async function saveOrderExecutionSettings() {
+    try {
+        const settings = {
+            auto_approve_failed_orders: document.getElementById('auto-approve-failed')?.checked || false,
+            auto_reject_failed_orders: document.getElementById('auto-reject-failed')?.checked || false,
+            auto_retry_leverage_errors: document.getElementById('auto-retry-leverage')?.checked || false,
+            max_leverage_retry_attempts: parseInt(document.getElementById('max-leverage-retry')?.value || '3'),
+            leverage_retry_delay_secs: parseInt(document.getElementById('leverage-retry-delay')?.value || '5'),
+        };
+        const result = await fetchAPI('/api/admin/order-execution-settings', {
+            method: 'POST',
+            body: JSON.stringify(settings),
+        });
+        renderOrderExecutionSettings(result);
+        showToast('Order execution settings saved', 'success', 'Settings Updated');
+    } catch (err) {
+        showToast(err.message, 'error', 'Settings Save Failed');
     }
 }
 

@@ -24,6 +24,7 @@ safe_float = _safe_float_common
 _LEVERAGE_MAX_RETRIES = 3
 _LEVERAGE_RETRY_DELAY_BASE = 1.0  # seconds, exponential backoff
 _LEVERAGE_RETRYABLE_ERRORS = ["NetworkError", "Timeout", "ExchangeNotAvailable", "DDoSProtection"]
+_OKX_LEVERAGE_ERROR_CODES = ["11045", "51000", "51020"]
 
 try:
     import ccxt
@@ -61,6 +62,17 @@ async def _close_exchange(exchange):
         await result
 
 
+def _is_okx_leverage_error(error_msg: str) -> tuple[bool, str]:
+    """Check if error is an OKX leverage-related error (11045, 51000, 51020)."""
+    text = str(error_msg).lower()
+    for code in _OKX_LEVERAGE_ERROR_CODES:
+        if f'"{code}"' in text or f"'{code}'" in text or f"code {code}" in text:
+            return True, code
+    if '"code":"11045"' in text or '"11045"' in text:
+        return True, "11045"
+    return False, ""
+
+
 async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_retries: int = _LEVERAGE_MAX_RETRIES) -> dict:
     """P0-FIX: Set leverage with exponential backoff retry mechanism.
 
@@ -76,6 +88,7 @@ async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_ret
     Retry Strategy:
         - Retries on transient errors (NetworkError, Timeout, DDoSProtection)
         - Exponential backoff: 1s, 2s, 4s
+        - For OKX leverage errors (11045), tries switching margin mode (cross <-> isolated)
         - Does NOT retry on authentication errors or permanent exchange errors
         - Logs all attempts for observability
     """
@@ -83,63 +96,83 @@ async def _set_leverage_with_retry(exchange, leverage: int, symbol: str, max_ret
         logger.debug(f"[P0-FIX] Leverage {leverage}x <= 1x, skip setup for {symbol}")
         return {"success": True}
 
-    for attempt in range(max_retries):
-        try:
-            await asyncio.to_thread(exchange.set_leverage, leverage, symbol)
-            logger.info(f"[P0-FIX] Leverage set successfully: {symbol} {leverage}x (attempt {attempt + 1}/{max_retries})")
-            return {"success": True}
+    exchange_id = str(getattr(exchange, "id", "") or "").lower().strip()
+    margin_modes_to_try = ["cross"]
+    if exchange_id == "okx":
+        margin_modes_to_try = ["cross", "isolated"]
 
-        except ccxt.AuthenticationError as e:
-            logger.error(f"[P0-FIX] Authentication error setting leverage for {symbol}: {e}")
-            return {"success": False, "error": f"Authentication failed: {e}", "abort": True}
+    for margin_mode in margin_modes_to_try:
+        for attempt in range(max_retries):
+            try:
+                if exchange_id == "okx":
+                    params = {"tdMode": margin_mode}
+                    await asyncio.to_thread(exchange.set_leverage, leverage, symbol, params)
+                else:
+                    await asyncio.to_thread(exchange.set_leverage, leverage, symbol)
+                logger.info(f"[P0-FIX] Leverage set successfully: {symbol} {leverage}x (mode={margin_mode}, attempt {attempt + 1}/{max_retries})")
+                return {"success": True}
 
-        except ccxt.ExchangeError as e:
-            error_name = type(e).__name__
-            error_msg = str(e)
+            except ccxt.AuthenticationError as e:
+                logger.error(f"[P0-FIX] Authentication error setting leverage for {symbol}: {e}")
+                return {"success": False, "error": f"Authentication failed: {e}", "abort": True}
 
-            # Check if this is a retryable error
-            is_retryable = any(
-                retryable_err.lower() in error_msg.lower() or retryable_err in error_name
-                for retryable_err in _LEVERAGE_RETRYABLE_ERRORS
-            )
+            except ccxt.ExchangeError as e:
+                error_name = type(e).__name__
+                error_msg = str(e)
 
-            if is_retryable and attempt < max_retries - 1:
-                delay = _LEVERAGE_RETRY_DELAY_BASE * (2 ** attempt)
-                logger.warning(
-                    f"[P0-FIX] Retrying leverage setup for {symbol} {leverage}x "
-                    f"(attempt {attempt + 1}/{max_retries}) after {error_name}: {error_msg}. "
-                    f"Retry in {delay:.1f}s"
-                )
-                await asyncio.sleep(delay)
-                continue
-            else:
-                # Non-retryable error or max retries exceeded
-                logger.error(
-                    f"[P0-FIX] Failed to set leverage {leverage}x for {symbol} after {attempt + 1} attempts: {error_name}: {error_msg}"
-                )
-                return {"success": False, "error": f"Exchange error: {error_msg}", "abort": leverage > 1}
+                is_okx_lev, okx_code = _is_okx_leverage_error(error_msg)
+                if is_okx_lev and exchange_id == "okx" and margin_mode == "cross" and len(margin_modes_to_try) > 1:
+                    logger.warning(f"[P0-FIX] OKX leverage error {okx_code} with cross mode, trying isolated mode for {symbol}")
+                    break
 
-        except Exception as e:
-            error_name = type(e).__name__
-            error_msg = str(e)
+                is_retryable = any(
+                    retryable_err.lower() in error_msg.lower() or retryable_err in error_name
+                    for retryable_err in _LEVERAGE_RETRYABLE_ERRORS
+                ) or is_okx_lev
 
-            # Generic error handling with retry for transient issues
-            if attempt < max_retries - 1:
-                delay = _LEVERAGE_RETRY_DELAY_BASE * (2 ** attempt)
-                logger.warning(
-                    f"[P0-FIX] Unexpected error setting leverage for {symbol}, retrying "
-                    f"(attempt {attempt + 1}/{max_retries}): {error_name}: {error_msg}. "
-                    f"Retry in {delay:.1f}s"
-                )
-                await asyncio.sleep(delay)
-                continue
-            else:
-                logger.error(
-                    f"[P0-FIX] Failed to set leverage {leverage}x for {symbol} after {max_retries} attempts: {error_name}: {error_msg}"
-                )
-                # Abort for transient errors if leverage > 1, otherwise continue
-                is_transient = isinstance(e, (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.DDoSProtection))
-                return {"success": False, "error": f"Unexpected error: {error_msg}", "abort": leverage > 1 and not is_transient}
+                if is_retryable and attempt < max_retries - 1:
+                    delay = _LEVERAGE_RETRY_DELAY_BASE * (2 ** attempt)
+                    logger.warning(
+                        f"[P0-FIX] Retrying leverage setup for {symbol} {leverage}x "
+                        f"(attempt {attempt + 1}/{max_retries}) after {error_name}: {error_msg}. "
+                        f"Retry in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    if is_okx_lev and margin_mode == "cross":
+                        break
+                    logger.error(
+                        f"[P0-FIX] Failed to set leverage {leverage}x for {symbol} after {attempt + 1} attempts: {error_name}: {error_msg}"
+                    )
+                    return {"success": False, "error": f"Exchange error: {error_msg}", "abort": leverage > 1}
+
+            except Exception as e:
+                error_name = type(e).__name__
+                error_msg = str(e)
+
+                is_okx_lev, okx_code = _is_okx_leverage_error(error_msg)
+                if is_okx_lev and exchange_id == "okx" and margin_mode == "cross" and len(margin_modes_to_try) > 1:
+                    logger.warning(f"[P0-FIX] OKX leverage error {okx_code} with cross mode, trying isolated mode for {symbol}")
+                    break
+
+                if attempt < max_retries - 1:
+                    delay = _LEVERAGE_RETRY_DELAY_BASE * (2 ** attempt)
+                    logger.warning(
+                        f"[P0-FIX] Unexpected error setting leverage for {symbol}, retrying "
+                        f"(attempt {attempt + 1}/{max_retries}): {error_name}: {error_msg}. "
+                        f"Retry in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    if is_okx_lev and margin_mode == "cross":
+                        break
+                    logger.error(
+                        f"[P0-FIX] Failed to set leverage {leverage}x for {symbol} after {max_retries} attempts: {error_name}: {error_msg}"
+                    )
+                    is_transient = isinstance(e, (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.DDoSProtection))
+                    return {"success": False, "error": f"Unexpected error: {error_msg}", "abort": leverage > 1 and not is_transient}
 
     return {"success": False, "error": "Max retries exceeded without success", "abort": True}
 
