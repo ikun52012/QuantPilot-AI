@@ -1766,6 +1766,7 @@ async function loadAdmin() {
         renderAdminPositionMonitor(monitorState || {});
         renderAdminFilterThresholds(filterThresholds || {});
         renderAdminFilterStats(filterStats || {});
+        loadRiskThresholds();
         renderAdminExternalAPIKeys(externalKeys || {});
         renderAdminEnhancedFilters(enhancedFilters || {});
         loadAdminRiskConsole();
@@ -2940,6 +2941,81 @@ async function resetFilterThresholds() {
     });
 
     showToast('Thresholds reset to defaults. Click Save to apply.', 'info', 'Reset');
+}
+
+function renderAdminRiskThresholds(thresholds) {
+    const el = document.getElementById('admin-risk-thresholds');
+    if (!el) return;
+
+    const fields = [
+        ['max_daily_trades', 'Max Daily Trades', 'Maximum total trades per day (0=unlimited)'],
+        ['max_daily_loss_pct', 'Max Daily Loss %', 'Stop trading if daily loss exceeds this % of equity'],
+        ['max_position_pct', 'Max Position %', 'Maximum single position size as % of equity'],
+        ['risk_per_trade_pct', 'Risk Per Trade %', 'Amount to risk per trade as % of equity'],
+        ['live_data_quality_mode', 'Live Data Quality', 'How strictly to validate market data in live mode'],
+    ];
+
+    const inputs = fields.map(([key, label, hint]) => {
+        const value = thresholds[key] ?? '';
+        if (key === 'live_data_quality_mode') {
+            const strictSel = value === 'strict' ? 'selected' : '';
+            const normalSel = value === 'normal' || !value ? 'selected' : '';
+            const lenientSel = value === 'lenient' ? 'selected' : '';
+            return `<div class="form-group">
+                <label for="risk-${key}">${escapeHtml(label)}</label>
+                <select id="risk-${key}" class="text-input">
+                    <option value="strict" ${strictSel}>Strict (strict)</option>
+                    <option value="normal" ${normalSel}>Normal (normal)</option>
+                    <option value="lenient" ${lenientSel}>Lenient (lenient)</option>
+                </select>
+                <p class="hint">${escapeHtml(hint)}</p>
+            </div>`;
+        }
+        const step = key.includes('pct') ? '0.1' : '1';
+        return `<div class="form-group">
+            <label for="risk-${key}">${escapeHtml(label)}</label>
+            <input type="number" id="risk-${key}" class="text-input" value="${value}" step="${step}" min="0">
+            <p class="hint">${escapeHtml(hint)}</p>
+        </div>`;
+    }).join('');
+
+    el.innerHTML = `<div class="settings-form">
+        <div class="form-row" style="font-size:13px;color:var(--text-secondary);margin-bottom:8px"><i class="ri-information-line"></i> These thresholds directly control trade execution safety limits. Changes take effect immediately.</div>
+        <div class="form-row three-col">${inputs}</div>
+        <div class="form-row">
+            <button class="btn btn-primary" onclick="saveRiskThresholds()"><i class="ri-save-line"></i> Save Risk Thresholds</button>
+        </div>
+    </div>`;
+}
+
+async function saveRiskThresholds() {
+    const fields = ['max_daily_trades', 'max_daily_loss_pct', 'max_position_pct', 'risk_per_trade_pct', 'live_data_quality_mode'];
+    const data = {};
+    fields.forEach(key => {
+        const el = document.getElementById(`risk-${key}`);
+        if (!el) return;
+        const raw = String(el.value ?? '').trim();
+        if (key === 'live_data_quality_mode') {
+            data[key] = raw || null;
+        } else {
+            data[key] = raw === '' ? null : readNumberInput(`risk-${key}`, null);
+        }
+    });
+    try {
+        await fetchAPI('/api/admin/risk-thresholds', { method: 'POST', body: JSON.stringify(data) });
+        showToast('Risk thresholds saved.', 'success', 'Saved');
+    } catch (err) {
+        showToast(err.message, 'error', 'Save Failed');
+    }
+}
+
+async function loadRiskThresholds() {
+    try {
+        const thresholds = await fetchAPI('/api/admin/risk-thresholds');
+        renderAdminRiskThresholds(thresholds);
+    } catch (err) {
+        showToast(err.message, 'error', 'Load Failed');
+    }
 }
 
 async function loadFilterStats() {

@@ -1658,6 +1658,15 @@ async def update_filter_thresholds(
     persisted.update(updates)
 
     await set_admin_setting(db, "prefilter_thresholds", json.dumps(persisted))
+
+    # P2-FIX: Propagate correlation risk keys to settings.risk so they take
+    # effect immediately (signal_processor reads from settings.risk, not pre_filter)
+    _RISK_PROPAGATE_KEYS = {"max_correlated_exposure_pct", "max_same_direction_positions", "max_live_missing_data_checks", "block_live_on_risk_check_error"}
+    for key in updates:
+        if key in _RISK_PROPAGATE_KEYS:
+            setattr(settings.risk, key, updates[key])
+            await set_admin_setting(db, key, str(updates[key]))
+
     await db.commit()
 
     await _add_audit_log(db, admin, "update_filter_thresholds", "settings", "", f"Updated {len(updates)} thresholds", request)
