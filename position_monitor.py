@@ -1010,7 +1010,13 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
     Called periodically during reconciliation to protect against
     exchange-side order cancellations (e.g. after server restart, disconnect).
     """
-    from exchange import _close_exchange, _create_conditional_order, _get_or_create_exchange, _resolve_symbol, get_open_orders
+    from exchange import (
+        _close_exchange,
+        _create_conditional_order,
+        _get_or_create_exchange,
+        _resolve_symbol,
+        get_open_orders,
+    )
 
     tp_ids = [str(oid) for oid in loads_list(position.take_profit_order_ids_json) if oid]
     tp_levels = loads_list(position.take_profit_json)
