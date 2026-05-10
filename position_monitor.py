@@ -4,10 +4,11 @@ Tracks open positions, settles paper TP/SL, reconciles exchange closes,
 and keeps realised PnL in the database.
 P0-FIX: Dynamic ghost position threshold based on position value
 P1-FIX: Re-evaluate trailing_stop config when limit order fills (CRITICAL BUG FIX)
+P2-FIX: Verify and re-place TP/SL orders periodically to protect against exchange-side cancellations
 """
 import asyncio
 import json
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import ccxt
@@ -43,6 +44,8 @@ _loads_dict = loads_dict
 
 _position_monitor_lock = asyncio.Lock()
 _GHOST_POSITION_TRACKER: dict[str, dict[str, Any]] = {}
+_PROTECTIVE_ORDERS_LAST_VERIFY: dict[str, datetime] = {}
+_PROTECTIVE_ORDERS_VERIFY_INTERVAL = 600  # seconds (10 min) between TP/SL existence checks
 
 # P0-FIX: Dynamic ghost position thresholds based on position value
 # Higher-value positions need more confirmation attempts before auto-close
@@ -1000,6 +1003,174 @@ async def _create_protective_orders_for_position(position: PositionModel, exchan
                 logger.error(f"[PositionMonitor] Failed to create SL for filled limit: {e}")
 
 
+async def _verify_protective_orders(session, position: PositionModel, exchange_config: dict) -> bool:
+    """Verify TP/SL orders still exist on exchange; re-place missing ones.
+
+    Returns True if any orders were re-placed.
+    Called periodically during reconciliation to protect against
+    exchange-side order cancellations (e.g. after server restart, disconnect).
+    """
+    from exchange import _close_exchange, _create_conditional_order, _get_or_create_exchange, _resolve_symbol, get_open_orders
+
+    tp_ids = [str(oid) for oid in loads_list(position.take_profit_order_ids_json) if oid]
+    tp_levels = loads_list(position.take_profit_json)
+    for level in tp_levels:
+        if isinstance(level, dict) and level.get("order_id"):
+            oid = str(level["order_id"])
+            if oid and oid not in tp_ids:
+                tp_ids.append(oid)
+
+    sl_id = str(position.stop_loss_order_id or "")
+
+    needs_sl = sl_id and safe_float(position.stop_loss) > 0
+    needs_tp = len(tp_ids) > 0 or bool(tp_levels)
+
+    if not needs_sl and not needs_tp:
+        return False
+
+    try:
+        open_orders = await get_open_orders(position.ticker, exchange_config)
+    except Exception as e:
+        logger.warning(f"[PositionMonitor] Skipping protective order verification for {position.ticker}: {e}")
+        return False
+
+    open_ids = {str(o.get("id") or "") for o in open_orders if o.get("id")}
+
+    # Check SL
+    sl_missing = needs_sl and sl_id and sl_id not in open_ids
+    if sl_missing:
+        logger.warning(
+            f"[PositionMonitor] CRITICAL: SL order {sl_id[:8]} for {position.ticker} "
+            f"NOT found on exchange - re-placing"
+        )
+
+    # Check TP
+    missing_tp_indices = []
+    for i, tp_id in enumerate(tp_ids):
+        if tp_id and tp_id not in open_ids:
+            missing_tp_indices.append(i)
+            logger.warning(
+                f"[PositionMonitor] CRITICAL: TP{i+1} order {tp_id[:8]} for {position.ticker} "
+                f"NOT found on exchange - re-placing"
+            )
+
+    if not sl_missing and not missing_tp_indices:
+        return False
+
+    side = "buy" if str(position.direction or "").lower() == "long" else "sell"
+    tp_close_side = "sell" if side == "buy" else "buy"
+    pos_side = "long" if side == "buy" else "short"
+
+    exchange = _get_or_create_exchange(
+        exchange_id=exchange_config.get("exchange", ""),
+        api_key=exchange_config.get("api_key", ""),
+        api_secret=exchange_config.get("api_secret", ""),
+        password=exchange_config.get("password", ""),
+        live=bool(exchange_config.get("live_trading", False)),
+        sandbox=bool(exchange_config.get("sandbox_mode", False)),
+        market_type=exchange_config.get("market_type", ""),
+    )
+
+    try:
+        symbol = await asyncio.to_thread(
+            _resolve_symbol,
+            exchange,
+            position.ticker,
+            exchange_config.get("market_type", ""),
+        )
+
+        remaining_qty = safe_float(position.remaining_quantity, safe_float(position.quantity, 0.0))
+        if remaining_qty <= 0:
+            await _close_exchange(exchange)
+            return False
+
+        re_placed = False
+
+        # Re-place missing TP orders
+        if missing_tp_indices and tp_levels:
+            tp_changed = False
+            for i in missing_tp_indices:
+                if i >= len(tp_levels):
+                    continue
+                tp = tp_levels[i]
+                level_status = str(tp.get("status") or "pending").lower()
+                if level_status in {"hit", "filled", "closed"}:
+                    continue
+                tp_price = safe_float(tp.get("price"))
+                tp_qty_pct = safe_float(tp.get("qty_pct"), 100.0)
+                if tp_price <= 0:
+                    continue
+                tp_qty = remaining_qty * (tp_qty_pct / 100.0)
+                if tp_qty <= 0:
+                    continue
+                try:
+                    tp_order = await _create_conditional_order(
+                        exchange, symbol, "take_profit", tp_close_side,
+                        round(tp_qty, 6), tp_price, pos_side,
+                    )
+                    new_id = str(tp_order.get("id") or "")
+                    if new_id:
+                        tp["order_id"] = new_id
+                        tp_changed = True
+                        if i < len(tp_ids):
+                            tp_ids[i] = new_id
+                        else:
+                            tp_ids.append(new_id)
+                        logger.info(
+                            f"[PositionMonitor] TP{i+1} re-placed for {position.ticker} @ {tp_price}, "
+                            f"new order id={new_id[:8]}"
+                        )
+                        re_placed = True
+                except Exception as e:
+                    logger.error(
+                        f"[PositionMonitor] Failed to re-place TP{i+1} for {position.ticker}: {e}"
+                    )
+
+            if tp_changed:
+                position.take_profit_order_ids_json = json.dumps(tp_ids, ensure_ascii=False)
+                position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
+
+        # Re-place missing SL order
+        if sl_missing:
+            sl_price = safe_float(position.stop_loss)
+            if sl_price > 0:
+                try:
+                    sl_order = await _create_conditional_order(
+                        exchange, symbol, "stop_loss", tp_close_side,
+                        remaining_qty, sl_price, pos_side,
+                    )
+                    new_sl_id = str(sl_order.get("id") or "")
+                    if new_sl_id:
+                        position.stop_loss_order_id = new_sl_id
+                        logger.info(
+                            f"[PositionMonitor] SL re-placed for {position.ticker} @ {sl_price}, "
+                            f"new order id={new_sl_id[:8]}"
+                        )
+                        re_placed = True
+                    else:
+                        position.stop_loss_order_id = ""
+                        logger.error(
+                            f"[PositionMonitor] Failed to re-place SL for {position.ticker}: "
+                            f"no order id returned"
+                        )
+                except Exception as e:
+                    position.stop_loss_order_id = ""
+                    logger.error(
+                        f"[PositionMonitor] Failed to re-place SL for {position.ticker}: {e}"
+                    )
+
+        await _close_exchange(exchange)
+        return re_placed
+
+    except Exception as e:
+        logger.error(f"[PositionMonitor] Protective order verification error for {position.ticker}: {e}")
+        try:
+            await _close_exchange(exchange)
+        except Exception:
+            pass
+        return False
+
+
 async def _reconcile_exchange_position(session, position: PositionModel, exchange_config: dict) -> dict:
     from exchange import get_open_positions, get_recent_orders, get_ticker, place_protective_stop
 
@@ -1044,6 +1215,15 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             if await _adjust_trailing_stop_on_tp_hit(position, tp_levels, tp_hit_levels, exchange_config, place_protective_stop):
                 stats["adjusted"] += 1
                 await session.flush()
+
+        now = utcnow()
+        last_verify = _PROTECTIVE_ORDERS_LAST_VERIFY.get(position.id)
+        if not last_verify or (now - last_verify).total_seconds() >= _PROTECTIVE_ORDERS_VERIFY_INTERVAL:
+            _PROTECTIVE_ORDERS_LAST_VERIFY[position.id] = now
+            if await _verify_protective_orders(session, position, exchange_config):
+                stats["adjusted"] += 1
+                await session.flush()
+
         return stats
 
     try:
