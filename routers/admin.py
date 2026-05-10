@@ -86,6 +86,7 @@ class CreatePlanRequest(BaseModel):
     duration_days: int = Field(ge=1)
     features: list[str] = Field(default_factory=list)
     max_signals_per_day: int = Field(default=0)
+    is_active: bool = Field(default=True)
 
 
 class CreateInviteCodeRequest(BaseModel):
@@ -580,6 +581,7 @@ async def create_plan(
         duration_days=req.duration_days,
         features_json=json.dumps(req.features),
         max_signals_per_day=req.max_signals_per_day,
+        is_active=req.is_active,
     )
     db.add(plan)
     await db.commit()
@@ -607,6 +609,7 @@ async def update_plan(
     plan.duration_days = req.duration_days
     plan.features_json = json.dumps(req.features)
     plan.max_signals_per_day = req.max_signals_per_day
+    plan.is_active = req.is_active
 
     await db.commit()
     return {"status": "ok"}

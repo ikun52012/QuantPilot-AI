@@ -1753,6 +1753,8 @@ async function loadAdmin() {
         ]);
 
         renderAdminUsers(users, plans);
+        renderAdminPlans(plans);
+        window._adminPlans = plans;
         renderAdminPaymentAddresses(addresses || {});
         renderAdminRegistration(registration || {}, invites || []);
         renderAdminRedeemCodes(redeemCodes || [], plans || []);
@@ -2171,6 +2173,152 @@ function renderAdminPendingPayments(payments) {
         payEl.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>User</th><th>Amount</th><th>Network</th><th>TX Hash</th><th>Date</th><th>Actions</th></tr></thead><tbody>${pendingPayments.map(p => `<tr><td>${escapeHtml(p.username||'--')}</td><td>${escapeHtml(p.amount)} ${escapeHtml(p.currency)}</td><td>${escapeHtml(p.network)}</td><td><code style="font-size:11px">${p.tx_hash?escapeHtml(p.tx_hash.slice(0,20))+'...':'--'}</code></td><td>${escapeHtml(formatDateTime(p.created_at))}</td><td><div class="admin-actions"><button class="btn btn-sm btn-primary" onclick="adminVerifyPayment('${escapeJsSingle(p.id)}')">Verify</button><button class="btn btn-sm btn-success" onclick="adminConfirmPayment('${escapeJsSingle(p.id)}')">Confirm</button><button class="btn btn-sm btn-danger" onclick="adminRejectPayment('${escapeJsSingle(p.id)}')">Reject</button></div></td></tr>`).join('')}</tbody></table></div>`;
     } else {
         payEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No pending payments</p>';
+    }
+}
+
+function renderAdminPlans(plans) {
+    const el = document.getElementById('admin-plans');
+    if (!el) return;
+    const rows = plans.length ? plans.map(p => {
+        const features = (p.features && p.features.length) ? p.features.map(f => `<span class="badge badge-feature">${escapeHtml(f)}</span>`).join(' ') : '<span class="hint">No features</span>';
+        const active = Boolean(p.is_active);
+        return `<tr>
+            <td><strong>${escapeHtml(p.name)}</strong></td>
+            <td>${formatNum(p.price_usdt)} USDT</td>
+            <td>${escapeHtml(p.duration_days)} days</td>
+            <td>${escapeHtml(p.max_signals_per_day || 'Unlimited')}</td>
+            <td><div class="feature-tags">${features}</div></td>
+            <td><span class="badge badge-${active ? 'active' : 'inactive'}">${active ? 'Active' : 'Inactive'}</span></td>
+            <td><div class="admin-actions">
+                <button class="btn btn-sm btn-primary" onclick="editPlan('${escapeJsSingle(p.id)}')">Edit</button>
+                <button class="btn btn-sm ${active ? 'btn-warning' : 'btn-success'}" onclick="togglePlanActive('${escapeJsSingle(p.id)}', ${!active})">${active ? 'Disable' : 'Enable'}</button>
+                <button class="btn btn-sm btn-danger" onclick="deletePlan('${escapeJsSingle(p.id)}', '${escapeJsSingle(p.name)}')">Delete</button>
+            </div></td>
+        </tr>`;
+    }).join('') : '<tr><td colspan="7" class="empty-state">No plans yet. Create one below.</td></tr>';
+
+    const formFeatures = '<input type="text" id="plan-features-input" class="text-input" placeholder="Feature1, Feature2, Feature3">';
+    el.innerHTML = `<div class="settings-form">
+        <div class="form-row" style="font-size:13px;color:var(--text-secondary);margin-bottom:4px"><i class="ri-add-circle-line"></i> <strong>Create / Edit Plan</strong> <span id="plan-edit-title"></span></div>
+        <div class="form-row three-col admin-create-row">
+            <div class="form-group"><label for="plan-name">Plan Name</label><input id="plan-name" class="text-input" placeholder="e.g. Pro Monthly"></div>
+            <div class="form-group"><label for="plan-price">Price USDT</label><input id="plan-price" type="number" class="text-input" min="0" step="0.01" value="0"></div>
+            <div class="form-group"><label for="plan-duration">Duration Days</label><input id="plan-duration" type="number" class="text-input" min="1" step="1" value="30"></div>
+        </div>
+        <div class="form-row three-col admin-create-row">
+            <div class="form-group"><label for="plan-signals">Max Signals / Day</label><input id="plan-signals" type="number" class="text-input" min="0" step="1" value="0" placeholder="0 = unlimited"></div>
+            <div class="form-group"><label for="plan-features-input">Features</label>${formFeatures}<p class="hint">Comma-separated feature list</p></div>
+            <div class="form-group admin-button-bottom"><label>&nbsp;</label>
+                <input type="hidden" id="plan-edit-id" value="">
+                <div style="display:flex;gap:8px">
+                    <button class="btn btn-primary" onclick="savePlan()"><i class="ri-save-line"></i> <span id="plan-save-label">Create Plan</span></button>
+                    <button class="btn btn-secondary" id="plan-cancel-btn" style="display:none" onclick="cancelEditPlan()">Cancel</button>
+                </div>
+            </div>
+        </div>
+        <div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Plan</th><th>Price</th><th>Duration</th><th>Signals/Day</th><th>Features</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>
+    </div>`;
+}
+
+function resetPlanForm() {
+    document.getElementById('plan-edit-id').value = '';
+    document.getElementById('plan-name').value = '';
+    document.getElementById('plan-price').value = '0';
+    document.getElementById('plan-duration').value = '30';
+    document.getElementById('plan-signals').value = '0';
+    document.getElementById('plan-features-input').value = '';
+    document.getElementById('plan-save-label').textContent = 'Create Plan';
+    document.getElementById('plan-cancel-btn').style.display = 'none';
+    document.getElementById('plan-edit-title').textContent = '';
+}
+
+function editPlan(planId) {
+    const plans = window._adminPlans || [];
+    const plan = plans.find(p => p.id === planId);
+    if (!plan) return;
+    document.getElementById('plan-edit-id').value = planId;
+    document.getElementById('plan-name').value = plan.name || '';
+    document.getElementById('plan-price').value = Number(plan.price_usdt || 0).toFixed(2);
+    document.getElementById('plan-duration').value = plan.duration_days || 30;
+    document.getElementById('plan-signals').value = plan.max_signals_per_day || 0;
+    document.getElementById('plan-features-input').value = (plan.features || []).join(', ');
+    document.getElementById('plan-save-label').textContent = 'Update Plan';
+    document.getElementById('plan-cancel-btn').style.display = '';
+    document.getElementById('plan-edit-title').textContent = `— Editing: ${plan.name}`;
+    document.getElementById('plan-name').focus();
+}
+
+function cancelEditPlan() {
+    resetPlanForm();
+}
+
+async function savePlan() {
+    const editId = document.getElementById('plan-edit-id').value;
+    const name = document.getElementById('plan-name').value.trim();
+    const price = parseFloat(document.getElementById('plan-price').value) || 0;
+    const duration = parseInt(document.getElementById('plan-duration').value) || 30;
+    const signals = parseInt(document.getElementById('plan-signals').value) || 0;
+    const featuresRaw = document.getElementById('plan-features-input').value;
+    const features = featuresRaw ? featuresRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+    if (!name) {
+        showToast('Plan name is required.', 'warning', 'Missing Name');
+        return;
+    }
+    if (duration < 1) {
+        showToast('Duration must be at least 1 day.', 'warning', 'Invalid Duration');
+        return;
+    }
+
+    const body = JSON.stringify({ name, description: '', price_usdt: price, duration_days: duration, features, max_signals_per_day: signals, is_active: true });
+
+    try {
+        if (editId) {
+            await fetchAPI(`/api/admin/plans/${encodeURIComponent(editId)}`, { method: 'PUT', body });
+            showToast('Plan updated successfully.', 'success', 'Plan Updated');
+        } else {
+            await fetchAPI('/api/admin/plans', { method: 'POST', body });
+            showToast('Plan created successfully.', 'success', 'Plan Created');
+        }
+        resetPlanForm();
+        await loadAdmin();
+    } catch (err) {
+        showToast(err.message, 'error', 'Plan Save Failed');
+    }
+}
+
+async function togglePlanActive(planId, activate) {
+    const plans = window._adminPlans || [];
+    const plan = plans.find(p => p.id === planId);
+    if (!plan) return;
+    const action = activate ? 'enable' : 'disable';
+    if (!confirm(`${activate ? 'Enable' : 'Disable'} plan "${plan.name}"? ${!activate ? 'It will no longer appear to users.' : ''}`)) return;
+    try {
+        const body = JSON.stringify({
+            name: plan.name,
+            description: plan.description || '',
+            price_usdt: plan.price_usdt,
+            duration_days: plan.duration_days,
+            features: plan.features || [],
+            max_signals_per_day: plan.max_signals_per_day || 0,
+            is_active: activate,
+        });
+        await fetchAPI(`/api/admin/plans/${encodeURIComponent(planId)}`, { method: 'PUT', body });
+        showToast(`Plan ${activate ? 'enabled' : 'disabled'} successfully.`, 'success', 'Plan Updated');
+        await loadAdmin();
+    } catch (err) {
+        showToast(err.message, 'error', 'Plan Update Failed');
+    }
+}
+
+async function deletePlan(planId, planName) {
+    if (!confirm(`Delete or deactivate plan "${planName}"? Deactivation occurs if the plan has existing subscriptions or card codes.`)) return;
+    try {
+        const result = await fetchAPI(`/api/admin/plans/${encodeURIComponent(planId)}`, { method: 'DELETE' });
+        showToast(result.status === 'deleted' ? 'Plan deleted.' : 'Plan deactivated (has references).', result.status === 'deleted' ? 'success' : 'warning', 'Plan Removed');
+        await loadAdmin();
+    } catch (err) {
+        showToast(err.message, 'error', 'Plan Delete Failed');
     }
 }
 
