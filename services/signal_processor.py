@@ -1946,12 +1946,16 @@ class SignalProcessor:
         fixed_margin: float,
         max_leverage: float | int | None = None,
         preferred_leverage: float | int | None = None,
-    ) -> int:
-        """Pick the integer leverage that keeps fixed margin closest after exchange limits."""
+    ) -> tuple[int, float]:
+        """Pick the integer leverage that keeps fixed margin closest after exchange limits.
+
+        Returns (leverage, deviation_pct) where deviation_pct is the margin deviation %.
+        """
         leverage_cap = int(cls._coerce_risk_float(max_leverage, 125.0, 1.0, 125.0))
         preferred = int(round(cls._coerce_risk_float(preferred_leverage, 1.0, 1.0, leverage_cap)))
         if notional_value <= 0 or fixed_margin <= 0:
-            return max(1, min(preferred, leverage_cap))
+            lev = max(1, min(preferred, leverage_cap))
+            return lev, 0.0
 
         ideal = notional_value / fixed_margin
         candidate_values = {
@@ -1964,8 +1968,11 @@ class SignalProcessor:
         }
         candidates = [max(1, min(leverage_cap, value)) for value in candidate_values if value > 0]
         if not candidates:
-            return max(1, min(preferred, leverage_cap))
-        return min(candidates, key=lambda value: (abs((notional_value / value) - fixed_margin), abs(value - preferred)))
+            lev = max(1, min(preferred, leverage_cap))
+            return lev, 0.0
+        best_lev = min(candidates, key=lambda value: (abs((notional_value / value) - fixed_margin), abs(value - preferred)))
+        deviation_pct = abs((notional_value / best_lev) - fixed_margin) / fixed_margin * 100.0 if fixed_margin > 0 else 0.0
+        return best_lev, round(deviation_pct, 2)
 
     @classmethod
     def _resolved_risk_settings(cls, user_settings: dict | None = None) -> dict[str, float | str]:
@@ -2421,6 +2428,8 @@ class SignalProcessor:
                     f"contractSize={contract_size})"
                 )
                 decision.quantity = round(expected_notional / (decision.entry_price * contract_size), 6)
+                current_notional = decision.quantity * decision.entry_price * contract_size
+
             if limits:
                 try:
                     from exchange import adjust_quantity_for_limits
@@ -2431,45 +2440,52 @@ class SignalProcessor:
                         limits,
                     )
                     adjusted_notional = adjusted_quantity * float(decision.entry_price) * contract_size
-                    selected_leverage = self._best_fixed_margin_leverage(
+                    selected_leverage, deviation_pct = self._best_fixed_margin_leverage(
                         adjusted_notional,
                         fixed_amount,
                         max_leverage,
                         leverage,
                     )
-                    previous_leverage = int(round(leverage))
-                    if selected_leverage != previous_leverage:
-                        logger.info(
-                            f"[Signal] Fixed mode: adjusted leverage {previous_leverage}x -> "
-                            f"{selected_leverage}x to keep margin near {fixed_amount:.2f}USDT "
-                            f"after exchange limits"
-                        )
-                    if decision.ai_analysis:
-                        decision.ai_analysis.recommended_leverage = selected_leverage
-                    leverage = float(selected_leverage)
-                    adjusted_margin = adjusted_notional / max(1.0, leverage)
-                    deviation_pct = (
-                        abs(adjusted_margin - fixed_amount) / fixed_amount * 100.0
-                        if fixed_amount > 0
-                        else 0.0
-                    )
-                    max_deviation_pct = 20.0
-                    if deviation_pct > max_deviation_pct:
-                        decision.execute = False
-                        decision.reason = (
-                            f"Fixed margin deviation too large after exchange limits: "
-                            f"configured={fixed_amount:.2f}USDT, actual={adjusted_margin:.2f}USDT "
-                            f"({deviation_pct:.2f}% > {max_deviation_pct:.2f}%)"
-                        )
-                        logger.warning(
-                            f"[Signal] {decision.reason} "
-                            f"(ticker={decision.ticker}, qty={decision.quantity}, adjusted_qty={adjusted_quantity}, "
-                            f"contractSize={contract_size})"
-                        )
-                        return
-                    decision.quantity = round(adjusted_quantity, 6)
                 except Exception as exc:
                     logger.warning(f"[Signal] Could not verify fixed margin deviation: {exc}")
+                    return
+            else:
+                selected_leverage, deviation_pct = self._best_fixed_margin_leverage(
+                    current_notional,
+                    fixed_amount,
+                    max_leverage,
+                    leverage,
+                )
+                adjusted_quantity = decision.quantity
+
+            previous_leverage = int(round(leverage))
+            if selected_leverage != previous_leverage:
+                logger.info(
+                    f"[Signal] Fixed mode: adjusted leverage {previous_leverage}x -> "
+                    f"{selected_leverage}x to keep margin near {fixed_amount:.2f}USDT "
+                    f"after exchange limits"
+                )
+            if decision.ai_analysis:
+                decision.ai_analysis.recommended_leverage = selected_leverage
+            leverage = float(selected_leverage)
+
+            max_deviation_pct = 20.0
+            if deviation_pct > max_deviation_pct:
+                actual_margin = (adjusted_quantity * float(decision.entry_price) * contract_size) / max(1.0, leverage)
+                decision.execute = False
+                decision.reason = (
+                    f"Fixed margin deviation too large: "
+                    f"configured={fixed_amount:.2f}USDT, actual={actual_margin:.2f}USDT "
+                    f"({deviation_pct:.2f}% > {max_deviation_pct:.2f}%)"
+                )
+                logger.warning(
+                    f"[Signal] {decision.reason} "
+                    f"(ticker={decision.ticker}, qty={decision.quantity}, adjusted_qty={adjusted_quantity}, "
+                    f"leverage={leverage}x, contractSize={contract_size})"
+                )
+                return
+
+            decision.quantity = round(adjusted_quantity, 6)
             return
 
         # Percentage/risk_ratio mode: apply max_position_pct limit
