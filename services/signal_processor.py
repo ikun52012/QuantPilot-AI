@@ -1952,9 +1952,15 @@ class SignalProcessor:
         """
         leverage_cap = int(cls._coerce_risk_float(max_leverage, 125.0, 1.0, 125.0))
         preferred = int(round(cls._coerce_risk_float(preferred_leverage, 1.0, 1.0, leverage_cap)))
+
+        def _deviation(lev: int) -> float:
+            if fixed_margin <= 0:
+                return 0.0
+            return abs((notional_value / lev) - fixed_margin) / fixed_margin * 100.0
+
         if notional_value <= 0 or fixed_margin <= 0:
             lev = max(1, min(preferred, leverage_cap))
-            return lev, 0.0
+            return lev, _deviation(lev)
 
         ideal = notional_value / fixed_margin
         candidate_values = {
@@ -1968,10 +1974,9 @@ class SignalProcessor:
         candidates = [max(1, min(leverage_cap, value)) for value in candidate_values if value > 0]
         if not candidates:
             lev = max(1, min(preferred, leverage_cap))
-            return lev, 0.0
+            return lev, _deviation(lev)
         best_lev = min(candidates, key=lambda value: (abs((notional_value / value) - fixed_margin), abs(value - preferred)))
-        deviation_pct = abs((notional_value / best_lev) - fixed_margin) / fixed_margin * 100.0 if fixed_margin > 0 else 0.0
-        return best_lev, round(deviation_pct, 2)
+        return best_lev, round(_deviation(best_lev), 2)
 
     @classmethod
     def _resolved_risk_settings(cls, user_settings: dict | None = None) -> dict[str, float | str]:
