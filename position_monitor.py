@@ -176,7 +176,7 @@ async def _fetch_market_price_changes(symbol: str, exchange_config: dict, curren
     The get_ticker() function does NOT return price_change_1h/24h, so we
     fetch OHLCV candles directly and compute the changes ourselves.
     """
-    from exchange import _close_exchange, _get_or_create_exchange, _resolve_symbol
+    from exchange import _get_or_create_exchange, _resolve_symbol
 
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange", settings.exchange.name),
@@ -223,8 +223,6 @@ async def _fetch_market_price_changes(symbol: str, exchange_config: dict, curren
     except Exception as e:
         logger.warning(f"[P1-FIX] Failed to fetch OHLCV for price changes: {e}")
         return {"price_change_1h": 0.0, "price_change_24h": 0.0}
-    finally:
-        await _close_exchange(exchange)
 
 
 async def _reevaluate_trailing_stop_config(
@@ -747,7 +745,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
     try:
         import ccxt
 
-        from exchange import _close_exchange, _get_or_create_exchange, _resolve_symbol
+        from exchange import _get_or_create_exchange, _resolve_symbol
 
         exchange = _get_or_create_exchange(
             exchange_id=exchange_config.get("exchange", settings.exchange.name),
@@ -972,7 +970,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         position.updated_at = utcnow()
                         logger.info(f"[PositionMonitor] Cancelled expired limit order for {position.ticker}")
         finally:
-            await _close_exchange(exchange)
+            pass
     except ccxt.OrderNotFound:
         logger.warning(
             f"[PositionMonitor] Limit order not found on exchange for {position.ticker}; "
@@ -1063,7 +1061,6 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
     exchange-side order cancellations (e.g. after server restart, disconnect).
     """
     from exchange import (
-        _close_exchange,
         _create_conditional_order,
         _get_or_create_exchange,
         _resolve_symbol,
@@ -1139,7 +1136,6 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
 
         remaining_qty = safe_float(position.remaining_quantity, safe_float(position.quantity, 0.0))
         if remaining_qty <= 0:
-            await _close_exchange(exchange)
             return False
 
         re_placed = False
@@ -1217,15 +1213,10 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                         f"[PositionMonitor] Failed to re-place SL for {position.ticker}: {e}"
                     )
 
-        await _close_exchange(exchange)
         return re_placed
 
     except Exception as e:
         logger.error(f"[PositionMonitor] Protective order verification error for {position.ticker}: {e}")
-        try:
-            await _close_exchange(exchange)
-        except Exception:
-            pass
         return False
 
 
@@ -1274,6 +1265,18 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             if await _adjust_trailing_stop_on_tp_hit(position, tp_levels, tp_hit_levels, exchange_config, place_protective_stop):
                 stats["adjusted"] += 1
                 await session.flush()
+            # Record account risk and close position if fully filled
+            if safe_float(position.remaining_quantity) <= 0:
+                exit_price = safe_float(tp_hit_levels[-1].get("price")) if tp_hit_levels else safe_float(position.entry_price)
+                await record_position_close_trade_async(
+                    session=session,
+                    position=position,
+                    exit_price=exit_price,
+                    close_reason="take_profit",
+                    order_status="exchange_closed",
+                    order_details={"trigger": "take_profit", "levels": tp_hit_levels},
+                )
+                stats["closed"] += 1
 
         now = utcnow()
         last_verify = _PROTECTIVE_ORDERS_LAST_VERIFY.get(position.id)
@@ -2200,11 +2203,14 @@ async def _enable_emergency_trailing_stop(
             emergency_sl = current_sl * (1 - 0.2 / 100.0)
 
     # Update position with emergency trailing config
+    original_config = loads_dict(position.trailing_stop_config_json)
     emergency_config = {
+        **original_config,
         "mode": "profit_pct_trailing",
         "activation_profit_pct": 0.0,  # Activate immediately
         "trail_pct": 0.5,  # Tight trailing
         "trailing_step_pct": 0.2,
+        "_emergency_override_original_mode": original_config.get("mode", "none"),
     }
 
     new_stop_order_id = str(position.stop_loss_order_id or "")

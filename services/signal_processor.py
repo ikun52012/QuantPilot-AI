@@ -1794,7 +1794,6 @@ class SignalProcessor:
                 pos_dir = str(pos.direction or "long").lower()
                 entry = safe_float(pos.entry_price)
                 qty = safe_float(pos.remaining_quantity or pos.quantity)
-                safe_float(pos.leverage, 1.0)
                 # Get contract_size from position's trailing_stop_config
                 try:
                     pos_ts_config = json.loads(pos.trailing_stop_config_json or "{}")

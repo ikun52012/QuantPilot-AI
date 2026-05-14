@@ -13,6 +13,7 @@ Processing:
 - Actual processing runs in background task
 - Fingerprint deduplication prevents duplicate execution
 """
+import asyncio
 import hashlib
 import hmac
 import json
@@ -37,32 +38,34 @@ _NONCE_CACHE: dict[str, float] = {}
 _NONCE_CACHE_MAX_SIZE = 10000
 _NONCE_CACHE_CLEANUP_INTERVAL = 3600
 _last_nonce_cleanup: float = 0.0
+_nonce_lock = asyncio.Lock()
 
 
-def _check_replay_protection(nonce: str, timestamp: float) -> None:
+async def _check_replay_protection(nonce: str, timestamp: float) -> None:
     """Check for replay attacks using timestamp and nonce."""
     now = time.time()
     if abs(now - timestamp) > _WEBHOOK_REPLAY_WINDOW_SECS:
         raise HTTPException(401, "Webhook timestamp expired — possible replay attack")
 
     if nonce:
-        global _last_nonce_cleanup
-        if now - _last_nonce_cleanup > _NONCE_CACHE_CLEANUP_INTERVAL:
-            cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
-            expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
-            for k in expired:
-                _NONCE_CACHE.pop(k, None)
-            _last_nonce_cleanup = now
+        async with _nonce_lock:
+            global _last_nonce_cleanup
+            if now - _last_nonce_cleanup > _NONCE_CACHE_CLEANUP_INTERVAL:
+                cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
+                expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
+                for k in expired:
+                    _NONCE_CACHE.pop(k, None)
+                _last_nonce_cleanup = now
 
-        if nonce in _NONCE_CACHE:
-            raise HTTPException(409, "Duplicate nonce — possible replay attack")
+            if nonce in _NONCE_CACHE:
+                raise HTTPException(409, "Duplicate nonce — possible replay attack")
 
-        _NONCE_CACHE[nonce] = now
-        if len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
-            cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
-            expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
-            for k in expired:
-                _NONCE_CACHE.pop(k, None)
+            _NONCE_CACHE[nonce] = now
+            if len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
+                cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
+                expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
+                for k in expired:
+                    _NONCE_CACHE.pop(k, None)
 
 
 @router.post("/webhook")
@@ -104,7 +107,7 @@ async def webhook(
     timestamp = float(body.get("timestamp", 0) or 0)
     nonce = str(body.get("nonce", "") or "").strip()
     if timestamp > 0 or nonce:
-        _check_replay_protection(nonce, timestamp)
+        await _check_replay_protection(nonce, timestamp)
 
     client_ip = get_client_ip(request)
 

@@ -284,6 +284,16 @@ async def create_payment(
     if not plan:
         raise HTTPException(404, "Plan not found")
 
+    # Check for existing pending payment
+    existing_payment_result = await db.execute(
+        select(PaymentModel).where(
+            PaymentModel.subscription_id == req.subscription_id,
+            PaymentModel.status == "pending"
+        )
+    )
+    if existing_payment_result.scalar_one_or_none():
+        raise HTTPException(400, "A pending payment already exists for this subscription")
+
     # Get payment address
     from payment import get_payment_address
 

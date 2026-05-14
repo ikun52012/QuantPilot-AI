@@ -1293,7 +1293,12 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status}, filled={actual_filled_qty}/{requested_qty})")
 
         if is_partial_fill:
-            logger.warning(f"[Exchange] ⚠️ PARTIAL FILL: {actual_filled_qty}/{requested_qty} - placing TP/SL for filled portion only")
+            logger.warning(f"[Exchange] ⚠️ PARTIAL FILL: {actual_filled_qty}/{requested_qty} - cancelling unfilled portion")
+            try:
+                cancel_result = await _cancel_exchange_order(exchange, symbol, str(order_id))
+                logger.info(f"[Exchange] Cancelled unfilled entry portion: {cancel_result}")
+            except Exception as cancel_err:
+                logger.warning(f"[Exchange] Failed to cancel unfilled entry portion: {cancel_err}")
 
         result_status = (
             "pending" if order_type == "limit" and order_status in {"open", "new"} and actual_filled_qty == 0
@@ -1534,10 +1539,16 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     result["warning"] = "CRITICAL: Rollback failed - MANUAL STOP LOSS REQUIRED"
                     return result
             else:
-                # Entry pending - cancel and return error
-                logger.warning("[Exchange] Protection failed for pending entry, returning warning")
+                # Entry pending - cancel order and return error
+                if result.get("order_id"):
+                    try:
+                        cancel_result = await _cancel_exchange_order(exchange, symbol, str(result.get("order_id")))
+                        logger.warning(f"[Exchange] Cancelled pending entry {result.get('order_id')} after protection failure: {cancel_result}")
+                    except Exception as cancel_err:
+                        logger.error(f"[Exchange] Failed to cancel pending entry after protection failure: {cancel_err}")
+                logger.warning("[Exchange] Protection failed for pending entry, order cancelled")
                 result["protection_errors"] = protection_errors
-                result["warning"] = "Protection orders failed - position pending"
+                result["warning"] = "Protection orders failed - pending entry cancelled"
 
         return result
 
@@ -1808,19 +1819,16 @@ async def place_protective_stop(
         )
         side = "sell" if str(direction).lower() == SignalDirection.LONG.value else "buy"
         pos_side_for_sl = "long" if str(direction).lower() in ("long", SignalDirection.LONG.value) else "short"
+        if existing_order_id:
+            cancel_result = await _cancel_exchange_order(exchange, symbol, str(existing_order_id))
+            if cancel_result.get("status") not in {"cancelled", "not_found"}:
+                logger.warning(f"[Exchange] Old protective stop {existing_order_id} could not be cancelled: {cancel_result}. Aborting new stop placement.")
+                return {"status": "error", "reason": f"Failed to cancel old stop: {cancel_result.get('reason', 'unknown')}", "stop_price": stop_price}
         order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price, pos_side_for_sl)
         result = {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price, "position_side": pos_side_for_sl}
         if existing_order_id:
-            cancel_result = await _cancel_exchange_order(exchange, symbol, str(existing_order_id))
             result["replace_cancel_result"] = cancel_result
-            if cancel_result.get("status") in {"cancelled", "not_found", "skipped"}:
-                result["replaced_order_id"] = str(cancel_result.get("order_id") or existing_order_id)
-            else:
-                result["warning"] = cancel_result.get("reason") or "New stop placed but old stop could not be cancelled"
-                logger.warning(
-                    f"[Exchange] New protective stop placed for {symbol}, but old stop "
-                    f"{existing_order_id} was not cancelled: {cancel_result}"
-                )
+            result["replaced_order_id"] = str(cancel_result.get("order_id") or existing_order_id)
         return result
     except ccxt.BaseError as e:
         logger.error(f"[Exchange] Failed to place protective stop: {e}")
