@@ -963,14 +963,16 @@ async def run_pre_filter_async(
             fetch_long_short_ratio,
         )
 
-        macro_result, liq_result, ls_result, basis_result, fg_result = await asyncio.gather(
+        results = await asyncio.gather(
             _enhanced_call("macro_events", check_macro_event_risk()),
             _enhanced_call("liquidation_heatmap", fetch_liquidation_heatmap(ticker)),
             _enhanced_call("long_short_ratio", fetch_long_short_ratio(ticker)),
             _enhanced_call("basis_check", fetch_basis_data(ticker)),
             _enhanced_call("fear_greed", fetch_fear_greed_index()),
+            return_exceptions=True,  # Per-result exceptions; don't cancel siblings on first error
         )
-    except Exception as e:
+        macro_result, liq_result, ls_result, basis_result, fg_result = results
+    except (ImportError, Exception) as e:
         macro_result = liq_result = ls_result = basis_result = fg_result = e
 
     # ── Check 20: Macro Events Risk ──

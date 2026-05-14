@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import time as _time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
@@ -42,10 +43,10 @@ _AI_SEMAPHORE = asyncio.Semaphore(settings.ai.max_concurrent_calls)
 # ─────────────────────────────────────────────
 _AI_CACHE_BASE_TTL = 60
 _AI_CACHE_MAX_SIZE = 500
-_AI_CACHE: dict[str, tuple[float, float, "AIAnalysis"]] = {}  # (timestamp, ttl, analysis)
+_AI_CACHE: "OrderedDict[str, tuple[float, float, AIAnalysis]]" = OrderedDict()  # (timestamp, ttl, analysis)
 _AI_CACHE_LOCK_INIT_LOCK = asyncio.Lock()  # P0-FIX: Init lock for double-check locking
 _AI_CACHE_LOCK: asyncio.Lock | None = None  # P0-FIX: Singleton cache lock
-_VOLATILITY_TRACKER: dict[str, float] = {}  # ticker -> recent volatility pct
+_VOLATILITY_TRACKER: "OrderedDict[str, float]" = OrderedDict()  # ticker -> recent volatility pct
 _VOLATILITY_TRACKER_INIT_LOCK = asyncio.Lock()  # P0-FIX: Init lock
 _VOLATILITY_TRACKER_LOCK: asyncio.Lock | None = None  # P0-FIX: Singleton lock
 
@@ -55,7 +56,7 @@ _VOLATILITY_TRACKER_LOCK: asyncio.Lock | None = None  # P0-FIX: Singleton lock
 # ─────────────────────────────────────────────
 _SMC_CACHE_BASE_TTL = 120  # 2 minutes (SMC structure changes slower than price)
 _SMC_CACHE_MAX_SIZE = 200
-_SMC_CACHE: dict[str, tuple[float, float, dict[str, Any]]] = {}  # (timestamp, ttl, smc_dict)
+_SMC_CACHE: "OrderedDict[str, tuple[float, float, dict[str, Any]]]" = OrderedDict()  # (timestamp, ttl, smc_dict)
 _SMC_CACHE_INIT_LOCK = asyncio.Lock()  # P0-FIX: Init lock for double-check locking
 _SMC_CACHE_LOCK: asyncio.Lock | None = None  # P0-FIX: Singleton cache lock
 
@@ -128,6 +129,7 @@ async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, cache_key
             timestamp, ttl, smc_dict = entry
             age = _time.monotonic() - timestamp
             if age < ttl:
+                _SMC_CACHE.move_to_end(cache_key)  # LRU: mark as recently used
                 logger.debug(f"[SMC_CACHE] Hit for {ticker}:{timeframe} (age={age:.1f}s, ttl={ttl}s)")
                 return smc_dict
     return None
@@ -151,13 +153,12 @@ async def _set_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, smc_ctx: 
 
     lock = await _get_smc_cache_lock()  # BUG-1 FIX: Lazy init
     async with lock:
-        # Enforce max size by removing oldest entries
-        if len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
-            sorted_keys = sorted(_SMC_CACHE.keys(), key=lambda k: _SMC_CACHE[k][0])
-            for old_key in sorted_keys[:len(_SMC_CACHE) - _SMC_CACHE_MAX_SIZE + 1]:
-                del _SMC_CACHE[old_key]
+        # Enforce max size by removing least-recently-used entries (OrderedDict LRU)
+        while len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
+            _SMC_CACHE.popitem(last=False)
 
         _SMC_CACHE[cache_key] = (_time.monotonic(), ttl, smc_dict)
+        _SMC_CACHE.move_to_end(cache_key)
         logger.debug(f"[SMC_CACHE] Stored for {ticker}:{timeframe} (ttl={ttl}s)")
 
 
@@ -234,16 +235,19 @@ async def _cached_analyze_smc_single_tf(
     # P1-R1: Pass atr_pct to enable dynamic premium/discount zones
     smc_ctx = analyze_smc_single_tf(ohlcv, timeframe, current_price, signal_direction, atr_pct)
 
-    # P2-O4: Dynamic TTL based on ATR volatility
-    # High volatility (>3% ATR): Shorter TTL (60s) for fresher structure
-    # Low volatility (<1% ATR): Longer TTL (180s) for stable structure
-    # Normal volatility: Base TTL (120s)
-    if atr_pct > 3.0:
-        dynamic_ttl = 60
-    elif atr_pct < 1.0:
-        dynamic_ttl = 180
+    # P2-O4: Dynamic TTL based on ATR volatility + config
+    # High volatility (>3% ATR): Shorter TTL for fresher structure
+    # Low volatility (<1% ATR): Longer TTL for stable structure
+    # Config-driven with env overrides
+    if settings.ai.smc_cache_ttl_enabled:
+        if atr_pct > 3.0:
+            dynamic_ttl = settings.ai.smc_cache_ttl_high_vol
+        elif atr_pct < 1.0:
+            dynamic_ttl = settings.ai.smc_cache_ttl_low_vol
+        else:
+            dynamic_ttl = settings.ai.smc_cache_ttl_base
     else:
-        dynamic_ttl = 120
+        dynamic_ttl = settings.ai.smc_cache_ttl_base
 
     # Cache the result with dynamic TTL
     await _set_cached_smc(ticker, timeframe, ohlcv_sig, smc_ctx, cache_key, ttl=dynamic_ttl)
@@ -260,9 +264,9 @@ async def _update_volatility_tracker(ticker: str, market: MarketContext) -> floa
     lock = await _get_volatility_lock()  # BUG-1 FIX: Lazy init
     async with lock:
         _VOLATILITY_TRACKER[ticker] = volatility_pct
+        _VOLATILITY_TRACKER.move_to_end(ticker)  # LRU: mark as recently updated
         if len(_VOLATILITY_TRACKER) > 200:
-            oldest = next(iter(_VOLATILITY_TRACKER))
-            _VOLATILITY_TRACKER.pop(oldest)
+            _VOLATILITY_TRACKER.popitem(last=False)  # Remove LRU entry
 
     return volatility_pct
 
@@ -358,6 +362,7 @@ async def _get_cached_analysis(
         if entry:
             timestamp, ttl, analysis = entry
             if (_time.monotonic() - timestamp) < ttl:
+                _AI_CACHE.move_to_end(key)  # LRU: mark as recently used
                 return analysis
     return None
 
@@ -378,15 +383,16 @@ async def _set_cached_analysis(
     lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
     async with lock:
         _AI_CACHE[key] = (_time.monotonic(), ttl, analysis)
+        _AI_CACHE.move_to_end(key)  # LRU: mark as most recently set
 
         now = _time.monotonic()
         stale = [k for k, (ts, t, _) in _AI_CACHE.items() if now - ts > t]
         for k in stale:
             del _AI_CACHE[k]
 
+        # LRU eviction: remove least-recently-used entries
         while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:
-            oldest_key = min(_AI_CACHE.keys(), key=lambda k: _AI_CACHE[k][0])
-            del _AI_CACHE[oldest_key]
+            _AI_CACHE.popitem(last=False)
 
 
 # ─────────────────────────────────────────────

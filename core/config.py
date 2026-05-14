@@ -68,6 +68,13 @@ class AIConfig(BaseModel):
     dynamic_cache_ttl_base: int = 60
     dynamic_cache_ttl_high_volatility_multiplier: float = 0.5
     dynamic_cache_ttl_low_volatility_multiplier: float = 2.0
+    # SMC cache TTL: high volatility = shorter, low = longer, normal = base
+    smc_cache_ttl_enabled: bool = True
+    smc_cache_ttl_base: int = 120
+    smc_cache_ttl_high_vol: int = 60
+    smc_cache_ttl_low_vol: int = 180
+    # Pre-filter enhanced checks global timeout (seconds)
+    prefilter_enhanced_timeout_secs: float = 30.0
     batch_signals_enabled: bool = False
     batch_signals_window_secs: float = 5.0
     batch_signals_max_count: int = 3

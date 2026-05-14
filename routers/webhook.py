@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import time
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -40,32 +41,103 @@ _NONCE_CACHE_CLEANUP_INTERVAL = 3600
 _last_nonce_cleanup: float = 0.0
 _nonce_lock = asyncio.Lock()
 
+# Redis nonce cache for multi-process deployments
+_redis_nonce_available: bool | None = None
+_redis_nonce_client: "Any | None" = None
+
+
+async def _get_redis_nonce_client():
+    """Lazily get Redis client for nonce deduplication.
+
+    Uses the same Redis connection as the cache layer. Falls back to in-memory
+    when Redis is disabled or unavailable, which ensures single-process
+    deployments still have replay protection.
+    """
+    global _redis_nonce_available, _redis_nonce_client
+    if _redis_nonce_available is not None:
+        return _redis_nonce_client if _redis_nonce_available else None
+
+    from core.config import settings
+    if not settings.redis.enabled:
+        _redis_nonce_available = False
+        return None
+
+    try:
+        from core.cache import cache_manager
+        redis_obj = getattr(cache_manager, "_redis", None)
+        if redis_obj and getattr(redis_obj, "is_connected", lambda: False)():
+            _redis_nonce_client = redis_obj
+            _redis_nonce_available = True
+            logger.debug("[Webhook] Redis nonce backend connected")
+            return _redis_nonce_client
+        if redis_obj:
+            await redis_obj._get_client()
+            if redis_obj.is_connected():
+                _redis_nonce_client = redis_obj
+                _redis_nonce_available = True
+                logger.debug("[Webhook] Redis nonce backend connected (lazy)")
+                return _redis_nonce_client
+    except Exception:
+        pass
+
+    _redis_nonce_available = False
+    logger.warning(
+        "[Webhook] Redis nonce backend unavailable — using in-memory fallback. "
+        "For multi-process deployments, enable REDIS_ENABLED=true."
+    )
+    return None
+
 
 async def _check_replay_protection(nonce: str, timestamp: float) -> None:
-    """Check for replay attacks using timestamp and nonce."""
+    """Check for replay attacks using timestamp and nonce.
+
+    Uses Redis for multi-process safety when available, falls back to
+    in-memory dict for single-process deployments.
+    """
     now = time.time()
     if abs(now - timestamp) > _WEBHOOK_REPLAY_WINDOW_SECS:
         raise HTTPException(401, "Webhook timestamp expired — possible replay attack")
 
-    if nonce:
-        async with _nonce_lock:
-            global _last_nonce_cleanup
-            if now - _last_nonce_cleanup > _NONCE_CACHE_CLEANUP_INTERVAL:
-                cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
-                expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
-                for k in expired:
-                    _NONCE_CACHE.pop(k, None)
-                _last_nonce_cleanup = now
+    if not nonce:
+        return
 
-            if nonce in _NONCE_CACHE:
-                raise HTTPException(409, "Duplicate nonce — possible replay attack")
+    # Try Redis first for multi-process safety
+    redis_client = await _get_redis_nonce_client()
+    if redis_client:
+        try:
+            client = await redis_client._get_client()
+            if client:
+                redis_key = f"nonce:{nonce}"
+                existing = await client.get(redis_key)
+                if existing:
+                    raise HTTPException(409, "Duplicate nonce — possible replay attack")
+                await client.setex(redis_key, _WEBHOOK_REPLAY_WINDOW_SECS, str(now))
+                return
+        except HTTPException:
+            raise
+        except Exception:
+            logger.warning("[Webhook] Redis nonce check failed, falling back to in-memory")
+        # Fall through to in-memory
 
-            _NONCE_CACHE[nonce] = now
-            if len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
-                cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
-                expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
-                for k in expired:
-                    _NONCE_CACHE.pop(k, None)
+    # In-memory fallback
+    async with _nonce_lock:
+        global _last_nonce_cleanup
+        if now - _last_nonce_cleanup > _NONCE_CACHE_CLEANUP_INTERVAL:
+            cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
+            expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
+            for k in expired:
+                _NONCE_CACHE.pop(k, None)
+            _last_nonce_cleanup = now
+
+        if nonce in _NONCE_CACHE:
+            raise HTTPException(409, "Duplicate nonce — possible replay attack")
+
+        _NONCE_CACHE[nonce] = now
+        if len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
+            cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
+            expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
+            for k in expired:
+                _NONCE_CACHE.pop(k, None)
 
 
 @router.post("/webhook")

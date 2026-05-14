@@ -1,0 +1,435 @@
+//@version=6
+// ────────────────────────────────────────────────────────────
+// QuantPilot AI - Multi-TF SMC Confluence Indicator v6
+//
+// 用途：作为 QuantPilot AI 的 TradingView 信号输入端
+// 配合后端 29 层预过滤器 + AI 多模型决策使用
+//
+// 设计理念：
+//   - 后端已做大量风控和 AI 分析，前端只需生成 "干净" 的信号
+//   - 高质量信号 > 高频信号（后端有信号饱和度和冷却检查）
+//   - 多时间框架 SMC 共振 + 成交量确认 = 高胜率信号
+//   - 每个信号附带完整的 SL/TP 数据供后端 AI 参考优化
+// ────────────────────────────────────────────────────────────
+indicator("QuantPilot SMC Confluence", "QP-SMC v6", true, timeframe = "")
+
+// ═══════════════════════════════════════════════════════════
+// 输入参数
+// ═══════════════════════════════════════════════════════════
+
+// ── Webhook 配置 ──
+WEBHOOK_SECRET = input.string("YOUR_SECRET_HERE", "Webhook Secret", group = "Webhook")
+EXCHANGE_NAME  = input.string("BINANCE", "交易所", options = ["BINANCE", "OKX", "BYBIT", "BITGET", "GATE", "COINBASE"], group = "Webhook")
+
+// ── 多时间框架 ──
+HTF_TIMEFRAME = input.timeframe("240",  "高时间框架 (HTF)",  options = ["60", "240", "D", "W"],  group = "时间框架")
+MTF_TIMEFRAME = input.timeframe("60",   "中时间框架 (MTF)",  options = ["15", "30", "60", "240"], group = "时间框架")
+ETF_TIMEFRAME = input.timeframe("15",   "入场时间框架 (ETF)", options = ["5", "15", "30", "60"],  group = "时间框架")
+
+// ── EMA 趋势 ──
+EMA_FAST   = input.int(20, "EMA 快线", 1, 200, group = "趋势")
+EMA_MEDIUM = input.int(50, "EMA 中线", 1, 200, group = "趋势")
+EMA_SLOW   = input.int(200, "EMA 慢线", 1, 500, group = "趋势")
+
+// ── RSI ──
+RSI_LENGTH    = input.int(14, "RSI 周期", 1, 50, group = "动量")
+RSI_OVERSOLD  = input.int(30, "RSI 超卖", 0, 50, group = "动量")
+RSI_OVERBOUGHT = input.int(70, "RSI 超买", 50, 100, group = "动量")
+
+// ── ATR ──
+ATR_LENGTH    = input.int(14, "ATR 周期", 1, 50, group = "波动率")
+ATR_MULT_SL   = input.float(1.5, "止损 ATR 倍数", 0.5, 5.0, 0.1, group = "波动率")
+ATR_MULT_TP1  = input.float(2.0, "TP1 ATR 倍数", 0.5, 10.0, 0.1, group = "波动率")
+ATR_MULT_TP2  = input.float(3.5, "TP2 ATR 倍数", 0.5, 15.0, 0.1, group = "波动率")
+ATR_MULT_TP3  = input.float(5.0, "TP3 ATR 倍数", 0.5, 20.0, 0.1, group = "波动率")
+
+// ── 成交量 ──
+VOL_MA_LENGTH = input.int(20, "成交量均线周期", 1, 100, group = "成交量")
+VOL_SPIKE_MULT = input.float(1.5, "成交量突增倍数", 1.0, 5.0, 0.1, group = "成交量")
+
+// ── FVG ──
+FVG_MIN_SIZE_PCT = input.float(0.1, "FVG 最小尺寸 %", 0.01, 2.0, 0.01, group = "FVG / SMC")
+FVG_MAX_AGE_BARS = input.int(10, "FVG 最大年龄 (K线)", 1, 50, group = "FVG / SMC")
+SHOW_FVG         = input.bool(true, "显示 FVG 区域", group = "FVG / SMC")
+
+// ── 提示 ──
+SIGNAL_COOLDOWN_BARS = input.int(5, "信号冷却 K 线数", 0, 50, group = "提示")
+FILTER_STRENGTH      = input.string("normal", "筛选强度", options = ["conservative", "normal", "aggressive"], group = "提示")
+
+// ═══════════════════════════════════════════════════════════
+// 数据获取 & 计算
+// ═══════════════════════════════════════════════════════════
+
+// ── 价格数据 ──
+htf_close  = request.security(syminfo.tickerid, HTF_TIMEFRAME, close, lookahead = barmerge.lookahead_off)
+htf_open   = request.security(syminfo.tickerid, HTF_TIMEFRAME, open,  lookahead = barmerge.lookahead_off)
+htf_high   = request.security(syminfo.tickerid, HTF_TIMEFRAME, high,  lookahead = barmerge.lookahead_off)
+htf_low    = request.security(syminfo.tickerid, HTF_TIMEFRAME, low,   lookahead = barmerge.lookahead_off)
+
+mtf_close  = request.security(syminfo.tickerid, MTF_TIMEFRAME, close, lookahead = barmerge.lookahead_off)
+mtf_high   = request.security(syminfo.tickerid, MTF_TIMEFRAME, high,  lookahead = barmerge.lookahead_off)
+mtf_low    = request.security(syminfo.tickerid, MTF_TIMEFRAME, low,   lookahead = barmerge.lookahead_off)
+
+// ── EMA ──
+ema20  = ta.ema(close, EMA_FAST)
+ema50  = ta.ema(close, EMA_MEDIUM)
+ema200 = ta.ema(close, EMA_SLOW)
+
+htf_ema20 = request.security(syminfo.tickerid, HTF_TIMEFRAME, ta.ema(close, EMA_FAST), lookahead = barmerge.lookahead_off)
+htf_ema50 = request.security(syminfo.tickerid, HTF_TIMEFRAME, ta.ema(close, EMA_MEDIUM), lookahead = barmerge.lookahead_off)
+
+// ── RSI ──
+rsi = ta.rsi(close, RSI_LENGTH)
+
+// ── ATR ──
+atr = ta.atr(ATR_LENGTH)
+
+// ── 成交量 ──
+vol_ma = ta.sma(volume, VOL_MA_LENGTH)
+vol_spike = volume > vol_ma * VOL_SPIKE_MULT
+
+// ═══════════════════════════════════════════════════════════
+// 市场结构检测 (Market Structure: BOS / CHoCH)
+// ═══════════════════════════════════════════════════════════
+
+// 使用 MTF 数据检测结构断点
+type SwingPoint
+    float price
+    int   bar_index
+    bool  is_high
+
+type MarketStructure
+    string trend          // "bullish", "bearish", "neutral"
+    bool   recent_bos     // 最近的突破结构
+    bool   recent_choch   // 最近的角色转换
+    int    bars_since_bos
+    int    bars_since_choch
+
+// 检测摆动高低点 (Swing High / Swing Low)
+swing_length = 5
+swing_high = ta.pivothigh(high, swing_length, swing_length)
+swing_low  = ta.pivotlow(low, swing_length, swing_length)
+
+// ── HTF 级别市场结构 ──
+htf_swing_length = 3
+htf_swing_high = request.security(syminfo.tickerid, HTF_TIMEFRAME, ta.pivothigh(high, htf_swing_length, htf_swing_length), lookahead = barmerge.lookahead_off)
+htf_swing_low  = request.security(syminfo.tickerid, HTF_TIMEFRAME, ta.pivotlow(low, htf_swing_length, htf_swing_length), lookahead = barmerge.lookahead_off)
+
+// HTF 趋势判断: 基于 EMA 排列 + 价格位置
+htf_bullish_trend = htf_ema20 > htf_ema50 and htf_close > htf_ema20
+htf_bearish_trend = htf_ema20 < htf_ema50 and htf_close < htf_ema20
+htf_ranging = not htf_bullish_trend and not htf_bearish_trend
+
+// MTF 趋势判断
+mtf_bullish = mtf_close > mtf_low[1] and mtf_close[1] > mtf_close[2]
+
+// ═══════════════════════════════════════════════════════════
+// FVG (Fair Value Gap) 检测
+// ═══════════════════════════════════════════════════════════
+
+type FVG
+    float top
+    float bottom
+    int   bar_index
+    bool  is_bullish     // 向上的 FVG (支撑)
+    bool  is_bearish     // 向下的 FVG (阻力)
+    bool  is_active
+
+// 检测 FVG: 当一根 K 线的影线不重叠前一根 K 线时产生缺口
+fvg_bullish_condition = low > high[2]   // 当前最低价 > 前前最高价 (向上跳空)
+fvg_bearish_condition = high < low[2]   // 当前最高价 < 前前最低价 (向下跳空)
+
+fvg_size_pct(fvg_top, fvg_bot) =>
+    math.abs(fvg_top - fvg_bot) / fvg_bot * 100
+
+var fvg_bullish_top    = float(na)
+var fvg_bullish_bot    = float(na)
+var fvg_bearish_top    = float(na)
+var fvg_bearish_bot    = float(na)
+var fvg_bullish_bar    = 0
+var fvg_bearish_bar    = 0
+
+if fvg_bullish_condition
+    gap_top = low
+    gap_bot = high[2]
+    gap_size = fvg_size_pct(gap_top, gap_bot)
+    if gap_size >= FVG_MIN_SIZE_PCT
+        fvg_bullish_top := gap_top
+        fvg_bullish_bot := gap_bot
+        fvg_bullish_bar := bar_index
+
+if fvg_bearish_condition
+    gap_top = low[2]
+    gap_bot = high
+    gap_size = fvg_size_pct(gap_top, gap_bot)
+    if gap_size >= FVG_MIN_SIZE_PCT
+        fvg_bearish_top := gap_top
+        fvg_bearish_bot := gap_bot
+        fvg_bearish_bar := bar_index
+
+// FVG 是否过期
+fvg_bullish_active = bar_index - fvg_bullish_bar <= FVG_MAX_AGE_BARS
+fvg_bearish_active = bar_index - fvg_bearish_bar <= FVG_MAX_AGE_BARS
+
+// FVG 是否被回填
+fvg_bullish_filled = fvg_bullish_active and low <= fvg_bullish_top and close > fvg_bullish_top
+fvg_bearish_filled = fvg_bearish_active and high >= fvg_bearish_bot and close < fvg_bearish_bot
+
+// ═══════════════════════════════════════════════════════════
+// Order Block (OB) 检测
+// ═══════════════════════════════════════════════════════════
+
+// Bullish OB: 最后一根阴线 (在强劲上涨之前) 的高低价区域
+// Bearish OB: 最后一根阳线 (在强劲下跌之前) 的高低价区域
+bullish_ob_condition = close > open[1] and close > high[1] and close[1] < open[1]  // 强势突破前一根阴线
+bearish_ob_condition = close < open[1] and close < low[1] and close[1] > open[1]   // 强势跌破前一根阳线
+
+var float bullish_ob_high = na
+var float bullish_ob_low  = na
+var float bearish_ob_high = na
+var float bearish_ob_low  = na
+var int   bullish_ob_bar  = 0
+var int   bearish_ob_bar  = 0
+
+if bullish_ob_condition
+    bullish_ob_high := high[1]
+    bullish_ob_low  := low[1]
+    bullish_ob_bar  := bar_index
+
+if bearish_ob_condition
+    bearish_ob_high := high[1]
+    bearish_ob_low  := low[1]
+    bearish_ob_bar  := bar_index
+
+// ═══════════════════════════════════════════════════════════
+// 信号生成逻辑
+// ═══════════════════════════════════════════════════════════
+
+// ── 筛选强度 ──
+conservative_mode = FILTER_STRENGTH == "conservative"
+aggressive_mode   = FILTER_STRENGTH == "aggressive"
+
+// ── 趋势共振 ──
+htf_bull_ok = conservative_mode ? htf_bullish_trend : (htf_bullish_trend or not htf_bearish_trend)
+htf_bear_ok = conservative_mode ? htf_bearish_trend : (htf_bearish_trend or not htf_bullish_trend)
+
+// ── 多时间框架 EMA 排列 ──
+ema_bull_aligned = ema20 > ema50 and ema50 > ema200
+ema_bear_aligned = ema20 < ema50 and ema50 < ema200
+ema_bull_ok = conservative_mode ? ema_bull_aligned : (ema20 > ema50 or ema50 > ema200)
+ema_bear_ok = conservative_mode ? ema_bear_aligned : (ema20 < ema50 or ema50 < ema200)
+
+// ── RSI 条件 ──
+rsi_bull_ok = not aggressive_mode ? (rsi > RSI_OVERSOLD and rsi < 65) : (rsi > 25 and rsi < 80)
+rsi_bear_ok = not aggressive_mode ? (rsi < RSI_OVERBOUGHT and rsi > 35) : (rsi < 80 and rsi > 20)
+
+// ── 做多条件 ──
+long_entry_zone =
+     // FVG 回填做多
+     (fvg_bullish_filled and close > fvg_bullish_top) or
+     // OB 回测做多
+     (bullish_ob_condition and close > bullish_ob_low and close < bullish_ob_high and close > ema20) or
+     // EMA 金叉 + RSI 确认
+     (ta.crossover(ema20, ema50) and rsi_bull_ok and htf_bull_ok)
+
+long_signal =
+     long_entry_zone and
+     htf_bull_ok and                        // HTF 趋势确认
+     ema_bull_ok and                        // EMA 排列确认
+     rsi_bull_ok and                        // RSI 非极端
+     (aggressive_mode or vol_spike) and     // 成交量确认 (aggressive 模式跳过)
+     not htf_ranging                        // 不参与震荡
+
+// ── 做空条件 ──
+short_entry_zone =
+     // FVG 回填做空
+     (fvg_bearish_filled and close < fvg_bearish_bot) or
+     // OB 回测做空
+     (bearish_ob_condition and close > bearish_ob_low and close < bearish_ob_high and close < ema20) or
+     // EMA 死叉 + RSI 确认
+     (ta.crossunder(ema20, ema50) and rsi_bear_ok and htf_bear_ok)
+
+short_signal =
+     short_entry_zone and
+     htf_bear_ok and
+     ema_bear_ok and
+     rsi_bear_ok and
+     (aggressive_mode or vol_spike) and
+     not htf_ranging
+
+// ── 平仓条件 ──
+close_long_condition  = ta.crossunder(ema20, ema50) or (rsi > 75 and not htf_bullish_trend)
+close_short_condition = ta.crossover(ema20, ema50) or (rsi < 25 and not htf_bearish_trend)
+
+// ═══════════════════════════════════════════════════════════
+// SL / TP 计算 (ATR 动态)
+// ═══════════════════════════════════════════════════════════
+
+calc_sl_long(entry, atr_val)  => entry - atr_val * ATR_MULT_SL
+calc_sl_short(entry, atr_val) => entry + atr_val * ATR_MULT_SL
+calc_tp1_long(entry, atr_val) => entry + atr_val * ATR_MULT_TP1
+calc_tp1_short(entry, atr_val) => entry - atr_val * ATR_MULT_TP1
+calc_tp2_long(entry, atr_val) => entry + atr_val * ATR_MULT_TP2
+calc_tp2_short(entry, atr_val) => entry - atr_val * ATR_MULT_TP2
+calc_tp3_long(entry, atr_val) => entry + atr_val * ATR_MULT_TP3
+calc_tp3_short(entry, atr_val) => entry - atr_val * ATR_MULT_TP3
+
+// ═══════════════════════════════════════════════════════════
+// 信号冷却 (避免重复触发)
+// ═══════════════════════════════════════════════════════════
+
+var int last_long_bar  = -999
+var int last_short_bar = -999
+
+long_cooldown_ok  = bar_index - last_long_bar  >= SIGNAL_COOLDOWN_BARS
+short_cooldown_ok = bar_index - last_short_bar >= SIGNAL_COOLDOWN_BARS
+
+// ═══════════════════════════════════════════════════════════
+// 信号生成 (最终触发)
+// ═══════════════════════════════════════════════════════════
+
+entry_price  = close
+current_atr  = atr
+
+// ── 做多信号 ──
+long_trigger = long_signal and long_cooldown_ok and not na(atr) and atr > 0
+
+if long_trigger
+    last_long_bar := bar_index
+
+    sl_price  = calc_sl_long(entry_price, current_atr)
+    tp1_price = calc_tp1_long(entry_price, current_atr)
+    tp2_price = calc_tp2_long(entry_price, current_atr)
+    tp3_price = calc_tp3_long(entry_price, current_atr)
+
+    // ── 构建 webhook JSON ──
+    // QuantPilot AI 需要的字段:
+    //   secret, ticker, exchange, direction, price, timeframe, strategy, message
+    webhook_json = '{"secret":"' + WEBHOOK_SECRET + '",' +
+        '"ticker":"' + syminfo.ticker + '",' +
+        '"exchange":"' + EXCHANGE_NAME + '",' +
+        '"direction":"long",' +
+        '"price":' + str.tostring(entry_price) + ',' +
+        '"timeframe":"' + str.tostring(timeframe.multiplier) + '",' +
+        '"strategy":"QP-SMCv6","message":"sig=long|' +
+        'entry=' + str.tostring(entry_price, "#.##") + '|' +
+        'sl=' + str.tostring(sl_price, "#.##") + '|' +
+        'tp1=' + str.tostring(tp1_price, "#.##") + '|' +
+        'tp2=' + str.tostring(tp2_price, "#.##") + '|' +
+        'tp3=' + str.tostring(tp3_price, "#.##") + '|' +
+        'atr=' + str.tostring(current_atr, "#.##") + '|' +
+        'filter=' + FILTER_STRENGTH + '"}'
+
+    alert(webhook_json, alert.freq_once_per_bar_close)
+
+// ── 做空信号 ──
+short_trigger = short_signal and short_cooldown_ok and not na(atr) and atr > 0
+
+if short_trigger
+    last_short_bar := bar_index
+
+    sl_price  = calc_sl_short(entry_price, current_atr)
+    tp1_price = calc_tp1_short(entry_price, current_atr)
+    tp2_price = calc_tp2_short(entry_price, current_atr)
+    tp3_price = calc_tp3_short(entry_price, current_atr)
+
+    webhook_json = '{"secret":"' + WEBHOOK_SECRET + '",' +
+        '"ticker":"' + syminfo.ticker + '",' +
+        '"exchange":"' + EXCHANGE_NAME + '",' +
+        '"direction":"short",' +
+        '"price":' + str.tostring(entry_price) + ',' +
+        '"timeframe":"' + str.tostring(timeframe.multiplier) + '",' +
+        '"strategy":"QP-SMCv6","message":"sig=short|' +
+        'entry=' + str.tostring(entry_price, "#.##") + '|' +
+        'sl=' + str.tostring(sl_price, "#.##") + '|' +
+        'tp1=' + str.tostring(tp1_price, "#.##") + '|' +
+        'tp2=' + str.tostring(tp2_price, "#.##") + '|' +
+        'tp3=' + str.tostring(tp3_price, "#.##") + '|' +
+        'atr=' + str.tostring(current_atr, "#.##") + '|' +
+        'filter=' + FILTER_STRENGTH + '"}'
+
+    alert(webhook_json, alert.freq_once_per_bar_close)
+
+// ── 平多信号 ──
+close_long_trigger = close_long_condition and bar_index - last_long_bar > 2
+
+if close_long_trigger
+    webhook_json = '{"secret":"' + WEBHOOK_SECRET + '",' +
+        '"ticker":"' + syminfo.ticker + '",' +
+        '"exchange":"' + EXCHANGE_NAME + '",' +
+        '"direction":"close_long",' +
+        '"price":' + str.tostring(close) + ',' +
+        '"timeframe":"' + str.tostring(timeframe.multiplier) + '",' +
+        '"strategy":"QP-SMCv6","message":"sig=close_long|reason=ema_cross|price=' + str.tostring(close, "#.##") + '"}'
+
+    alert(webhook_json, alert.freq_once_per_bar_close)
+
+// ── 平空信号 ──
+close_short_trigger = close_short_condition and bar_index - last_short_bar > 2
+
+if close_short_trigger
+    webhook_json = '{"secret":"' + WEBHOOK_SECRET + '",' +
+        '"ticker":"' + syminfo.ticker + '",' +
+        '"exchange":"' + EXCHANGE_NAME + '",' +
+        '"direction":"close_short",' +
+        '"price":' + str.tostring(close) + ',' +
+        '"timeframe":"' + str.tostring(timeframe.multiplier) + '",' +
+        '"strategy":"QP-SMCv6","message":"sig=close_short|reason=ema_cross|price=' + str.tostring(close, "#.##") + '"}'
+
+    alert(webhook_json, alert.freq_once_per_bar_close)
+
+// ═══════════════════════════════════════════════════════════
+// 可视化
+// ═══════════════════════════════════════════════════════════
+
+// ── EMA 线 ──
+plot(ema20,  "EMA " + str.tostring(EMA_FAST),  color.blue, 2)
+plot(ema50,  "EMA " + str.tostring(EMA_MEDIUM), color.orange, 2)
+plot(ema200, "EMA " + str.tostring(EMA_SLOW),  color.gray, 1)
+
+// ── FVG 区域 ──
+bg_fvg_bull = fvg_bullish_active and SHOW_FVG ? color.new(color.green, 85) : na
+bg_fvg_bear = fvg_bearish_active and SHOW_FVG ? color.new(color.red, 85) : na
+bgcolor(bg_fvg_bull, title = "Bullish FVG")
+bgcolor(bg_fvg_bear, title = "Bearish FVG")
+
+// ── 信号标记 ──
+plotshape(long_trigger,  "做多信号",  shape.triangleup,   location.belowbar, color.green, size = size.small, text = "LONG",  textcolor = color.green)
+plotshape(short_trigger, "做空信号",  shape.triangledown, location.abovebar, color.red,   size = size.small, text = "SHORT", textcolor = color.red)
+plotshape(close_long_trigger,  "平多信号",  shape.xcross, location.abovebar, color.orange, size = size.small, text = "CLOSE L")
+plotshape(close_short_trigger, "平空信号",  shape.xcross, location.belowbar, color.orange, size = size.small, text = "CLOSE S")
+
+// ── 信息表格 ──
+var info_table = table.new(position.top_right, 2, 10, border_width = 1)
+
+if barstate.islastconfirmedhistory
+    table.cell(info_table, 0, 0, "QuantPilot SMC v6", text_color = color.white, text_size = size.small)
+    table.cell(info_table, 1, 0, "Status", text_color = color.white, text_size = size.small)
+
+    table.cell(info_table, 0, 1, "HTF Trend", text_size = size.small)
+    table.cell(info_table, 1, 1, htf_bullish_trend ? "Bullish ▲" : htf_bearish_trend ? "Bearish ▼" : "Ranging ―", text_color = htf_bullish_trend ? color.green : htf_bearish_trend ? color.red : color.gray, text_size = size.small)
+
+    table.cell(info_table, 0, 2, "EMA Align", text_size = size.small)
+    table.cell(info_table, 1, 2, ema_bull_aligned ? "Bull ▲" : ema_bear_aligned ? "Bear ▼" : "Mixed", text_color = ema_bull_aligned ? color.green : ema_bear_aligned ? color.red : color.yellow, text_size = size.small)
+
+    table.cell(info_table, 0, 3, "RSI (" + str.tostring(RSI_LENGTH) + ")", text_size = size.small)
+    table.cell(info_table, 1, 3, str.tostring(math.round(rsi, 1)), text_color = rsi > 70 ? color.red : rsi < 30 ? color.green : color.white, text_size = size.small)
+
+    table.cell(info_table, 0, 4, "ATR", text_size = size.small)
+    table.cell(info_table, 1, 4, str.tostring(math.round(atr, 4)), text_size = size.small)
+
+    table.cell(info_table, 0, 5, "Volume", text_size = size.small)
+    table.cell(info_table, 1, 5, vol_spike ? "SPIKE ▲" : "Normal", text_color = vol_spike ? color.yellow : color.gray, text_size = size.small)
+
+    table.cell(info_table, 0, 6, "FVG Bull", text_size = size.small)
+    table.cell(info_table, 1, 6, fvg_bullish_active ? "Active [" + str.tostring(fvg_bullish_bot, "#.##") + "-" + str.tostring(fvg_bullish_top, "#.##") + "]" : "None", text_color = fvg_bullish_active ? color.green : color.gray, text_size = size.small)
+
+    table.cell(info_table, 0, 7, "FVG Bear", text_size = size.small)
+    table.cell(info_table, 1, 7, fvg_bearish_active ? "Active [" + str.tostring(fvg_bearish_bot, "#.##") + "-" + str.tostring(fvg_bearish_top, "#.##") + "]" : "None", text_color = fvg_bearish_active ? color.red : color.gray, text_size = size.small)
+
+    table.cell(info_table, 0, 8, "Filter", text_size = size.small)
+    table.cell(info_table, 1, 8, FILTER_STRENGTH, text_color = conservative_mode ? color.orange : aggressive_mode ? color.yellow : color.white, text_size = size.small)
+
+    table.cell(info_table, 0, 9, "Signal", text_size = size.small)
+    signal_status = long_trigger ? "LONG ▲" : short_trigger ? "SHORT ▼" : "Waiting"
+    table.cell(info_table, 1, 9, signal_status, text_color = long_trigger ? color.green : short_trigger ? color.red : color.gray, text_size = size.small)
