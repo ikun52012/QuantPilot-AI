@@ -1601,6 +1601,11 @@ class FilterThresholdsRequest(BaseModel):
     dynamic_cooldown_enabled: bool | None = None
     min_pass_score: float | None = None
     data_completeness_soft_fail_count: int | None = None
+    max_same_direction_positions: int | None = None
+    max_correlated_exposure_pct: float | None = None
+    max_live_missing_data_checks: int | None = None
+    block_live_on_risk_check_error: bool | None = None
+    margin_mode: str | None = None
 
 
 class RiskThresholdsRequest(BaseModel):
@@ -1661,7 +1666,7 @@ async def update_filter_thresholds(
 
     # P2-FIX: Propagate correlation risk keys to settings.risk so they take
     # effect immediately (signal_processor reads from settings.risk, not pre_filter)
-    _RISK_PROPAGATE_KEYS = {"max_correlated_exposure_pct", "max_same_direction_positions", "max_live_missing_data_checks", "block_live_on_risk_check_error"}
+    _RISK_PROPAGATE_KEYS = {"max_correlated_exposure_pct", "max_same_direction_positions", "max_live_missing_data_checks", "block_live_on_risk_check_error", "margin_mode"}
     for key in updates:
         if key in _RISK_PROPAGATE_KEYS:
             setattr(settings.risk, key, updates[key])
