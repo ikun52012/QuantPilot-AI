@@ -71,12 +71,7 @@ async def reload_settings_from_db(session: AsyncSession) -> dict[str, Any]:
         changed["ai_provider"] = (old_ai_provider, new_ai_provider)
         logger.info(f"[HotReload] ai.provider changed: {old_ai_provider} -> {new_ai_provider}")
 
-    old_ai_model = getattr(settings.ai, "model", "")
-    new_ai_model = await get_admin_setting(session, "ai_model", old_ai_model)
-    if new_ai_model and new_ai_model != old_ai_model:
-        settings.ai.model = new_ai_model
-        changed["ai_model"] = (old_ai_model, new_ai_model)
-        logger.info(f"[HotReload] ai.model changed: {old_ai_model} -> {new_ai_model}")
+    # Per-provider model settings are handled by the admin AI provider config endpoints
 
     # ── Risk settings ──
     risk_attrs = [
@@ -86,6 +81,9 @@ async def reload_settings_from_db(session: AsyncSession) -> dict[str, Any]:
         ("risk_per_trade_pct", float, 1.0),
         ("max_same_direction_positions", int, 5),
         ("max_correlated_exposure_pct", float, 50.0),
+        ("margin_mode", str, "cross"),
+        ("max_live_missing_data_checks", int, 0),
+        ("block_live_on_risk_check_error", lambda v: str(v).lower() in ("true", "1", "yes"), True),
     ]
     for attr_name, coerce_type, default_val in risk_attrs:
         old_val = getattr(settings.risk, attr_name, default_val)

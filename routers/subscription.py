@@ -343,6 +343,11 @@ async def submit_payment(
     if payment.status != "pending":
         raise HTTPException(400, f"Payment is {payment.status}")
 
+    if payment.expires_at and utcnow() > payment.expires_at:
+        payment.status = "expired"
+        await db.commit()
+        raise HTTPException(400, "Payment request has expired. Please create a new subscription.")
+
     normalized_tx_hash = req.tx_hash.strip()
     # Check for duplicate tx hash
     result = await db.execute(

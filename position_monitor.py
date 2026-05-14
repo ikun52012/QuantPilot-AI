@@ -9,6 +9,7 @@ P2-FIX: Verify and re-place TP/SL orders periodically to protect against exchang
 import asyncio
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import ccxt
@@ -55,6 +56,49 @@ _GHOST_THRESHOLD_LARGE_POSITION = 7   # > $1000
 _GHOST_THRESHOLD_HUGE_POSITION = 10   # > $10,000
 _MAX_GHOST_THRESHOLD = _GHOST_THRESHOLD_HUGE_POSITION  # Backward compatibility alias
 _GHOST_CHECK_INTERVAL_SECS = 3600
+_GHOST_MIN_ELAPSED_SECS = 300  # minimum elapsed before ghost-close (protects against brief exchange outages)
+_GHOST_TRACKER_FILE = Path(__file__).parent.parent / "data" / "ghost_position_tracker.json"
+
+
+def _save_ghost_tracker() -> None:
+    """Persist ghost tracker to disk for restart survival."""
+    if not _GHOST_TRACKER_FILE:
+        return
+    try:
+        _GHOST_TRACKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        serializable = {}
+        for pos_id, entry in _GHOST_POSITION_TRACKER.items():
+            first_missing = entry.get("first_missing_at")
+            serializable[pos_id] = {
+                "fail_count": entry.get("fail_count", 0),
+                "first_missing_at": first_missing.isoformat() if first_missing else None,
+            }
+        _GHOST_TRACKER_FILE.write_text(json.dumps(serializable))
+    except Exception:
+        pass
+
+
+def _load_ghost_tracker() -> None:
+    """Restore ghost tracker from disk after restart."""
+    if not _GHOST_TRACKER_FILE or not _GHOST_TRACKER_FILE.exists():
+        return
+    try:
+        data = json.loads(_GHOST_TRACKER_FILE.read_text())
+        for pos_id, entry in data.items():
+            first_missing = entry.get("first_missing_at")
+            if first_missing:
+                try:
+                    first_missing = datetime.fromisoformat(first_missing)
+                except (ValueError, TypeError):
+                    first_missing = None
+            _GHOST_POSITION_TRACKER[pos_id] = {
+                "fail_count": entry.get("fail_count", 0),
+                "first_missing_at": first_missing or utcnow(),
+                "last_check": utcnow(),
+            }
+        logger.info(f"[PositionMonitor] Restored ghost tracker: {len(data)} entries")
+    except Exception as e:
+        logger.warning(f"[PositionMonitor] Failed to restore ghost tracker: {e}")
 _POSITION_VALUE_THRESHOLDS = [100.0, 1000.0, 10000.0]  # USDT thresholds for dynamic thresholds
 
 
@@ -423,6 +467,7 @@ async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
             "errors": 0,
             "timestamp": utcnow().isoformat(),
         }
+        _load_ghost_tracker()
 
         try:
             async with db_manager.async_session_factory() as session:
@@ -504,7 +549,14 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
     if not candle:
         ticker = await get_ticker(position.ticker, {**exchange_config, "live_trading": False})
         last = safe_float(ticker.get("last") or ticker.get("bid") or ticker.get("ask"))
-        candle = {"high": last, "low": last, "close": last}
+        bid = safe_float(ticker.get("bid"))
+        ask = safe_float(ticker.get("ask"))
+        # Use bid/ask spread for SL/TP detection if available; otherwise widen by 0.5%
+        if bid > 0 and ask > 0:
+            candle = {"high": ask, "low": bid, "close": last}
+        else:
+            spread = last * 0.005 if last > 0 else 0
+            candle = {"high": last + spread, "low": max(last - spread, 0.00000001), "close": last}
 
     high = safe_float(candle.get("high"))
     low = safe_float(candle.get("low"))
@@ -1203,6 +1255,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
     if match:
         _GHOST_POSITION_TRACKER.pop(position.id, None)
+        _save_ghost_tracker()
         mark_price = safe_float(match.get("mark_price") or match.get("markPrice") or match.get("entry_price"))
         if mark_price > 0:
             _update_unrealized(position, mark_price)
@@ -1255,6 +1308,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         ghost_entry.setdefault("first_missing_at", ghost_entry.get("last_check", now))
         ghost_entry["last_check"] = now
         _GHOST_POSITION_TRACKER[position.id] = ghost_entry
+        _save_ghost_tracker()
 
         missing_since = ghost_entry.get("first_missing_at", now)
         missing_elapsed = (now - missing_since).total_seconds() if missing_since else 0.0
@@ -1262,7 +1316,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         # P0-FIX: Use dynamic threshold based on position value
         dynamic_threshold = _calculate_ghost_threshold(position)
 
-        if ghost_entry["fail_count"] >= dynamic_threshold and missing_elapsed >= _GHOST_CHECK_INTERVAL_SECS:
+        if ghost_entry["fail_count"] >= dynamic_threshold and missing_elapsed >= _GHOST_MIN_ELAPSED_SECS:
             # P0-FIX: Log with dynamic threshold info
             contract_size = _position_contract_size(position) or 1.0
             position_value = (
@@ -1316,6 +1370,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 },
             )
             _GHOST_POSITION_TRACKER.pop(position.id, None)
+            _save_ghost_tracker()
             stats["closed"] += 1
             return stats
 
@@ -1954,13 +2009,13 @@ async def _adjust_sl_for_volatility(
 
     if direction == "long":
         new_stop = entry_price * (1 - new_sl_distance_pct / 100.0)
-        # Don't move SL down for long positions (would increase risk)
-        if new_stop <= current_stop:
+        # Only accept if new stop is wider (lower = more room before stop)
+        if new_stop >= current_stop:
             return False
     else:
         new_stop = entry_price * (1 + new_sl_distance_pct / 100.0)
-        # Don't move SL up for short positions
-        if new_stop >= current_stop:
+        # Only accept if new stop is wider (higher = more room before stop)
+        if new_stop <= current_stop:
             return False
 
     # Place new stop

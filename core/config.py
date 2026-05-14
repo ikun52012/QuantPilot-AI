@@ -353,6 +353,8 @@ class TrailingStopSettings(BaseModel):
     trail_pct: float = 1.0
     activation_profit_pct: float = 1.0
     trailing_step_pct: float = 0.5
+    breakeven_buffer_pct: float = 0.2
+    step_buffer_pct: float = 0.3
 
     @field_validator('mode')
     @classmethod
