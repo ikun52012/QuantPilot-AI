@@ -25,6 +25,7 @@ _LEVERAGE_MAX_RETRIES = 3
 _LEVERAGE_RETRY_DELAY_BASE = 1.0  # seconds, exponential backoff
 _LEVERAGE_RETRYABLE_ERRORS = ["NetworkError", "Timeout", "ExchangeNotAvailable", "DDoSProtection"]
 _OKX_LEVERAGE_ERROR_CODES = ["11045", "51000", "51020"]
+_MARKET_MAX_LEVERAGE_CACHE: dict[str, float] = {}  # key: "exchange_id:symbol" -> max_leverage
 
 try:
     import ccxt
@@ -1094,6 +1095,46 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str, market_type: str | Non
     return candidates[0]
 
 
+async def _fetch_market_max_leverage(exchange, symbol: str) -> float | None:
+    """Query the exchange for the maximum allowed leverage for this symbol.
+
+    Uses fetch_leverage_tiers() if supported, falls back to market limits.
+    Results are cached per exchange+symbol to avoid repeated API calls.
+    Returns None if the exchange doesn't expose leverage limits.
+    """
+    exchange_id = str(getattr(exchange, "id", "") or "").lower().strip()
+    cache_key = f"{exchange_id}:{symbol}"
+    cached = _MARKET_MAX_LEVERAGE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached if cached > 0 else None
+
+    max_lev = None
+
+    try:
+        tiers = await asyncio.to_thread(exchange.fetch_leverage_tiers, [symbol])
+        if tiers and symbol in tiers:
+            symbol_tiers = tiers[symbol]
+            if symbol_tiers:
+                # Each tier has maxLeverage; pick the highest across all tiers
+                tier_maxes = [float(t.get("maxLeverage", 0)) for t in symbol_tiers]
+                max_lev = max(tier_maxes) if tier_maxes else None
+    except Exception:
+        pass
+
+    if not max_lev:
+        try:
+            market = exchange.market(symbol)
+            lev_limit = market.get("limits", {}).get("leverage", {})
+            max_lev = safe_float(lev_limit.get("max"))
+        except Exception:
+            pass
+
+    _MARKET_MAX_LEVERAGE_CACHE[cache_key] = max_lev or 0.0
+    if max_lev and max_lev > 0:
+        logger.debug(f"[Exchange] Market max leverage for {symbol}: {max_lev}x (source: {exchange_id})")
+    return max_lev if max_lev and max_lev > 0 else None
+
+
 def _effective_order_leverage(decision: TradeDecision, exchange_config: dict | None = None) -> int | None:
     """Return the leverage that will actually be requested for this order."""
     exchange_config = exchange_config or {}
@@ -1153,6 +1194,15 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
     try:
         leverage = _effective_order_leverage(decision, exchange_config)
         if leverage:
+            # P2-FIX: Cap leverage to exchange's actual max for this symbol
+            market_max = await _fetch_market_max_leverage(exchange, symbol)
+            if market_max and market_max > 0 and leverage > market_max:
+                original_leverage = leverage
+                leverage = max(1, int(market_max))
+                logger.warning(
+                    f"[P2-FIX] Leverage capped: AI requested {original_leverage}x but "
+                    f"{symbol} market max is {int(market_max)}x. Using {leverage}x."
+                )
             # P0-FIX: Use retry mechanism for leverage setup
             result = await _set_leverage_with_retry(exchange, leverage, symbol)
 
