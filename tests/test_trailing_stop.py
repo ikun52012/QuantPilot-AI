@@ -278,7 +278,7 @@ async def test_place_protective_stop_replaces_existing_order(monkeypatch):
     assert result["replaced_order_id"] == "stop-old"
     assert cancel_calls == [(fake_exchange, "TRB/USDT:USDT", "stop-old")]
     assert create_calls == [(fake_exchange, "TRB/USDT:USDT", "stop_loss", "sell", 1.5, 99.0, "long")]
-    assert call_order == ["create", "cancel"]
+    assert call_order == ["cancel", "create"]
 
 
 @pytest.mark.asyncio
@@ -309,7 +309,8 @@ async def test_place_protective_stop_keeps_old_stop_when_new_stop_fails(monkeypa
 
     assert result["status"] == "error"
     assert "create failed" in result["reason"]
-    cancel_order.assert_not_awaited()
+    # Cancel is called first, then create fails
+    cancel_order.assert_awaited_once()
 
 
 @pytest.mark.asyncio
