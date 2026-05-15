@@ -228,6 +228,8 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.risk.fixed_position_size_usdt = _to_float(risk.get("fixed_position_size_usdt"), settings.risk.fixed_position_size_usdt, 1, 1000000)
         settings.risk.risk_per_trade_pct = _to_float(risk.get("risk_per_trade_pct"), settings.risk.risk_per_trade_pct, 0.1, 100)
         settings.risk.account_equity_usdt = _to_float(risk.get("account_equity_usdt"), settings.risk.account_equity_usdt, 100, 10000000)
+        margin_mode = str(risk.get("margin_mode") or settings.risk.margin_mode).lower().strip()
+        settings.risk.margin_mode = margin_mode if margin_mode in {"cross", "isolated"} else "cross"
 
     take_profit = runtime.get("take_profit") or {}
     if take_profit:
@@ -533,6 +535,7 @@ async def save_risk_settings(session: AsyncSession, data: dict[str, Any]) -> dic
         "fixed_position_size_usdt": _to_float(data.get("fixed_position_size_usdt"), _to_float(current.get("fixed_position_size_usdt"), settings.risk.fixed_position_size_usdt), 1, 1000000),
         "risk_per_trade_pct": _to_float(data.get("risk_per_trade_pct"), _to_float(current.get("risk_per_trade_pct"), settings.risk.risk_per_trade_pct), 0.1, 100),
         "account_equity_usdt": _to_float(data.get("account_equity_usdt"), _to_float(current.get("account_equity_usdt"), settings.risk.account_equity_usdt), 100, 10000000),
+        "margin_mode": str(data.get("margin_mode") or current.get("margin_mode") or settings.risk.margin_mode),
     }
     await _save_encrypted_dict(session, RISK_KEY, updated)
     apply_runtime_settings({"risk": updated})
@@ -669,6 +672,7 @@ def runtime_status() -> dict[str, Any]:
             "fixed_position_size_usdt": settings.risk.fixed_position_size_usdt,
             "risk_per_trade_pct": settings.risk.risk_per_trade_pct,
             "account_equity_usdt": settings.risk.account_equity_usdt,
+            "margin_mode": settings.risk.margin_mode,
         },
         "voting": {
             "enabled": settings.ai.voting_enabled,

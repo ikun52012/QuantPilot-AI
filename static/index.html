@@ -959,6 +959,14 @@
                             <label for="set-max-loss">Max Daily Loss %</label>
                             <input type="number" id="set-max-loss" class="text-input" value="5" step="0.5">
                         </div>
+                        <div class="form-group">
+                            <label for="set-margin-mode">Margin Mode</label>
+                            <select id="set-margin-mode" class="text-input">
+                                <option value="cross">Cross (全仓)</option>
+                                <option value="isolated">Isolated (逐仓)</option>
+                            </select>
+                            <p class="hint">cross: share margin across positions; isolated: separate margin per position</p>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Position Sizing Mode</label>

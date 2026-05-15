@@ -1070,6 +1070,7 @@ async function loadSettings() {
         setFieldValue('set-max-pos', risk.max_position_pct ?? 10);
         setFieldValue('set-max-trades', risk.max_daily_trades ?? 10);
         setFieldValue('set-max-loss', risk.max_daily_loss_pct ?? 5);
+        setFieldValue('set-margin-mode', risk.margin_mode || 'cross');
         setFieldValue('set-custom-sl', risk.custom_stop_loss_pct ?? 1.5);
         setFieldValue('set-ai-exit-prompt', risk.ai_exit_system_prompt || '');
         setFieldValue('set-equity', risk.account_equity_usdt ?? 10000);
@@ -1206,6 +1207,7 @@ async function saveRiskSettings() {
         max_position_pct: readNumberInput('set-max-pos', 10),
         max_daily_trades: readNumberInput('set-max-trades', 10, value => parseInt(value, 10)),
         max_daily_loss_pct: readNumberInput('set-max-loss', 5),
+        margin_mode: document.getElementById('set-margin-mode')?.value || 'cross',
         exit_management_mode: exitMode,
         ai_risk_profile: profile,
         custom_stop_loss_pct: readNumberInput('set-custom-sl', 1.5),
