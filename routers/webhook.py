@@ -206,7 +206,9 @@ async def webhook(
                 )
                 raise HTTPException(401, "Webhook secret not configured for live trading")
 
-        if not hmac.compare_digest(secret, admin_secret):
+        admin_secret_hash = hashlib.sha256(admin_secret.encode()).hexdigest()
+        provided_hash = hashlib.sha256(secret.encode()).hexdigest()
+        if not hmac.compare_digest(provided_hash, admin_secret_hash):
             logger.warning(f"[Webhook] Invalid secret from {client_ip}")
             raise HTTPException(401, "Invalid webhook secret")
 
@@ -284,7 +286,7 @@ async def _process_webhook_background(
 async def _find_user_by_secret(db: AsyncSession, secret: str):
     """Find user by webhook secret.
 
-    Uses constant-time dummy hash to prevent timing side-channel attacks
+    Uses constant-time comparison to prevent timing side-channel attacks
     that could enumerate valid user webhook secrets.
     """
     from sqlalchemy import select
@@ -304,5 +306,6 @@ async def _find_user_by_secret(db: AsyncSession, secret: str):
 
     if user is None:
         _dummy_hash = hashlib.sha256(b"timing-attack-mitigation-dummy").hexdigest()
+        hmac.compare_digest(secret_hash, _dummy_hash)
 
     return user

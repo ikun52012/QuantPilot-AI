@@ -28,16 +28,24 @@ security = HTTPBearer(auto_error=False)
 
 
 def _get_jwt_secret() -> str:
-    """Get or generate JWT secret."""
+    """Get or generate JWT secret.
+
+    SECURITY: No hardcoded fallback secret. If JWT_SECRET is not set:
+    - In live trading mode: raise RuntimeError (block startup)
+    - In development mode: generate a random per-instance secret and warn the user
+      that sessions will be invalidated on restart.
+    """
     secret = settings.jwt_secret
-    if not secret:
-        if settings.exchange.live_trading:
-            raise RuntimeError("JWT_SECRET must be set when LIVE_TRADING=true")
-        logger.warning(
-            "[Auth] JWT_SECRET is not set; using a deterministic development secret. "
-            "All sessions will be invalidated on restart. Set JWT_SECRET in production."
-        )
-        secret = "dev-jwt-secret-not-for-production-use-only-32chars!"
+    if secret:
+        return secret
+    if settings.exchange.live_trading:
+        raise RuntimeError("JWT_SECRET must be set when LIVE_TRADING=true")
+    secret = secrets.token_urlsafe(48)
+    logger.warning(
+        "[Auth] JWT_SECRET is not set; generated a random per-instance secret. "
+        "All sessions will be invalidated on restart. Set JWT_SECRET in your .env file "
+        "to persist sessions across restarts."
+    )
     return secret
 
 

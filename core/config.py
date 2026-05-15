@@ -522,7 +522,9 @@ class Settings(BaseModel):
             "secret", "jwt-secret", "jwt_secret", "tvss-change-this-secret",
         }
 
-        if self.default_admin_password and self.default_admin_password.lower() in WEAK_PASSWORDS:
+        if not self.default_admin_password:
+            warnings.append("DEFAULT_ADMIN_PASSWORD is empty — a random password will be generated on first boot. Set a strong password in your .env file.")
+        elif self.default_admin_password.lower() in WEAK_PASSWORDS:
             warnings.append("DEFAULT_ADMIN_PASSWORD uses a weak default value. Change it before deployment!")
 
         if self.jwt_secret:
@@ -546,7 +548,10 @@ class Settings(BaseModel):
             errors.append("CORS_ORIGINS=['*'] is not allowed in production (LIVE_TRADING=true). Set explicit origins or disable live trading.")
 
         if self.server.trusted_hosts == ["*"] and self.is_production:
-            warnings.append("TRUSTED_HOSTS=['*'] is too permissive for production")
+            errors.append("TRUSTED_HOSTS=['*'] is not allowed in production (LIVE_TRADING=true). Set explicit trusted hosts.")
+
+        if self.debug and self.is_production:
+            errors.append("DEBUG=true is not allowed in production (LIVE_TRADING=true). Disable debug mode for production safety.")
 
         # P0-FIX: Additional production validations
         if self.is_production:

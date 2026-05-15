@@ -306,6 +306,7 @@ def _ai_cache_key(
     timeframe: str = "",
     config_signature: str = "",
     ohlcv_signature: str = "",  # P2-8: Add OHLCV signature to detect market changes
+    user_id: str = "",  # Include user_id to prevent cross-user cache leakage
 ) -> str:
     """Generate cache key with price bucket and timeframe to avoid stale cache hits.
 
@@ -314,6 +315,8 @@ def _ai_cache_key(
     P2-8: Include OHLCV signature to detect market structure changes.
     """
     key = f"{ticker}:{direction}"
+    if user_id:
+        key = f"{user_id}:{key}"
     if timeframe:
         key += f":{timeframe}"
     if price_bucket:
@@ -330,10 +333,14 @@ def _price_to_bucket(price: float, bucket_pct: float = 1.0) -> str:
 
     Groups prices into 1% intervals to balance cache hit rate with accuracy.
     """
-    if price <= 0:
+    if price <= 0 or bucket_pct <= 0:
         return ""
     bucket_size = price * bucket_pct / 100
+    if bucket_size <= 0:
+        return ""
     bucket = int(price / bucket_size) * bucket_size
+    if bucket <= 0:
+        return ""
     return f"{bucket:.2f}"
 
 
@@ -344,12 +351,13 @@ async def _get_cached_analysis(
     timeframe: str = "",
     config_signature: str = "",
     ohlcv_signature: str = "",  # P2-8: Add OHLCV signature
+    user_id: str = "",
 ) -> AIAnalysis | None:
     """Get cached analysis with dynamic TTL support.
 
     BUG-4 FIX: Also clean expired entries during reads.
     """
-    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature)
+    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature, user_id)
     lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
     async with lock:
         # BUG-4 FIX: Clean expired entries during reads
@@ -375,9 +383,10 @@ async def _set_cached_analysis(
     timeframe: str = "",
     config_signature: str = "",
     ohlcv_signature: str = "",  # P2-8: Add OHLCV signature
+    user_id: str = "",
 ) -> None:
     """Set cached analysis with dynamic TTL based on volatility."""
-    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature)
+    key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature, user_id)
     ttl = await _get_dynamic_cache_ttl(ticker)
 
     lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
@@ -1711,6 +1720,7 @@ async def analyze_signal(
     signal: TradingViewSignal,
     market: MarketContext,
     user_settings: dict | None = None,
+    user_id: str = "",
 ) -> AIAnalysis:
     """
     Send signal + market context to LLM and parse the response.
@@ -1743,6 +1753,7 @@ async def analyze_signal(
             timeframe,
             config_signature,
             ohlcv_signature,  # P2-8: Include OHLCV signature
+            user_id=user_id,
         )
         if cached is not None:
             logger.info(f"[AI] Using cached analysis for {signal.ticker} {signal.direction.value} @ {price_bucket}")
@@ -1870,6 +1881,7 @@ async def analyze_signal(
                     timeframe,
                     config_signature,
                     ohlcv_signature,  # P2-8: Include OHLCV signature
+                    user_id=user_id,
                 )
             return final_analysis
 
@@ -1916,6 +1928,7 @@ async def analyze_signal(
                 timeframe,
                 config_signature,
                 ohlcv_signature,  # P2-8: Include OHLCV signature
+                user_id=user_id,
             )
         return analysis
 

@@ -101,7 +101,7 @@ class TradingViewSignal(BaseModel):
     }
     """
     secret: str = ""
-    ticker: str = Field(min_length=1, max_length=40)  # e.g. "BTCUSDT"
+    ticker: str = Field(min_length=1, max_length=60)  # e.g. "BTCUSDT" (60 to accommodate exchange suffixes)
     exchange: str = Field(default="BINANCE", max_length=30)  # e.g. "BINANCE"
     direction: SignalDirection
     price: float = Field(gt=0)

@@ -160,7 +160,18 @@ def _load_or_create_key() -> bytes:
     except (OSError, PermissionError):
         pass
 
-    logger.warning("[Security] Generated persistent APP_ENCRYPTION_KEY in data/app_encryption.key")
+    # On Windows, try to set restricted ACL permissions
+    try:
+        if os.name == "nt":
+            import subprocess
+            subprocess.run(
+                ["icacls", str(KEY_FILE), "/inheritance:r", "/grant:r", f"{os.getenv('USERNAME', 'ADMIN')}:R"],
+                check=False, capture_output=True, timeout=5,
+            )
+    except Exception:
+        pass
+
+    logger.warning("[Security] Generated persistent APP_ENCRYPTION_KEY — set APP_ENCRYPTION_KEY in .env for production")
     return key
 
 

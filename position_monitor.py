@@ -8,6 +8,7 @@ P2-FIX: Verify and re-place TP/SL orders periodically to protect against exchang
 """
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ _GHOST_THRESHOLD_HUGE_POSITION = 10   # > $10,000
 _MAX_GHOST_THRESHOLD = _GHOST_THRESHOLD_HUGE_POSITION  # Backward compatibility alias
 _GHOST_CHECK_INTERVAL_SECS = 3600
 _GHOST_MIN_ELAPSED_SECS = 300  # minimum elapsed before ghost-close (protects against brief exchange outages)
-_GHOST_TRACKER_FILE = Path(__file__).parent.parent / "data" / "ghost_position_tracker.json"
+_GHOST_TRACKER_FILE = Path("data") / "ghost_position_tracker.json"
 
 
 def _save_ghost_tracker() -> None:
@@ -942,7 +943,6 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                 # Check if order has exceeded timeout
                 created_at = order.get("timestamp")
                 if created_at:
-                    import time
                     order_age_secs = (time.time() * 1000 - created_at) / 1000
                     limit_timeout = _position_limit_timeout_secs(position)
                     if order_age_secs > limit_timeout:

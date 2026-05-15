@@ -1,7 +1,7 @@
 # docker-compose.yml
 # Usage: docker compose up -d
-# IMPORTANT: Set POSTGRES_PASSWORD and REDIS_PASSWORD in .env before running in production!
-# Default passwords are placeholders and MUST be changed for production.
+# IMPORTANT: You MUST set POSTGRES_PASSWORD and REDIS_PASSWORD in .env before running!
+# The compose file will fail to start if these are not set (no insecure defaults).
 
 services:
   # ─────────────────────────────────────────────
@@ -16,8 +16,8 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://signal:${POSTGRES_PASSWORD:-changeme-in-production}@postgres:5432/signal_server
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme-in-production}@redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://signal:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/signal_server
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
       - REDIS_ENABLED=true
       - PYTHONIOENCODING=utf-8
       - AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED:-true}
@@ -59,7 +59,7 @@ services:
       - UPDATER_HEARTBEAT_SECS=10
     volumes:
       - ./:/workspace
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - signal-server
     networks:
@@ -74,7 +74,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: signal
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme-in-production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: signal_server
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -98,11 +98,11 @@ services:
     image: redis:7-alpine
     container_name: signal-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme-in-production}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a '${REDIS_PASSWORD:-changeme-in-production}' ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a '${REDIS_PASSWORD:?REDIS_PASSWORD must be set}' ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 5

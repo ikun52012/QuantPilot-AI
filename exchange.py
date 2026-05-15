@@ -25,7 +25,9 @@ _LEVERAGE_MAX_RETRIES = 3
 _LEVERAGE_RETRY_DELAY_BASE = 1.0  # seconds, exponential backoff
 _LEVERAGE_RETRYABLE_ERRORS = ["NetworkError", "Timeout", "ExchangeNotAvailable", "DDoSProtection"]
 _OKX_LEVERAGE_ERROR_CODES = ["11045", "51000", "51020"]
-_MARKET_MAX_LEVERAGE_CACHE: dict[str, float] = {}  # key: "exchange_id:symbol" -> max_leverage
+_MARKET_MAX_LEVERAGE_CACHE: dict[str, tuple[float, float]] = {}  # key: "exchange_id:symbol" -> (max_leverage, cached_at_timestamp)
+_MARKET_MAX_LEVERAGE_TTL = 3600.0  # Cache leverage for 1 hour
+_MARKET_MAX_LEVERAGE_LOCK = _threading.Lock()
 
 try:
     import ccxt
@@ -274,13 +276,11 @@ async def _create_exchange_order(
                        Required for close/TP/SL orders to target correct position.
                        Optional for open orders (derived from side).
     """
-    import time
-
     from core.metrics import EXCHANGE_ERRORS, record_exchange_request
 
     # Validate amount against market limits before placing order
     requested_amount = amount
-    amount = _validate_and_adjust_amount(exchange, symbol, amount)
+    amount = _validate_and_adjust_amount(exchange, symbol, amount, allow_amount_increase)
     if not allow_amount_increase and amount > requested_amount:
         raise ValueError(
             f"Adjusted close amount {amount} exceeds requested rollback amount {requested_amount}"
@@ -344,7 +344,7 @@ async def _create_exchange_order(
     raise RuntimeError("; ".join(errors[-2:]) or f"Failed to create {order_type} order")
 
 
-def _validate_and_adjust_amount(exchange, symbol: str, amount: float) -> float:
+def _validate_and_adjust_amount(exchange, symbol: str, amount: float, allow_increase: bool = True) -> float:
     """
     Validate and adjust order amount against exchange market limits.
 
@@ -352,6 +352,11 @@ def _validate_and_adjust_amount(exchange, symbol: str, amount: float) -> float:
     - Minimum order amount (e.g., XAU requires min 1 unit)
     - Maximum order amount (e.g., SHIB has max limit per order)
     - Amount precision (e.g., some markets require integer amounts)
+
+    Args:
+        allow_increase: If False, do NOT increase amount above the requested value.
+                        Used for close/rollback orders to prevent closing more than
+                        the actual position.
 
     Returns adjusted amount that meets exchange requirements.
     """
@@ -383,11 +388,17 @@ def _validate_and_adjust_amount(exchange, symbol: str, amount: float) -> float:
 
         # Adjust for minimum amount
         if min_amount > 0 and amount < min_amount:
-            logger.warning(
-                f"[Exchange] Amount {amount} < min_amount {min_amount} for {symbol}, "
-                f"adjusting to minimum"
-            )
-            amount = min_amount
+            if allow_increase:
+                logger.warning(
+                    f"[Exchange] Amount {amount} < min_amount {min_amount} for {symbol}, "
+                    f"adjusting to minimum"
+                )
+                amount = min_amount
+            else:
+                logger.warning(
+                    f"[Exchange] Amount {amount} < min_amount {min_amount} for {symbol}, "
+                    f"but allow_increase=False (close order). Order may be rejected by exchange."
+                )
 
         # Adjust for maximum amount
         if max_amount < float("inf") and amount > max_amount:
@@ -559,6 +570,8 @@ def adjust_quantity_for_limits(
     if quantity <= 0 or price <= 0 or not limits:
         return quantity
 
+    requested_qty = quantity
+
     min_amount = limits.get("min_amount", 0)
     max_amount = limits.get("max_amount", float("inf"))
     min_cost = limits.get("min_cost", 0)
@@ -618,7 +631,7 @@ def adjust_quantity_for_limits(
     if adjustments:
         logger.info(
             f"[Exchange] Quantity adjusted for limits: "
-            f"original={quantity}, final={quantity}, adjustments: {', '.join(adjustments)}"
+            f"original={requested_qty}, final={quantity}, adjustments: {', '.join(adjustments)}"
         )
 
     return quantity
@@ -651,7 +664,8 @@ def _get_or_create_exchange(
     Uses double-checked locking pattern to avoid race conditions
     while minimizing lock contention.
 
-    Includes health check to evict stale/unhealthy connections.
+    Health checks are performed OUTSIDE the lock to avoid blocking
+    other threads during network I/O.
     """
     eid = (exchange_id or settings.exchange.name).lower().strip()
     # SECURITY: Hash credentials individually to avoid plaintext concatenation in memory
@@ -674,16 +688,18 @@ def _get_or_create_exchange(
         consecutive_failures = health.get("consecutive_failures", 0)
 
         if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-            logger.warning(f"[Exchange] Evicting unhealthy cached instance: {cache_key}")
-            _exchange_pool.pop(cache_key, None)
-            _exchange_pool_health.pop(cache_key, None)
-            try:
-                close = getattr(existing, "close", None)
-                if close:
-                    close()
-            except Exception as e:
-                logger.debug(f"[Exchange] Error closing evicted cached instance: {e}")
+            with _exchange_pool_lock:
+                removed = _exchange_pool.pop(cache_key, None)
+                _exchange_pool_health.pop(cache_key, None)
+            if removed is not None:
+                try:
+                    close = getattr(removed, "close", None)
+                    if close:
+                        close()
+                except Exception as e:
+                    logger.debug(f"[Exchange] Error closing evicted cached instance: {e}")
         elif now - last_check > _HEALTH_CHECK_INTERVAL_SECS:
+            needs_rebuild = False
             try:
                 existing.fetch_time()
                 _exchange_pool_health[cache_key] = {
@@ -693,28 +709,32 @@ def _get_or_create_exchange(
                 return existing
             except Exception as exc:
                 logger.warning(f"[Exchange] Health check failed for {cache_key}: {exc}")
-                _exchange_pool_health[cache_key] = {
-                    "last_check": now,
-                    "consecutive_failures": consecutive_failures + 1,
-                }
-                if consecutive_failures + 1 >= _MAX_CONSECUTIVE_FAILURES:
-                    _exchange_pool.pop(cache_key, None)
-                    _exchange_pool_health.pop(cache_key, None)
+                removed = None
+                with _exchange_pool_lock:
+                    current_health = _exchange_pool_health.get(cache_key, {})
+                    new_consecutive = current_health.get("consecutive_failures", 0) + 1
+                    if new_consecutive >= _MAX_CONSECUTIVE_FAILURES:
+                        removed = _exchange_pool.pop(cache_key, None)
+                        _exchange_pool_health.pop(cache_key, None)
+                        needs_rebuild = True
+                    else:
+                        _exchange_pool_health[cache_key] = {
+                            "last_check": now,
+                            "consecutive_failures": new_consecutive,
+                        }
+                        removed = _exchange_pool.pop(cache_key, None)
+                        _exchange_pool_health.pop(cache_key, None)
+                        needs_rebuild = True
+
+                if removed is not None:
                     try:
-                        close = getattr(existing, "close", None)
+                        close = getattr(removed, "close", None)
                         if close:
                             close()
                     except Exception as e:
                         logger.debug(f"[Exchange] Error closing unhealthy cached instance: {e}")
-                else:
-                    try:
-                        close = getattr(existing, "close", None)
-                        if close:
-                            close()
-                    except Exception as e:
-                        logger.debug(f"[Exchange] Error closing failed health check instance: {e}")
-                    _exchange_pool.pop(cache_key, None)
-                    _exchange_pool_health.pop(cache_key, None)
+
+                if needs_rebuild:
                     logger.info(f"[Exchange] Health check failed, rebuilding instance for {cache_key}")
                     return _get_or_create_exchange(
                         exchange_id=exchange_id,
@@ -1080,33 +1100,39 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str, market_type: str | Non
             if not fallback_symbol:
                 fallback_symbol = market_symbol
 
-    # ENHANCED: Only use fallback if it matches type, or log warning
+# ENHANCED: Only use fallback if it matches type, otherwise warn prominently
     if fallback_symbol:
         fallback_market = markets.get(fallback_symbol)
         if fallback_market and _market_matches_type(fallback_market, target_market_type):
             return fallback_symbol
-        logger.warning(
-            f"[Exchange] Symbol {symbol} not found with requested type '{target_market_type}', "
-            f"found '{fallback_symbol}' but it is {fallback_market.get('type', 'unknown')} market. "
-            f"Using first candidate '{candidates[0]}' instead."
+        # Fallback symbol has wrong market type — log prominent warning
+        logger.error(
+            f"[Exchange] Symbol {symbol} not found with requested type '{target_market_type}'. "
+            f"Found '{fallback_symbol}' but it is a {fallback_market.get('type', 'unknown') if fallback_market else 'unknown'} market. "
+            f"Using '{fallback_symbol}' as fallback — trade may execute on wrong market type!"
         )
+        return fallback_symbol
 
-    logger.warning(f"[Exchange] Symbol {symbol} not found in loaded markets; using {candidates[0]}")
+    logger.error(f"[Exchange] Symbol {symbol} not found in loaded markets; using {candidates[0]} as last resort")
     return candidates[0]
 
 
 async def _fetch_market_max_leverage(exchange, symbol: str) -> float | None:
     """Query the exchange for the maximum allowed leverage for this symbol.
 
-    Uses fetch_leverage_tiers() if supported, falls back to market limits.
-    Results are cached per exchange+symbol to avoid repeated API calls.
+    Uses TTL-based caching with thread-safe access.
     Returns None if the exchange doesn't expose leverage limits.
     """
     exchange_id = str(getattr(exchange, "id", "") or "").lower().strip()
     cache_key = f"{exchange_id}:{symbol}"
-    cached = _MARKET_MAX_LEVERAGE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached if cached > 0 else None
+    now = time.time()
+
+    with _MARKET_MAX_LEVERAGE_LOCK:
+        cached = _MARKET_MAX_LEVERAGE_CACHE.get(cache_key)
+        if cached is not None:
+            cached_val, cached_at = cached
+            if now - cached_at < _MARKET_MAX_LEVERAGE_TTL:
+                return cached_val if cached_val > 0 else None
 
     max_lev = None
 
@@ -1115,7 +1141,6 @@ async def _fetch_market_max_leverage(exchange, symbol: str) -> float | None:
         if tiers and symbol in tiers:
             symbol_tiers = tiers[symbol]
             if symbol_tiers:
-                # Each tier has maxLeverage; pick the highest across all tiers
                 tier_maxes = [float(t.get("maxLeverage", 0)) for t in symbol_tiers]
                 max_lev = max(tier_maxes) if tier_maxes else None
     except Exception:
@@ -1129,7 +1154,9 @@ async def _fetch_market_max_leverage(exchange, symbol: str) -> float | None:
         except Exception:
             pass
 
-    _MARKET_MAX_LEVERAGE_CACHE[cache_key] = max_lev or 0.0
+    with _MARKET_MAX_LEVERAGE_LOCK:
+        _MARKET_MAX_LEVERAGE_CACHE[cache_key] = (max_lev or 0.0, now)
+
     if max_lev and max_lev > 0:
         logger.debug(f"[Exchange] Market max leverage for {symbol}: {max_lev}x (source: {exchange_id})")
     return max_lev if max_lev and max_lev > 0 else None
@@ -1141,8 +1168,11 @@ def _effective_order_leverage(decision: TradeDecision, exchange_config: dict | N
     if not decision.ai_analysis or not decision.ai_analysis.recommended_leverage:
         return None
     try:
-        max_leverage = int(float(exchange_config.get("max_leverage") or 125))
-    except (TypeError, ValueError):
+        raw_max = exchange_config.get("max_leverage") or 125
+        max_leverage = int(float(raw_max))
+        if max_leverage <= 0 or max_leverage != max_leverage:
+            max_leverage = 125
+    except (TypeError, ValueError, OverflowError):
         max_leverage = 125
     max_leverage = max(1, min(max_leverage, 125))
     return max(1, min(int(round(decision.ai_analysis.recommended_leverage)), max_leverage))
@@ -2189,7 +2219,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
                     try:
                         entry = float(entry_price)
                         mark = float(mark_price)
-                        if entry > 0:
+                        if entry > 0 and mark > 0:
                             side = str(pos.get('side') or '').lower()
                             if side == 'long':
                                 percentage = ((mark - entry) / entry) * 100
@@ -2201,7 +2231,9 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
                 # Fallback: calculate from unrealized_pnl / notional if available
                 if percentage is None and unrealized_pnl is not None and notional:
                     try:
-                        percentage = (float(unrealized_pnl) / abs(float(notional))) * 100
+                        abs_notional = abs(float(notional))
+                        if abs_notional > 0:
+                            percentage = (float(unrealized_pnl) / abs_notional) * 100
                     except (TypeError, ValueError, ZeroDivisionError):
                         percentage = None
                 result.append({
