@@ -35,7 +35,7 @@ from core.metrics import (
     record_trade,
 )
 from core.security import decrypt_settings_payload
-from core.trading_control import assert_trading_allowed, trading_allowed
+from core.trading_control import trading_allowed
 from core.utils.common import (
     first_valid,
     loads_list,

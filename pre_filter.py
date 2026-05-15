@@ -944,13 +944,13 @@ async def run_pre_filter_async(
 
     try:
         from enhanced_market_data import (
+            calculate_cvd_divergence,
             check_macro_event_risk,
+            detect_volatility_regime,
             fetch_basis_data,
             fetch_fear_greed_index,
             fetch_liquidation_heatmap,
             fetch_long_short_ratio,
-            calculate_cvd_divergence,
-            detect_volatility_regime,
         )
 
         # P1-7: Parallelize ALL enhanced market data + CVD/volatility checks
