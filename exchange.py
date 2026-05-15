@@ -28,6 +28,7 @@ _OKX_LEVERAGE_ERROR_CODES = ["11045", "51000", "51020"]
 _MARKET_MAX_LEVERAGE_CACHE: dict[str, tuple[float, float]] = {}  # key: "exchange_id:symbol" -> (max_leverage, cached_at_timestamp)
 _MARKET_MAX_LEVERAGE_TTL = 3600.0  # Cache leverage for 1 hour
 _MARKET_MAX_LEVERAGE_LOCK = _threading.Lock()
+_EXCHANGE_IDLE_CLEANUP_SECS = 1800.0  # Clean up idle connections after 30 minutes
 
 try:
     import ccxt
@@ -702,10 +703,11 @@ def _get_or_create_exchange(
             needs_rebuild = False
             try:
                 existing.fetch_time()
-                _exchange_pool_health[cache_key] = {
-                    "last_check": now,
-                    "consecutive_failures": 0,
-                }
+                with _exchange_pool_lock:
+                    _exchange_pool_health[cache_key] = {
+                        "last_check": time.time(),
+                        "consecutive_failures": 0,
+                    }
                 return existing
             except Exception as exc:
                 logger.warning(f"[Exchange] Health check failed for {cache_key}: {exc}")
@@ -719,7 +721,7 @@ def _get_or_create_exchange(
                         needs_rebuild = True
                     else:
                         _exchange_pool_health[cache_key] = {
-                            "last_check": now,
+                            "last_check": time.time(),
                             "consecutive_failures": new_consecutive,
                         }
                         removed = _exchange_pool.pop(cache_key, None)
@@ -774,6 +776,35 @@ def _get_or_create_exchange(
             "consecutive_failures": 0,
         }
         return instance
+
+
+def cleanup_idle_exchange_pool(max_idle_secs: float = _EXCHANGE_IDLE_CLEANUP_SECS) -> int:
+    """Close and remove exchange instances that haven't been used recently.
+
+    Returns the number of connections cleaned up.
+    """
+    cleaned = 0
+    now = time.time()
+    with _exchange_pool_lock:
+        stale_keys = []
+        for key, health in _exchange_pool_health.items():
+            last_check = health.get("last_check", 0)
+            if now - last_check > max_idle_secs:
+                stale_keys.append(key)
+        for key in stale_keys:
+            removed = _exchange_pool.pop(key, None)
+            _exchange_pool_health.pop(key, None)
+            if removed is not None:
+                try:
+                    close = getattr(removed, "close", None)
+                    if close:
+                        close()
+                except Exception:
+                    pass
+                cleaned += 1
+    if cleaned:
+        logger.info(f"[Exchange] Cleaned up {cleaned} idle exchange connections")
+    return cleaned
 
 
 # ─────────────────────────────────────────────
@@ -1221,6 +1252,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         exchange_config.get("market_type") or settings.exchange.market_type,
     )
 
+    original_leverage = None
+    leverage_changed = False
     try:
         leverage = _effective_order_leverage(decision, exchange_config)
         if leverage:
@@ -1253,6 +1286,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     # Non-critical failure, continue with default leverage
                     logger.warning(f"[P0-FIX] Could not set leverage for {symbol}: {result.get('error', 'Unknown')}. Continuing with default leverage.")
             else:
+                leverage_changed = True
                 logger.info(f"[Exchange] Leverage set: {symbol} {leverage}x")
 
         if decision.direction in [SignalDirection.LONG]:
@@ -1274,25 +1308,42 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         if not order_type or order_type not in ("market", "limit"):
             order_type = "market"
 
-        if order_type == "limit" and decision.entry_price and decision.entry_price > 0:
-            logger.info(f"[Exchange] Placing {side} LIMIT order: {symbol} qty={decision.quantity} @ {decision.entry_price}")
-            order = await _create_exchange_order(
-                exchange,
-                symbol=symbol,
-                order_type="limit",
-                side=side,
-                amount=decision.quantity,
-                price=decision.entry_price,
-            )
-        else:
-            logger.info(f"[Exchange] Placing {side} MARKET order: {symbol} qty={decision.quantity}")
-            order = await _create_exchange_order(
-                exchange,
-                symbol=symbol,
-                order_type="market",
-                side=side,
-                amount=decision.quantity,
-            )
+        try:
+            if order_type == "limit" and decision.entry_price and decision.entry_price > 0:
+                logger.info(f"[Exchange] Placing {side} LIMIT order: {symbol} qty={decision.quantity} @ {decision.entry_price}")
+                order = await _create_exchange_order(
+                    exchange,
+                    symbol=symbol,
+                    order_type="limit",
+                    side=side,
+                    amount=decision.quantity,
+                    price=decision.entry_price,
+                )
+            else:
+                logger.info(f"[Exchange] Placing {side} MARKET order: {symbol} qty={decision.quantity}")
+                order = await _create_exchange_order(
+                    exchange,
+                    symbol=symbol,
+                    order_type="market",
+                    side=side,
+                    amount=decision.quantity,
+                )
+        except (ccxt.BaseError, Exception) as order_exc:
+            logger.error(f"[Exchange] Order placement failed for {symbol}: {order_exc}")
+            if leverage_changed and leverage and leverage > 1:
+                logger.warning(
+                    f"[Exchange] Attempting leverage rollback for {symbol} after order failure"
+                )
+                try:
+                    rollback_leverage = 1
+                    await _set_leverage_with_retry(exchange, rollback_leverage, symbol)
+                    logger.info(f"[Exchange] Leverage rolled back to {rollback_leverage}x for {symbol}")
+                except Exception as rollback_exc:
+                    logger.warning(
+                        f"[Exchange] Leverage rollback also failed for {symbol}: {rollback_exc}. "
+                        f"Manual intervention may be required."
+                    )
+            raise
 
         order_id = order.get("id")
         if not order_id:

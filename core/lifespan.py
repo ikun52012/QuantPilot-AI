@@ -116,6 +116,15 @@ async def _init_scheduler():
         if result.get("closed") or result.get("partials") or result.get("errors"):
             logger.info(f"[Scheduler] Position monitor: {result.get('closed', 0)} closed, {result.get('partials', 0)} partials")
 
+    async def _exchange_pool_cleanup_job():
+        try:
+            from exchange import cleanup_idle_exchange_pool
+            cleaned = cleanup_idle_exchange_pool()
+            if cleaned:
+                logger.info(f"[Scheduler] Exchange pool cleanup: removed {cleaned} idle connections")
+        except Exception as e:
+            logger.debug(f"[Scheduler] Exchange pool cleanup failed: {e}")
+
     scheduler.add_job(
         _daily_reset_job,
         CronTrigger(hour=0, minute=0, second=0, timezone="UTC"),
@@ -148,6 +157,16 @@ async def _init_scheduler():
         coalesce=True,
         id="position_monitor",
         name="Position monitor",
+    )
+    # P2-11: Periodic exchange pool cleanup
+    scheduler.add_job(
+        _exchange_pool_cleanup_job,
+        "interval",
+        seconds=1800,
+        max_instances=1,
+        coalesce=True,
+        id="exchange_pool_cleanup",
+        name="Exchange pool cleanup",
     )
     scheduler.start()
     logger.info(f"[Scheduler] Started (position monitor: {settings.position_monitor_interval_secs}s)")
@@ -196,6 +215,13 @@ async def _on_shutdown():
         _scheduler.shutdown(wait=True)
         _scheduler = None
         logger.info("[Scheduler] Shut down")
+
+    try:
+        from exchange import cleanup_idle_exchange_pool
+        cleanup_idle_exchange_pool(max_idle_secs=0)
+        logger.info("[Exchange] All connections closed")
+    except Exception as e:
+        logger.debug(f"[Exchange] Pool cleanup on shutdown: {e}")
 
     await db_manager.close()
     logger.info("QuantPilot AI shut down complete")

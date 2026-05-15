@@ -1094,6 +1094,10 @@ class TestPositionConflictSafety:
 
         monkeypatch.setattr("services.signal_processor.record_signal_received", lambda *args, **kwargs: None)
         monkeypatch.setattr("services.signal_processor.notify_signal_received", AsyncMock())
+        monkeypatch.setattr(
+            "services.signal_processor.trading_allowed",
+            AsyncMock(return_value={"allowed": True, "mode": "enabled", "block_reason": ""}),
+        )
         monkeypatch.setattr(processor, "_load_user_settings", AsyncMock(return_value={}))
         monkeypatch.setattr(processor, "_reserve_webhook_event", AsyncMock(return_value=SimpleNamespace()))
         monkeypatch.setattr(processor, "_run_prefilter", AsyncMock(return_value=PreFilterResult(passed=True)))

@@ -49,6 +49,10 @@ _GHOST_POSITION_TRACKER: dict[str, dict[str, Any]] = {}
 _PROTECTIVE_ORDERS_LAST_VERIFY: dict[str, datetime] = {}
 _PROTECTIVE_ORDERS_VERIFY_INTERVAL = 600  # seconds (10 min) between TP/SL existence checks
 
+# P2-14: Per-position reconcile locks to prevent concurrent TP/SL processing
+_position_reconcile_locks: dict[str, asyncio.Lock] = {}
+_position_reconcile_locks_guard = asyncio.Lock()
+
 # P0-FIX: Dynamic ghost position thresholds based on position value
 # Higher-value positions need more confirmation attempts before auto-close
 _GHOST_THRESHOLD_SMALL_POSITION = 3  # < $100
@@ -118,12 +122,16 @@ def _calculate_ghost_threshold(position: PositionModel) -> int:
     entry_price = safe_float(position.entry_price, 0.0)
     quantity = safe_float(position.quantity, 0.0)
     leverage = max(1.0, safe_float(position.leverage, 1.0))
-    # Get contract_size from trailing_stop_config for correct position value
-    ts_config = loads_dict(position.trailing_stop_config_json)
-    contract_size = safe_float(ts_config.get("_contract_size"), 1.0)
-
-    # Calculate position value (margin used) - includes contract_size for contracts
-    position_value = (entry_price * quantity * contract_size) / leverage if entry_price > 0 and quantity > 0 else 0.0
+    # Use position.margin as primary source for actual margin (updated on fills)
+    # Fallback to calculated value only if margin is not available
+    stored_margin = safe_float(position.margin, 0.0)
+    if stored_margin > 0:
+        position_value = stored_margin * leverage
+    else:
+        # Fallback: recalculate from entry_price, quantity, and stored contract_size
+        ts_config = loads_dict(position.trailing_stop_config_json)
+        contract_size = safe_float(ts_config.get("_contract_size"), 1.0)
+        position_value = (entry_price * quantity * contract_size) / leverage if entry_price > 0 and quantity > 0 else 0.0
 
     # Dynamic thresholds based on position value
     if position_value < _POSITION_VALUE_THRESHOLDS[0]:  # < $100
@@ -480,9 +488,15 @@ async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
 
                 for position in positions:
                     try:
-                        changed = await _reconcile_position(session, position, user_configs or {})
-                        for key, value in changed.items():
-                            stats[key] = stats.get(key, 0) + value
+                        # P2-14: Acquire per-position lock to prevent concurrent TP/SL processing
+                        pos_lock = await _get_position_lock(str(position.id))
+                        if pos_lock.locked():
+                            logger.debug(f"[PositionMonitor] Skipping {position.id} - reconciliation already in progress")
+                            continue
+                        async with pos_lock:
+                            changed = await _reconcile_position(session, position, user_configs or {})
+                            for key, value in changed.items():
+                                stats[key] = stats.get(key, 0) + value
                     except Exception as exc:
                         stats["errors"] += 1
                         logger.exception(f"[PositionMonitor] Failed to reconcile {position.id}: {exc}")
@@ -493,6 +507,21 @@ async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
             logger.exception(f"[PositionMonitor] Cycle failed: {exc}")
 
         return stats
+
+
+async def _get_position_lock(position_id: str) -> asyncio.Lock:
+    """P2-14: Get or create a per-position lock to prevent concurrent reconciliation."""
+    async with _position_reconcile_locks_guard:
+        lock = _position_reconcile_locks.get(position_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _position_reconcile_locks[position_id] = lock
+            # Periodic cleanup of old locks
+            if len(_position_reconcile_locks) > 5000:
+                unlocked = [k for k, v in _position_reconcile_locks.items() if not v.locked()]
+                for k in unlocked[:2500]:
+                    _position_reconcile_locks.pop(k, None)
+        return lock
 
 
 async def _reconcile_position(session, position: PositionModel, user_configs: dict) -> dict:

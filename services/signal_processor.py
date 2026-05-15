@@ -35,7 +35,7 @@ from core.metrics import (
     record_trade,
 )
 from core.security import decrypt_settings_payload
-from core.trading_control import trading_allowed
+from core.trading_control import assert_trading_allowed, trading_allowed
 from core.utils.common import (
     first_valid,
     loads_list,
@@ -184,16 +184,20 @@ async def _wait_processing_interval(skip_interval: bool = False, user_id: str | 
         _LAST_SIGNAL_PROCESS_TIME[rate_key] = _time.time()
 
 
-async def _prefetch_market_data_async(ticker: str) -> MarketContext | None:
+async def _prefetch_market_data_async(ticker: str, user_id: str | None = None) -> MarketContext | None:
     """Prefetch market data before acquiring semaphore (Optimization 5).
 
     This allows market data fetch to happen in parallel with other signals,
     reducing overall latency when semaphore is acquired.
+
+    P1-8: Cache key includes user_id to isolate per-user exchange configurations.
     """
     if not settings.ai.prefetch_market_data:
         return None
 
-    cache_key = ticker.upper().strip()
+    # P1-8: Include user_id in cache key for per-user isolation
+    cache_scope = user_id or "admin"
+    cache_key = f"{cache_scope}:{ticker.upper().strip()}"
     now = _time.time()
 
     async with _PREFETCH_GUARD:
@@ -537,7 +541,7 @@ class SignalProcessor:
             }
 
         # Optimization 5: Prefetch market data AFTER queue limit check
-        prefetched_market = await _prefetch_market_data_async(signal.ticker)
+        prefetched_market = await _prefetch_market_data_async(signal.ticker, user_id)
 
         # Get global processing semaphore
         global_sem = await _get_global_semaphore()
@@ -604,6 +608,27 @@ class SignalProcessor:
             logger.warning(f"[Signal] Duplicate webhook: {fingerprint[:16]}")
             return {"status": "duplicate", "reason": "Duplicate signal within 5 minutes"}
 
+        # Step 0: Check global trading control (emergency stop, paused, read_only)
+        live_trading = self._live_trading_requested(user_settings)
+        trading_state = await trading_allowed(self.session, user_id=user_id, live_trading=live_trading)
+        if not trading_state.get("allowed"):
+            logger.warning(
+                f"[Signal] Trading blocked by global control for {signal.ticker}: "
+                f"mode={trading_state.get('mode')}, reason={trading_state.get('block_reason')}"
+            )
+            self._update_reserved_event(
+                reservation,
+                status="blocked",
+                status_code=423,
+                reason=trading_state.get("block_reason", "Trading is currently disabled"),
+                payload=raw_body or signal.model_dump(),
+            )
+            return {
+                "status": "blocked",
+                "reason": trading_state.get("block_reason", "Trading is currently disabled"),
+                "trading_mode": trading_state.get("mode"),
+            }
+
         # Record signal received
         record_signal_received(signal.ticker, signal.direction.value, user_id)
 
@@ -611,7 +636,7 @@ class SignalProcessor:
         await notify_signal_received(signal.ticker, signal.direction.value, signal.price)
 
         try:
-            # Step 1: Fetch market context (use prefetched if available)
+            # Step 1: Fetch market context (use prefetch
             enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
             if prefetched_market:
                 market = prefetched_market
@@ -1479,6 +1504,11 @@ class SignalProcessor:
         default_sl_pct = get_default_sl_for_timeframe(timeframe)
         atr_sl_pct = atr_pct * 1.5 if atr_pct > 0 else default_sl_pct
         sl_pct = max(min_sl_pct, min(atr_sl_pct, max_sl_pct))
+
+        # P2-10: Hard boundaries to prevent extreme fallback SL values
+        absolute_min_sl_pct = 0.1  # Never less than 0.1% from entry
+        absolute_max_sl_pct = 50.0  # Never more than 50% from entry
+        sl_pct = max(absolute_min_sl_pct, min(sl_pct, absolute_max_sl_pct))
 
         if direction == SignalDirection.LONG:
             price = entry * (1 - sl_pct / 100.0)

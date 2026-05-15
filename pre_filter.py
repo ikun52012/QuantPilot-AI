@@ -371,26 +371,28 @@ def update_daily_pnl(pnl: float):
 
 
 async def count_today_executed_trades_async(user_id: str | None = None) -> int:
-    """Count today's executed trades from the async database."""
+    """Count today's executed trades from the async database.
+
+    P0-3 FIX: On database failure, returns max_daily_trades to BLOCK the trade,
+    preventing bypass of daily trade limits through fallback to stale in-memory counter.
+    """
     from core.database import count_today_executed_trades, db_manager
 
     try:
         async with db_manager.async_session_factory() as session:
             return await count_today_executed_trades(session, user_id)
     except SQLAlchemyError as e:
-        logger.warning(f"[PreFilter] Database count failed, using in-memory fallback: {e}")
-        with _state_lock:
-            today = utcnow().strftime("%Y-%m-%d")
-            if today != _daily_trade_date:
-                reset_daily_counters()
-            return _daily_trade_count
+        logger.error(
+            f"[PreFilter] CRITICAL: Database count failed for daily_trade_limit. "
+            f"User={user_id}, error={e}. BLOCKING trade to prevent limit bypass."
+        )
+        return 999999  # Block: assume limit reached to prevent bypass
     except Exception as e:
-        logger.warning(f"[PreFilter] Database count failed, using in-memory fallback: {e}")
-        with _state_lock:
-            today = utcnow().strftime("%Y-%m-%d")
-            if today != _daily_trade_date:
-                reset_daily_counters()
-            return _daily_trade_count
+        logger.error(
+            f"[PreFilter] CRITICAL: Unexpected error in daily trade count. "
+f"User={user_id}, error={e}. BLOCKING trade to prevent limit bypass."
+        )
+        return 999999  # Block: assume limit reached to prevent bypass
 
 
 async def run_pre_filter_async(
@@ -442,21 +444,7 @@ async def run_pre_filter_async(
     unavailable_data_checks = []
 
     # ── Check 1: Daily trade limit ──
-    try:
-        daily_count_snapshot = await count_today_executed_trades_async(user_id=user_id)
-    except (SQLAlchemyError, ConnectionError, TimeoutError, OSError):
-        with _state_lock:
-            today = utcnow().strftime("%Y-%m-%d")
-            if today != _daily_trade_date:
-                reset_daily_counters()
-            daily_count_snapshot = _daily_trade_count
-    except Exception:
-        with _state_lock:
-            today = utcnow().strftime("%Y-%m-%d")
-            if today != _daily_trade_date:
-                reset_daily_counters()
-            daily_count_snapshot = _daily_trade_count
-
+    daily_count_snapshot = await count_today_executed_trades_async(user_id=user_id)
     daily_ok = True if max_daily_trades <= 0 else daily_count_snapshot < max_daily_trades
     checks["daily_trade_limit"] = {
         "passed": daily_ok,
@@ -961,7 +949,23 @@ async def run_pre_filter_async(
             fetch_fear_greed_index,
             fetch_liquidation_heatmap,
             fetch_long_short_ratio,
+            calculate_cvd_divergence,
+            detect_volatility_regime,
         )
+
+        # P1-7: Parallelize ALL enhanced market data + CVD/volatility checks
+        ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
+        ohlcv_4h = getattr(market, "_ohlcv_4h", None) or []
+
+        async def _safe_cvd():
+            if len(ohlcv_1h) >= 20:
+                return await calculate_cvd_divergence(ohlcv_1h)
+            return None
+
+        async def _safe_volatility():
+            if len(ohlcv_1h) >= 100:
+                return await detect_volatility_regime(ohlcv_1h)
+            return None
 
         results = await asyncio.gather(
             _enhanced_call("macro_events", check_macro_event_risk()),
@@ -969,9 +973,23 @@ async def run_pre_filter_async(
             _enhanced_call("long_short_ratio", fetch_long_short_ratio(ticker)),
             _enhanced_call("basis_check", fetch_basis_data(ticker)),
             _enhanced_call("fear_greed", fetch_fear_greed_index()),
-            return_exceptions=True,  # Per-result exceptions; don't cancel siblings on first error
+            _safe_cvd(),
+            _safe_volatility(),
+            return_exceptions=True,
         )
-        macro_result, liq_result, ls_result, basis_result, fg_result = results
+        macro_result, liq_result, ls_result, basis_result, fg_result, cvd_result_raw, vol_result_raw = results
+
+        # Handle CVD result (may be None or Exception)
+        if cvd_result_raw is None or isinstance(cvd_result_raw, Exception):
+            cvd_result = cvd_result_raw
+        else:
+            cvd_result = cvd_result_raw
+
+        # Handle volatility result (may be None or Exception)
+        if vol_result_raw is None or isinstance(vol_result_raw, Exception):
+            vol_result = vol_result_raw
+        else:
+            vol_result = vol_result_raw
     except (ImportError, Exception) as e:
         macro_result = liq_result = ls_result = basis_result = fg_result = e
 
@@ -1100,76 +1118,74 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Fear & Greed extreme: {fg_value} ({fg_class})")
             checks["fear_greed"]["soft_fail"] = True
 
-    # ── Check 23: CVD Divergence ──
+# ── Check 23: CVD Divergence (now using parallel-fetched result) ──
     cvd_ok = True
     cvd_threshold = thresholds.get("cvd_divergence_threshold", ticker)
-    try:
-        ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
-        if len(ohlcv_1h) >= 20:
-            from enhanced_market_data import calculate_cvd_divergence
-            cvd_data = await calculate_cvd_divergence(ohlcv_1h)
-            divergence = cvd_data.get("divergence")
-            strength = cvd_data.get("strength", 0)
-            div_type = cvd_data.get("type")
-
-            if divergence and strength > cvd_threshold:
-                is_long = signal.direction in (SignalDirection.LONG,)
-                is_short = signal.direction in (SignalDirection.SHORT,)
-
-                if is_long and div_type == "bearish":
-                    cvd_ok = False
-                elif is_short and div_type == "bullish":
-                    cvd_ok = False
-
-            checks["cvd_divergence"] = {
-                "passed": cvd_ok,
-                "divergence_type": div_type,
-                "strength": strength,
-                "price_change_pct": cvd_data.get("price_change_pct"),
-                "threshold": cvd_threshold,
-            }
-            if not cvd_ok:
-                soft_fail_reasons.append(f"CVD divergence: {div_type} (${strength:.1f}%)")
-                checks["cvd_divergence"]["soft_fail"] = True
-        else:
-            checks["cvd_divergence"] = {"passed": True, "missing_data": True, "note": "Need at least 20 1h candles"}
-            missing_data_checks.append("cvd_divergence")
-    except Exception as e:
-        checks["cvd_divergence"] = {"passed": True, "note": f"Skip: {e}"}
+    if cvd_result is None:
+        checks["cvd_divergence"] = {"passed": True, "missing_data": True, "note": "Need at least 20 1h candles"}
+        missing_data_checks.append("cvd_divergence")
+    elif isinstance(cvd_result, Exception):
+        checks["cvd_divergence"] = {"passed": True, "note": f"Skip: {cvd_result}"}
         unavailable_data_checks.append("cvd_divergence")
+    else:
+        cvd_data = cvd_result
+        divergence = cvd_data.get("divergence")
+        strength = cvd_data.get("strength", 0)
+        div_type = cvd_data.get("type")
 
-    # ── Check 26: Volatility Regime ──
+        if divergence and strength > cvd_threshold:
+            is_long = signal.direction in (SignalDirection.LONG,)
+            is_short = signal.direction in (SignalDirection.SHORT,)
+
+            if is_long and div_type == "bearish":
+                cvd_ok = False
+            elif is_short and div_type == "bullish":
+                cvd_ok = False
+
+        checks["cvd_divergence"] = {
+            "passed": cvd_ok,
+            "divergence_type": div_type,
+            "strength": strength,
+            "price_change_pct": cvd_data.get("price_change_pct"),
+            "threshold": cvd_threshold,
+        }
+        if not cvd_ok:
+            soft_fail_reasons.append(f"CVD divergence: {div_type} (${strength:.1f}%)")
+            checks["cvd_divergence"]["soft_fail"] = True
+
+# ── Check 26: Volatility Regime (now using parallel-fetched result) ──
     regime_ok = True
     vol_multiplier = thresholds.get("volatility_regime_multiplier", ticker)
-    try:
+    if vol_result is None:
         ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
-        if len(ohlcv_1h) >= 100:
-            from enhanced_market_data import detect_volatility_regime
-            regime_data = await detect_volatility_regime(ohlcv_1h)
-            regime = regime_data.get("regime")
-            suggestion = regime_data.get("suggestion")
-
-            if regime == "extreme_volatility":
-                regime_ok = False
-            elif regime == "high_volatility" and market.atr_pct and market.atr_pct > vol_multiplier * regime_data.get("avg_atr_pct", 5):
-                regime_ok = False
-
-            checks["volatility_regime"] = {
-                "passed": regime_ok,
-                "regime": regime,
-                "current_atr_pct": regime_data.get("current_atr_pct"),
-                "avg_atr_pct": regime_data.get("avg_atr_pct"),
-                "suggestion": suggestion,
-            }
-            if not regime_ok:
-                soft_fail_reasons.append(f"Volatility regime: {regime} - {suggestion}")
-                checks["volatility_regime"]["soft_fail"] = True
-        else:
+        if len(ohlcv_1h) < 100:
             checks["volatility_regime"] = {"passed": True, "missing_data": True, "note": "Need at least 100 1h candles"}
             missing_data_checks.append("volatility_regime")
-    except Exception as e:
-        checks["volatility_regime"] = {"passed": True, "note": f"Skip: {e}"}
+        else:
+            checks["volatility_regime"] = {"passed": True, "note": "No volatility regime data"}
+    elif isinstance(vol_result, Exception):
+        checks["volatility_regime"] = {"passed": True, "note": f"Skip: {vol_result}"}
         unavailable_data_checks.append("volatility_regime")
+    else:
+        regime_data = vol_result
+        regime = regime_data.get("regime")
+        suggestion = regime_data.get("suggestion")
+
+        if regime == "extreme_volatility":
+            regime_ok = False
+        elif regime == "high_volatility" and market.atr_pct and market.atr_pct > vol_multiplier * regime_data.get("avg_atr_pct", 5):
+            regime_ok = False
+
+        checks["volatility_regime"] = {
+            "passed": regime_ok,
+            "regime": regime,
+            "current_atr_pct": regime_data.get("current_atr_pct"),
+            "avg_atr_pct": regime_data.get("avg_atr_pct"),
+            "suggestion": suggestion,
+        }
+        if not regime_ok:
+            soft_fail_reasons.append(f"Volatility regime: {regime} - {suggestion}")
+            checks["volatility_regime"]["soft_fail"] = True
 
     # ── Check 27: Market Data Completeness ──
     missing_soft_fail_count = int(thresholds.get("data_completeness_soft_fail_count", ticker) or 5)

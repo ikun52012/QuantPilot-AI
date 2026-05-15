@@ -41,6 +41,11 @@ _NONCE_CACHE_CLEANUP_INTERVAL = 3600
 _last_nonce_cleanup: float = 0.0
 _nonce_lock = asyncio.Lock()
 
+# P2-9: IP-based rate limiting for webhook endpoint
+_WEBHOOK_IP_RATE_LIMITS: dict[str, list[float]] = {}
+_WEBHOOK_IP_RATE_MAX = 60  # Maximum requests per window
+_WEBHOOK_IP_RATE_WINDOW = 60.0  # Window in seconds
+
 # Redis nonce cache for multi-process deployments
 _redis_nonce_available: bool | None = None
 _redis_nonce_client: "Any | None" = None
@@ -140,6 +145,39 @@ async def _check_replay_protection(nonce: str, timestamp: float) -> None:
                 _NONCE_CACHE.pop(k, None)
 
 
+async def _check_ip_rate_limit(client_ip: str) -> None:
+    """P2-9: IP-based rate limiting for webhook endpoint.
+
+    Prevents abuse by limiting requests per IP address.
+    Uses a sliding window approach with in-memory tracking.
+    """
+    global _WEBHOOK_IP_RATE_LIMITS
+    now = time.time()
+    cutoff = now - _WEBHOOK_IP_RATE_WINDOW
+
+    # Clean up old entries for this IP
+    timestamps = _WEBHOOK_IP_RATE_LIMITS.get(client_ip, [])
+    timestamps = [ts for ts in timestamps if ts > cutoff]
+    _WEBHOOK_IP_RATE_LIMITS[client_ip] = timestamps
+
+    # Check rate limit
+    if len(timestamps) >= _WEBHOOK_IP_RATE_MAX:
+        raise HTTPException(429, "Rate limit exceeded - too many requests")
+
+    # Record this request
+    timestamps.append(now)
+    _WEBHOOK_IP_RATE_LIMITS[client_ip] = timestamps
+
+    # Periodic global cleanup to prevent memory leak
+    if len(_WEBHOOK_IP_RATE_LIMITS) > 10000:
+        expired_ips = [
+            ip for ip, ts_list in _WEBHOOK_IP_RATE_LIMITS.items()
+            if not ts_list or ts_list[-1] < cutoff
+        ]
+        for ip in expired_ips:
+            _WEBHOOK_IP_RATE_LIMITS.pop(ip, None)
+
+
 @router.post("/webhook")
 async def webhook(
     request: Request,
@@ -182,6 +220,9 @@ async def webhook(
         await _check_replay_protection(nonce, timestamp)
 
     client_ip = get_client_ip(request)
+
+    # P2-9: IP-based rate limiting
+    await _check_ip_rate_limit(client_ip)
 
     try:
         signal = TradingViewSignal(**body)

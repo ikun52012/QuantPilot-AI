@@ -12,8 +12,9 @@ from loguru import logger
 from core.config import settings
 from models import AIAnalysis, TradeDecision
 
-_TELEGRAM_MAX_RETRIES = 2
+_TELEGRAM_MAX_RETRIES = 4  # P2-15: Increased from 2 to 4 for critical trading notifications
 _TELEGRAM_RETRY_DELAY_SECS = 2.0
+_TELEGRAM_RETRY_BACKOFF = 1.5  # P2-15: Exponential backoff multiplier
 
 
 def _safe_html(text: str) -> str:
