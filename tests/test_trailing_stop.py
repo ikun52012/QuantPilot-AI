@@ -490,7 +490,17 @@ async def test_ghost_position_close_waits_for_interval(monkeypatch):
     }
 
     async def fake_open_positions(*args, **kwargs):
-        return []
+        # Return a non-empty list with BTC/ETH positions (but NOT our position)
+        # This makes the exchange data "reliable" so ghost tracking proceeds normally
+        return [
+            {"symbol": "ETH/USDT:USDT", "side": "long", "contracts": 0.5,
+             "entryPrice": 3000.0, "markPrice": 3050.0, "notional": 1500.0,
+             "unrealizedPnl": 25.0},
+        ]
+
+    async def fake_fetch_single_position(*args, **kwargs):
+        # Position NOT found on exchange
+        return None
 
     async def fake_recent_orders(*args, **kwargs):
         return []
@@ -500,6 +510,7 @@ async def test_ghost_position_close_waits_for_interval(monkeypatch):
 
     close_recorder = AsyncMock()
     monkeypatch.setattr("exchange.get_open_positions", fake_open_positions)
+    monkeypatch.setattr("exchange.fetch_single_position", fake_fetch_single_position)
     monkeypatch.setattr("exchange.get_recent_orders", fake_recent_orders)
     monkeypatch.setattr("exchange.get_ticker", fake_ticker)
     monkeypatch.setattr("position_monitor.record_position_close_trade_async", close_recorder)
@@ -512,6 +523,8 @@ async def test_ghost_position_close_waits_for_interval(monkeypatch):
 
     assert stats["closed"] == 0
     close_recorder.assert_not_awaited()
+    # Ghost counter should have incremented by 1 (fail_count goes from max-1 to max)
+    # but position NOT closed because elapsed time < _GHOST_MIN_ELAPSED_SECS (900s)
     assert _GHOST_POSITION_TRACKER[position.id]["fail_count"] == _MAX_GHOST_THRESHOLD
 
     _GHOST_POSITION_TRACKER.pop(position.id, None)

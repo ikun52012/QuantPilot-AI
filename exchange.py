@@ -2313,6 +2313,60 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         return []
 
 
+async def fetch_single_position(ticker: str, exchange_config: dict | None = None) -> dict | None:
+    """Fetch a single position for a specific ticker from the exchange.
+
+    Uses fetch_positions with a symbol filter for more targeted verification.
+    Returns the position dict if found, None if not found or on error.
+    """
+    exchange_config = exchange_config or {}
+    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+        return None
+    exchange = _get_or_create_exchange(
+        exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+        api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
+        api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
+        password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
+        live=True,
+        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+        margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
+    )
+    try:
+        resolved = await asyncio.to_thread(_resolve_symbol, exchange, ticker, exchange_config.get("market_type", ""))
+        positions = await asyncio.to_thread(exchange.fetch_positions, [resolved])
+        from core.utils.common import position_symbol_key as _psk
+        ticker_key = _psk(ticker)
+        for pos in positions:
+            try:
+                contracts = float(pos.get('contracts') or 0)
+            except (TypeError, ValueError):
+                contracts = 0.0
+            if contracts != 0 and _psk(pos.get('symbol', '')) == ticker_key:
+                return {
+                    "symbol": pos.get('symbol'),
+                    "side": pos.get('side'),
+                    "contracts": contracts,
+                    "entryPrice": pos.get('entryPrice'),
+                    "entry_price": pos.get('entryPrice'),
+                    "markPrice": pos.get('markPrice'),
+                    "mark_price": pos.get('markPrice'),
+                    "notional": pos.get('notional'),
+                    "unrealizedPnl": pos.get('unrealizedPnl'),
+                    "unrealized_pnl": pos.get('unrealizedPnl'),
+                    "liquidationPrice": pos.get('liquidationPrice'),
+                    "liquidation_price": pos.get('liquidationPrice'),
+                    "percentage": pos.get('percentage'),
+                    "leverage": pos.get('leverage'),
+                    "marginMode": pos.get('marginMode'),
+                    "margin_mode": pos.get('marginMode'),
+                }
+        return None
+    except Exception as e:
+        logger.warning(f"[Exchange] fetch_single_position failed for {ticker}: {e}")
+        raise
+
+
 async def get_open_orders(symbol: str | None = None, exchange_config: dict | None = None) -> list[dict]:
     """Fetch open/pending orders from exchange."""
     exchange_config = exchange_config or {}

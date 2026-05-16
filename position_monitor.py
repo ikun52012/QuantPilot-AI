@@ -111,13 +111,13 @@ _position_reconcile_locks_guard = asyncio.Lock()
 
 # P0-FIX: Dynamic ghost position thresholds based on position value
 # Higher-value positions need more confirmation attempts before auto-close
-_GHOST_THRESHOLD_SMALL_POSITION = 3  # < $100
-_GHOST_THRESHOLD_MEDIUM_POSITION = 5  # $100 - $1000
-_GHOST_THRESHOLD_LARGE_POSITION = 7   # > $1000
-_GHOST_THRESHOLD_HUGE_POSITION = 10   # > $10,000
+_GHOST_THRESHOLD_SMALL_POSITION = 5   # < $100
+_GHOST_THRESHOLD_MEDIUM_POSITION = 8   # $100 - $1000
+_GHOST_THRESHOLD_LARGE_POSITION = 12   # > $1000
+_GHOST_THRESHOLD_HUGE_POSITION = 15    # > $10,000
 _MAX_GHOST_THRESHOLD = _GHOST_THRESHOLD_HUGE_POSITION  # Backward compatibility alias
 _GHOST_CHECK_INTERVAL_SECS = 3600
-_GHOST_MIN_ELAPSED_SECS = 300  # minimum elapsed before ghost-close (protects against brief exchange outages)
+_GHOST_MIN_ELAPSED_SECS = 900  # minimum elapsed before ghost-close (15 min, protects against API instability)
 _GHOST_TRACKER_FILE = Path("data") / "ghost_position_tracker.json"
 
 
@@ -1390,10 +1390,63 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         return stats
 
     if not order:
+        # P0-CRITICAL: Determine if exchange data is reliable before ghost tracking
+        # An empty positions list could be an API failure rather than truly no positions.
+        # Only count ghost failures when we got a non-empty response from the exchange.
+        positions_data_reliable = len(exchange_positions) > 0
+
         now = utcnow()
         ghost_entry = _GHOST_POSITION_TRACKER.get(position.id)
-        if not ghost_entry:
-            ghost_entry = {"fail_count": 0, "first_missing_at": now, "last_check": now}
+
+        if not positions_data_reliable:
+            # Exchange returned empty list — could be API instability (e.g. OKX sandbox).
+            # Reset ghost tracker since we cannot trust this data point.
+            if ghost_entry and ghost_entry.get("fail_count", 0) > 0:
+                logger.warning(
+                    f"[P0-CRITICAL] Exchange returned empty positions for {position.ticker}; "
+                    f"resetting ghost counter (was {ghost_entry['fail_count']}) "
+                    f"— cannot confirm position is truly gone"
+                )
+                ghost_entry["fail_count"] = 0
+                ghost_entry["first_missing_at"] = now
+                ghost_entry["last_check"] = now
+                _GHOST_POSITION_TRACKER[position.id] = ghost_entry
+                _save_ghost_tracker()
+
+            # Attempt a targeted single-position fetch as secondary verification
+            from exchange import fetch_single_position
+            try:
+                single_pos = await fetch_single_position(position.ticker, checked_exchange_config)
+                if single_pos is not None:
+                    # Position IS on the exchange! Empty list was an API glitch.
+                    logger.warning(
+                        f"[P0-CRITICAL] Empty positions list but single-fetch found {position.ticker}! "
+                        f"Exchange API inconsistency detected — position is safe"
+                    )
+                    match = single_pos
+                    _GHOST_POSITION_TRACKER.pop(position.id, None)
+                    _save_ghost_tracker()
+                    mark_price = safe_float(match.get("mark_price") or match.get("markPrice") or match.get("entry_price"))
+                    if mark_price > 0:
+                        _update_unrealized(position, mark_price)
+                        stats["updated"] += 1
+                    return stats
+            except Exception as single_exc:
+                logger.debug(
+                    f"[P0-CRITICAL] Single-position verification also failed for {position.ticker}: {single_exc}"
+                )
+
+            # Neither batch nor single fetch confirms the position is gone.
+            # Update unrealized PnL from ticker and defer ghost decision.
+            ticker = await get_ticker(position.ticker, exchange_config)
+            mark_price = safe_float(ticker.get("last") or position.last_price)
+            if mark_price > 0:
+                _update_unrealized(position, mark_price)
+                stats["updated"] += 1
+            return stats
+
+        # Exchange data is reliable (non-empty list) and position not found.
+        ghost_entry = ghost_entry or {"fail_count": 0, "first_missing_at": now, "last_check": now}
         ghost_entry["fail_count"] += 1
         ghost_entry.setdefault("first_missing_at", ghost_entry.get("last_check", now))
         ghost_entry["last_check"] = now
@@ -1407,6 +1460,31 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         dynamic_threshold = _calculate_ghost_threshold(position)
 
         if ghost_entry["fail_count"] >= dynamic_threshold and missing_elapsed >= _GHOST_MIN_ELAPSED_SECS:
+            # P0-CRITICAL: Final verification before ghost-closing.
+            # Re-fetch the position from exchange one more time to confirm it's really gone.
+            from exchange import fetch_single_position
+            try:
+                final_check = await fetch_single_position(position.ticker, checked_exchange_config)
+                if final_check is not None:
+                    logger.warning(
+                        f"[P0-CRITICAL] ABORTED ghost close for {position.ticker}: "
+                        f"position found on re-verification! Exchange API was returning incomplete data. "
+                        f"Resetting ghost counter."
+                    )
+                    _GHOST_POSITION_TRACKER.pop(position.id, None)
+                    _save_ghost_tracker()
+                    mark_price = safe_float(final_check.get("mark_price") or final_check.get("markPrice") or final_check.get("entry_price"))
+                    if mark_price > 0:
+                        _update_unrealized(position, mark_price)
+                        stats["updated"] += 1
+                    return stats
+            except Exception as verify_exc:
+                logger.warning(
+                    f"[P0-CRITICAL] Final position verification failed for {position.ticker}: {verify_exc}. "
+                    f"Aborting ghost close — cannot safely confirm position is gone."
+                )
+                return stats
+
             # P0-FIX: Log with dynamic threshold info
             contract_size = _position_contract_size(position) or 1.0
             position_value = (

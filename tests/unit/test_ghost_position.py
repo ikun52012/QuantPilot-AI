@@ -39,7 +39,7 @@ class TestGhostPositionThreshold:
 
         threshold = _calculate_ghost_threshold(mock_position)
 
-        assert threshold == _GHOST_THRESHOLD_SMALL_POSITION  # 3
+        assert threshold == _GHOST_THRESHOLD_SMALL_POSITION  # 5
 
     def test_medium_position_threshold(self, mock_position):
         """Test threshold for medium position ($100-$1000)."""
@@ -51,7 +51,7 @@ class TestGhostPositionThreshold:
 
         threshold = _calculate_ghost_threshold(mock_position)
 
-        assert threshold == _GHOST_THRESHOLD_MEDIUM_POSITION  # 5
+        assert threshold == _GHOST_THRESHOLD_MEDIUM_POSITION  # 8
 
     def test_large_position_threshold(self, mock_position):
         """Test threshold for large position ($1000-$10000)."""
@@ -62,7 +62,7 @@ class TestGhostPositionThreshold:
 
         threshold = _calculate_ghost_threshold(mock_position)
 
-        assert threshold == _GHOST_THRESHOLD_LARGE_POSITION  # 7
+        assert threshold == _GHOST_THRESHOLD_LARGE_POSITION  # 12
 
     def test_huge_position_threshold(self, mock_position):
         """Test threshold for huge position (>$10000)."""
@@ -73,7 +73,7 @@ class TestGhostPositionThreshold:
 
         threshold = _calculate_ghost_threshold(mock_position)
 
-        assert threshold == _GHOST_THRESHOLD_HUGE_POSITION  # 10
+        assert threshold == _GHOST_THRESHOLD_HUGE_POSITION  # 15
 
     def test_threshold_boundary_100_dollars(self, mock_position):
         """Test threshold at $100 boundary."""
@@ -85,7 +85,7 @@ class TestGhostPositionThreshold:
         threshold = _calculate_ghost_threshold(mock_position)
 
         # At boundary, should use medium threshold
-        assert threshold == _GHOST_THRESHOLD_MEDIUM_POSITION  # 5
+        assert threshold == _GHOST_THRESHOLD_MEDIUM_POSITION  # 8
 
     def test_threshold_boundary_1000_dollars(self, mock_position):
         """Test threshold at $1000 boundary."""
@@ -97,7 +97,7 @@ class TestGhostPositionThreshold:
         threshold = _calculate_ghost_threshold(mock_position)
 
         # At boundary, should use large threshold
-        assert threshold == _GHOST_THRESHOLD_LARGE_POSITION  # 7
+        assert threshold == _GHOST_THRESHOLD_LARGE_POSITION  # 12
 
     def test_threshold_boundary_10000_dollars(self, mock_position):
         """Test threshold at $10000 boundary."""
@@ -109,7 +109,7 @@ class TestGhostPositionThreshold:
         threshold = _calculate_ghost_threshold(mock_position)
 
         # At boundary, should use huge threshold
-        assert threshold == _GHOST_THRESHOLD_HUGE_POSITION  # 10
+        assert threshold == _GHOST_THRESHOLD_HUGE_POSITION  # 15
 
     def test_threshold_with_leverage_1x(self, mock_position):
         """Test threshold calculation with 1x leverage."""
@@ -120,7 +120,7 @@ class TestGhostPositionThreshold:
 
         threshold = _calculate_ghost_threshold(mock_position)
 
-        assert threshold == _GHOST_THRESHOLD_HUGE_POSITION  # 10
+        assert threshold == _GHOST_THRESHOLD_HUGE_POSITION  # 15
 
     def test_threshold_with_high_leverage(self, mock_position):
         """Test threshold with high leverage reduces position value."""
@@ -132,7 +132,7 @@ class TestGhostPositionThreshold:
         threshold = _calculate_ghost_threshold(mock_position)
 
         # Low value = small threshold
-        assert threshold == _GHOST_THRESHOLD_SMALL_POSITION  # 3
+        assert threshold == _GHOST_THRESHOLD_SMALL_POSITION  # 5
 
     def test_threshold_with_zero_values(self, mock_position):
         """Test threshold with zero/missing values."""
@@ -143,12 +143,12 @@ class TestGhostPositionThreshold:
         threshold = _calculate_ghost_threshold(mock_position)
 
         # Zero value = small threshold
-        assert threshold == _GHOST_THRESHOLD_SMALL_POSITION  # 3
+        assert threshold == _GHOST_THRESHOLD_SMALL_POSITION  # 5
 
     def test_threshold_gradient(self, mock_position):
         """Test threshold increases smoothly with position value."""
         values = [50, 150, 550, 1500, 5500, 15000]
-        expected_thresholds = [3, 5, 5, 7, 7, 10]
+        expected_thresholds = [5, 8, 8, 12, 12, 15]
 
         for value, expected in zip(values, expected_thresholds, strict=True):
             # Calculate position params to achieve target value
@@ -182,7 +182,7 @@ class TestGhostPositionIntegration:
 
         # Calculate expected threshold
         expected_threshold = _calculate_ghost_threshold(position)
-        assert expected_threshold == _GHOST_THRESHOLD_LARGE_POSITION  # 7
+        assert expected_threshold == _GHOST_THRESHOLD_LARGE_POSITION  # 12
 
         # Would need to mock session and exchange_config to test full flow
         # This demonstrates threshold calculation is used
@@ -199,7 +199,7 @@ class TestGhostPositionIntegration:
         threshold = _calculate_ghost_threshold(position)
 
         # Small position = low threshold (quick auto-close)
-        assert threshold == 3
+        assert threshold == 5
 
     async def test_ghost_position_huge_position_slow_close(self):
         """Test huge positions have high threshold (more patience)."""
@@ -212,8 +212,8 @@ class TestGhostPositionIntegration:
 
         threshold = _calculate_ghost_threshold(position)
 
-        # Huge position = high threshold (10 attempts)
-        assert threshold == 10
+        # Huge position = high threshold (15 attempts)
+        assert threshold == 15
 
 
 class TestGhostPositionThresholdRange:
@@ -221,11 +221,11 @@ class TestGhostPositionThresholdRange:
 
     def test_threshold_minimum(self):
         """Test minimum threshold value."""
-        assert _GHOST_THRESHOLD_SMALL_POSITION == 3
+        assert _GHOST_THRESHOLD_SMALL_POSITION == 5
 
     def test_threshold_maximum(self):
         """Test maximum threshold value."""
-        assert _GHOST_THRESHOLD_HUGE_POSITION == 10
+        assert _GHOST_THRESHOLD_HUGE_POSITION == 15
 
     def test_threshold_monotonic_increase(self):
         """Test thresholds increase monotonically."""
