@@ -2032,24 +2032,27 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                        If None, closes first found position (may be wrong in hedge mode).
         close_quantity: If specified, only close this quantity (for partial rollback).
                         If None, close entire position.
-        max_retries: Number of retry attempts for transient errors (default 3).
+        max_retries: Maximum reduce-only close attempts for full closes; also caps transient retry attempts.
     """
     last_error = None
+    last_unconfirmed: dict | None = None
+    close_order_ids: list[str] = []
     for attempt in range(1, max_retries + 1):
         try:
             positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
-            found_position = False
+            found_matching_position = False
+            retry_unconfirmed_close = False
             for pos in positions:
                 if not _position_symbol_matches(symbol, pos):
                     continue
                 contracts = float(pos.get("contracts", 0))
                 if contracts == 0:
                     continue
-                found_position = True
 
                 pos_side = _normalized_position_side(pos, contracts)
                 if position_side and not _position_side_matches(position_side, pos_side):
                     continue
+                found_matching_position = True
 
                 amount = abs(contracts)
                 requested_full_close = not close_quantity or close_quantity >= (amount - _CLOSE_FLAT_CONTRACT_EPSILON)
@@ -2067,36 +2070,100 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                     position_side=pos_side if pos_side else None,
                     allow_amount_increase=False,
                 )
+                order_id = str(order.get("id") or "")
+                if order_id:
+                    close_order_ids.append(order_id)
                 verify = await _verify_position_close(exchange, symbol, pos_side or position_side)
                 exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
                 if verify.get("flat"):
                     logger.info(f"[Exchange] ✅ Position close confirmed flat: {order.get('id')} (side={pos_side or 'net'})")
-                    return {
+                    result = {
                         "status": "closed",
                         "order_id": order.get("id"),
                         "exit_price": exit_price,
                         "position_side": pos_side,
                         "remaining_contracts": 0.0,
                         "close_verification": verify,
+                        "close_attempts": attempt,
                     }
+                    if close_order_ids:
+                        result["close_order_ids"] = close_order_ids
+                    return result
                 remaining = safe_float(verify.get("remaining_contracts") or 0)
-                status = "close_unconfirmed" if requested_full_close else "partial_closed"
-                reason = (
-                    f"Close order accepted but exchange still reports {remaining} contracts"
-                    if requested_full_close
-                    else f"Partial close accepted; exchange still reports {remaining} contracts"
-                )
-                logger.error(f"[Exchange] CRITICAL: {reason} for {symbol} side={pos_side}")
-                return {
-                    "status": status,
+                if not requested_full_close:
+                    reason = f"Partial close accepted; exchange still reports {remaining} contracts"
+                    logger.warning(f"[Exchange] {reason} for {symbol} side={pos_side}")
+                    result = {
+                        "status": "partial_closed",
+                        "reason": reason,
+                        "order_id": order.get("id"),
+                        "exit_price": exit_price,
+                        "position_side": pos_side,
+                        "remaining_contracts": remaining,
+                        "close_verification": verify,
+                        "close_attempts": attempt,
+                    }
+                    if close_order_ids:
+                        result["close_order_ids"] = close_order_ids
+                    return result
+
+                reason = f"Close order accepted but exchange still reports {remaining} contracts"
+                last_unconfirmed = {
+                    "status": "close_unconfirmed",
                     "reason": reason,
                     "order_id": order.get("id"),
                     "exit_price": exit_price,
                     "position_side": pos_side,
                     "remaining_contracts": remaining,
                     "close_verification": verify,
+                    "close_attempts": attempt,
                 }
-            if not found_position and attempt < max_retries:
+                if close_order_ids:
+                    last_unconfirmed["close_order_ids"] = close_order_ids
+                if attempt < max_retries:
+                    delay = min(0.5 * attempt, 2.0)
+                    logger.error(
+                        f"[Exchange] CRITICAL: {reason} for {symbol} side={pos_side}. "
+                        f"Retrying reduce-only close in {delay:.1f}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(delay)
+                    retry_unconfirmed_close = True
+                    break
+
+                logger.error(
+                    f"[Exchange] CRITICAL: {reason} for {symbol} side={pos_side} "
+                    f"after {max_retries} close attempts"
+                )
+                return last_unconfirmed
+
+            if retry_unconfirmed_close:
+                continue
+
+            if not found_matching_position and last_unconfirmed:
+                logger.info(
+                    f"[Exchange] ✅ Position close confirmed flat after retry fetch: "
+                    f"{symbol} side={position_side or 'net'}"
+                )
+                result = {
+                    "status": "closed",
+                    "order_id": last_unconfirmed.get("order_id"),
+                    "exit_price": last_unconfirmed.get("exit_price"),
+                    "position_side": last_unconfirmed.get("position_side") or position_side,
+                    "remaining_contracts": 0.0,
+                    "close_verification": {
+                        "flat": True,
+                        "remaining_contracts": 0.0,
+                        "position_side": last_unconfirmed.get("position_side") or position_side,
+                        "source": "retry_fetch_absent",
+                    },
+                    "close_attempts": attempt,
+                }
+                if close_order_ids:
+                    result["close_order_ids"] = close_order_ids
+                return result
+
+            if not found_matching_position and attempt < max_retries:
                 await asyncio.sleep(min(0.5 * attempt, 2.0))
                 continue
             return {"status": "no_position", "reason": f"No open {position_side or ''} position to close"}

@@ -24,8 +24,8 @@ from position_monitor import (
     _price_pnl_pct,
     _reconcile_exchange_position,
     _reconcile_paper_position,
-    _verify_protective_orders,
     _safe_float,
+    _verify_protective_orders,
 )
 from services.signal_processor import SignalProcessor
 

@@ -507,6 +507,48 @@ async def test_close_position_requires_exchange_flat_confirmation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_close_position_retries_reduce_only_until_flat(monkeypatch):
+    monkeypatch.setattr(exchange_module.asyncio, "sleep", AsyncMock())
+
+    class FakeExchange:
+        id = "binance"
+        options = {"defaultType": "future"}
+
+        def __init__(self):
+            self.remaining = 1.0
+            self.close_amounts = []
+
+        def load_markets(self):
+            return {"BTC/USDT:USDT": {"limits": {"amount": {}}, "precision": {"amount": 8}}}
+
+        def fetch_positions(self, symbols):
+            if self.remaining <= 0:
+                return []
+            return [{"symbol": "BTC/USDT:USDT", "side": "long", "contracts": self.remaining, "markPrice": 99.0}]
+
+        def create_order(self, **kwargs):
+            self.close_amounts.append(kwargs["amount"])
+            self.remaining = 0.25 if len(self.close_amounts) == 1 else 0.0
+            return {
+                "id": f"close-{len(self.close_amounts)}",
+                "status": "closed",
+                "filled": kwargs["amount"],
+                "average": 99.0,
+            }
+
+    fake_exchange = FakeExchange()
+
+    result = await exchange_module._close_position(fake_exchange, "BTC/USDT:USDT", position_side="long")
+
+    assert result["status"] == "closed"
+    assert result["remaining_contracts"] == 0.0
+    assert result["close_attempts"] == 2
+    assert result["close_order_ids"] == ["close-1", "close-2"]
+    assert fake_exchange.close_amounts[0] == pytest.approx(1.0)
+    assert fake_exchange.close_amounts[1] == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
 async def test_close_position_returns_closed_only_after_flat_confirmation(monkeypatch):
     monkeypatch.setattr(exchange_module.asyncio, "sleep", AsyncMock())
 
