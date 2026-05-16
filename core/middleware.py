@@ -467,10 +467,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 def setup_middleware(app) -> None:
     """Setup all middleware for the FastAPI app."""
 
-    # CORS
+    # CORS — include public_base_url if configured
+    cors_origins = list(settings.server.cors_origins)
+    base_url = (settings.server.public_base_url or "").strip().rstrip("/")
+    if base_url and base_url not in cors_origins:
+        cors_origins.append(base_url)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.server.cors_origins,
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

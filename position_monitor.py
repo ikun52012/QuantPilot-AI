@@ -516,6 +516,80 @@ async def get_monitor_state() -> dict:
     }
 
 
+async def _recover_ghost_closed_positions(session: AsyncSession, user_configs: dict) -> int:
+    """Check positions that were ghost-closed and verify if they still exist on the exchange.
+
+    If a ghost-closed position is found to be still open on the exchange, reopen it
+    in the database and restore protective orders. Returns count of recovered positions.
+    """
+    result = await session.execute(
+        select(PositionModel)
+        .where(
+            PositionModel.status == "closed",
+            PositionModel.close_reason == "ghost_position_auto_close",
+        )
+        .order_by(PositionModel.closed_at.desc())
+    )
+    ghost_closed = list(result.scalars().all())
+    if not ghost_closed:
+        return 0
+
+    logger.info(f"[GhostRecovery] Checking {len(ghost_closed)} ghost-closed position(s) for recovery")
+    recovered = 0
+
+    for position in ghost_closed:
+        exchange_config = await _exchange_config_for_position(session, position, user_configs)
+        if not exchange_config.get("live_trading"):
+            continue
+
+        try:
+            from exchange import fetch_single_position
+            exchange_pos = await fetch_single_position(position.ticker, {**exchange_config, "raise_on_error": True})
+        except Exception as exc:
+            logger.debug(f"[GhostRecovery] Cannot verify {position.ticker}: {exc}")
+            continue
+
+        if exchange_pos is None:
+            continue
+
+        contracts = 0.0
+        try:
+            contracts = float(exchange_pos.get("contracts") or 0)
+        except (TypeError, ValueError):
+            pass
+
+        if contracts <= 0:
+            continue
+
+        logger.warning(
+            f"[GhostRecovery] POSITION RECOVERED: {position.id[:8]} on {position.ticker} "
+            f"is still open on the exchange (contracts={contracts})! Reopening in database."
+        )
+
+        position.status = "open"
+        position.close_reason = None
+        position.closed_at = None
+        position.close_trade_id = None
+        position.pnl_pct = None
+        position.current_pnl_pct = None
+        position.exit_price = None
+
+        mark_price = safe_float(exchange_pos.get("mark_price") or exchange_pos.get("markPrice") or exchange_pos.get("entry_price"))
+        if mark_price > 0:
+            position.last_price = mark_price
+            if position.entry_price and position.entry_price > 0:
+                _update_unrealized(position, mark_price)
+
+        await session.flush()
+        _GHOST_POSITION_TRACKER.pop(str(position.id), None)
+        _save_ghost_tracker()
+        recovered += 1
+
+    if recovered > 0:
+        logger.warning(f"[GhostRecovery] Recovered {recovered} ghost-closed position(s) that are still on the exchange")
+    return recovered
+
+
 async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
     """Run one full tracking cycle and persist TP/SL/PnL updates.
 
@@ -530,12 +604,22 @@ async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
             "closed": 0,
             "adjusted": 0,
             "errors": 0,
+            "recovered": 0,
             "timestamp": utcnow().isoformat(),
         }
         _load_ghost_tracker()
 
         try:
             async with db_manager.async_session_factory() as session:
+                # P0-FIX: Recover ghost-closed positions that are still on the exchange
+                try:
+                    recovered = await _recover_ghost_closed_positions(session, user_configs or {})
+                    stats["recovered"] = recovered
+                    if recovered > 0:
+                        await session.commit()
+                except Exception as exc:
+                    logger.warning(f"[GhostRecovery] Recovery check failed: {exc}")
+
                 result = await session.execute(
                     select(PositionModel)
                     .where(PositionModel.status.in_(["open", "pending"]))
@@ -1465,10 +1549,13 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         return stats
 
     if not order:
-        # P0-CRITICAL: Determine if exchange data is reliable before ghost tracking
+        # P0-CRITICAL: Determine if exchange data is reliable before ghost tracking.
         # An empty positions list could be an API failure rather than truly no positions.
-        # Only count ghost failures when we got a non-empty response from the exchange.
+        # A non-empty list is also unreliable if the exchange returns partial data
+        # (e.g. OKX returning 5/10 positions). We must verify with a single-position
+        # fetch before incrementing ghost counters.
         positions_data_reliable = len(exchange_positions) > 0
+        exchange_positions_count = len(exchange_positions)
 
         now = utcnow()
         ghost_entry = _GHOST_POSITION_TRACKER.get(position.id)
@@ -1521,6 +1608,32 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             return stats
 
         # Exchange data is reliable (non-empty list) and position not found.
+        # P0-FIX: Even with a non-empty list, exchanges like OKX may return partial data.
+        # Verify with a single-position fetch before incrementing ghost counter.
+        if exchange_positions_count <= 3 or ghost_entry is None or ghost_entry.get("fail_count", 0) == 0:
+            # Few positions returned or first detection: verify with targeted fetch
+            from exchange import fetch_single_position
+            try:
+                single_verify = await fetch_single_position(position.ticker, checked_exchange_config)
+                if single_verify is not None:
+                    logger.warning(
+                        f"[P0-CRITICAL] Position {position.ticker} not in batch list "
+                        f"(got {exchange_positions_count} positions) but single-fetch found it! "
+                        f"Exchange API returned partial data — marking as safe"
+                    )
+                    _GHOST_POSITION_TRACKER.pop(position.id, None)
+                    _save_ghost_tracker()
+                    match = single_verify
+                    mark_price = safe_float(match.get("mark_price") or match.get("markPrice") or match.get("entry_price"))
+                    if mark_price > 0:
+                        _update_unrealized(position, mark_price)
+                        stats["updated"] += 1
+                    return stats
+            except Exception as single_exc:
+                logger.debug(
+                    f"[P0-CRITICAL] Single-position verification also failed for {position.ticker}: {single_exc}"
+                )
+
         ghost_entry = ghost_entry or {"fail_count": 0, "first_missing_at": now, "last_check": now}
         ghost_entry["fail_count"] += 1
         ghost_entry.setdefault("first_missing_at", ghost_entry.get("last_check", now))

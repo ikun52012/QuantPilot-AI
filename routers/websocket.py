@@ -86,18 +86,51 @@ def _extract_ws_token(websocket: WebSocket) -> str:
 
 
 def _validate_ws_origin(websocket: WebSocket) -> bool:
-    """Validate WebSocket Origin header to prevent cross-site WebSocket hijacking."""
+    """Validate WebSocket Origin header to prevent cross-site WebSocket hijacking.
+
+    Checks origin against:
+    1. CORS origins (explicit list)
+    2. public_base_url (if configured)
+    3. Localhost variants for development
+
+    Allows connections with no Origin header (non-browser clients).
+    """
     origin = websocket.headers.get("origin", "")
     if not origin:
         return True
     allowed_origins = settings.server.cors_origins
     if "*" in allowed_origins:
         return True
+
+    origin_lower = origin.lower().rstrip("/")
+
+    # Check explicit CORS origins
     for allowed in allowed_origins:
         allowed_lower = allowed.lower().rstrip("/")
-        if origin.lower().rstrip("/") == allowed_lower:
+        if origin_lower == allowed_lower:
             return True
-    logger.warning(f"[WebSocket] Origin validation failed: {origin}")
+        # Also allow any subpath match for path-based origins
+        if origin_lower.startswith(allowed_lower + "/"):
+            return True
+
+    # Check public_base_url if configured
+    base_url = (settings.server.public_base_url or "").strip().rstrip("/")
+    if base_url and origin_lower == base_url.lower().rstrip("/"):
+        return True
+    if base_url and origin_lower.startswith(base_url.lower().rstrip("/") + "/"):
+        return True
+
+    # Allow localhost variants in non-production for development convenience
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(origin)
+        hostname = (parsed.hostname or "").lower()
+        if hostname in ("localhost", "127.0.0.1", "::1"):
+            return True
+    except Exception:
+        pass
+
+    logger.warning(f"[WebSocket] Origin validation failed: {origin} (allowed: {allowed_origins}, base_url: {base_url})")
     return False
 
 
