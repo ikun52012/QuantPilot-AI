@@ -1590,9 +1590,10 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     f"[Exchange] Protection orders failed for filled entry. "
                     f"Closing position {symbol} for safety. Errors: {protection_errors}"
                 )
+                # P0-FIX: Retry rollback close using retry-capable _close_position
                 try:
                     close_result = await _close_position(
-                        exchange, symbol, position_side=pos_side_for_orders, close_quantity=actual_filled_qty
+                        exchange, symbol, position_side=pos_side_for_orders, close_quantity=actual_filled_qty, max_retries=3
                     )
                     if close_result.get("status") == "closed":
                         return {
@@ -1924,67 +1925,80 @@ async def place_protective_stop(
         return {"status": "error", "reason": str(e)}
 
 
-async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: str | None = None, close_quantity: float | None = None) -> dict:
-    """Close an existing position.
+async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: str | None = None, close_quantity: float | None = None, max_retries: int = 3) -> dict:
+    """Close an existing position with retry logic.
 
     Args:
         position_side: For hedge mode exchanges (OKX), specify 'long' or 'short'.
                        If None, closes first found position (may be wrong in hedge mode).
         close_quantity: If specified, only close this quantity (for partial rollback).
                         If None, close entire position.
+        max_retries: Number of retry attempts for transient errors (default 3).
     """
-    try:
-        positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
-        for pos in positions:
-            if pos["symbol"] != symbol:
-                continue
-            contracts = float(pos.get("contracts", 0))
-            if contracts == 0:
-                continue
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
+            for pos in positions:
+                if pos["symbol"] != symbol:
+                    continue
+                contracts = float(pos.get("contracts", 0))
+                if contracts == 0:
+                    continue
 
-            # In hedge mode, filter by position side
-            pos_side = str(pos.get("side", "") or "").lower()
-            if not pos_side:
-                pos_info = pos.get("info") or {}
-                pos_side = str(pos_info.get("posSide") or "").lower()
+                pos_side = str(pos.get("side", "") or "").lower()
+                if not pos_side:
+                    pos_info = pos.get("info") or {}
+                    pos_side = str(pos_info.get("posSide") or "").lower()
 
-            # For net mode (no posSide), infer direction from contracts sign
-            if not pos_side:
-                logger.warning(
-                    f"[Exchange] Cannot determine position side for {symbol} in net mode; "
-                    f"side field is empty. Using contracts > 0 heuristic but this may be wrong."
+                if not pos_side:
+                    logger.warning(
+                        f"[Exchange] Cannot determine position side for {symbol} in net mode; "
+                        f"side field is empty. Using contracts > 0 heuristic but this may be wrong."
+                    )
+                    pos_side = "long" if contracts > 0 else "short"
+                    contracts = abs(contracts)
+
+                if position_side and pos_side and position_side.lower() not in pos_side:
+                    continue
+
+                amount = abs(contracts)
+                if close_quantity and close_quantity > 0:
+                    amount = min(amount, close_quantity)
+                close_side = "sell" if pos_side == "long" else "buy"
+
+                order = await _create_exchange_order(
+                    exchange,
+                    symbol=symbol,
+                    order_type="market",
+                    side=close_side,
+                    amount=amount,
+                    params={"reduceOnly": True},
+                    position_side=pos_side if pos_side else None,
+                    allow_amount_increase=False,
                 )
-                pos_side = "long" if contracts > 0 else "short"
-                contracts = abs(contracts)
-
-            if position_side and pos_side and position_side.lower() not in pos_side:
+                logger.info(f"[Exchange] ✅ Position closed: {order.get('id')} (side={pos_side or 'net'})")
+                exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
+                return {"status": "closed", "order_id": order.get("id"), "exit_price": exit_price, "position_side": pos_side}
+            return {"status": "no_position", "reason": f"No open {position_side or ''} position to close"}
+        except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RateLimitExceeded, ccxt.RequestTimeout) as e:
+            last_error = e
+            if attempt < max_retries:
+                delay = min(2 ** attempt, 10)
+                logger.warning(
+                    f"[Exchange] Transient error closing {symbol} (attempt {attempt}/{max_retries}): {e}. "
+                    f"Retrying in {delay}s..."
+                )
+                await asyncio.sleep(delay)
                 continue
-
-            amount = abs(contracts)
-            if close_quantity and close_quantity > 0:
-                amount = min(amount, close_quantity)
-            close_side = "sell" if pos_side == "long" else "buy"
-
-            order = await _create_exchange_order(
-                exchange,
-                symbol=symbol,
-                order_type="market",
-                side=close_side,
-                amount=amount,
-                params={"reduceOnly": True},
-                position_side=pos_side if pos_side else None,
-                allow_amount_increase=False,
-            )
-            logger.info(f"[Exchange] ✅ Position closed: {order.get('id')} (side={pos_side or 'net'})")
-            exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
-            return {"status": "closed", "order_id": order.get("id"), "exit_price": exit_price, "position_side": pos_side}
-        return {"status": "no_position", "reason": f"No open {position_side or ''} position to close"}
-    except ccxt.BaseError as e:
-        logger.error(f"[Exchange] Failed to close position: {e}")
-        return {"status": "error", "reason": f"Failed to close position: {e}"}
-    except Exception as e:
-        logger.error(f"[Exchange] Unexpected error closing position: {e}")
-        return {"status": "error", "reason": "Failed to close position"}
+            logger.error(f"[Exchange] Failed to close {symbol} after {max_retries} retries: {e}")
+        except ccxt.BaseError as e:
+            logger.error(f"[Exchange] Failed to close position: {e}")
+            return {"status": "error", "reason": f"Failed to close position: {e}"}
+        except Exception as e:
+            logger.error(f"[Exchange] Unexpected error closing position: {e}")
+            return {"status": "error", "reason": "Failed to close position"}
+    return {"status": "error", "reason": f"Failed to close position after {max_retries} retries: {last_error}"}
 
 
 def _calc_notional_value(quantity: float, price: float, ticker: str = "") -> float:

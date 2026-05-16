@@ -1727,6 +1727,25 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             _GHOST_POSITION_TRACKER.pop(position.id, None)
             _save_ghost_tracker()
             stats["closed"] += 1
+
+            # P0-FIX: Cancel leftover protective orders for ghost-closed positions
+            try:
+                from exchange import cancel_order
+                tp_ids = loads_list(position.take_profit_order_ids_json)
+                for oid in tp_ids:
+                    if oid:
+                        try:
+                            await cancel_order(str(oid), position.ticker, exchange_config)
+                        except Exception:
+                            pass
+                if position.stop_loss_order_id:
+                    try:
+                        await cancel_order(str(position.stop_loss_order_id), position.ticker, exchange_config)
+                    except Exception:
+                        pass
+            except Exception:
+                pass  # Best-effort
+
             return stats
 
         ticker = await get_ticker(position.ticker, exchange_config)
@@ -1744,6 +1763,18 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         exit_price = safe_float(ticker.get("last") or position.last_price or position.entry_price)
         close_reason = "exchange_closed_unmatched"
 
+    # P0-FIX: If we still can't get an exit price, use entry_price as absolute fallback
+    # to prevent positions staying "open" forever when price data is unavailable
+    if exit_price <= 0:
+        entry_fallback = safe_float(position.entry_price)
+        if entry_fallback > 0:
+            logger.warning(
+                f"[P0-CRITICAL] No exit price available for {position.ticker}, "
+                f"using entry price ${entry_fallback} as fallback to prevent orphan position"
+            )
+            exit_price = entry_fallback
+            close_reason = "exchange_closed_unmatched"
+
     if exit_price > 0:
         await record_position_close_trade_async(
             session=session,
@@ -1754,6 +1785,25 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             order_details=order or {"trigger": close_reason},
         )
         stats["closed"] += 1
+
+        # P0-FIX: Cancel leftover protective orders (SL/TP) when closing a position.
+        # On hedge-mode exchanges, leftover orders can block margin or create unwanted fills.
+        try:
+            from exchange import cancel_order
+            tp_order_ids = loads_list(position.take_profit_order_ids_json)
+            for order_id in tp_order_ids:
+                if order_id:
+                    try:
+                        await cancel_order(str(order_id), position.ticker, exchange_config)
+                    except Exception:
+                        pass  # Best-effort cancel
+            if position.stop_loss_order_id:
+                try:
+                    await cancel_order(str(position.stop_loss_order_id), position.ticker, exchange_config)
+                except Exception:
+                    pass  # Best-effort cancel
+        except Exception as cancel_exc:
+            logger.debug(f"[PositionMonitor] Best-effort order cancel skipped for {position.ticker}: {cancel_exc}")
 
     return stats
 
@@ -2492,13 +2542,62 @@ async def monitor_black_swan_events(session: AsyncSession) -> dict[str, Any]:
                             "reason": "Profitable during black swan - protect gains",
                         })
                     else:
-                        # Losing position: Close immediately
-                        await close_position_async(
-                            session=session,
-                            position=pos,
-                            exit_price=current_price,
-                            close_reason="black_swan_loss_protection",
-                        )
+                        # Losing position: Close immediately on exchange first, then DB
+                        black_swan_closed_exchange = False
+                        if pos.live_trading:
+                            try:
+                                exchange_config = await _exchange_config_for_position(session, pos, {})
+                                from exchange import _get_or_create_exchange
+                                exchange = _get_or_create_exchange(
+                                    exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+                                    api_key=exchange_config.get("api_key") or settings.exchange.api_key,
+                                    api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
+                                    password=exchange_config.get("password") or settings.exchange.password,
+                                    live=True,
+                                    sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+                                    market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+                                    margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
+                                )
+                                from exchange import _close_position as _exchange_close
+                                close_result = await _exchange_close(
+                                    exchange, pos.ticker,
+                                    position_side=str(pos.direction).lower() if pos.direction else None,
+                                )
+                                if close_result.get("status") == "closed":
+                                    black_swan_closed_exchange = True
+                                    close_exit_price = safe_float(close_result.get("exit_price"))
+                                    if close_exit_price > 0:
+                                        current_price = close_exit_price
+                                    logger.warning(
+                                        f"[PositionMonitor] Black swan: closed {pos.id[:8]} on exchange "
+                                        f"(exit_price={current_price})"
+                                    )
+                                else:
+                                    logger.error(
+                                        f"[PositionMonitor] CRITICAL: Black swan exchange close failed for "
+                                        f"{pos.ticker}: {close_result.get('reason')}. "
+                                        f"Position still open on exchange! Manual intervention required."
+                                    )
+                            except Exception as exc:
+                                logger.error(
+                                    f"[PositionMonitor] CRITICAL: Black swan exchange close exception for "
+                                    f"{pos.ticker}: {exc}. Position still open on exchange!"
+                                )
+                        else:
+                            black_swan_closed_exchange = True  # Paper trading always succeeds
+
+                        try:
+                            await close_position_async(
+                                session=session,
+                                position=pos,
+                                exit_price=current_price,
+                                close_reason="black_swan_loss_protection",
+                            )
+                        except Exception as db_exc:
+                            logger.error(
+                                f"[PositionMonitor] Black swan DB close failed for {pos.id[:8]}: {db_exc}. "
+                                f"Exchange position {'closed' if black_swan_closed_exchange else 'STILL OPEN'}!"
+                            )
                         events_summary["positions_closed"] += 1
                         logger.warning(
                             f"[PositionMonitor] Black swan: closed losing position "

@@ -2,6 +2,7 @@
 Signal Server - Database Layer (Enhanced)
 Async SQLAlchemy with PostgreSQL/SQLite support.
 """
+import asyncio
 import hashlib
 import json
 import re
@@ -1216,11 +1217,26 @@ async def close_position_async(
     race conditions (e.g., TP hit + manual close happening concurrently).
     """
     # SAFETY: Re-fetch position with row-level lock to prevent concurrent closes
-    result = await session.execute(
-        select(PositionModel)
-        .where(PositionModel.id == position.id)
-        .with_for_update(nowait=True)
-    )
+    try:
+        result = await session.execute(
+            select(PositionModel)
+            .where(PositionModel.id == position.id)
+            .with_for_update(nowait=True)
+        )
+    except Exception as lock_exc:
+        # P0-FIX: nowait=True can raise OperationalError if row is locked.
+        # Retry once with a short wait instead of losing the close.
+        logger.warning(f"[Database] close_position_async lock conflict for {position.id}: {lock_exc}. Retrying after 1s...")
+        await asyncio.sleep(1.0)
+        try:
+            result = await session.execute(
+                select(PositionModel)
+                .where(PositionModel.id == position.id)
+                .with_for_update(nowait=True)
+            )
+        except Exception as retry_exc:
+            logger.error(f"[Database] CRITICAL: close_position_async lock retry failed for {position.id}: {retry_exc}")
+            return 0.0
     locked_position = result.scalar_one_or_none()
     if not locked_position:
         raise ValueError(f"Position {position.id} not found")
