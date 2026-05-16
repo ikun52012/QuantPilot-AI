@@ -366,7 +366,7 @@ class TrailingStopSettings(BaseModel):
     @field_validator('mode')
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        allowed = {'none', 'moving', 'breakeven_on_tp1', 'step_trailing', 'profit_pct_trailing'}
+        allowed = {'none', 'auto', 'moving', 'breakeven_on_tp1', 'step_trailing', 'profit_pct_trailing'}
         if v not in allowed:
             raise ValueError(f"mode must be one of: {allowed}")
         return v

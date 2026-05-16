@@ -44,6 +44,62 @@ _safe_float = safe_float
 _loads_list = loads_list
 _loads_dict = loads_dict
 
+
+def _resolve_trailing_mode(trailing_config: dict, position: "PositionModel" = None) -> str:
+    """Resolve 'auto' trailing-stop mode to a concrete mode.
+
+    When the stored mode is 'auto' (or empty while global setting is 'auto'),
+    use the AI metadata stored alongside the config to re-resolve via
+    ``select_smart_trailing_stop``.  If metadata is missing, fall back to
+    ``step_trailing`` as a safe default.
+    """
+    raw_mode = str(trailing_config.get("mode") or "").lower()
+
+    if raw_mode and raw_mode not in {"auto", "", "none"}:
+        return raw_mode
+
+    global_mode = str(settings.trailing_stop.mode or "none").lower()
+
+    if raw_mode != "auto" and global_mode != "auto":
+        return raw_mode if raw_mode else global_mode
+
+    from smart_trailing_stop import select_smart_trailing_stop
+
+    confidence = safe_float(trailing_config.get("_ai_confidence"), 0.65)
+    risk_score = safe_float(trailing_config.get("_ai_risk_score"), 0.5)
+    market_condition = str(trailing_config.get("_ai_market_condition") or "unknown").lower()
+    trend_strength = str(trailing_config.get("_ai_trend_strength") or "moderate").lower()
+    timeframe = str(trailing_config.get("_signal_timeframe") or "60")
+    atr_pct = safe_float(trailing_config.get("_atr_pct_at_fill"), None)
+
+    tp_levels = []
+    if position is not None:
+        tp_levels = loads_list(position.take_profit_json)
+    num_tp_levels = len(tp_levels) if tp_levels else 4
+
+    try:
+        decision = select_smart_trailing_stop(
+            confidence=confidence,
+            market_condition=market_condition,
+            trend_strength=trend_strength,
+            risk_score=risk_score,
+            timeframe=timeframe,
+            num_tp_levels=num_tp_levels,
+            atr_pct=atr_pct,
+            user_override=None,
+        )
+        resolved = decision.mode.value
+        logger.info(
+            f"[TrailingStop] Resolved 'auto' -> '{resolved}' for "
+            f"confidence={confidence:.2f} market={market_condition} "
+            f"trend={trend_strength} (reason: {decision.reasoning})"
+        )
+        return resolved
+    except Exception as e:
+        logger.warning(f"[TrailingStop] Failed to resolve 'auto' mode: {e}. Falling back to 'step_trailing'")
+        return "step_trailing"
+
+
 _position_monitor_lock = asyncio.Lock()
 _GHOST_POSITION_TRACKER: dict[str, dict[str, Any]] = {}
 _PROTECTIVE_ORDERS_LAST_VERIFY: dict[str, datetime] = {}
@@ -368,7 +424,7 @@ def _position_limit_timeout_secs(position: PositionModel) -> float:
 
 def _paper_trailing_stop_price(position: PositionModel, mark_price: float) -> float | None:
     trailing_config = loads_dict(position.trailing_stop_config_json)
-    trailing_mode = str(trailing_config.get("mode") or settings.trailing_stop.mode or "none").lower()
+    trailing_mode = _resolve_trailing_mode(trailing_config, position)
     if trailing_mode not in {"moving", "profit_pct_trailing"}:
         return None
 
@@ -449,12 +505,14 @@ def _get_exchange_config_for_position(position: PositionModel) -> dict | None:
 
 async def get_monitor_state() -> dict:
     """Get position monitor state."""
+    raw_mode = str(settings.trailing_stop.mode or "none").lower()
+    display_mode = raw_mode if raw_mode != "auto" else f"auto -> {_resolve_trailing_mode({})}"
     return {
         "enabled": True,
         "position_tracking_enabled": True,
-        "trailing_stop_enabled": settings.trailing_stop.mode != "none",
+        "trailing_stop_enabled": raw_mode != "none",
         "interval_secs": settings.position_monitor_interval_secs,
-        "mode": settings.trailing_stop.mode,
+        "mode": display_mode,
     }
 
 
@@ -1646,7 +1704,7 @@ def _update_unrealized(position: PositionModel, mark_price: float) -> None:
 
 async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: dict, exchange_position: dict, place_protective_stop) -> bool:
     trailing_config = loads_dict(position.trailing_stop_config_json)
-    trailing_mode = str(trailing_config.get("mode") or settings.trailing_stop.mode or "none").lower()
+    trailing_mode = _resolve_trailing_mode(trailing_config, position)
 
     if trailing_mode == "none":
         return False
@@ -1739,7 +1797,7 @@ async def _adjust_trailing_stop_on_tp_hit(
     from models import TrailingStopHistory  # noqa: F401 - Used for type annotation in future
 
     trailing_config = loads_dict(position.trailing_stop_config_json)
-    trailing_mode = str(trailing_config.get("mode") or "none").lower()
+    trailing_mode = _resolve_trailing_mode(trailing_config, position)
 
     if trailing_mode not in {"breakeven_on_tp1", "step_trailing"}:
         return False
