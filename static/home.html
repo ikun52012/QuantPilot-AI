@@ -42,6 +42,9 @@
         .nav-links a{color:var(--text-secondary);font-size:14px;font-weight:500;padding:8px 14px;border-radius:var(--radius);transition:all .2s}
         .nav-links a:hover{color:var(--text-primary);background:var(--bg-section-alt)}
         .nav-actions{display:flex;align-items:center;gap:10px}
+.lang-select{background:#fff;color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;font:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:border-color .2s}
+.lang-select:hover{border-color:var(--border-hover)}
+.lang-select:focus{outline:2px solid var(--accent);outline-offset:1px}
         .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:var(--radius);font-size:14px;font-weight:600;transition:all .25s;cursor:pointer;border:none;text-decoration:none}
         .btn-primary{background:var(--accent);color:#fff;box-shadow:0 2px 8px var(--accent-glow)}
         .btn-primary:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:0 6px 24px var(--accent-glow)}
@@ -185,14 +188,21 @@
             QuantPilot
         </a>
         <div class="nav-links">
-            <a href="#platform">Platform</a>
-            <a href="#features">Features</a>
-            <a href="#exchanges">Exchanges</a>
-            <a href="#docs">Docs</a>
+            <a href="#platform" data-i18n="landing.nav_platform" data-i18n-fallback="Platform">Platform</a>
+            <a href="#features" data-i18n="landing.nav_features" data-i18n-fallback="Features">Features</a>
+            <a href="#exchanges" data-i18n="landing.nav_exchanges" data-i18n-fallback="Exchanges">Exchanges</a>
+            <a href="#docs" data-i18n="landing.nav_docs" data-i18n-fallback="Docs">Docs</a>
         </div>
         <div class="nav-actions">
-            <a href="/login" class="btn btn-ghost">Sign In</a>
-            <a href="/register" class="btn btn-primary">Get Started</a>
+            <select class="lang-select" id="nav-lang-select" aria-label="Language">
+                <option value="en">English</option>
+                <option value="zh">中文</option>
+                <option value="ja">日本語</option>
+                <option value="ko">한국어</option>
+                <option value="es">Español</option>
+            </select>
+            <a href="/login" class="btn btn-ghost" data-i18n="landing.nav_signin" data-i18n-fallback="Sign In">Sign In</a>
+            <a href="/register" class="btn btn-primary" data-i18n="landing.nav_getstarted" data-i18n-fallback="Get Started">Get Started</a>
         </div>
     </div>
 </nav>
@@ -203,32 +213,32 @@
         <div class="hero-inner">
             <div class="hero-label">
                 <span class="dot"></span>
-                Open-source &middot; Multi-exchange &middot; AI-ready
+                <span data-i18n="landing.hero_label" data-i18n-fallback="Open-source · Multi-exchange · AI-ready">Open-source &middot; Multi-exchange &middot; AI-ready</span>
             </div>
-            <h1>Algorithmic Crypto Trading,<br><span class="highlight">Automated.</span></h1>
-            <p class="hero-sub">
+            <h1><span data-i18n="landing.hero_title_1" data-i18n-fallback="Algorithmic Crypto Trading,">Algorithmic Crypto Trading,</span><br><span class="highlight" data-i18n="landing.hero_title_2" data-i18n-fallback="Automated.">Automated.</span></h1>
+            <p class="hero-sub" data-i18n="landing.hero_desc" data-i18n-fallback="Connect TradingView signals to Binance, OKX, Bybit, and more. QuantPilot handles signal validation, risk management, multi-TP execution, and smart trailing stops — so you can focus on strategy.">
                 Connect TradingView signals to Binance, OKX, Bybit, and more. QuantPilot handles signal validation, risk management, multi-TP execution, and smart trailing stops &mdash; so you can focus on strategy.
             </p>
             <div class="hero-actions">
-                <a href="/register" class="btn btn-primary btn-lg"><i class="ri-rocket-line"></i> Create Free Account</a>
-                <a href="#platform" class="btn btn-ghost btn-lg"><i class="ri-play-circle-line"></i> See How It Works</a>
+                <a href="/register" class="btn btn-primary btn-lg"><i class="ri-rocket-line"></i> <span data-i18n="landing.hero_cta_primary" data-i18n-fallback="Create Free Account">Create Free Account</span></a>
+                <a href="#platform" class="btn btn-ghost btn-lg"><i class="ri-play-circle-line"></i> <span data-i18n="landing.hero_cta_secondary" data-i18n-fallback="See How It Works">See How It Works</span></a>
             </div>
             <div class="hero-stats">
                 <div class="hero-stat">
                     <div class="hero-stat-value">6<span class="unit">+</span></div>
-                    <div class="hero-stat-label">Exchanges</div>
+                    <div class="hero-stat-label" data-i18n="landing.stat_exchanges" data-i18n-fallback="Exchanges">Exchanges</div>
                 </div>
                 <div class="hero-stat">
                     <div class="hero-stat-value">4<span class="unit">TP</span></div>
-                    <div class="hero-stat-label">Take-Profit Levels</div>
+                    <div class="hero-stat-label" data-i18n="landing.stat_tp" data-i18n-fallback="Take-Profit Levels">Take-Profit Levels</div>
                 </div>
                 <div class="hero-stat">
                     <div class="hero-stat-value">5<span class="unit">+</span></div>
-                    <div class="hero-stat-label">AI Providers</div>
+                    <div class="hero-stat-label" data-i18n="landing.stat_ai" data-i18n-fallback="AI Providers">AI Providers</div>
                 </div>
                 <div class="hero-stat">
                     <div class="hero-stat-value">24&frasl;7</div>
-                    <div class="hero-stat-label">Position Monitor</div>
+                    <div class="hero-stat-label" data-i18n="landing.stat_monitor" data-i18n-fallback="Position Monitor">Position Monitor</div>
                 </div>
             </div>
         </div>
@@ -238,31 +248,31 @@
 <!-- Platform / Process -->
 <section class="section" id="platform">
     <div class="container">
-        <div class="section-label"><i class="ri-route-line"></i> THE PROCESS</div>
-        <h2 class="section-title">From Signal to Execution</h2>
-        <p class="section-desc">
+        <div class="section-label"><i class="ri-route-line"></i> <span data-i18n="landing.process_label" data-i18n-fallback="THE PROCESS">THE PROCESS</span></div>
+        <h2 class="section-title" data-i18n="landing.process_title" data-i18n-fallback="From Signal to Execution">From Signal to Execution</h2>
+        <p class="section-desc" data-i18n="landing.process_desc" data-i18n-fallback="QuantPilot bridges the gap between your trading signals and exchange execution, with institutional-grade risk controls at every step.">
             QuantPilot bridges the gap between your trading signals and exchange execution, with institutional-grade risk controls at every step.
         </p>
         <div class="process-grid">
             <div class="process-step">
                 <div class="process-step-num blue"><i class="ri-webhook-line"></i></div>
-                <h3>Signal Ingestion</h3>
-                <p>Receive signals via TradingView webhooks with IP-based rate limiting and replay protection.</p>
+                <h3 data-i18n="landing.process_step1_title" data-i18n-fallback="Signal Ingestion">Signal Ingestion</h3>
+                <p data-i18n="landing.process_step1_desc" data-i18n-fallback="Receive signals via TradingView webhooks with IP-based rate limiting and replay protection.">Receive signals via TradingView webhooks with IP-based rate limiting and replay protection.</p>
             </div>
             <div class="process-step">
                 <div class="process-step-num purple"><i class="ri-brain-line"></i></div>
-                <h3>AI Analysis</h3>
-                <p>GPT-4o, Claude, DeepSeek, or Mistral validate signal quality, assess risk, and recommend position size.</p>
+                <h3 data-i18n="landing.process_step2_title" data-i18n-fallback="AI Analysis">AI Analysis</h3>
+                <p data-i18n="landing.process_step2_desc" data-i18n-fallback="GPT-4o, Claude, DeepSeek, or Mistral validate signal quality, assess risk, and recommend position size.">GPT-4o, Claude, DeepSeek, or Mistral validate signal quality, assess risk, and recommend position size.</p>
             </div>
             <div class="process-step">
                 <div class="process-step-num green"><i class="ri-shield-check-line"></i></div>
-                <h3>Risk Filtering</h3>
-                <p>Daily trade limits, correlation checks, leverage caps, and pre-filters ensure only sound trades execute.</p>
+                <h3 data-i18n="landing.process_step3_title" data-i18n-fallback="Risk Filtering">Risk Filtering</h3>
+                <p data-i18n="landing.process_step3_desc" data-i18n-fallback="Daily trade limits, correlation checks, leverage caps, and pre-filters ensure only sound trades execute.">Daily trade limits, correlation checks, leverage caps, and pre-filters ensure only sound trades execute.</p>
             </div>
             <div class="process-step">
                 <div class="process-step-num teal"><i class="ri-exchange-funds-line"></i></div>
-                <h3>Execution & Monitoring</h3>
-                <p>Place multi-TP orders, smart trailing stops, and 24/7 position monitoring with ghost detection.</p>
+                <h3 data-i18n="landing.process_step4_title" data-i18n-fallback="Execution & Monitoring">Execution &amp; Monitoring</h3>
+                <p data-i18n="landing.process_step4_desc" data-i18n-fallback="Place multi-TP orders, smart trailing stops, and 24/7 position monitoring with ghost detection.">Place multi-TP orders, smart trailing stops, and 24/7 position monitoring with ghost detection.</p>
             </div>
         </div>
     </div>
@@ -271,41 +281,41 @@
 <!-- Features -->
 <section class="section section-alt" id="features">
     <div class="container">
-        <div class="section-label"><i class="ri-flashlight-line"></i> CAPABILITIES</div>
-        <h2 class="section-title">Built for Serious Traders</h2>
-        <p class="section-desc">
+        <div class="section-label"><i class="ri-flashlight-line"></i> <span data-i18n="landing.cap_label" data-i18n-fallback="CAPABILITIES">CAPABILITIES</span></div>
+        <h2 class="section-title" data-i18n="landing.cap_title" data-i18n-fallback="Built for Serious Traders">Built for Serious Traders</h2>
+        <p class="section-desc" data-i18n="landing.cap_desc" data-i18n-fallback="Production-grade features designed from real trading experience, not hype.">
             Production-grade features designed from real trading experience, not hype.
         </p>
         <div class="features-grid">
             <div class="feature-card">
                 <div class="feature-icon blue"><i class="ri-router-line"></i></div>
-                <h3>Multi-Exchange</h3>
-                <p>Execute simultaneously on Binance, OKX, Bybit, Bitget, Gate.io, and Coinbase. Unified API with automatic symbol resolution and contract size handling.</p>
+                <h3 data-i18n="landing.feat1_title" data-i18n-fallback="Multi-Exchange">Multi-Exchange</h3>
+                <p data-i18n="landing.feat1_desc" data-i18n-fallback="Execute simultaneously on Binance, OKX, Bybit, Bitget, Gate.io, and Coinbase. Unified API with automatic symbol resolution and contract size handling.">Execute simultaneously on Binance, OKX, Bybit, Bitget, Gate.io, and Coinbase. Unified API with automatic symbol resolution and contract size handling.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon green"><i class="ri-trophy-line"></i></div>
-                <h3>Multi-Take-Profit</h3>
-                <p>Up to 4 TP levels with quantity split. Each level tracked independently with order verification and automatic re-placement on exchange cancellation.</p>
+                <h3 data-i18n="landing.feat2_title" data-i18n-fallback="Multi-Take-Profit">Multi-Take-Profit</h3>
+                <p data-i18n="landing.feat2_desc" data-i18n-fallback="Up to 4 TP levels with quantity split. Each level tracked independently with order verification and automatic re-placement on exchange cancellation.">Up to 4 TP levels with quantity split. Each level tracked independently with order verification and automatic re-placement on exchange cancellation.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon purple"><i class="ri-line-chart-line"></i></div>
-                <h3>Smart Trailing Stop</h3>
-                <p>5 trailing modes: none, auto (AI-selected), moving, breakeven-on-TP1, step-trailing. Re-evaluated on limit order fills for changed market conditions.</p>
+                <h3 data-i18n="landing.feat3_title" data-i18n-fallback="Smart Trailing Stop">Smart Trailing Stop</h3>
+                <p data-i18n="landing.feat3_desc" data-i18n-fallback="5 trailing modes: none, auto (AI-selected), moving, breakeven-on-TP1, step-trailing. Re-evaluated on limit order fills for changed market conditions.">5 trailing modes: none, auto (AI-selected), moving, breakeven-on-TP1, step-trailing. Re-evaluated on limit order fills for changed market conditions.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon cyan"><i class="ri-brain-line"></i></div>
-                <h3>AI-Powered Decisions</h3>
-                <p>Optional AI analysis with confidence scoring, market regime detection, and trend strength assessment. Built-in caching for sub-second repeated signals.</p>
+                <h3 data-i18n="landing.feat4_title" data-i18n-fallback="AI-Powered Decisions">AI-Powered Decisions</h3>
+                <p data-i18n="landing.feat4_desc" data-i18n-fallback="Optional AI analysis with confidence scoring, market regime detection, and trend strength assessment. Built-in caching for sub-second repeated signals.">Optional AI analysis with confidence scoring, market regime detection, and trend strength assessment. Built-in caching for sub-second repeated signals.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon orange"><i class="ri-shield-keyhole-line"></i></div>
-                <h3>Institutional Risk Controls</h3>
-                <p>Pre-filter DB for daily limits, emergency stop, position correlation checks, leverage rollback on failure, and hard SL boundaries (0.1%&ndash;50% from entry).</p>
+                <h3 data-i18n="landing.feat5_title" data-i18n-fallback="Institutional Risk Controls">Institutional Risk Controls</h3>
+                <p data-i18n="landing.feat5_desc" data-i18n-fallback="Pre-filter DB for daily limits, emergency stop, position correlation checks, leverage rollback on failure, and hard SL boundaries (0.1%–50% from entry).">Pre-filter DB for daily limits, emergency stop, position correlation checks, leverage rollback on failure, and hard SL boundaries (0.1%&ndash;50% from entry).</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon rose"><i class="ri-eye-line"></i></div>
-                <h3>24/7 Position Monitor</h3>
-                <p>Continuous reconciliation with exchange data. Ghost position detection with API-failure safeguards. Protective order verification and automatic re-placement.</p>
+                <h3 data-i18n="landing.feat6_title" data-i18n-fallback="24/7 Position Monitor">24/7 Position Monitor</h3>
+                <p data-i18n="landing.feat6_desc" data-i18n-fallback="Continuous reconciliation with exchange data. Ghost position detection with API-failure safeguards. Protective order verification and automatic re-placement.">Continuous reconciliation with exchange data. Ghost position detection with API-failure safeguards. Protective order verification and automatic re-placement.</p>
             </div>
         </div>
     </div>
@@ -316,17 +326,17 @@
     <div class="container">
         <div class="detail-row">
             <div class="detail-content">
-                <div class="section-label"><i class="ri-webhook-line"></i> SIGNAL PROCESSING</div>
-                <h2 class="section-title">Reliable Signal Ingestion</h2>
-                <p class="section-desc">
+                <div class="section-label"><i class="ri-webhook-line"></i> <span data-i18n="landing.signal_label" data-i18n-fallback="SIGNAL PROCESSING">SIGNAL PROCESSING</span></div>
+                <h2 class="section-title" data-i18n="landing.signal_title" data-i18n-fallback="Reliable Signal Ingestion">Reliable Signal Ingestion</h2>
+                <p class="section-desc" data-i18n="landing.signal_desc" data-i18n-fallback="Secure webhooks with replay protection, IP rate limiting, and daily trade caps ensure your signals are processed exactly once without over-trading.">
                     Secure webhooks with replay protection, IP rate limiting, and daily trade caps ensure your signals are processed exactly once without over-trading.
                 </p>
                 <ul class="detail-checks">
-                    <li><i class="ri-check-line"></i> HMAC signature verification for signal authenticity</li>
-                    <li><i class="ri-check-line"></i> IP-based rate limiting (60 req/min) prevents abuse</li>
-                    <li><i class="ri-check-line"></i> Fingerprint-based replay protection against duplicates</li>
-                    <li><i class="ri-check-line"></i> Per-user daily trade limits with database persistence</li>
-                    <li><i class="ri-check-line"></i> Emergency stop, pause, and read-only trading modes</li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.signal_check1" data-i18n-fallback="HMAC signature verification for signal authenticity">HMAC signature verification for signal authenticity</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.signal_check2" data-i18n-fallback="IP-based rate limiting (60 req/min) prevents abuse">IP-based rate limiting (60 req/min) prevents abuse</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.signal_check3" data-i18n-fallback="Fingerprint-based replay protection against duplicates">Fingerprint-based replay protection against duplicates</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.signal_check4" data-i18n-fallback="Per-user daily trade limits with database persistence">Per-user daily trade limits with database persistence</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.signal_check5" data-i18n-fallback="Emergency stop, pause, and read-only trading modes">Emergency stop, pause, and read-only trading modes</span></li>
                 </ul>
             </div>
             <div class="detail-visual">
@@ -353,18 +363,18 @@
     <div class="container">
         <div class="detail-row reverse">
             <div class="detail-content">
-                <div class="section-label"><i class="ri-shield-keyhole-line"></i> RISK MANAGEMENT</div>
-                <h2 class="section-title">Multi-Layer Risk Protection</h2>
-                <p class="section-desc">
+                <div class="section-label"><i class="ri-shield-keyhole-line"></i> <span data-i18n="landing.risk_label" data-i18n-fallback="RISK MANAGEMENT">RISK MANAGEMENT</span></div>
+                <h2 class="section-title" data-i18n="landing.risk_title" data-i18n-fallback="Multi-Layer Risk Protection">Multi-Layer Risk Protection</h2>
+                <p class="section-desc" data-i18n="landing.risk_desc" data-i18n-fallback="Every trade passes through 7 risk checks before execution, and positions are continuously monitored after entry.">
                     Every trade passes through 7 risk checks before execution, and positions are continuously monitored after entry.
                 </p>
                 <ul class="detail-checks">
-                    <li><i class="ri-check-line"></i> Pre-filter database enforces daily trade caps per user</li>
-                    <li><i class="ri-check-line"></i> AI confidence and risk score gating</li>
-                    <li><i class="ri-check-line"></i> Correlation risk prevents over-concentration</li>
-                    <li><i class="ri-check-line"></i> Leverage setup with automatic rollback on failure</li>
-                    <li><i class="ri-check-line"></i> Hard SL boundaries: 0.1% minimum, 50% maximum from entry</li>
-                    <li><i class="ri-check-line"></i> Ghost position detection with exchange API failure safeguards</li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.risk_check1" data-i18n-fallback="Pre-filter database enforces daily trade caps per user">Pre-filter database enforces daily trade caps per user</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.risk_check2" data-i18n-fallback="AI confidence and risk score gating">AI confidence and risk score gating</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.risk_check3" data-i18n-fallback="Correlation risk prevents over-concentration">Correlation risk prevents over-concentration</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.risk_check4" data-i18n-fallback="Leverage setup with automatic rollback on failure">Leverage setup with automatic rollback on failure</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.risk_check5" data-i18n-fallback="Hard SL boundaries: 0.1% minimum, 50% maximum from entry">Hard SL boundaries: 0.1% minimum, 50% maximum from entry</span></li>
+                    <li><i class="ri-check-line"></i> <span data-i18n="landing.risk_check6" data-i18n-fallback="Ghost position detection with exchange API failure safeguards">Ghost position detection with exchange API failure safeguards</span></li>
                 </ul>
             </div>
             <div class="detail-visual">
@@ -372,22 +382,22 @@
                 <div class="pipeline">
                     <div class="pipeline-row">
                         <i class="ri-shield-check-line" style="color:#34d399"></i>
-                        <span>Daily trade limit check</span>
+                        <span data-i18n="landing.pipeline_check1" data-i18n-fallback="Daily trade limit check">Daily trade limit check</span>
                         <span class="pass green">PASS</span>
                     </div>
                     <div class="pipeline-row">
                         <i class="ri-shield-check-line" style="color:#34d399"></i>
-                        <span>AI confidence &ge; threshold</span>
+                        <span data-i18n="landing.pipeline_check2" data-i18n-fallback="AI confidence ≥ threshold">AI confidence &ge; threshold</span>
                         <span class="pass green">PASS</span>
                     </div>
                     <div class="pipeline-row">
                         <i class="ri-shield-check-line" style="color:#34d399"></i>
-                        <span>Correlation risk check</span>
+                        <span data-i18n="landing.pipeline_check3" data-i18n-fallback="Correlation risk check">Correlation risk check</span>
                         <span class="pass green">PASS</span>
                     </div>
                     <div class="pipeline-row">
                         <i class="ri-exchange-funds-line" style="color:#60a5fa"></i>
-                        <span>Execute on exchange</span>
+                        <span data-i18n="landing.pipeline_check4" data-i18n-fallback="Execute on exchange">Execute on exchange</span>
                         <span class="pass blue">LIVE</span>
                     </div>
                 </div>
@@ -399,9 +409,9 @@
 <!-- Exchanges -->
 <section class="section" id="exchanges">
     <div class="container" style="text-align:center">
-        <div class="section-label"><i class="ri-exchange-line"></i> EXCHANGES</div>
-        <h2 class="section-title">Multi-Exchange Execution</h2>
-        <p class="section-desc" style="max-width:560px;margin-left:auto;margin-right:auto">
+        <div class="section-label"><i class="ri-exchange-line"></i> <span data-i18n="landing.exchanges_label" data-i18n-fallback="EXCHANGES">EXCHANGES</span></div>
+        <h2 class="section-title" data-i18n="landing.exchanges_title" data-i18n-fallback="Multi-Exchange Execution">Multi-Exchange Execution</h2>
+        <p class="section-desc" style="max-width:560px;margin-left:auto;margin-right:auto" data-i18n="landing.exchanges_desc" data-i18n-fallback="Unified API across major exchanges with automatic symbol resolution, contract size handling, and hedge mode support.">
             Unified API across major exchanges with automatic symbol resolution, contract size handling, and hedge mode support.
         </p>
         <div class="exchanges-row">
@@ -418,11 +428,11 @@
 <!-- CTA -->
 <section class="cta-section" id="cta">
     <div class="container" style="position:relative;z-index:1">
-        <h2>Start Trading Smarter Today</h2>
-        <p>Open-source, self-hosted, and free. Deploy QuantPilot in minutes and turn your TradingView signals into automated execution.</p>
+        <h2 data-i18n="landing.cta_title" data-i18n-fallback="Start Trading Smarter Today">Start Trading Smarter Today</h2>
+        <p data-i18n="landing.cta_desc" data-i18n-fallback="Open-source, self-hosted, and free. Deploy QuantPilot in minutes and turn your TradingView signals into automated execution.">Open-source, self-hosted, and free. Deploy QuantPilot in minutes and turn your TradingView signals into automated execution.</p>
         <div style="display:flex;gap:14px;justify-content:center;flex-wrap:wrap">
-            <a href="/register" class="btn btn-primary btn-lg"><i class="ri-rocket-line"></i> Create Free Account</a>
-            <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank" class="btn btn-dark btn-lg"><i class="ri-github-fill"></i> View on GitHub</a>
+            <a href="/register" class="btn btn-primary btn-lg"><i class="ri-rocket-line"></i> <span data-i18n="landing.cta_primary" data-i18n-fallback="Create Free Account">Create Free Account</span></a>
+            <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank" class="btn btn-dark btn-lg"><i class="ri-github-fill"></i> <span data-i18n="landing.cta_github" data-i18n-fallback="View on GitHub">View on GitHub</span></a>
         </div>
     </div>
 </section>
@@ -436,25 +446,25 @@
                     <div class="footer-brand-icon"><i class="ri-line-chart-line"></i></div>
                     QuantPilot
                 </div>
-                <p class="footer-desc">Open-source algorithmic crypto trading platform. From signal to execution, with institutional-grade risk controls.</p>
+                <p class="footer-desc" data-i18n="landing.footer_desc" data-i18n-fallback="Open-source algorithmic crypto trading platform. From signal to execution, with institutional-grade risk controls.">Open-source algorithmic crypto trading platform. From signal to execution, with institutional-grade risk controls.</p>
             </div>
             <div class="footer-col">
-                <h4>Platform</h4>
-                <a href="/register">Get Started</a>
-                <a href="/login">Sign In</a>
-                <a href="#features">Features</a>
-                <a href="#exchanges">Exchanges</a>
+                <h4 data-i18n="landing.footer_platform" data-i18n-fallback="Platform">Platform</h4>
+                <a href="/register" data-i18n="landing.nav_getstarted" data-i18n-fallback="Get Started">Get Started</a>
+                <a href="/login" data-i18n="landing.nav_signin" data-i18n-fallback="Sign In">Sign In</a>
+                <a href="#features" data-i18n="landing.nav_features" data-i18n-fallback="Features">Features</a>
+                <a href="#exchanges" data-i18n="landing.nav_exchanges" data-i18n-fallback="Exchanges">Exchanges</a>
             </div>
             <div class="footer-col">
-                <h4>Resources</h4>
-                <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank">GitHub</a>
-                <a href="#docs">Documentation</a>
-                <a href="#platform">How It Works</a>
+                <h4 data-i18n="landing.footer_resources" data-i18n-fallback="Resources">Resources</h4>
+                <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank" data-i18n="landing.footer_github" data-i18n-fallback="GitHub">GitHub</a>
+                <a href="#docs" data-i18n="landing.footer_documentation" data-i18n-fallback="Documentation">Documentation</a>
+                <a href="#platform" data-i18n="landing.footer_howitworks" data-i18n-fallback="How It Works">How It Works</a>
             </div>
             <div class="footer-col">
-                <h4>Community</h4>
-                <a href="https://github.com/ikun52012/QuantPilot-AI/issues" target="_blank">Issues</a>
-                <a href="https://github.com/ikun52012/QuantPilot-AI/pulls" target="_blank">Pull Requests</a>
+                <h4 data-i18n="landing.footer_community" data-i18n-fallback="Community">Community</h4>
+                <a href="https://github.com/ikun52012/QuantPilot-AI/issues" target="_blank" data-i18n="landing.footer_issues" data-i18n-fallback="Issues">Issues</a>
+                <a href="https://github.com/ikun52012/QuantPilot-AI/pulls" target="_blank" data-i18n="landing.footer_prs" data-i18n-fallback="Pull Requests">Pull Requests</a>
             </div>
         </div>
         <div class="footer-bottom">
@@ -463,6 +473,7 @@
     </div>
 </footer>
 
+<script src="/static/js/i18n.js"></script>
 <script>
     const nav = document.getElementById('navbar');
     window.addEventListener('scroll', () => {
