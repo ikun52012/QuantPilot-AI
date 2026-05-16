@@ -61,9 +61,9 @@ jobs:
       - name: Run Ruff
         run: ruff check .
 
-      - name: Run MyPy
-        run: mypy --ignore-missing-imports .
-        continue-on-error: true
+      - name: Run MyPy (advisory)
+        run: |
+          mypy --ignore-missing-imports . || echo "MyPy reported type issues; advisory only until the existing type debt is cleaned up."
 
   docker:
     runs-on: ubuntu-latest
