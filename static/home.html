@@ -3,1093 +3,463 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QuantPilot AI — AI-Powered Crypto Trading Platform</title>
-    <meta name="description" content="QuantPilot AI v4.5.3 — AI-assisted crypto trade automation with TradingView webhooks, pre-filtering, multi-TP exits, strategy automation, and multi-exchange execution.">
-    <meta name="keywords" content="crypto trading, AI trading, quantitative trading, GPT-4o, Claude, DeepSeek, OpenRouter, Binance, OKX, automated trading">
-    <meta name="theme-color" content="#0f151f">
+    <title>QuantPilot — Algorithmic Crypto Trading Platform</title>
+    <meta name="description" content="QuantPilot — Automated crypto trading with multi-exchange execution, AI-powered analysis, smart trailing stops, and institutional-grade risk management.">
+    <meta name="keywords" content="crypto trading, algorithmic trading, automated trading, Binance, OKX, Bybit, TradingView, risk management, trailing stop">
+    <meta name="theme-color" content="#111827">
     <link rel="manifest" href="/static/manifest.json?v=20260504-2">
-    <link href="https://fonts.bunny.net/css?family=outfit:500,600,700,800,900|inter:300,400,500,600|jetbrains+mono:400,500" rel="stylesheet">
+    <link href="https://fonts.bunny.net/css?family=inter:300,400,500,600,700&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.1.0/fonts/remixicon.css" rel="stylesheet">
     <style>
-        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+        :root{
+            --bg:#0b0f19;--bg-surface:#111827;--bg-card:#1a2236;--bg-card-hover:#1f2a42;
+            --border:#1e293b;--border-hover:#334155;
+            --text-primary:#f1f5f9;--text-secondary:#94a3b8;--text-muted:#64748b;
+            --accent:#3b82f6;--accent-hover:#2563eb;--accent-light:rgba(59,130,246,.12);
+            --green:#10b981;--green-light:rgba(16,185,129,.12);
+            --purple:#8b5cf6;--purple-light:rgba(139,92,246,.12);
+            --cyan:#06b6d4;--cyan-light:rgba(6,182,212,.12);
+            --orange:#f59e0b;--orange-light:rgba(245,158,11,.12);
+            --rose:#f43f5e;--rose-light:rgba(244,63,94,.12);
+            --radius:8px;--radius-lg:12px;
+        }
+        html{scroll-behavior:smooth}
+        body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text-primary);line-height:1.7;overflow-x:hidden}
+        h1,h2,h3{font-weight:700;letter-spacing:-.02em;line-height:1.2}
+        a{text-decoration:none;color:inherit}
+        .container{max-width:1200px;margin:0 auto;padding:0 24px}
 
-        :root {
-            --bg-dark: #07090d;
-            --bg-card: rgba(15, 21, 32, 0.86);
-            --bg-card-hover: rgba(20, 28, 42, 0.94);
-            --border: rgba(148, 163, 184, 0.12);
-            --border-hover: rgba(45, 212, 191, 0.28);
-            --text-primary: #eef4fb;
-            --text-secondary: #9caaba;
-            --text-muted: #667487;
-            --accent-indigo: #38bdf8;
-            --accent-blue: #38bdf8;
-            --accent-purple: #8b5cf6;
-            --accent-cyan: #22d3ee;
-            --accent-green: #2dd4bf;
-            --accent-orange: #fbbf24;
-            --accent-rose: #fb7185;
-            --gradient-hero: linear-gradient(135deg, #2dd4bf 0%, #38bdf8 100%);
-            --gradient-text: linear-gradient(135deg, #2dd4bf 0%, #38bdf8 100%);
-            --gradient-border: linear-gradient(135deg, rgba(45,212,191,0.36), rgba(56,189,248,0.24));
-            --glow-indigo: 0 0 70px rgba(56,189,248,0.10);
-            --glow-purple: 0 0 60px rgba(45,212,191,0.06);
-            --radius-xl: 8px;
-            --radius-lg: 8px;
-            --radius-md: 8px;
-            --radius-sm: 8px;
-        }
+        /* ── NAV ── */
+        .nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(11,15,25,.85);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);transition:all .3s}
+        .nav .container{display:flex;align-items:center;justify-content:space-between;height:64px}
+        .nav-brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px}
+        .nav-brand-icon{width:32px;height:32px;border-radius:6px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#fff;font-size:16px}
+        .nav-links{display:flex;align-items:center;gap:6px}
+        .nav-links a{color:var(--text-secondary);font-size:14px;font-weight:500;padding:8px 14px;border-radius:6px;transition:all .2s}
+        .nav-links a:hover{color:var(--text-primary);background:rgba(255,255,255,.05)}
+        .nav-actions{display:flex;align-items:center;gap:10px}
+        .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:var(--radius);font-size:14px;font-weight:600;transition:all .25s;cursor:pointer;border:none;text-decoration:none}
+        .btn-primary{background:var(--accent);color:#fff}
+        .btn-primary:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:0 4px 20px rgba(59,130,246,.3)}
+        .btn-ghost{background:transparent;color:var(--text-secondary);border:1px solid var(--border)}
+        .btn-ghost:hover{color:var(--text-primary);border-color:var(--border-hover);background:rgba(255,255,255,.03)}
+        .btn-lg{padding:14px 32px;font-size:15px;border-radius:var(--radius-lg)}
 
-        html { scroll-behavior: smooth; }
+        /* ── HERO ── */
+        .hero{padding:140px 0 80px;text-align:center;position:relative}
+        .hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:600px;background:radial-gradient(ellipse,rgba(59,130,246,.08),transparent 70%);pointer-events:none}
+        .hero-label{display:inline-flex;align-items:center;gap:8px;padding:6px 16px 6px 10px;border-radius:50px;border:1px solid var(--border);background:var(--bg-surface);font-size:13px;font-weight:500;color:var(--text-secondary);margin-bottom:28px}
+        .hero-label .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px rgba(16,185,129,.5)}
+        .hero h1{font-size:clamp(36px,6vw,60px);font-weight:800;margin-bottom:24px;letter-spacing:-.03em}
+        .hero h1 .highlight{background:linear-gradient(135deg,var(--green),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+        .hero-sub{font-size:17px;color:var(--text-secondary);max-width:640px;margin:0 auto 44px;line-height:1.8}
+        .hero-actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+        .hero-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;margin-top:72px;border-radius:var(--radius-lg);overflow:hidden;border:1px solid var(--border);background:var(--border)}
+        .hero-stat{background:var(--bg-surface);padding:24px 16px;text-align:center}
+        .hero-stat-value{font-size:28px;font-weight:800;color:var(--text-primary)}
+        .hero-stat-value .unit{font-size:14px;font-weight:500;color:var(--text-muted);margin-left:2px}
+        .hero-stat-label{font-size:12px;color:var(--text-muted);margin-top:4px;font-weight:500;text-transform:uppercase;letter-spacing:.04em}
 
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: radial-gradient(circle at 50% -20%, rgba(56,189,248,.08), transparent 32%), linear-gradient(180deg, #07090d 0%, #090d14 46%, #070a10 100%);
-            color: var(--text-primary);
-            overflow-x: hidden;
-            line-height: 1.6;
-        }
+        /* ── SECTIONS ── */
+        .section{padding:100px 0}
+        .section-label{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);margin-bottom:16px}
+        .section-label i{font-size:16px}
+        .section-title{font-size:clamp(28px,4vw,42px);margin-bottom:16px}
+        .section-desc{color:var(--text-secondary);font-size:16px;max-width:600px;line-height:1.8;margin-bottom:48px}
 
-        h1, h2, h3, h4, h5, h6, .nav-logo {
-            font-family: 'Outfit', sans-serif;
-        }
+        /* ── PROCESS ── */
+        .process-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;position:relative}
+        .process-grid::before{content:'';position:absolute;top:40px;left:12.5%;right:12.5%;height:2px;background:linear-gradient(90deg,var(--border),var(--border-hover),var(--border))}
+        .process-step{position:relative;text-align:center}
+        .process-step-num{width:56px;height:56px;margin:0 auto 20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;position:relative;z-index:1}
+        .process-step-num.blue{background:var(--accent-light);color:var(--accent)}
+        .process-step-num.green{background:var(--green-light);color:var(--green)}
+        .process-step-num.purple{background:var(--purple-light);color:var(--purple)}
+        .process-step-num.cyan{background:var(--cyan-light);color:var(--cyan)}
+        .process-step h3{font-size:16px;margin-bottom:8px}
+        .process-step p{font-size:14px;color:var(--text-secondary);line-height:1.6}
 
-        code, .mono { font-family: 'JetBrains Mono', monospace; }
+        /* ── FEATURES ── */
+        .features-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+        .feature-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px 28px;transition:all .3s}
+        .feature-card:hover{border-color:var(--border-hover);transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.3)}
+        .feature-icon{width:44px;height:44px;border-radius:var(--radius);display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:20px}
+        .feature-icon.blue{background:var(--accent-light);color:var(--accent)}
+        .feature-icon.green{background:var(--green-light);color:var(--green)}
+        .feature-icon.purple{background:var(--purple-light);color:var(--purple)}
+        .feature-icon.cyan{background:var(--cyan-light);color:var(--cyan)}
+        .feature-icon.orange{background:var(--orange-light);color:var(--orange)}
+        .feature-icon.rose{background:var(--rose-light);color:var(--rose)}
+        .feature-card h3{font-size:16px;margin-bottom:10px}
+        .feature-card p{font-size:14px;color:var(--text-secondary);line-height:1.7}
 
-        /* ── Animated Background ── */
-        .bg-grid {
-            position: fixed; inset: 0; z-index: 0; pointer-events: none;
-            background-image:
-                linear-gradient(rgba(148,163,184,0.025) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(148,163,184,0.022) 1px, transparent 1px);
-            background-size: 40px 40px;
-            mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 20%, transparent 70%);
-            -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 20%, transparent 70%);
-        }
-        .bg-noise {
-            position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.015;
-            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
-            background-size: 256px 256px;
-        }
-        .bg-glow { display: none; }
-        /* ── Utility ── */
-        .container { max-width: 1240px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
-        .section { padding: 120px 0; }
-        .section-title {
-            font-size: clamp(30px, 4.5vw, 48px); font-weight: 800; text-align: center;
-            margin-bottom: 16px; letter-spacing: -0.03em;
-        }
-        .section-subtitle {
-            text-align: center; color: var(--text-secondary); font-size: 17px;
-            max-width: 640px; margin: 0 auto 64px; line-height: 1.7;
-        }
-        .gradient-text {
-            background: var(--gradient-text);
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
+        /* ── DETAIL SECTIONS ── */
+        .detail-row{display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:center;margin-bottom:100px}
+        .detail-row.reverse{direction:rtl}.detail-row.reverse>*{direction:ltr}
+        .detail-content .section-desc{margin-bottom:24px}
+        .detail-checks{list-style:none;padding:0;margin-top:20px}
+        .detail-checks li{display:flex;align-items:flex-start;gap:10px;font-size:14px;color:var(--text-secondary);margin-bottom:12px;line-height:1.6}
+        .detail-checks li i{color:var(--green);font-size:18px;margin-top:2px;flex-shrink:0}
+        .detail-visual{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px;min-height:320px;display:flex;flex-direction:column;justify-content:center}
+        .detail-visual h4{font-size:14px;color:var(--text-muted);margin-bottom:16px;font-weight:500;text-transform:uppercase;letter-spacing:.04em}
+        .code-block{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;font-family:'Cascadia Code',Consolas,monospace;font-size:13px;line-height:1.7;color:var(--text-secondary);overflow-x:auto}
+        .code-block .keyword{color:var(--accent)}
+        .code-block .string{color:var(--green)}
+        .code-block .comment{color:var(--text-muted)}
+        .code-block .key{color:var(--cyan)}
+        .code-block .value{color:var(--orange)}
 
-        @keyframes shimmer {
-            0% { background-position: 0% center; }
-            100% { background-position: -200% center; }
-        }
-        .shimmer-text {
-            background: linear-gradient(90deg, #2dd4bf 0%, #38bdf8 45%, #8b5cf6 50%, #38bdf8 75%, #2dd4bf 100%);
-            background-size: 200% auto;
-            color: transparent;
-            -webkit-background-clip: text;
-            background-clip: text;
-            animation: shimmer 5s linear infinite;
-        }
+        /* ── EXCHANGES ── */
+        .exchanges-row{display:flex;flex-wrap:wrap;gap:16px;justify-content:center;margin-top:48px}
+        .exchange-badge{display:flex;align-items:center;gap:10px;padding:12px 24px;border-radius:var(--radius-lg);background:var(--bg-surface);border:1px solid var(--border);font-size:14px;font-weight:600;color:var(--text-secondary);transition:all .3s}
+        .exchange-badge:hover{border-color:var(--border-hover);color:var(--text-primary);transform:translateY(-2px)}
+        .exchange-badge i{font-size:20px}
+        .exchange-badge .binance{color:#f0b90b}
+        .exchange-badge .okx{color:#fff}
+        .exchange-badge .bybit{color:#f7a600}
+        .exchange-badge .bitget{color:#00d4aa}
+        .exchange-badge .gateio{color:#2374ff}
 
-        @keyframes typing {
-            from { width: 0; }
-            to { width: 100%; }
-        }
-        @keyframes blink-caret {
-            0%, 100% { border-color: transparent; }
-            50% { border-color: var(--accent-indigo); }
-        }
+        /* ── CTA ── */
+        .cta-section{text-align:center;padding:100px 0;position:relative}
+        .cta-section::before{content:'';position:absolute;top:-100px;left:50%;transform:translateX(-50%);width:600px;height:400px;background:radial-gradient(ellipse,rgba(59,130,246,.06),transparent 70%);pointer-events:none}
+        .cta-section h2{font-size:clamp(28px,4vw,42px);margin-bottom:16px}
+        .cta-section p{color:var(--text-secondary);font-size:16px;max-width:500px;margin:0 auto 32px;line-height:1.7}
+        .cta-actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
 
-        /* ── Navbar ── */
-        .navbar {
-            position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-            padding: 18px 0;
-            background: rgba(4, 6, 14, 0.6);
-            backdrop-filter: blur(20px) saturate(1.2);
-            -webkit-backdrop-filter: blur(20px) saturate(1.2);
-            border-bottom: 1px solid transparent;
-            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .navbar.scrolled {
-            padding: 12px 0;
-            background: rgba(4, 6, 14, 0.92);
-            border-bottom-color: var(--border);
-        }
-        .navbar .container {
-            display: flex; align-items: center; justify-content: space-between;
-        }
-        .nav-logo {
-            display: flex; align-items: center; gap: 10px;
-            font-size: 22px; font-weight: 900; text-decoration: none; color: var(--text-primary);
-            letter-spacing: -0.02em;
-        }
-        .nav-logo-icon {
-            width: 36px; height: 36px; border-radius: var(--radius);
-            background: var(--gradient-hero);
-            display: flex; align-items: center; justify-content: center;
-            font-size: 18px; color: #fff;
-            box-shadow: 0 4px 16px rgba(59,130,246,0.26);
-        }
-        .nav-links { display: flex; align-items: center; gap: 8px; }
-        .nav-links a {
-            color: var(--text-secondary); text-decoration: none; font-size: 14px;
-            font-weight: 500; transition: all 0.2s; padding: 8px 16px;
-            border-radius: 8px;
-        }
-        .nav-links a:hover { color: var(--text-primary); background: rgba(255,255,255,0.05); }
-        .nav-cta-group { display: flex; align-items: center; gap: 10px; }
-        .nav-cta {
-            display: inline-flex; align-items: center; gap: 8px;
-            padding: 10px 22px; border-radius: var(--radius-sm);
-            background: var(--gradient-hero); color: #fff; font-weight: 600;
-            font-size: 14px; text-decoration: none; transition: all 0.3s;
-            box-shadow: 0 4px 20px rgba(59,130,246,0.26);
-        }
-        .nav-cta:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(59,130,246,0.38); }
-        .nav-cta-ghost {
-            display: inline-flex; align-items: center; gap: 8px;
-            padding: 10px 22px; border-radius: var(--radius-sm);
-            background: rgba(255,255,255,0.04); color: var(--text-primary); font-weight: 600;
-            font-size: 14px; text-decoration: none; transition: all 0.3s;
-            border: 1px solid var(--border);
-        }
-        .nav-cta-ghost:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); }
+        /* ── FOOTER ── */
+        .footer{border-top:1px solid var(--border);padding:48px 0 32px}
+        .footer-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:48px;margin-bottom:40px}
+        .footer-brand{font-size:18px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+        .footer-brand-icon{width:28px;height:28px;border-radius:6px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px}
+        .footer-desc{font-size:13px;color:var(--text-muted);line-height:1.7;max-width:280px}
+        .footer-col h4{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-secondary);margin-bottom:16px}
+        .footer-col a{display:block;font-size:13px;color:var(--text-muted);padding:4px 0;transition:color .2s}
+        .footer-col a:hover{color:var(--text-primary)}
+        .footer-bottom{border-top:1px solid var(--border);padding-top:24px;text-align:center;font-size:12px;color:var(--text-muted)}
 
-        /* ── Hero ── */
-        .hero {
-            min-height: 100vh; display: flex; align-items: center;
-            text-align: center; padding-top: 80px; position: relative;
+        /* ── RESPONSIVE ── */
+        @media(max-width:1024px){
+            .features-grid{grid-template-columns:repeat(2,1fr)}
+            .process-grid{grid-template-columns:repeat(2,1fr)}
+            .process-grid::before{display:none}
+            .detail-row{grid-template-columns:1fr;gap:40px}
+            .detail-row.reverse{direction:ltr}
+            .footer-grid{grid-template-columns:1fr 1fr;gap:32px}
         }
-        .hero-badge {
-            display: inline-flex; align-items: center; gap: 10px;
-            padding: 8px 20px 8px 12px; border-radius: 50px;
-            background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.22);
-            font-size: 13px; color: var(--accent-indigo); margin-bottom: 32px;
-            font-weight: 600; letter-spacing: 0.02em;
-        }
-        .hero-badge .dot-container {
-            width: 22px; height: 22px; border-radius: 50%;
-            background: rgba(34,197,94,0.12);
-            display: flex; align-items: center; justify-content: center;
-        }
-        .hero-badge .dot {
-            width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green);
-            animation: glow-pulse 2s infinite;
-        }
-        @keyframes glow-pulse {
-            0%,100% { box-shadow: 0 0 4px var(--accent-green); opacity: 1; }
-            50% { box-shadow: 0 0 16px var(--accent-green); opacity: 0.5; }
-        }
-        .hero h1 {
-            font-size: clamp(42px, 7vw, 80px); font-weight: 900;
-            letter-spacing: -0.04em; line-height: 1.05; margin-bottom: 28px;
-        }
-        .hero p {
-            font-size: 18px; color: var(--text-secondary); max-width: 700px;
-            margin: 0 auto 44px; line-height: 1.75;
-        }
-        .hero-actions { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
-        .btn-hero {
-            display: inline-flex; align-items: center; gap: 10px;
-            padding: 16px 36px; border-radius: var(--radius-md);
-            font-size: 15px; font-weight: 600; text-decoration: none;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); cursor: pointer; border: none;
-            position: relative; overflow: hidden;
-        }
-        .btn-hero::after {
-            content: ''; position: absolute; inset: 0;
-            background: linear-gradient(135deg, rgba(255,255,255,0.1), transparent);
-            opacity: 0; transition: opacity 0.3s;
-        }
-        .btn-hero:hover::after { opacity: 1; }
-        .btn-hero.primary {
-            background: var(--gradient-hero); color: #fff;
-            box-shadow: 0 4px 28px rgba(59,130,246,0.3);
-        }
-        .btn-hero.primary:hover { transform: translateY(-3px); box-shadow: 0 12px 40px rgba(59,130,246,0.42); }
-        .btn-hero.secondary {
-            background: rgba(255,255,255,0.04); color: var(--text-primary);
-            border: 1px solid var(--border);
-        }
-        .btn-hero.secondary:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); transform: translateY(-2px); }
-
-        /* ── Hero Stats ── */
-        .hero-stats {
-            display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px;
-            margin-top: 80px; border-radius: var(--radius-lg); overflow: hidden;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid var(--border);
-        }
-        .hero-stat {
-            text-align: center; padding: 28px 16px;
-            background: rgba(4, 6, 14, 0.8);
-            backdrop-filter: blur(12px);
-            transition: background 0.3s;
-        }
-        .hero-stat:hover { background: rgba(12, 17, 30, 0.9); }
-        .hero-stat-value {
-            font-size: 36px; font-weight: 900;
-            font-family: 'Outfit', sans-serif;
-            background: var(--gradient-text);
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-            background-clip: text; line-height: 1.2;
-        }
-        .hero-stat-label { font-size: 12px; color: var(--text-muted); margin-top: 6px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; }
-
-        /* ── Feature Cards ── */
-        .features-grid {
-            display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
-        }
-        .feature-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-xl);
-            padding: 36px 32px;
-            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            position: relative;
-            overflow: hidden;
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-        }
-        .feature-card::after {
-            content: '';
-            position: absolute;
-            inset: 0;
-            opacity: 0;
-            transition: opacity 0.4s;
-            background: radial-gradient(500px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(59,130,246,0.06), transparent 40%);
-            pointer-events: none;
-        }
-        .feature-card:hover::after { opacity: 1; }
-        .feature-card::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-            background: var(--gradient-border); opacity: 0;
-            transition: opacity 0.4s ease;
-        }
-        .feature-card:hover {
-            transform: translateY(-6px);
-            border-color: var(--border-hover);
-            box-shadow: var(--glow-indigo);
-        }
-        .feature-card:hover::before { opacity: 1; }
-        .feature-icon {
-            width: 52px; height: 52px; border-radius: var(--radius-md);
-            display: flex; align-items: center; justify-content: center;
-            font-size: 24px; margin-bottom: 24px;
-        }
-        .feature-icon.indigo { background: rgba(59,130,246,0.1); color: var(--accent-indigo); }
-        .feature-icon.blue { background: rgba(59,130,246,0.1); color: var(--accent-blue); }
-        .feature-icon.purple { background: rgba(167,139,250,0.1); color: var(--accent-purple); }
-        .feature-icon.cyan { background: rgba(6,182,212,0.1); color: var(--accent-cyan); }
-        .feature-icon.green { background: rgba(34,197,94,0.1); color: var(--accent-green); }
-        .feature-icon.orange { background: rgba(245,158,11,0.1); color: var(--accent-orange); }
-        .feature-icon.rose { background: rgba(239,68,68,0.1); color: var(--accent-rose); }
-        .feature-card .card-tag {
-            display: inline-block; padding: 3px 10px; border-radius: 6px;
-            font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
-            text-transform: uppercase; margin-bottom: 12px;
-        }
-        .tag-new { background: rgba(34,197,94,0.12); color: var(--accent-green); }
-        .tag-upgraded { background: rgba(59,130,246,0.12); color: var(--accent-indigo); }
-        .feature-card h3 { font-size: 18px; font-weight: 700; margin-bottom: 10px; letter-spacing: -0.01em; }
-        .feature-card p { font-size: 14px; color: var(--text-secondary); line-height: 1.65; }
-
-        /* ── AI Models Showcase ── */
-        .ai-showcase {
-            display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
-        }
-        .ai-main-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-xl);
-            padding: 40px;
-            position: relative; overflow: hidden;
-        }
-        .ai-main-card::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-            background: var(--gradient-border);
-        }
-        .ai-main-card h3 {
-            font-size: 22px; font-weight: 800; margin-bottom: 20px;
-            display: flex; align-items: center; gap: 12px;
-        }
-        .ai-main-card h3 i { font-size: 26px; }
-        .ai-models-grid {
-            display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
-        }
-        .ai-model-chip {
-            display: flex; align-items: center; gap: 10px;
-            padding: 14px 16px; border-radius: var(--radius-md);
-            background: rgba(255,255,255,0.03); border: 1px solid var(--border);
-            transition: all 0.3s; cursor: default;
-        }
-        .ai-model-chip:hover {
-            border-color: var(--border-hover);
-            background: rgba(59,130,246,0.05);
-            transform: translateY(-2px);
-        }
-        .ai-model-chip .model-icon {
-            width: 36px; height: 36px; border-radius: var(--radius);
-            display: flex; align-items: center; justify-content: center;
-            font-size: 16px; flex-shrink: 0;
-        }
-        .ai-model-chip .model-info { flex: 1; min-width: 0; }
-        .ai-model-chip .model-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .ai-model-chip .model-price { font-size: 11px; color: var(--text-muted); }
-
-        /* ── Decision Section ── */
-        .voting-section {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-xl);
-            padding: 40px;
-            position: relative; overflow: hidden;
-        }
-        .voting-section::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-            background: linear-gradient(90deg, var(--accent-green), var(--accent-blue), var(--accent-cyan));
-        }
-        .voting-section h3 {
-            font-size: 22px; font-weight: 800; margin-bottom: 20px;
-            display: flex; align-items: center; gap: 12px;
-        }
-        .voting-strategies {
-            display: flex; flex-direction: column; gap: 12px;
-        }
-        .strategy-item {
-            display: flex; align-items: center; gap: 14px;
-            padding: 16px 18px; border-radius: var(--radius-md);
-            background: rgba(255,255,255,0.02); border: 1px solid var(--border);
-            transition: all 0.3s;
-        }
-        .strategy-item:hover {
-            border-color: var(--border-hover);
-            background: rgba(59,130,246,0.04);
-        }
-        .strategy-icon {
-            width: 42px; height: 42px; border-radius: var(--radius-sm);
-            display: flex; align-items: center; justify-content: center;
-            font-size: 20px; flex-shrink: 0;
-        }
-        .strategy-info h4 { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
-        .strategy-info p { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
-
-        /* ── Pipeline Section ── */
-        .pipeline-flow {
-            display: flex; align-items: center; justify-content: center;
-            gap: 6px; flex-wrap: wrap; margin-top: 48px;
-        }
-        .pipeline-step {
-            display: flex; align-items: center; gap: 10px;
-            padding: 18px 28px; border-radius: var(--radius-lg);
-            background: var(--bg-card); border: 1px solid var(--border);
-            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            position: relative;
-        }
-        .pipeline-step::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-            background: var(--gradient-border); opacity: 0;
-            transition: opacity 0.3s;
-        }
-        .pipeline-step:hover {
-            border-color: var(--border-hover);
-            transform: translateY(-3px);
-            box-shadow: var(--glow-indigo);
-        }
-        .pipeline-step:hover::before { opacity: 1; }
-        .pipeline-step i { font-size: 22px; }
-        .pipeline-step span { font-size: 14px; font-weight: 600; }
-        .pipeline-arrow {
-            color: var(--accent-indigo);
-            font-size: 22px;
-            animation: pulse-arrow 1.5s infinite alternate ease-in-out;
-        }
-        @keyframes pulse-arrow {
-            0% { transform: translateX(-4px); opacity: 0.3; }
-            100% { transform: translateX(4px); opacity: 1; text-shadow: 0 0 16px var(--accent-blue); }
-        }
-
-        /* ── TP & Trailing Section ── */
-        .tp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-        .tp-card {
-            background: var(--bg-card); border: 1px solid var(--border);
-            border-radius: var(--radius-xl); padding: 36px; position: relative; overflow: hidden;
-        }
-        .tp-card::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-        }
-        .tp-card.green-line::before { background: linear-gradient(90deg, var(--accent-green), var(--accent-cyan)); }
-        .tp-card.purple-line::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-indigo)); }
-        .tp-card h3 {
-            font-size: 20px; font-weight: 700; margin-bottom: 20px;
-            display: flex; align-items: center; gap: 12px;
-        }
-        .tp-card h3 i { font-size: 24px; }
-        .tp-list { list-style: none; }
-        .tp-list li {
-            display: flex; align-items: center; gap: 14px;
-            padding: 14px 0; border-bottom: 1px solid rgba(255,255,255,0.04);
-            font-size: 14px; color: var(--text-secondary);
-        }
-        .tp-list li:last-child { border-bottom: none; }
-        .tp-list li i { font-size: 16px; color: var(--accent-green); flex-shrink: 0; }
-        .tp-list li strong { color: var(--text-primary); }
-
-        /* ── Exchanges ── */
-        .exchanges-grid {
-            display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
-            margin-top: 48px;
-        }
-        .exchange-card {
-            display: flex; align-items: center; gap: 16px;
-            padding: 20px 24px; border-radius: var(--radius-lg);
-            background: var(--bg-card); border: 1px solid var(--border);
-            font-size: 15px; font-weight: 600; color: var(--text-primary);
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            position: relative; overflow: hidden;
-        }
-        .exchange-card::after {
-            content: '';
-            position: absolute; inset: 0;
-            opacity: 0;
-            transition: opacity 0.3s;
-            background: radial-gradient(400px circle at var(--mouse-x, 0) var(--mouse-y, 0), rgba(59,130,246,0.04), transparent 40%);
-            pointer-events: none;
-        }
-        .exchange-card:hover::after { opacity: 1; }
-        .exchange-card:hover {
-            border-color: var(--border-hover);
-            transform: translateY(-3px);
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-        }
-        .exchange-card .ex-icon {
-            width: 44px; height: 44px; border-radius: var(--radius-sm);
-            display: flex; align-items: center; justify-content: center;
-            font-size: 20px; flex-shrink: 0;
-        }
-        .exchange-card .ex-info { flex: 1; }
-        .exchange-card .ex-name { font-weight: 700; }
-        .exchange-card .ex-desc { font-size: 12px; color: var(--text-muted); font-weight: 400; }
-
-        /* ── CTA Section ── */
-        .cta-section { text-align: center; padding: 80px 0 120px; }
-        .cta-box {
-            background: rgba(15, 23, 42, 0.35);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: var(--radius-xl);
-            padding: 72px 56px;
-            position: relative; overflow: hidden;
-            backdrop-filter: blur(24px);
-            -webkit-backdrop-filter: blur(24px);
-            box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5);
-            animation: cta-pulse 5s infinite alternate;
-        }
-        @keyframes cta-pulse {
-            0% { box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5), 0 0 40px rgba(59,130,246,0.08); }
-            100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.03), 0 24px 80px rgba(0,0,0,0.5), 0 0 60px rgba(167,139,250,0.1); }
-        }
-        .cta-box::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-            background: var(--gradient-border);
-        }
-        .cta-box::after {
-            content: ''; position: absolute; bottom: -200px; left: 50%; transform: translateX(-50%);
-            width: 600px; height: 400px; border-radius: 50%;
-            background: radial-gradient(circle, rgba(59,130,246,0.08), transparent 70%);
-            pointer-events: none;
-        }
-        .cta-box h2 { font-size: 36px; font-weight: 800; margin-bottom: 16px; letter-spacing: -0.02em; }
-        .cta-box p { color: var(--text-secondary); font-size: 16px; margin-bottom: 36px; max-width: 520px; margin-left: auto; margin-right: auto; line-height: 1.7; }
-
-        /* ── Footer ── */
-        .footer {
-            padding: 48px 0; border-top: 1px solid var(--border);
-            text-align: center;
-        }
-        .footer-links {
-            display: flex; justify-content: center; gap: 24px;
-            margin-bottom: 20px;
-        }
-        .footer-links a {
-            color: var(--text-muted); text-decoration: none; font-size: 13px;
-            transition: color 0.2s;
-        }
-        .footer-links a:hover { color: var(--text-primary); }
-        .footer-copy { color: var(--text-muted); font-size: 13px; }
-
-        /* ── Animated counter ── */
-        .counter { display: inline-block; }
-
-        /* ── Responsive ── */
-        @media (max-width: 1024px) {
-            .features-grid { grid-template-columns: repeat(2, 1fr); }
-            .tp-grid { grid-template-columns: 1fr; }
-            .ai-showcase { grid-template-columns: 1fr; }
-            .exchanges-grid { grid-template-columns: repeat(2, 1fr); }
-            .hero-stats { grid-template-columns: repeat(3, 1fr); }
-        }
-        @media (max-width: 768px) {
-            .features-grid { grid-template-columns: 1fr; }
-            .nav-links, .nav-cta-ghost { display: none; }
-            .hero h1 { font-size: 36px; }
-            .hero-stats { grid-template-columns: repeat(3, 1fr); }
-            .pipeline-flow { flex-direction: column; }
-            .pipeline-arrow { transform: rotate(90deg); }
-            .cta-box { padding: 40px 24px; }
-            .exchanges-grid { grid-template-columns: 1fr; }
-            .ai-models-grid { grid-template-columns: 1fr; }
-            .hero-stat-value { font-size: 28px; }
-        }
-        @media (max-width: 480px) {
-            .hero-stats { grid-template-columns: repeat(2, 1fr); }
-            .hero-stats .hero-stat:last-child { grid-column: span 2; }
-        }
-
-        /* ── Reveal animations ── */
-        .reveal {
-            opacity: 0; transform: translateY(32px);
-            transition: opacity 0.7s cubic-bezier(0.4, 0, 0.2, 1), transform 0.7s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .reveal.visible { opacity: 1; transform: translateY(0); }
-        .reveal.delay-1 { transition-delay: 0.1s; }
-        .reveal.delay-2 { transition-delay: 0.2s; }
-        .reveal.delay-3 { transition-delay: 0.3s; }
-        .reveal.delay-4 { transition-delay: 0.4s; }
-        .reveal.delay-5 { transition-delay: 0.5s; }
-        .reveal.delay-6 { transition-delay: 0.6s; }
-
-        /* ── Divider ── */
-        .section-divider {
-            width: 60px; height: 3px; border-radius: 2px;
-            background: var(--gradient-hero);
-            margin: 0 auto 0;
+        @media(max-width:768px){
+            .nav-links{display:none}
+            .hero h1{font-size:clamp(28px,7vw,42px)}
+            .hero-stats{grid-template-columns:repeat(2,1fr)}
+            .features-grid{grid-template-columns:1fr}
+            .process-grid{grid-template-columns:1fr;gap:32px}
+            .hero-actions,.cta-actions{flex-direction:column;align-items:center}
+            .footer-grid{grid-template-columns:1fr;gap:24px}
         }
     </style>
 </head>
 <body>
 
-<!-- Background effects -->
-<div class="bg-grid"></div>
-<div class="bg-noise"></div>
-<!-- ── Navbar ── -->
-<nav class="navbar" id="navbar">
+<!-- Navbar -->
+<nav class="nav" id="navbar">
     <div class="container">
-        <a href="/" class="nav-logo">
-            <div class="nav-logo-icon"><i class="ri-radar-line"></i></div>
-            <span>QuantPilot AI</span>
+        <a href="/" class="nav-brand">
+            <div class="nav-brand-icon"><i class="ri-line-chart-line"></i></div>
+            QuantPilot
         </a>
         <div class="nav-links">
+            <a href="#platform">Platform</a>
             <a href="#features">Features</a>
-            <a href="#ai-models">AI Models</a>
-            <a href="#pipeline">Pipeline</a>
             <a href="#exchanges">Exchanges</a>
+            <a href="#docs">Docs</a>
         </div>
-        <div class="nav-cta-group">
-            <a href="/login" class="nav-cta-ghost"><i class="ri-login-box-line"></i> Sign In</a>
-            <a href="/register" class="nav-cta"><i class="ri-user-add-line"></i> Get Started</a>
+        <div class="nav-actions">
+            <a href="/login" class="btn btn-ghost">Sign In</a>
+            <a href="/register" class="btn btn-primary">Get Started</a>
         </div>
     </div>
 </nav>
 
-<!-- ── Hero ── -->
+<!-- Hero -->
 <section class="hero">
     <div class="container">
-        <div class="hero-badge reveal">
-            <span class="dot-container"><span class="dot"></span></span>
-            <span>v4.5.3 &middot; AI Risk Review &middot; Strategy Automation &middot; Exchange Execution</span>
+        <div class="hero-label">
+            <span class="dot"></span>
+            Open-source &middot; Multi-exchange &middot; AI-ready
         </div>
-        <h1 class="reveal delay-1">
-            AI-Powered<br>
-            <span class="shimmer-text">Crypto Trading</span><br>
-            QuantPilot AI
-        </h1>
-        <p class="reveal delay-2">
-            Receive TradingView signals, filter weak setups with 15 fast checks, review them with
-            OpenAI, Claude, DeepSeek, OpenRouter, or a custom provider, then execute across 6+ exchanges.
+        <h1>Algorithmic Crypto Trading,<br><span class="highlight">Automated.</span></h1>
+        <p class="hero-sub">
+            Connect TradingView signals to Binance, OKX, Bybit, and more. QuantPilot handles signal validation, risk management, multi-TP execution, and smart trailing stops &mdash; so you can focus on strategy.
         </p>
-        <div class="hero-actions reveal delay-3">
-            <a href="/register" class="btn-hero primary">
-                <i class="ri-rocket-2-line"></i> Start Trading Free
-            </a>
-            <a href="#features" class="btn-hero secondary">
-                <i class="ri-book-read-line"></i> Explore Features
-            </a>
+        <div class="hero-actions">
+            <a href="/register" class="btn btn-primary btn-lg"><i class="ri-rocket-line"></i> Create Free Account</a>
+            <a href="#platform" class="btn btn-ghost btn-lg"><i class="ri-play-circle-line"></i> See How It Works</a>
         </div>
-        <div class="hero-stats reveal delay-4">
+        <div class="hero-stats">
             <div class="hero-stat">
-                <div class="hero-stat-value counter" data-target="4">0</div>
-                <div class="hero-stat-label">AI Providers</div>
-            </div>
-            <div class="hero-stat">
-                <div class="hero-stat-value counter" data-target="6">0</div>
+                <div class="hero-stat-value">6<span class="unit">+</span></div>
                 <div class="hero-stat-label">Exchanges</div>
             </div>
             <div class="hero-stat">
-                <div class="hero-stat-value counter" data-target="15">0</div>
-                <div class="hero-stat-label">Filter Checks</div>
+                <div class="hero-stat-value">4<span class="unit">TP</span></div>
+                <div class="hero-stat-label">Take-Profit Levels</div>
             </div>
             <div class="hero-stat">
-                <div class="hero-stat-value counter" data-target="4">0</div>
-                <div class="hero-stat-label">TP Levels</div>
+                <div class="hero-stat-value">5<span class="unit">+</span></div>
+                <div class="hero-stat-label">AI Providers</div>
             </div>
             <div class="hero-stat">
-                <div class="hero-stat-value counter" data-target="5">0</div>
-                <div class="hero-stat-label">Trailing Modes</div>
+                <div class="hero-stat-value">24&frasl;7</div>
+                <div class="hero-stat-label">Position Monitor</div>
             </div>
         </div>
     </div>
 </section>
 
-<!-- ── Features ── -->
+<!-- Platform / Process -->
+<section class="section" id="platform">
+    <div class="container">
+        <div class="section-label"><i class="ri-route-line"></i> THE PROCESS</div>
+        <h2 class="section-title">From Signal to Execution</h2>
+        <p class="section-desc">
+            QuantPilot bridges the gap between your trading signals and exchange execution, with institutional-grade risk controls at every step.
+        </p>
+        <div class="process-grid">
+            <div class="process-step">
+                <div class="process-step-num blue"><i class="ri-webhook-line"></i></div>
+                <h3>Signal Ingestion</h3>
+                <p>Receive signals via TradingView webhooks with IP-based rate limiting and replay protection.</p>
+            </div>
+            <div class="process-step">
+                <div class="process-step-num purple"><i class="ri-brain-line"></i></div>
+                <h3>AI Analysis</h3>
+                <p>GPT-4o, Claude, DeepSeek, or Mistral validate signal quality, assess risk, and recommend position size.</p>
+            </div>
+            <div class="process-step">
+                <div class="process-step-num green"><i class="ri-shield-check-line"></i></div>
+                <h3>Risk Filtering</h3>
+                <p>Daily trade limits, correlation checks, leverage caps, and pre-filters ensure only sound trades execute.</p>
+            </div>
+            <div class="process-step">
+                <div class="process-step-num cyan"><i class="ri-exchange-funds-line"></i></div>
+                <h3>Execution & Monitoring</h3>
+                <p>Place multi-TP orders, smart trailing stops, and 24/7 position monitoring with ghost detection.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Features -->
 <section class="section" id="features">
     <div class="container">
-        <h2 class="section-title reveal">
-            Everything You Need for<br><span class="gradient-text">Smart Trading</span>
-        </h2>
-        <p class="section-subtitle reveal delay-1">
-            A complete trading pipeline from signal to execution, with strict risk controls and practical operations tooling.
+        <div class="section-label"><i class="ri-flashlight-line"></i> CAPABILITIES</div>
+        <h2 class="section-title">Built for Serious Traders</h2>
+        <p class="section-desc">
+            Production-grade features designed from real trading experience, not hype.
         </p>
         <div class="features-grid">
-            <div class="feature-card reveal delay-1">
-                <span class="card-tag tag-upgraded">CORE</span>
-                <div class="feature-icon indigo"><i class="ri-robot-2-line"></i></div>
-                <h3>Provider-Aware AI Review</h3>
-                <p>Route analysis through OpenAI, Anthropic, DeepSeek, OpenRouter, or an OpenAI-compatible custom endpoint with configurable prompts and token limits.</p>
+            <div class="feature-card">
+                <div class="feature-icon blue"><i class="ri-router-line"></i></div>
+                <h3>Multi-Exchange</h3>
+                <p>Execute simultaneously on Binance, OKX, Bybit, Bitget, Gate.io, and Coinbase. Unified API with automatic symbol resolution and contract size handling.</p>
             </div>
-            <div class="feature-card reveal delay-2">
-                <span class="card-tag tag-upgraded">COMPATIBLE</span>
-                <div class="feature-icon purple"><i class="ri-router-line"></i></div>
-                <h3>OpenRouter Support</h3>
-                <p>Use OpenRouter's OpenAI-compatible endpoint from the same AI settings surface while keeping direct provider integrations available.</p>
+            <div class="feature-card">
+                <div class="feature-icon green"><i class="ri-trophy-line"></i></div>
+                <h3>Multi-Take-Profit</h3>
+                <p>Up to 4 TP levels with quantity split. Each level tracked independently with order verification and automatic re-placement on exchange cancellation.</p>
             </div>
-            <div class="feature-card reveal delay-3">
-                <div class="feature-icon blue"><i class="ri-robot-2-line"></i></div>
-                <h3>Custom AI Analysis</h3>
-                <p>Choose from OpenAI GPT-4o, Anthropic Claude, DeepSeek, or your own custom endpoint. Customize temperature, tokens, and system prompt.</p>
+            <div class="feature-card">
+                <div class="feature-icon purple"><i class="ri-line-chart-line"></i></div>
+                <h3>Smart Trailing Stop</h3>
+                <p>5 trailing modes: none, auto (AI-selected), moving, breakeven-on-TP1, step-trailing. Re-evaluated on limit order fills for changed market conditions.</p>
             </div>
-            <div class="feature-card reveal delay-1">
-                <span class="card-tag tag-upgraded">SAFE</span>
-                <div class="feature-icon green"><i class="ri-money-dollar-circle-line"></i></div>
-                <h3>Realistic Paper Trading</h3>
-                <p>Paper mode records simulated orders locally first, so strategies can be tested without sending live exchange orders.</p>
+            <div class="feature-card">
+                <div class="feature-icon cyan"><i class="ri-brain-line"></i></div>
+                <h3>AI-Powered Decisions</h3>
+                <p>Optional AI analysis with confidence scoring, market regime detection, and trend strength assessment. Built-in caching for sub-second repeated signals.</p>
             </div>
-            <div class="feature-card reveal delay-2">
-                <div class="feature-icon orange"><i class="ri-shield-check-line"></i></div>
-                <h3>15-Layer Pre-Filter</h3>
-                <p>RSI extremes, funding rate guard, orderbook imbalance, market hours, consecutive loss protection, EMA alignment, and adaptive thresholds.</p>
+            <div class="feature-card">
+                <div class="feature-icon orange"><i class="ri-shield-keyhole-line"></i></div>
+                <h3>Institutional Risk Controls</h3>
+                <p>Pre-filter DB for daily limits, emergency stop, position correlation checks, leverage rollback on failure, and hard SL boundaries (0.1%&ndash;50% from entry).</p>
             </div>
-            <div class="feature-card reveal delay-3">
-                <div class="feature-icon cyan"><i class="ri-route-line"></i></div>
-                <h3>5 Trailing Stop Modes</h3>
-                <p>Moving trailing, breakeven on TP1, step-down trailing, profit-% activated, or static stop-loss. Advanced exit management for any strategy.</p>
-            </div>
-            <div class="feature-card reveal delay-1">
-                <span class="card-tag tag-upgraded">SECURE</span>
-                <div class="feature-icon rose"><i class="ri-key-2-line"></i></div>
-                <h3>Per-User Webhooks</h3>
-                <p>Each user can receive an isolated webhook secret, encrypted exchange settings, and subscription-aware live trading permissions.</p>
-            </div>
-            <div class="feature-card reveal delay-2">
-                <span class="card-tag tag-upgraded">OPS</span>
-                <div class="feature-icon indigo"><i class="ri-pulse-line"></i></div>
-                <h3>Operational Controls</h3>
-                <p>Admin diagnostics cover payment review, webhook events, position monitor state, backups, storage health, and audit history.</p>
-            </div>
-            <div class="feature-card reveal delay-3">
-                <div class="feature-icon green"><i class="ri-pie-chart-2-line"></i></div>
-                <h3>Live Analytics</h3>
-                <p>Equity curves, win/loss distribution, Sharpe ratio, Sortino, profit factor, and AI confidence performance are available in the dashboard.</p>
+            <div class="feature-card">
+                <div class="feature-icon rose"><i class="ri-eye-line"></i></div>
+                <h3>24/7 Position Monitor</h3>
+                <p>Continuous reconciliation with exchange data. Ghost position detection with API-failure safeguards. Protective order verification and automatic re-placement.</p>
             </div>
         </div>
     </div>
 </section>
 
-<!-- ── AI Providers ── -->
-<section class="section" id="ai-models" style="padding-top: 60px;">
+<!-- Detail: Signal Processing -->
+<section class="section" id="detail-signal">
     <div class="container">
-        <h2 class="section-title reveal">
-            <span class="gradient-text">AI Provider Layer</span>
-        </h2>
-        <p class="section-subtitle reveal delay-1">
-            Choose a direct provider or an OpenAI-compatible route, then keep risk behavior consistent through one execution pipeline.
-        </p>
-        <div class="ai-showcase">
-            <div class="ai-main-card reveal delay-1">
-                <h3><i class="ri-robot-2-line" style="color:var(--accent-indigo)"></i> Supported Models</h3>
-                <div class="ai-models-grid">
-                    <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(16,185,129,0.1);color:var(--accent-green)"><i class="ri-flashlight-line"></i></div>
-                        <div class="model-info">
-                            <div class="model-name">GPT-4o</div>
-                            <div class="model-price">OpenAI route</div>
-                        </div>
-                    </div>
-                    <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-purple)"><i class="ri-sparkling-line"></i></div>
-                        <div class="model-info">
-                            <div class="model-name">Claude 3.5 Sonnet</div>
-                            <div class="model-price">Anthropic route</div>
-                        </div>
-                    </div>
-                    <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(59,130,246,0.1);color:var(--accent-blue)"><i class="ri-mental-health-line"></i></div>
-                        <div class="model-info">
-                            <div class="model-name">Gemini Pro 1.5</div>
-                            <div class="model-price">OpenRouter route</div>
-                        </div>
-                    </div>
-                    <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(6,182,212,0.1);color:var(--accent-cyan)"><i class="ri-code-s-slash-line"></i></div>
-                        <div class="model-info">
-                            <div class="model-name">DeepSeek Chat</div>
-                            <div class="model-price">DeepSeek route</div>
-                        </div>
-                    </div>
-                    <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(244,63,94,0.1);color:var(--accent-rose)"><i class="ri-fire-line"></i></div>
-                        <div class="model-info">
-                            <div class="model-name">Llama 3.1 70B</div>
-                            <div class="model-price">OpenRouter route</div>
-                        </div>
-                    </div>
-                    <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-orange)"><i class="ri-typhoon-line"></i></div>
-                        <div class="model-info">
-                            <div class="model-name">Mistral Large</div>
-                            <div class="model-price">OpenRouter route</div>
-                        </div>
-                    </div>
-                    <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(20,184,166,0.1);color:var(--accent-indigo)"><i class="ri-global-line"></i></div>
-                        <div class="model-info">
-                            <div class="model-name">Qwen 2.5 72B</div>
-                            <div class="model-price">OpenRouter route</div>
-                        </div>
-                    </div>
-                    <div class="ai-model-chip">
-                        <div class="model-icon" style="background:rgba(148,163,184,0.1);color:var(--text-secondary)"><i class="ri-tools-line"></i></div>
-                        <div class="model-info">
-                            <div class="model-name">Local Rules</div>
-                            <div class="model-price">Free (fallback)</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="voting-section reveal delay-2">
-                <h3><i class="ri-shield-check-line" style="color:var(--accent-green)"></i> Risk Decision Layer</h3>
-                <p style="color:var(--text-secondary);font-size:14px;margin-bottom:20px;line-height:1.6">
-                    Every executable trade has to pass fast rule checks, AI confidence thresholds, and validated exit planning before an order is created.
+        <div class="detail-row">
+            <div class="detail-content">
+                <div class="section-label"><i class="ri-webhook-line"></i> SIGNAL PROCESSING</div>
+                <h2 class="section-title">Reliable Signal Ingestion</h2>
+                <p class="section-desc">
+                    Secure webhooks with replay protection, IP rate limiting, and daily trade caps ensure your signals are processed exactly once without over-trading.
                 </p>
-                <div class="voting-strategies">
-                    <div class="strategy-item">
-                        <div class="strategy-icon" style="background:rgba(16,185,129,0.1);color:var(--accent-green)"><i class="ri-scales-3-line"></i></div>
-                        <div class="strategy-info">
-                            <h4>Pre-Filter Gate</h4>
-                            <p>Daily limits, volatility, spread, volume, RSI, funding, and trend checks run before AI spend.</p>
-                        </div>
-                    </div>
-                    <div class="strategy-item">
-                        <div class="strategy-icon" style="background:rgba(20,184,166,0.1);color:var(--accent-indigo)"><i class="ri-team-line"></i></div>
-                        <div class="strategy-info">
-                            <h4>AI Confidence</h4>
-                            <p>Low-confidence or direction-conflicting analysis is rejected before execution.</p>
-                        </div>
-                    </div>
-                    <div class="strategy-item">
-                        <div class="strategy-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-orange)"><i class="ri-star-line"></i></div>
-                        <div class="strategy-info">
-                            <h4>Protective Exits</h4>
-                            <p>Opening trades require a valid stop loss and at least one take-profit target.</p>
-                        </div>
-                    </div>
-                </div>
-                <div style="margin-top:20px;padding:16px;border-radius:var(--radius-md);background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.14)">
-                    <p style="font-size:12px;color:var(--text-secondary);line-height:1.6">
-                        <i class="ri-lightbulb-line" style="color:var(--accent-indigo)"></i>
-                        <strong style="color:var(--text-primary)">Default posture:</strong>
-                        Paper trading first, explicit live-trading permission, and user-scoped webhook secrets.
-                    </p>
-                </div>
-            </div>
-        </div>
-    </div>
-</section>
-
-<!-- ── Pipeline ── -->
-<section class="section" id="pipeline" style="padding-top: 60px;">
-    <div class="container">
-        <h2 class="section-title reveal">Signal <span class="gradient-text">Processing Pipeline</span></h2>
-        <p class="section-subtitle reveal delay-1">Every signal flows through a practical pipeline with fast checks, AI review, and protective exit validation.</p>
-        <div class="pipeline-flow reveal delay-2">
-            <div class="pipeline-step reveal delay-1" style="color: var(--accent-indigo);">
-                <i class="ri-tv-2-line"></i>
-                <span>TradingView</span>
-            </div>
-            <span class="pipeline-arrow reveal delay-1"><i class="ri-arrow-right-line"></i></span>
-            <div class="pipeline-step reveal delay-2" style="color: var(--accent-orange);">
-                <i class="ri-filter-3-line"></i>
-                <span>15-Layer Filter</span>
-            </div>
-            <span class="pipeline-arrow reveal delay-2"><i class="ri-arrow-right-line"></i></span>
-            <div class="pipeline-step reveal delay-3" style="color: var(--accent-purple);">
-                <i class="ri-robot-2-line"></i>
-                <span>AI Review</span>
-            </div>
-            <span class="pipeline-arrow reveal delay-3"><i class="ri-arrow-right-line"></i></span>
-            <div class="pipeline-step reveal delay-4" style="color: var(--accent-green);">
-                <i class="ri-shield-check-line"></i>
-                <span>Risk Decision</span>
-            </div>
-            <span class="pipeline-arrow reveal delay-4"><i class="ri-arrow-right-line"></i></span>
-            <div class="pipeline-step reveal delay-5" style="color: var(--accent-cyan);">
-                <i class="ri-exchange-line"></i>
-                <span>Execute</span>
-            </div>
-            <span class="pipeline-arrow reveal delay-5"><i class="ri-arrow-right-line"></i></span>
-            <div class="pipeline-step reveal delay-6" style="color: var(--accent-indigo);">
-                <i class="ri-telegram-line"></i>
-                <span>Notify</span>
-            </div>
-        </div>
-    </div>
-</section>
-
-<!-- ── Multi-TP & Trailing Stop ── -->
-<section class="section" id="tp-trailing">
-    <div class="container">
-        <h2 class="section-title reveal">Multi Take-Profit &<br><span class="gradient-text">Trailing Stop Strategies</span></h2>
-        <p class="section-subtitle reveal delay-1">Maximize profits and protect gains with sophisticated exit management.</p>
-        <div class="tp-grid">
-            <div class="tp-card green-line reveal delay-1">
-                <h3><i class="ri-target-line" style="color:var(--accent-green)"></i> Take-Profit Levels</h3>
-                <ul class="tp-list">
-                    <li>
-                        <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>TP1</strong> — First target, close partial position (e.g. 25%)</span>
-                    </li>
-                    <li>
-                        <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>TP2</strong> — Second target, scale out more (e.g. 25%)</span>
-                    </li>
-                    <li>
-                        <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>TP3</strong> — Third target, further reduction (e.g. 25%)</span>
-                    </li>
-                    <li>
-                        <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>TP4</strong> — Final target, close remaining position</span>
-                    </li>
-                    <li>
-                        <i class="ri-settings-3-line" style="color:var(--accent-indigo)"></i>
-                        <span>Configurable distance % and close % per level</span>
-                    </li>
+                <ul class="detail-checks">
+                    <li><i class="ri-check-line"></i> HMAC signature verification for signal authenticity</li>
+                    <li><i class="ri-check-line"></i> IP-based rate limiting (60 req/min) prevents abuse</li>
+                    <li><i class="ri-check-line"></i> Fingerprint-based replay protection against duplicates</li>
+                    <li><i class="ri-check-line"></i> Per-user daily trade limits with database persistence</li>
+                    <li><i class="ri-check-line"></i> Emergency stop, pause, and read-only trading modes</li>
                 </ul>
             </div>
-            <div class="tp-card purple-line reveal delay-2">
-                <h3><i class="ri-route-line" style="color:var(--accent-purple)"></i> Trailing Stop Modes</h3>
-                <ul class="tp-list">
-                    <li>
-                        <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>Moving Trailing</strong> — Classic moving stop-loss following price</span>
-                    </li>
-                    <li>
-                        <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>Breakeven on TP1</strong> — Move SL to entry when TP1 is hit</span>
-                    </li>
-                    <li>
-                        <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>Step Trailing</strong> — SL moves to TP(n-1) when TP(n) is reached</span>
-                    </li>
-                    <li>
-                        <i class="ri-checkbox-circle-fill"></i>
-                        <span><strong>Profit % Trailing</strong> — Activate trailing after X% profit</span>
-                    </li>
-                    <li>
-                        <i class="ri-close-circle-line" style="color:var(--accent-orange)"></i>
-                        <span><strong>Static SL</strong> — Traditional fixed stop-loss (no trailing)</span>
-                    </li>
+            <div class="detail-visual">
+                <h4>Webhook payload (JSON)</h4>
+                <div class="code-block">
+<span class="comment">// TradingView webhook &rarr; QuantPilot</span><br>
+{<br>
+&nbsp;&nbsp;<span class="key">"ticker"</span>: <span class="string">"BTCUSDT.P"</span>,<br>
+&nbsp;&nbsp;<span class="key">"action"</span>: <span class="string">"buy"</span>,<br>
+&nbsp;&nbsp;<span class="key">"entry"</span>: <span class="value">67250.0</span>,<br>
+&nbsp;&nbsp;<span class="key">"stop_loss"</span>: <span class="value">66500.0</span>,<br>
+&nbsp;&nbsp;<span class="key">"take_profits"</span>: [<span class="value">68000</span>, <span class="value">69000</span>, <span class="value">70500</span>],<br>
+&nbsp;&nbsp;<span class="key">"leverage"</span>: <span class="value">5</span>,<br>
+&nbsp;&nbsp;<span class="key">"timeframe"</span>: <span class="string">"60"</span><br>
+}
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Detail: Risk Management -->
+<section class="section" id="detail-risk">
+    <div class="container">
+        <div class="detail-row reverse">
+            <div class="detail-content">
+                <div class="section-label"><i class="ri-shield-keyhole-line"></i> RISK MANAGEMENT</div>
+                <h2 class="section-title">Multi-Layer Risk Protection</h2>
+                <p class="section-desc">
+                    Every trade passes through 7 risk checks before execution, and positions are continuously monitored after entry.
+                </p>
+                <ul class="detail-checks">
+                    <li><i class="ri-check-line"></i> Pre-filter database enforces daily trade caps per user</li>
+                    <li><i class="ri-check-line"></i> AI confidence and risk score gating</li>
+                    <li><i class="ri-check-line"></i> Correlation risk prevents over-concentration</li>
+                    <li><i class="ri-check-line"></i> Leverage setup with automatic rollback on failure</li>
+                    <li><i class="ri-check-line"></i> Hard SL boundaries: 0.1% minimum, 50% maximum from entry</li>
+                    <li><i class="ri-check-line"></i> Ghost position detection with exchange API failure safeguards</li>
                 </ul>
             </div>
+            <div class="detail-visual">
+                <h4>Pre-filter pipeline</h4>
+                <div style="display:flex;flex-direction:column;gap:12px;margin-top:8px">
+                    <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);font-size:13px">
+                        <i class="ri-shield-check-line" style="color:var(--green);font-size:18px"></i>
+                        <span style="color:var(--text-secondary)">Daily trade limit check</span>
+                        <span style="margin-left:auto;color:var(--green);font-size:12px;font-weight:600">PASS</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);font-size:13px">
+                        <i class="ri-shield-check-line" style="color:var(--green);font-size:18px"></i>
+                        <span style="color:var(--text-secondary)">AI confidence &ge; threshold</span>
+                        <span style="margin-left:auto;color:var(--green);font-size:12px;font-weight:600">PASS</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);font-size:13px">
+                        <i class="ri-shield-check-line" style="color:var(--green);font-size:18px"></i>
+                        <span style="color:var(--text-secondary)">Correlation risk check</span>
+                        <span style="margin-left:auto;color:var(--green);font-size:12px;font-weight:600">PASS</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);font-size:13px">
+                        <i class="ri-exchange-funds-line" style="color:var(--accent);font-size:18px"></i>
+                        <span style="color:var(--text-secondary)">Execute on exchange</span>
+                        <span style="margin-left:auto;color:var(--accent);font-size:12px;font-weight:600">LIVE</span>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </section>
 
-<!-- ── Exchanges ── -->
-<section class="section" id="exchanges" style="padding-top: 60px;">
+<!-- Exchanges -->
+<section class="section" id="exchanges">
+    <div class="container" style="text-align:center">
+        <div class="section-label"><i class="ri-exchange-line"></i> EXCHANGES</div>
+        <h2 class="section-title">Multi-Exchange Execution</h2>
+        <p class="section-desc" style="max-width:560px;margin-left:auto;margin-right:auto">
+            Unified API across major exchanges with automatic symbol resolution, contract size handling, and hedge mode support.
+        </p>
+        <div class="exchanges-row">
+            <div class="exchange-badge"><i class="ri-bit-coin-line binance"></i> Binance</div>
+            <div class="exchange-badge"><i class="ri-exchange-line okx"></i> OKX</div>
+            <div class="exchange-badge"><i class="ri-exchange-line bybit"></i> Bybit</div>
+            <div class="exchange-badge"><i class="ri-exchange-line bitget"></i> Bitget</div>
+            <div class="exchange-badge"><i class="ri-exchange-line gateio"></i> Gate.io</div>
+            <div class="exchange-badge"><i class="ri-coin-line"></i> Coinbase</div>
+        </div>
+    </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section" id="cta">
     <div class="container">
-        <h2 class="section-title reveal"><span class="gradient-text">Supported Exchanges</span></h2>
-        <p class="section-subtitle reveal delay-1">Seamlessly connect to the world's leading cryptocurrency exchanges via CCXT.</p>
-        <div class="exchanges-grid">
-            <div class="exchange-card reveal delay-1">
-                <div class="ex-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-orange)"><i class="ri-coins-line"></i></div>
-                <div class="ex-info">
-                    <div class="ex-name">Binance</div>
-                    <div class="ex-desc">World's largest crypto exchange</div>
-                </div>
-            </div>
-            <div class="exchange-card reveal delay-2">
-                <div class="ex-icon" style="background:rgba(59,130,246,0.1);color:var(--accent-blue)"><i class="ri-coins-line"></i></div>
-                <div class="ex-info">
-                    <div class="ex-name">OKX</div>
-                    <div class="ex-desc">Advanced derivatives trading</div>
-                </div>
-            </div>
-            <div class="exchange-card reveal delay-3">
-                <div class="ex-icon" style="background:rgba(6,182,212,0.1);color:var(--accent-cyan)"><i class="ri-coins-line"></i></div>
-                <div class="ex-info">
-                    <div class="ex-name">Bybit</div>
-                    <div class="ex-desc">Popular futures platform</div>
-                </div>
-            </div>
-            <div class="exchange-card reveal delay-4">
-                <div class="ex-icon" style="background:rgba(245,158,11,0.1);color:var(--accent-purple)"><i class="ri-coins-line"></i></div>
-                <div class="ex-info">
-                    <div class="ex-name">Bitget</div>
-                    <div class="ex-desc">Copy trading &amp; futures</div>
-                </div>
-            </div>
-            <div class="exchange-card reveal delay-5">
-                <div class="ex-icon" style="background:rgba(16,185,129,0.1);color:var(--accent-green)"><i class="ri-coins-line"></i></div>
-                <div class="ex-info">
-                    <div class="ex-name">Gate.io</div>
-                    <div class="ex-desc">Wide altcoin selection</div>
-                </div>
-            </div>
-            <div class="exchange-card reveal delay-6">
-                <div class="ex-icon" style="background:rgba(20,184,166,0.1);color:var(--accent-indigo)"><i class="ri-coins-line"></i></div>
-                <div class="ex-info">
-                    <div class="ex-name">Coinbase</div>
-                    <div class="ex-desc">US-regulated exchange</div>
-                </div>
-            </div>
+        <h2>Start Trading Smarter Today</h2>
+        <p>Open-source, self-hosted, and free. Deploy QuantPilot in minutes and turn your TradingView signals into automated execution.</p>
+        <div class="cta-actions">
+            <a href="/register" class="btn btn-primary btn-lg"><i class="ri-rocket-line"></i> Create Free Account</a>
+            <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank" class="btn btn-ghost btn-lg"><i class="ri-github-fill"></i> View on GitHub</a>
         </div>
     </div>
 </section>
 
-<!-- ── CTA ── -->
-<section class="cta-section">
-    <div class="container">
-        <div class="cta-box reveal">
-            <h2>Ready to Start <span class="gradient-text">Trading Smarter</span>?</h2>
-            <p>Create an account, subscribe to a plan, and start routing AI-reviewed trading signals to your exchange.</p>
-            <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
-                <a href="/register" class="btn-hero primary" style="font-size:16px;padding:18px 44px;">
-                    <i class="ri-user-add-line"></i> Create Account
-                </a>
-                <a href="/login" class="btn-hero secondary" style="font-size:16px;padding:18px 44px;">
-                    <i class="ri-login-box-line"></i> Sign In
-                </a>
-            </div>
-        </div>
-    </div>
-</section>
-
-<!-- ── Footer ── -->
+<!-- Footer -->
 <footer class="footer">
     <div class="container">
-        <div class="footer-links">
-            <a href="/">Home</a>
-            <a href="/dashboard">Dashboard</a>
-            <a href="/register">Register</a>
-            <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank">GitHub</a>
+        <div class="footer-grid">
+            <div>
+                <div class="footer-brand">
+                    <div class="footer-brand-icon"><i class="ri-line-chart-line"></i></div>
+                    QuantPilot
+                </div>
+                <p class="footer-desc">Open-source algorithmic crypto trading platform. From signal to execution, with institutional-grade risk controls.</p>
+            </div>
+            <div class="footer-col">
+                <h4>Platform</h4>
+                <a href="/register">Get Started</a>
+                <a href="/login">Sign In</a>
+                <a href="#features">Features</a>
+                <a href="#exchanges">Exchanges</a>
+            </div>
+            <div class="footer-col">
+                <h4>Resources</h4>
+                <a href="https://github.com/ikun52012/QuantPilot-AI" target="_blank">GitHub</a>
+                <a href="#docs">Documentation</a>
+                <a href="#platform">How It Works</a>
+            </div>
+            <div class="footer-col">
+                <h4>Community</h4>
+                <a href="https://github.com/ikun52012/QuantPilot-AI/issues" target="_blank">Issues</a>
+                <a href="https://github.com/ikun52012/QuantPilot-AI/pulls" target="_blank">Pull Requests</a>
+            </div>
         </div>
-        <p class="footer-copy">&copy; 2026 QuantPilot AI &middot; Built by @ikun52012 &middot; v4.5.3</p>
+        <div class="footer-bottom">
+            &copy; 2026 QuantPilot AI. Open source under MIT License.
+        </div>
     </div>
 </footer>
 
-<script data-cfasync="false" src="/static/js/i18n.js?v=20260504-2" defer></script>
-<script data-cfasync="false">
-    // ── Scroll reveal ──
-    const revealObserver = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                entry.target.classList.add('visible');
-            }
-        });
-    }, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
-
-    document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
-
-    // ── Counter animation ──
-    const counters = document.querySelectorAll('.counter');
-    const counterObserver = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                const el = entry.target;
-                const target = parseInt(el.dataset.target);
-                const duration = 1800;
-                const startTime = performance.now();
-                const animate = (now) => {
-                    const elapsed = now - startTime;
-                    const progress = Math.min(elapsed / duration, 1);
-                    const eased = 1 - Math.pow(1 - progress, 3);
-                    el.textContent = Math.round(eased * target) + (target >= 100 ? '+' : '');
-                    if (progress < 1) requestAnimationFrame(animate);
-                };
-                requestAnimationFrame(animate);
-                counterObserver.unobserve(el);
-            }
-        });
-    }, { threshold: 0.5 });
-
-    counters.forEach(c => counterObserver.observe(c));
-
-    // ── Navbar scroll effect ──
-    const navbar = document.getElementById('navbar');
-    let lastScroll = 0;
+<script>
+    // Navbar scroll effect
+    const nav = document.getElementById('navbar');
     window.addEventListener('scroll', () => {
-        const scrollY = window.scrollY;
-        if (scrollY > 50) {
-            navbar.classList.add('scrolled');
-        } else {
-            navbar.classList.remove('scrolled');
-        }
-        lastScroll = scrollY;
-    }, { passive: true });
-
-    // ── Spotlight Hover Effect ──
-    const spotlightCards = document.querySelectorAll('.feature-card, .tp-card, .exchange-card, .ai-model-chip');
-    spotlightCards.forEach(card => {
-        card.addEventListener('mousemove', (e) => {
-            const rect = card.getBoundingClientRect();
-            card.style.setProperty('--mouse-x', `${e.clientX - rect.left}px`);
-            card.style.setProperty('--mouse-y', `${e.clientY - rect.top}px`);
-        });
+        nav.classList.toggle('scrolled', window.scrollY > 40);
     });
 
-    // ── Smooth scroll ──
-    document.querySelectorAll('a[href^="#"]').forEach(link => {
-        link.addEventListener('click', (e) => {
+    // Smooth scroll for anchor links
+    document.querySelectorAll('a[href^="#"]').forEach(a => {
+        a.addEventListener('click', e => {
             e.preventDefault();
-            const target = document.querySelector(link.getAttribute('href'));
-            if (target) {
-                const navHeight = navbar.offsetHeight;
-                window.scrollTo({
-                    top: target.offsetTop - navHeight - 16,
-                    behavior: 'smooth'
-                });
-            }
+            const target = document.querySelector(a.getAttribute('href'));
+            if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
     });
-
-    if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-            navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' }).catch(() => {});
-        });
-    }
-
 </script>
-
 </body>
 </html>
