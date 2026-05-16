@@ -29,6 +29,9 @@ _MARKET_MAX_LEVERAGE_CACHE: dict[str, tuple[float, float]] = {}  # key: "exchang
 _MARKET_MAX_LEVERAGE_TTL = 3600.0  # Cache leverage for 1 hour
 _MARKET_MAX_LEVERAGE_LOCK = _threading.Lock()
 _EXCHANGE_IDLE_CLEANUP_SECS = 1800.0  # Clean up idle connections after 30 minutes
+_CLOSE_VERIFY_ATTEMPTS = 5
+_CLOSE_VERIFY_DELAY_SECS = 0.75
+_CLOSE_FLAT_CONTRACT_EPSILON = 1e-9
 
 try:
     import ccxt
@@ -1925,6 +1928,102 @@ async def place_protective_stop(
         return {"status": "error", "reason": str(e)}
 
 
+def _normalized_position_side(position: dict, contracts: float | None = None) -> str:
+    side = str(position.get("side") or "").lower().strip()
+    if not side:
+        info = position.get("info") or {}
+        if isinstance(info, dict):
+            side = str(info.get("posSide") or info.get("positionSide") or "").lower().strip()
+    if side in {"buy", "long"}:
+        return "long"
+    if side in {"sell", "short"}:
+        return "short"
+    if contracts is not None and contracts != 0:
+        return "long" if contracts > 0 else "short"
+    return side
+
+
+def _position_symbol_matches(symbol: str, position: dict) -> bool:
+    position_symbol = str(position.get("symbol") or "")
+    if position_symbol == symbol:
+        return True
+    try:
+        from core.utils.common import position_symbol_key
+        return position_symbol_key(position_symbol) == position_symbol_key(symbol)
+    except Exception:
+        return False
+
+
+def _position_side_matches(requested_side: str | None, actual_side: str) -> bool:
+    requested = str(requested_side or "").lower().strip()
+    if requested in {"buy", "long"}:
+        requested = "long"
+    elif requested in {"sell", "short"}:
+        requested = "short"
+    if not requested:
+        return True
+    if not actual_side:
+        return False
+    return requested == actual_side or requested in actual_side or actual_side in requested
+
+
+async def _fetch_matching_exchange_position(
+    exchange: ccxt.Exchange,
+    symbol: str,
+    position_side: str | None = None,
+) -> tuple[dict | None, float, str]:
+    positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
+    for pos in positions:
+        if not _position_symbol_matches(symbol, pos):
+            continue
+        contracts_raw = safe_float(pos.get("contracts") or 0)
+        if contracts_raw == 0:
+            continue
+        pos_side = _normalized_position_side(pos, contracts_raw)
+        if not _position_side_matches(position_side, pos_side):
+            continue
+        return pos, abs(contracts_raw), pos_side
+    return None, 0.0, ""
+
+
+async def _verify_position_close(
+    exchange: ccxt.Exchange,
+    symbol: str,
+    position_side: str | None,
+    *,
+    attempts: int = _CLOSE_VERIFY_ATTEMPTS,
+    delay_secs: float = _CLOSE_VERIFY_DELAY_SECS,
+) -> dict:
+    """Confirm a close by re-reading exchange positions.
+
+    A reduce-only market order being accepted is not enough to mark the
+    position closed; the exchange position must actually disappear or reach
+    zero contracts.
+    """
+    last_position: dict | None = None
+    last_contracts = 0.0
+    last_side = ""
+    for attempt in range(max(1, attempts)):
+        match, contracts, side = await _fetch_matching_exchange_position(exchange, symbol, position_side)
+        last_position, last_contracts, last_side = match, contracts, side
+        if match is None or contracts <= _CLOSE_FLAT_CONTRACT_EPSILON:
+            return {
+                "flat": True,
+                "remaining_contracts": 0.0,
+                "position_side": side or position_side,
+                "attempts": attempt + 1,
+            }
+        if attempt < attempts - 1:
+            await asyncio.sleep(delay_secs)
+    return {
+        "flat": False,
+        "remaining_contracts": last_contracts,
+        "position_side": last_side or position_side,
+        "position": last_position,
+        "attempts": attempts,
+    }
+
+
 async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: str | None = None, close_quantity: float | None = None, max_retries: int = 3) -> dict:
     """Close an existing position with retry logic.
 
@@ -1939,30 +2038,21 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
     for attempt in range(1, max_retries + 1):
         try:
             positions = await asyncio.to_thread(exchange.fetch_positions, [symbol])
+            found_position = False
             for pos in positions:
-                if pos["symbol"] != symbol:
+                if not _position_symbol_matches(symbol, pos):
                     continue
                 contracts = float(pos.get("contracts", 0))
                 if contracts == 0:
                     continue
+                found_position = True
 
-                pos_side = str(pos.get("side", "") or "").lower()
-                if not pos_side:
-                    pos_info = pos.get("info") or {}
-                    pos_side = str(pos_info.get("posSide") or "").lower()
-
-                if not pos_side:
-                    logger.warning(
-                        f"[Exchange] Cannot determine position side for {symbol} in net mode; "
-                        f"side field is empty. Using contracts > 0 heuristic but this may be wrong."
-                    )
-                    pos_side = "long" if contracts > 0 else "short"
-                    contracts = abs(contracts)
-
-                if position_side and pos_side and position_side.lower() not in pos_side:
+                pos_side = _normalized_position_side(pos, contracts)
+                if position_side and not _position_side_matches(position_side, pos_side):
                     continue
 
                 amount = abs(contracts)
+                requested_full_close = not close_quantity or close_quantity >= (amount - _CLOSE_FLAT_CONTRACT_EPSILON)
                 if close_quantity and close_quantity > 0:
                     amount = min(amount, close_quantity)
                 close_side = "sell" if pos_side == "long" else "buy"
@@ -1977,9 +2067,38 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                     position_side=pos_side if pos_side else None,
                     allow_amount_increase=False,
                 )
-                logger.info(f"[Exchange] ✅ Position closed: {order.get('id')} (side={pos_side or 'net'})")
+                verify = await _verify_position_close(exchange, symbol, pos_side or position_side)
                 exit_price = order.get("average") or order.get("price") or pos.get("markPrice") or pos.get("entryPrice")
-                return {"status": "closed", "order_id": order.get("id"), "exit_price": exit_price, "position_side": pos_side}
+                if verify.get("flat"):
+                    logger.info(f"[Exchange] ✅ Position close confirmed flat: {order.get('id')} (side={pos_side or 'net'})")
+                    return {
+                        "status": "closed",
+                        "order_id": order.get("id"),
+                        "exit_price": exit_price,
+                        "position_side": pos_side,
+                        "remaining_contracts": 0.0,
+                        "close_verification": verify,
+                    }
+                remaining = safe_float(verify.get("remaining_contracts") or 0)
+                status = "close_unconfirmed" if requested_full_close else "partial_closed"
+                reason = (
+                    f"Close order accepted but exchange still reports {remaining} contracts"
+                    if requested_full_close
+                    else f"Partial close accepted; exchange still reports {remaining} contracts"
+                )
+                logger.error(f"[Exchange] CRITICAL: {reason} for {symbol} side={pos_side}")
+                return {
+                    "status": status,
+                    "reason": reason,
+                    "order_id": order.get("id"),
+                    "exit_price": exit_price,
+                    "position_side": pos_side,
+                    "remaining_contracts": remaining,
+                    "close_verification": verify,
+                }
+            if not found_position and attempt < max_retries:
+                await asyncio.sleep(min(0.5 * attempt, 2.0))
+                continue
             return {"status": "no_position", "reason": f"No open {position_side or ''} position to close"}
         except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RateLimitExceeded, ccxt.RequestTimeout) as e:
             last_error = e

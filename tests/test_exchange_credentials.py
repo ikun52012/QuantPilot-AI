@@ -475,3 +475,61 @@ async def test_execute_trade_rolls_back_when_multi_tp_reports_failed(monkeypatch
     assert result["status"] == "error"
     assert result["rollback_success"] is True
     assert "Multi-TP failed" in result["protection_errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_close_position_requires_exchange_flat_confirmation(monkeypatch):
+    monkeypatch.setattr(exchange_module.asyncio, "sleep", AsyncMock())
+
+    class FakeExchange:
+        id = "binance"
+        options = {"defaultType": "future"}
+
+        def __init__(self):
+            self.fetch_calls = 0
+
+        def load_markets(self):
+            return {"BTC/USDT:USDT": {"limits": {"amount": {}}, "precision": {"amount": 8}}}
+
+        def fetch_positions(self, symbols):
+            self.fetch_calls += 1
+            if self.fetch_calls == 1:
+                return [{"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 1.0, "markPrice": 100.0}]
+            return [{"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.25, "markPrice": 99.0}]
+
+        def create_order(self, **kwargs):
+            return {"id": "close-1", "status": "closed", "filled": kwargs["amount"], "average": 99.0}
+
+    result = await exchange_module._close_position(FakeExchange(), "BTC/USDT:USDT", position_side="long")
+
+    assert result["status"] == "close_unconfirmed"
+    assert result["remaining_contracts"] == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_close_position_returns_closed_only_after_flat_confirmation(monkeypatch):
+    monkeypatch.setattr(exchange_module.asyncio, "sleep", AsyncMock())
+
+    class FakeExchange:
+        id = "binance"
+        options = {"defaultType": "future"}
+
+        def __init__(self):
+            self.fetch_calls = 0
+
+        def load_markets(self):
+            return {"BTC/USDT:USDT": {"limits": {"amount": {}}, "precision": {"amount": 8}}}
+
+        def fetch_positions(self, symbols):
+            self.fetch_calls += 1
+            if self.fetch_calls == 1:
+                return [{"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 1.0, "markPrice": 100.0}]
+            return []
+
+        def create_order(self, **kwargs):
+            return {"id": "close-1", "status": "closed", "filled": kwargs["amount"], "average": 99.0}
+
+    result = await exchange_module._close_position(FakeExchange(), "BTC/USDT:USDT", position_side="long")
+
+    assert result["status"] == "closed"
+    assert result["remaining_contracts"] == 0.0

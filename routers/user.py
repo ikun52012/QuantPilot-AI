@@ -558,8 +558,10 @@ async def close_position(
                     break
 
         result = await _close_position(exchange, symbol, position_side=side, close_quantity=close_quantity)
-        if result.get("status") == "error":
-            raise HTTPException(500, result.get("reason", "Failed to close position"))
+        close_status = str(result.get("status") or "")
+        expected_statuses = {"closed"} if close_pct is None else {"closed", "partial_closed"}
+        if close_status not in expected_statuses:
+            raise HTTPException(409, result.get("reason", "Exchange close not confirmed"))
         return {"status": "success", "result": result, "position_id": position_id}
 
     result = await db.execute(select(PositionModel).where(PositionModel.id == position_id))
@@ -589,10 +591,12 @@ async def close_position(
         )
         symbol = await asyncio.to_thread(_resolve_symbol, exchange, position.ticker)
         result = await _close_position(exchange, symbol, position_side=position.direction, close_quantity=close_qty)
-        if result.get("status") == "error":
-            raise HTTPException(500, result.get("reason", "Failed to close position on exchange"))
+        close_status = str(result.get("status") or "")
+        expected_statuses = {"closed"} if close_pct is None else {"closed", "partial_closed"}
+        if close_status not in expected_statuses:
+            raise HTTPException(409, result.get("reason", "Exchange close not confirmed"))
         # Use exchange-reported fill price if available
-        exit_price = result.get("average") or result.get("price") or position.last_price or position.entry_price
+        exit_price = result.get("exit_price") or result.get("average") or result.get("price") or position.last_price or position.entry_price
     else:
         # Paper trading: fetch current market price for accurate PnL
         try:
@@ -603,12 +607,24 @@ async def close_position(
             exit_price = position.last_price or position.entry_price
 
     final_close_qty = close_qty or float(position.remaining_quantity or position.quantity or 0)
+    if close_pct is not None and close_pct < 100:
+        current_remaining = float(position.remaining_quantity or position.quantity or 0)
+        position.remaining_quantity = max(0.0, current_remaining - final_close_qty)
+        position.updated_at = utcnow()
+        await db.commit()
+        return {
+            "status": "success",
+            "position_id": position_id,
+            "close_qty": final_close_qty,
+            "remaining_quantity": position.remaining_quantity,
+            "partial": True,
+        }
+
     pnl_pct = await close_position_async(
         session=db,
         position=position,
         exit_price=exit_price,
-        exit_reason="manual_close",
-        close_quantity=final_close_qty,
+        close_reason="manual_close",
     )
 
     await db.commit()
@@ -656,15 +672,18 @@ async def close_all_positions(
                 )
                 symbol = await asyncio.to_thread(_resolve_symbol, exchange, position.ticker)
                 result = await _close_position(exchange, symbol, position_side=position.direction)
-                if result.get("status") == "error":
+                if result.get("status") != "closed":
                     errors.append(f"{position.ticker}: {result.get('reason')}")
                     continue
+                exit_price = result.get("exit_price") or position.last_price or position.entry_price
+            else:
+                exit_price = position.last_price or position.entry_price
 
             await close_position_async(
                 session=db,
                 position=position,
-                exit_price=position.last_price or position.entry_price,
-                exit_reason="manual_close_all",
+                exit_price=exit_price,
+                close_reason="manual_close_all",
             )
             closed_count += 1
         except Exception as e:

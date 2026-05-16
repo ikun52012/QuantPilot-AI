@@ -9,7 +9,7 @@ P2-FIX: Verify and re-place TP/SL orders periodically to protect against exchang
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +119,7 @@ _MAX_GHOST_THRESHOLD = _GHOST_THRESHOLD_HUGE_POSITION  # Backward compatibility 
 _GHOST_CHECK_INTERVAL_SECS = 3600
 _GHOST_MIN_ELAPSED_SECS = 900  # minimum elapsed before ghost-close (15 min, protects against API instability)
 _GHOST_TRACKER_FILE = Path("data") / "ghost_position_tracker.json"
+_CLOSED_POSITION_RECOVERY_LOOKBACK_HOURS = 24
 
 
 def _save_ghost_tracker() -> None:
@@ -516,30 +517,116 @@ async def get_monitor_state() -> dict:
     }
 
 
-async def _recover_ghost_closed_positions(session: AsyncSession, user_configs: dict) -> int:
-    """Check positions that were ghost-closed and verify if they still exist on the exchange.
+def _exchange_position_contracts(exchange_pos: dict | None) -> float:
+    if not exchange_pos:
+        return 0.0
+    return abs(safe_float(exchange_pos.get("contracts") or 0))
 
-    If a ghost-closed position is found to be still open on the exchange, reopen it
+
+def _exchange_position_side_matches_position(position: PositionModel, exchange_pos: dict | None) -> bool:
+    if not exchange_pos:
+        return False
+    exchange_side = str(exchange_pos.get("side") or "").lower().strip()
+    direction = str(position.direction or "").lower().strip()
+    if exchange_side in {"buy", "long"}:
+        exchange_side = "long"
+    elif exchange_side in {"sell", "short"}:
+        exchange_side = "short"
+    if direction in {"buy", "long"}:
+        direction = "long"
+    elif direction in {"sell", "short"}:
+        direction = "short"
+    return not exchange_side or not direction or exchange_side == direction
+
+
+def _sync_open_position_from_exchange(position: PositionModel, exchange_pos: dict) -> float:
+    contracts = _exchange_position_contracts(exchange_pos)
+    if contracts <= 0:
+        return 0.0
+
+    if safe_float(position.quantity) <= 0 or contracts > safe_float(position.quantity):
+        position.quantity = contracts
+    position.remaining_quantity = contracts
+    position.status = "open"
+    position.close_reason = None
+    position.closed_at = None
+    position.close_trade_id = None
+    position.pnl_pct = None
+    position.exit_price = None
+
+    entry_price = safe_float(exchange_pos.get("entry_price") or exchange_pos.get("entryPrice"))
+    if entry_price > 0:
+        position.entry_price = entry_price
+
+    mark_price = safe_float(
+        exchange_pos.get("mark_price")
+        or exchange_pos.get("markPrice")
+        or exchange_pos.get("entry_price")
+        or exchange_pos.get("entryPrice")
+    )
+    if mark_price > 0:
+        position.last_price = mark_price
+        if safe_float(position.entry_price) > 0:
+            _update_unrealized(position, mark_price)
+
+    position.updated_at = utcnow()
+    return contracts
+
+
+async def _has_active_duplicate_position(session: AsyncSession, position: PositionModel) -> bool:
+    result = await session.execute(
+        select(PositionModel).where(
+            PositionModel.status.in_(["open", "pending"]),
+            PositionModel.id != position.id,
+            PositionModel.direction == position.direction,
+        )
+    )
+    target_key = position_symbol_key(position.ticker)
+    return any(position_symbol_key(row.ticker) == target_key for row in result.scalars().all())
+
+
+async def _recover_ghost_closed_positions(session: AsyncSession, user_configs: dict) -> int:
+    """Recover closed live positions that are still open on the exchange.
+
+    If a closed position is found to be still open on the exchange, reopen it
     in the database and restore protective orders. Returns count of recovered positions.
     """
+    cutoff = utcnow() - timedelta(hours=_CLOSED_POSITION_RECOVERY_LOOKBACK_HOURS)
+    recoverable_reasons = {
+        "ghost_position_auto_close",
+        "exchange_closed",
+        "exchange_closed_unmatched",
+        "manual_close",
+        "manual_close_all",
+        "reverse_signal",
+        "black_swan_loss_protection",
+        "take_profit",
+        "stop_loss",
+    }
     result = await session.execute(
         select(PositionModel)
         .where(
             PositionModel.status == "closed",
-            PositionModel.close_reason == "ghost_position_auto_close",
+            PositionModel.live_trading.is_(True),
+            PositionModel.closed_at.is_not(None),
+            PositionModel.closed_at >= cutoff,
+            PositionModel.close_reason.in_(recoverable_reasons),
         )
         .order_by(PositionModel.closed_at.desc())
+        .limit(200)
     )
-    ghost_closed = list(result.scalars().all())
-    if not ghost_closed:
+    closed_positions = list(result.scalars().all())
+    if not closed_positions:
         return 0
 
-    logger.info(f"[GhostRecovery] Checking {len(ghost_closed)} ghost-closed position(s) for recovery")
+    logger.info(f"[ClosedRecovery] Checking {len(closed_positions)} recently closed live position(s) for exchange residuals")
     recovered = 0
 
-    for position in ghost_closed:
+    for position in closed_positions:
         exchange_config = await _exchange_config_for_position(session, position, user_configs)
         if not exchange_config.get("live_trading"):
+            continue
+        if await _has_active_duplicate_position(session, position):
             continue
 
         try:
@@ -551,42 +638,39 @@ async def _recover_ghost_closed_positions(session: AsyncSession, user_configs: d
 
         if exchange_pos is None:
             continue
+        if not _exchange_position_side_matches_position(position, exchange_pos):
+            continue
 
-        contracts = 0.0
-        try:
-            contracts = float(exchange_pos.get("contracts") or 0)
-        except (TypeError, ValueError):
-            pass
+        contracts = _exchange_position_contracts(exchange_pos)
 
         if contracts <= 0:
             continue
+        exchange_entry = safe_float(exchange_pos.get("entry_price") or exchange_pos.get("entryPrice"))
+        db_entry = safe_float(position.entry_price)
+        if exchange_entry > 0 and db_entry > 0 and abs(exchange_entry - db_entry) / db_entry > 0.05:
+            logger.warning(
+                f"[ClosedRecovery] Skipping {position.ticker}: exchange entry {exchange_entry} "
+                f"differs from closed DB entry {db_entry}; likely a separate manual position."
+            )
+            continue
 
         logger.warning(
-            f"[GhostRecovery] POSITION RECOVERED: {position.id[:8]} on {position.ticker} "
+            f"[ClosedRecovery] POSITION RECOVERED: {position.id[:8]} on {position.ticker} "
             f"is still open on the exchange (contracts={contracts})! Reopening in database."
         )
 
-        position.status = "open"
-        position.close_reason = None
-        position.closed_at = None
-        position.close_trade_id = None
-        position.pnl_pct = None
-        position.current_pnl_pct = None
-        position.exit_price = None
-
-        mark_price = safe_float(exchange_pos.get("mark_price") or exchange_pos.get("markPrice") or exchange_pos.get("entry_price"))
-        if mark_price > 0:
-            position.last_price = mark_price
-            if position.entry_price and position.entry_price > 0:
-                _update_unrealized(position, mark_price)
-
+        _sync_open_position_from_exchange(position, exchange_pos)
         await session.flush()
+        try:
+            await _verify_protective_orders(session, position, exchange_config)
+        except Exception as exc:
+            logger.error(f"[ClosedRecovery] Failed to restore protective orders for {position.ticker}: {exc}")
         _GHOST_POSITION_TRACKER.pop(str(position.id), None)
         _save_ghost_tracker()
         recovered += 1
 
     if recovered > 0:
-        logger.warning(f"[GhostRecovery] Recovered {recovered} ghost-closed position(s) that are still on the exchange")
+        logger.warning(f"[ClosedRecovery] Recovered {recovered} closed position(s) that are still on the exchange")
     return recovered
 
 
@@ -1313,17 +1397,22 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
         get_open_orders,
     )
 
-    tp_ids = [str(oid) for oid in loads_list(position.take_profit_order_ids_json) if oid]
+    raw_tp_ids = [str(oid or "") for oid in loads_list(position.take_profit_order_ids_json)]
     tp_levels = loads_list(position.take_profit_json)
-    for level in tp_levels:
+    tp_ids: list[str] = []
+    for i, level in enumerate(tp_levels):
+        oid = ""
         if isinstance(level, dict) and level.get("order_id"):
             oid = str(level["order_id"])
-            if oid and oid not in tp_ids:
-                tp_ids.append(oid)
+        elif i < len(raw_tp_ids):
+            oid = raw_tp_ids[i]
+        tp_ids.append(oid)
+    if not tp_levels:
+        tp_ids = [oid for oid in raw_tp_ids if oid]
 
     sl_id = str(position.stop_loss_order_id or "")
 
-    needs_sl = sl_id and safe_float(position.stop_loss) > 0
+    needs_sl = safe_float(position.stop_loss) > 0
     needs_tp = len(tp_ids) > 0 or bool(tp_levels)
 
     if not needs_sl and not needs_tp:
@@ -1338,22 +1427,37 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
     open_ids = {str(o.get("id") or "") for o in open_orders if o.get("id")}
 
     # Check SL
-    sl_missing = needs_sl and sl_id and sl_id not in open_ids
+    sl_missing = needs_sl and (not sl_id or sl_id not in open_ids)
     if sl_missing:
-        logger.warning(
-            f"[PositionMonitor] CRITICAL: SL order {sl_id[:8]} for {position.ticker} "
-            f"NOT found on exchange - re-placing"
-        )
+        if sl_id:
+            logger.warning(
+                f"[PositionMonitor] CRITICAL: SL order {sl_id[:8]} for {position.ticker} "
+                f"NOT found on exchange - re-placing"
+            )
+        else:
+            logger.warning(
+                f"[PositionMonitor] CRITICAL: {position.ticker} has no SL order id "
+                f"despite stop_loss={position.stop_loss} - placing protection"
+            )
 
     # Check TP
     missing_tp_indices = []
     for i, tp_id in enumerate(tp_ids):
-        if tp_id and tp_id not in open_ids:
+        level = tp_levels[i] if i < len(tp_levels) and isinstance(tp_levels[i], dict) else {}
+        level_status = str(level.get("status") or "pending").lower()
+        if level_status in {"hit", "filled", "closed"}:
+            continue
+        if not tp_id or tp_id not in open_ids:
             missing_tp_indices.append(i)
-            logger.warning(
-                f"[PositionMonitor] CRITICAL: TP{i+1} order {tp_id[:8]} for {position.ticker} "
-                f"NOT found on exchange - re-placing"
-            )
+            if tp_id:
+                logger.warning(
+                    f"[PositionMonitor] CRITICAL: TP{i+1} order {tp_id[:8]} for {position.ticker} "
+                    f"NOT found on exchange - re-placing"
+                )
+            else:
+                logger.warning(
+                    f"[PositionMonitor] CRITICAL: TP{i+1} for {position.ticker} has no order id - placing protection"
+                )
 
     if not sl_missing and not missing_tp_indices:
         return False
@@ -1493,6 +1597,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
     if match:
         _GHOST_POSITION_TRACKER.pop(position.id, None)
         _save_ghost_tracker()
+        _sync_open_position_from_exchange(position, match)
         mark_price = safe_float(match.get("mark_price") or match.get("markPrice") or match.get("entry_price"))
         if mark_price > 0:
             _update_unrealized(position, mark_price)
@@ -1742,23 +1847,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             _save_ghost_tracker()
             stats["closed"] += 1
 
-            # P0-FIX: Cancel leftover protective orders for ghost-closed positions
-            try:
-                from exchange import cancel_order
-                tp_ids = loads_list(position.take_profit_order_ids_json)
-                for oid in tp_ids:
-                    if oid:
-                        try:
-                            await cancel_order(str(oid), position.ticker, exchange_config)
-                        except Exception:
-                            pass
-                if position.stop_loss_order_id:
-                    try:
-                        await cancel_order(str(position.stop_loss_order_id), position.ticker, exchange_config)
-                    except Exception:
-                        pass
-            except Exception:
-                pass  # Best-effort
+            logger.warning(
+                f"[PositionMonitor] Ghost-closed {position.ticker} in DB but left reduce-only "
+                f"protective orders untouched. This avoids creating a naked exchange position "
+                f"if the exchange API later reports the position again."
+            )
 
             return stats
 
@@ -1767,6 +1860,38 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         if mark_price > 0:
             _update_unrealized(position, mark_price)
             stats["updated"] += 1
+        return stats
+
+    try:
+        from exchange import fetch_single_position
+        residual_position = await fetch_single_position(position.ticker, checked_exchange_config)
+    except Exception as exc:
+        logger.warning(
+            f"[PositionMonitor] Close order found for {position.ticker}, but residual position "
+            f"verification failed: {exc}. Keeping DB position open and protection active."
+        )
+        ticker = await get_ticker(position.ticker, exchange_config)
+        mark_price = safe_float(ticker.get("last") or position.last_price)
+        if mark_price > 0:
+            _update_unrealized(position, mark_price)
+            stats["updated"] += 1
+        return stats
+
+    if (
+        residual_position is not None
+        and _exchange_position_side_matches_position(position, residual_position)
+        and _exchange_position_contracts(residual_position) > 0
+    ):
+        contracts = _sync_open_position_from_exchange(position, residual_position)
+        logger.error(
+            f"[PositionMonitor] CRITICAL: Close order detected for {position.ticker}, "
+            f"but exchange still reports {contracts} contracts. Keeping position OPEN "
+            f"and preserving/rebuilding protection."
+        )
+        if await _verify_protective_orders(session, position, exchange_config):
+            stats["adjusted"] += 1
+            await session.flush()
+        stats["updated"] += 1
         return stats
 
     exit_price = safe_float((order or {}).get("average") or (order or {}).get("price"))
@@ -2600,6 +2725,16 @@ async def monitor_black_swan_events(session: AsyncSession) -> dict[str, Any]:
                         else:
                             black_swan_closed_exchange = True  # Paper trading always succeeds
 
+                        if not black_swan_closed_exchange:
+                            events_summary["actions"].append({
+                                "position_id": pos.id[:8],
+                                "ticker": ticker,
+                                "action": "close_failed_position_kept_open",
+                                "pnl_pct": pnl_pct,
+                                "reason": "Exchange close not confirmed; keeping DB position open and protection active",
+                            })
+                            continue
+
                         try:
                             await close_position_async(
                                 session=session,
@@ -2610,8 +2745,9 @@ async def monitor_black_swan_events(session: AsyncSession) -> dict[str, Any]:
                         except Exception as db_exc:
                             logger.error(
                                 f"[PositionMonitor] Black swan DB close failed for {pos.id[:8]}: {db_exc}. "
-                                f"Exchange position {'closed' if black_swan_closed_exchange else 'STILL OPEN'}!"
+                                f"Exchange position closed; DB reconciliation required."
                             )
+                            continue
                         events_summary["positions_closed"] += 1
                         logger.warning(
                             f"[PositionMonitor] Black swan: closed losing position "

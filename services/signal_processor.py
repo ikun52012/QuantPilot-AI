@@ -2734,8 +2734,14 @@ class SignalProcessor:
                     exit_price = safe_float(close_result.get("exit_price") or exit_price)
                     result["exchange_close"] = close_result
                 elif close_result.get("status") == "no_position":
-                    logger.info(f"[Signal] Position already closed on exchange: {position.ticker}")
-                    result["exchange_close"] = close_result
+                    logger.warning(
+                        f"[Signal] Exchange returned no_position while DB still tracks {position.ticker}. "
+                        "Keeping DB position open and preserving TP/SL until monitor confirms flat."
+                    )
+                    result["exchange_close_error"] = close_result
+                    result["status"] = "error"
+                    result["reason"] = "Exchange close not confirmed: no_position while DB position is open"
+                    return result
                 else:
                     logger.warning(f"[Signal] Failed to close position on exchange: {close_result}")
                     result["exchange_close_error"] = close_result

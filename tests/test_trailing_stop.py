@@ -24,6 +24,7 @@ from position_monitor import (
     _price_pnl_pct,
     _reconcile_exchange_position,
     _reconcile_paper_position,
+    _verify_protective_orders,
     _safe_float,
 )
 from services.signal_processor import SignalProcessor
@@ -468,6 +469,117 @@ async def test_find_recent_close_order_skips_already_hit_partial_tp():
     order = await _find_recent_close_order(position, {}, fake_recent_orders)
 
     assert order["id"] == "sl1"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_exchange_keeps_position_open_when_close_order_leaves_residual(monkeypatch):
+    position = PositionModel(
+        id="pos-residual",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        opened_at=utcnow(),
+        stop_loss=95.0,
+        stop_loss_order_id="sl1",
+    )
+
+    async def fake_open_positions(*args, **kwargs):
+        return []
+
+    async def fake_recent_orders(*args, **kwargs):
+        return [
+            {
+                "id": "sl1",
+                "symbol": "BTC/USDT:USDT",
+                "status": "closed",
+                "filled": 1.0,
+                "average": 94.0,
+                "side": "sell",
+                "timestamp": utcnow().timestamp() * 1000,
+            }
+        ]
+
+    async def fake_fetch_single_position(*args, **kwargs):
+        return {
+            "symbol": "BTC/USDT:USDT",
+            "side": "long",
+            "contracts": 0.2,
+            "entryPrice": 100.0,
+            "markPrice": 93.0,
+        }
+
+    close_recorder = AsyncMock()
+    verify_protection = AsyncMock(return_value=True)
+    monkeypatch.setattr("exchange.get_open_positions", fake_open_positions)
+    monkeypatch.setattr("exchange.get_recent_orders", fake_recent_orders)
+    monkeypatch.setattr("exchange.fetch_single_position", fake_fetch_single_position)
+    monkeypatch.setattr("position_monitor.record_position_close_trade_async", close_recorder)
+    monkeypatch.setattr("position_monitor._verify_protective_orders", verify_protection)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    stats = await _reconcile_exchange_position(FakeSession(), position, {"live_trading": True})
+
+    assert stats["closed"] == 0
+    assert stats["adjusted"] == 1
+    assert position.status == "open"
+    assert position.remaining_quantity == pytest.approx(0.2)
+    close_recorder.assert_not_awaited()
+    verify_protection.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_protective_orders_places_missing_sl_and_tp_without_order_ids(monkeypatch):
+    position = PositionModel(
+        id="pos-missing-protection",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        stop_loss=95.0,
+        stop_loss_order_id="",
+        take_profit_json=json.dumps([
+            {"level": 1, "price": 110.0, "qty_pct": 100, "status": "pending"},
+        ]),
+        take_profit_order_ids_json=json.dumps([]),
+    )
+
+    class FakeExchange:
+        pass
+
+    create_calls = []
+
+    async def fake_create(exchange, symbol, kind, side, amount, trigger_price, position_side=None):
+        create_calls.append((kind, side, amount, trigger_price, position_side))
+        return {"id": "tp-new" if kind == "take_profit" else "sl-new"}
+
+    async def fake_open_orders(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr("exchange.get_open_orders", fake_open_orders)
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda **kwargs: FakeExchange())
+    monkeypatch.setattr("exchange._resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr("exchange._create_conditional_order", fake_create)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    changed = await _verify_protective_orders(FakeSession(), position, {"live_trading": True, "market_type": "contract"})
+
+    assert changed is True
+    assert position.stop_loss_order_id == "sl-new"
+    tp_levels = json.loads(position.take_profit_json)
+    assert tp_levels[0]["order_id"] == "tp-new"
+    assert ("take_profit", "sell", 1.0, 110.0, "long") in create_calls
+    assert ("stop_loss", "sell", 1.0, 95.0, "long") in create_calls
 
 
 @pytest.mark.asyncio
