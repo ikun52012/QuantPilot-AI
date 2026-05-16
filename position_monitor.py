@@ -1549,20 +1549,19 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         return stats
 
     if not order:
-        # P0-CRITICAL: Determine if exchange data is reliable before ghost tracking.
-        # An empty positions list could be an API failure rather than truly no positions.
-        # A non-empty list is also unreliable if the exchange returns partial data
-        # (e.g. OKX returning 5/10 positions). We must verify with a single-position
-        # fetch before incrementing ghost counters.
+        # P0-CRITICAL: NEVER trust batch list absence alone to increment ghost counter.
+        # OKX and other exchanges may return partial position lists. Every time a
+        # position is absent from the batch list, we MUST verify with a targeted
+        # single-position fetch. Only increment the ghost counter when both the
+        # batch list and the single-fetch confirm the position is gone.
         positions_data_reliable = len(exchange_positions) > 0
-        exchange_positions_count = len(exchange_positions)
 
         now = utcnow()
         ghost_entry = _GHOST_POSITION_TRACKER.get(position.id)
 
         if not positions_data_reliable:
             # Exchange returned empty list — could be API instability (e.g. OKX sandbox).
-            # Reset ghost tracker since we cannot trust this data point.
+            # Reset ghost tracker since we cannot trust this data point at all.
             if ghost_entry and ghost_entry.get("fail_count", 0) > 0:
                 logger.warning(
                     f"[P0-CRITICAL] Exchange returned empty positions for {position.ticker}; "
@@ -1575,12 +1574,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 _GHOST_POSITION_TRACKER[position.id] = ghost_entry
                 _save_ghost_tracker()
 
-            # Attempt a targeted single-position fetch as secondary verification
+            # Even with empty batch, try single-position verification
             from exchange import fetch_single_position
             try:
                 single_pos = await fetch_single_position(position.ticker, checked_exchange_config)
                 if single_pos is not None:
-                    # Position IS on the exchange! Empty list was an API glitch.
                     logger.warning(
                         f"[P0-CRITICAL] Empty positions list but single-fetch found {position.ticker}! "
                         f"Exchange API inconsistency detected — position is safe"
@@ -1607,39 +1605,55 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 stats["updated"] += 1
             return stats
 
-        # Exchange data is reliable (non-empty list) and position not found.
-        # P0-FIX: Even with a non-empty list, exchanges like OKX may return partial data.
-        # Verify with a single-position fetch before incrementing ghost counter.
-        if exchange_positions_count <= 3 or ghost_entry is None or ghost_entry.get("fail_count", 0) == 0:
-            # Few positions returned or first detection: verify with targeted fetch
-            from exchange import fetch_single_position
-            try:
-                single_verify = await fetch_single_position(position.ticker, checked_exchange_config)
-                if single_verify is not None:
-                    logger.warning(
-                        f"[P0-CRITICAL] Position {position.ticker} not in batch list "
-                        f"(got {exchange_positions_count} positions) but single-fetch found it! "
-                        f"Exchange API returned partial data — marking as safe"
-                    )
-                    _GHOST_POSITION_TRACKER.pop(position.id, None)
-                    _save_ghost_tracker()
-                    match = single_verify
-                    mark_price = safe_float(match.get("mark_price") or match.get("markPrice") or match.get("entry_price"))
-                    if mark_price > 0:
-                        _update_unrealized(position, mark_price)
-                        stats["updated"] += 1
-                    return stats
-            except Exception as single_exc:
-                logger.debug(
-                    f"[P0-CRITICAL] Single-position verification also failed for {position.ticker}: {single_exc}"
+        # Exchange data is non-empty (positions_data_reliable=True) and position not
+        # found in batch list. Before incrementing ghost counter, ALWAYS verify with
+        # single-position fetch. Exchanges like OKX can return 4-5 out of 10 positions,
+        # missing the one we're looking for — that's NOT proof it's gone.
+        from exchange import fetch_single_position
+        try:
+            single_verify = await fetch_single_position(position.ticker, checked_exchange_config)
+            if single_verify is not None:
+                # Position IS on the exchange! Batch list was incomplete.
+                logger.warning(
+                    f"[P0-CRITICAL] Position {position.ticker} not in batch list "
+                    f"(got {len(exchange_positions)} positions) but single-fetch found it! "
+                    f"Exchange API returned incomplete data — marking as safe"
                 )
+                _GHOST_POSITION_TRACKER.pop(position.id, None)
+                _save_ghost_tracker()
+                mark_price = safe_float(single_verify.get("mark_price") or single_verify.get("markPrice") or single_verify.get("entry_price"))
+                if mark_price > 0:
+                    _update_unrealized(position, mark_price)
+                    stats["updated"] += 1
+                return stats
+        except Exception as single_exc:
+            # Single-fetch API call failed — cannot confirm position is gone.
+            # Do NOT increment ghost counter on API errors; wait for next cycle.
+            logger.warning(
+                f"[P0-CRITICAL] Single-position verification failed for {position.ticker}: {single_exc}. "
+                f"Batch list had {len(exchange_positions)} positions but single-fetch error. "
+                f"Deferring ghost decision to next cycle."
+            )
+            ticker = await get_ticker(position.ticker, exchange_config)
+            mark_price = safe_float(ticker.get("last") or position.last_price)
+            if mark_price > 0:
+                _update_unrealized(position, mark_price)
+                stats["updated"] += 1
+            return stats
 
+        # Only increment ghost counter when BOTH batch list and single-fetch confirm
+        # the position is not on the exchange. This is the only safe path to +1.
         ghost_entry = ghost_entry or {"fail_count": 0, "first_missing_at": now, "last_check": now}
         ghost_entry["fail_count"] += 1
         ghost_entry.setdefault("first_missing_at", ghost_entry.get("last_check", now))
         ghost_entry["last_check"] = now
         _GHOST_POSITION_TRACKER[position.id] = ghost_entry
         _save_ghost_tracker()
+
+        logger.info(
+            f"[GhostSafe] {position.ticker} confirmed absent by both batch+single-fetch. "
+            f"Ghost counter={ghost_entry['fail_count']}, threshold={_calculate_ghost_threshold(position)}"
+        )
 
         missing_since = ghost_entry.get("first_missing_at", now)
         missing_elapsed = (now - missing_since).total_seconds() if missing_since else 0.0
