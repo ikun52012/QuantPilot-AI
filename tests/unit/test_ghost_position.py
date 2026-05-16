@@ -32,10 +32,11 @@ class TestGhostPositionThreshold:
 
     def test_small_position_threshold(self, mock_position):
         """Test threshold for small position (<$100)."""
-        # Position value = (50000 * 0.01) / 10 = $50
+        # Notional value = 5000 * 0.01 = $50
         mock_position.entry_price = 5000.0
         mock_position.quantity = 0.01
         mock_position.leverage = 10.0
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -43,11 +44,11 @@ class TestGhostPositionThreshold:
 
     def test_medium_position_threshold(self, mock_position):
         """Test threshold for medium position ($100-$1000)."""
-        # Position value = (50000 * 0.01) / 10 = $50 (too small)
-        # Adjust to $500
+        # Position notional value = 50000 * 0.002 = $100
         mock_position.entry_price = 50000.0
-        mock_position.quantity = 0.1
-        mock_position.leverage = 10.0  # Value = $500
+        mock_position.quantity = 0.002
+        mock_position.leverage = 10.0  # Notional value = $100
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -55,10 +56,11 @@ class TestGhostPositionThreshold:
 
     def test_large_position_threshold(self, mock_position):
         """Test threshold for large position ($1000-$10000)."""
-        # Position value = $5000
+        # Position notional value = $5000
         mock_position.entry_price = 50000.0
-        mock_position.quantity = 1.0
-        mock_position.leverage = 10.0  # Value = $5000
+        mock_position.quantity = 0.1
+        mock_position.leverage = 10.0  # Notional value = $5000
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -66,10 +68,11 @@ class TestGhostPositionThreshold:
 
     def test_huge_position_threshold(self, mock_position):
         """Test threshold for huge position (>$10000)."""
-        # Position value = $50000
+        # Position notional value = $50000
         mock_position.entry_price = 50000.0
         mock_position.quantity = 10.0
-        mock_position.leverage = 10.0  # Value = $50000
+        mock_position.leverage = 10.0  # Notional value = $50000
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -77,10 +80,11 @@ class TestGhostPositionThreshold:
 
     def test_threshold_boundary_100_dollars(self, mock_position):
         """Test threshold at $100 boundary."""
-        # Exactly $100
-        mock_position.entry_price = 1000.0
+        # Exactly $100 notional
+        mock_position.entry_price = 100.0
         mock_position.quantity = 1.0
-        mock_position.leverage = 10.0  # Value = $100
+        mock_position.leverage = 10.0
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -89,10 +93,11 @@ class TestGhostPositionThreshold:
 
     def test_threshold_boundary_1000_dollars(self, mock_position):
         """Test threshold at $1000 boundary."""
-        # Exactly $1000
-        mock_position.entry_price = 10000.0
+        # Exactly $1000 notional
+        mock_position.entry_price = 1000.0
         mock_position.quantity = 1.0
-        mock_position.leverage = 10.0  # Value = $1000
+        mock_position.leverage = 10.0
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -101,10 +106,11 @@ class TestGhostPositionThreshold:
 
     def test_threshold_boundary_10000_dollars(self, mock_position):
         """Test threshold at $10000 boundary."""
-        # Exactly $10000
-        mock_position.entry_price = 100000.0
+        # Exactly $10000 notional
+        mock_position.entry_price = 10000.0
         mock_position.quantity = 1.0
-        mock_position.leverage = 10.0  # Value = $10000
+        mock_position.leverage = 10.0
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -113,21 +119,22 @@ class TestGhostPositionThreshold:
 
     def test_threshold_with_leverage_1x(self, mock_position):
         """Test threshold calculation with 1x leverage."""
-        # High leverage reduces position value
+        # Notional value = 50000 * 0.2 = $10000 (leverage doesn't affect notional)
         mock_position.entry_price = 50000.0
         mock_position.quantity = 0.2
-        mock_position.leverage = 1.0  # No leverage, value = $10000
+        mock_position.leverage = 1.0  # Notional = $10000
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
         assert threshold == _GHOST_THRESHOLD_HUGE_POSITION  # 15
 
     def test_threshold_with_high_leverage(self, mock_position):
-        """Test threshold with high leverage reduces position value."""
-        # High leverage reduces effective position value
+        """Test threshold with high leverage — notional value still determines threshold."""
+        # Notional value = 50000 * 0.001 = $50 (small regardless of leverage)
         mock_position.entry_price = 50000.0
-        mock_position.quantity = 0.02
-        mock_position.leverage = 100.0  # Value = $10
+        mock_position.quantity = 0.001
+        mock_position.leverage = 100.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -139,6 +146,7 @@ class TestGhostPositionThreshold:
         mock_position.entry_price = 0.0
         mock_position.quantity = 0.0
         mock_position.leverage = 0.0
+        mock_position.margin = 0.0
 
         threshold = _calculate_ghost_threshold(mock_position)
 
@@ -151,10 +159,12 @@ class TestGhostPositionThreshold:
         expected_thresholds = [5, 8, 8, 12, 12, 15]
 
         for value, expected in zip(values, expected_thresholds, strict=True):
-            # Calculate position params to achieve target value
+            # Calculate position params to achieve target notional value
+            # Notional value = entry_price * quantity (leverage does NOT divide)
             mock_position.entry_price = 1000.0
-            mock_position.quantity = value / 1000.0  # Adjust quantity
+            mock_position.quantity = value / 1000.0
             mock_position.leverage = 1.0
+            mock_position.margin = 0.0  # Force fallback path
 
             threshold = _calculate_ghost_threshold(mock_position)
 
@@ -169,14 +179,14 @@ class TestGhostPositionIntegration:
         """Test ghost position auto-close uses dynamic threshold."""
         from core.database import PositionModel
 
-        # Create test position with medium value
+        # Create test position with large notional value
         position = Mock(spec=PositionModel)
         position.id = "test_pos_123"
         position.ticker = "BTCUSDT"
         position.direction = "long"
         position.entry_price = 50000.0
-        position.quantity = 0.2
-        position.leverage = 10.0  # Value = $1000
+        position.quantity = 0.1  # Notional = $5000
+        position.leverage = 10.0
         position.status = "open"
         position.live_trading = True
 

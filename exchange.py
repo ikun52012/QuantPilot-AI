@@ -724,9 +724,8 @@ def _get_or_create_exchange(
                             "last_check": time.time(),
                             "consecutive_failures": new_consecutive,
                         }
-                        removed = _exchange_pool.pop(cache_key, None)
-                        _exchange_pool_health.pop(cache_key, None)
-                        needs_rebuild = True
+                        # Do NOT evict — keep the entry and let failures accumulate
+                        # until _MAX_CONSECUTIVE_FAILURES is reached.
 
                 if removed is not None:
                     try:
@@ -1283,8 +1282,12 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                         "reason": f"Leverage setup failed ({leverage}x): {result.get('error', 'Unknown')}. Trade aborted for safety.",
                     }
                 else:
-                    # Non-critical failure, continue with default leverage
-                    logger.warning(f"[P0-FIX] Could not set leverage for {symbol}: {result.get('error', 'Unknown')}. Continuing with default leverage.")
+                    logger.error(f"[Exchange] Could not verify 1x leverage for {symbol}: {result.get('error', 'Unknown')}. "
+                                f"Aborting trade for safety — unknown exchange default leverage could exceed 1x.")
+                    return {
+                        "status": "error",
+                        "reason": f"Cannot verify 1x leverage for {symbol}. Trade aborted for safety.",
+                    }
             else:
                 leverage_changed = True
                 logger.info(f"[Exchange] Leverage set: {symbol} {leverage}x")
@@ -1731,7 +1734,7 @@ async def _place_multi_tp_orders(exchange, symbol, side, total_qty, tp_levels, p
     return tp_results
 
 
-def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: float, position_side: str | None = None) -> list[tuple[str, dict[str, Any]]]:
+def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: float, position_side: str | None = None, margin_mode: str = "cross") -> list[tuple[str, dict[str, Any]]]:
     """Return exchange-aware conditional-order candidates.
 
     Args:
@@ -1755,7 +1758,7 @@ def _conditional_order_attempts(exchange_id: str, kind: str, trigger_price: floa
     if exchange_id == "okx":
         key = "tpTriggerPx" if kind == "take_profit" else "slTriggerPx"
         order_key = "tpOrdPx" if kind == "take_profit" else "slOrdPx"
-        candidates.insert(0, ("market", {**reduce_params, key: trigger_price, order_key: "-1", "tdMode": "cross"}))
+        candidates.insert(0, ("market", {**reduce_params, key: trigger_price, order_key: "-1", "tdMode": margin_mode}))
     if exchange_id == "bitget":
         candidates.insert(0, ("market", {**reduce_params, "triggerPrice": trigger_price, "planType": "profit_plan" if kind == "take_profit" else "loss_plan"}))
     if exchange_id == "bybit":
@@ -1790,8 +1793,10 @@ async def _create_conditional_order(exchange, symbol: str, kind: str, side: str,
                        For Bybit, determines triggerDirection.
     """
     exchange_id = _exchange_id(exchange)
+    exchange_options = getattr(exchange, "options", {}) or {}
+    effective_margin_mode = str(exchange_options.get("defaultMarginMode") or settings.risk.margin_mode or "cross").lower()
     errors = []
-    for order_type, params in _conditional_order_attempts(exchange_id, kind, trigger_price, position_side):
+    for order_type, params in _conditional_order_attempts(exchange_id, kind, trigger_price, position_side, margin_mode=effective_margin_mode):
         try:
             return await _create_exchange_order(
                 exchange,
@@ -1945,6 +1950,10 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
 
             # For net mode (no posSide), infer direction from contracts sign
             if not pos_side:
+                logger.warning(
+                    f"[Exchange] Cannot determine position side for {symbol} in net mode; "
+                    f"side field is empty. Using contracts > 0 heuristic but this may be wrong."
+                )
                 pos_side = "long" if contracts > 0 else "short"
                 contracts = abs(contracts)
 
@@ -2188,10 +2197,11 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
             "volume": ticker.get("volume"),
             "timestamp": ticker.get("timestamp"),
             "datetime": ticker.get("datetime"),
+            "_data_reliable": True,
         }
     except Exception as e:
         logger.error(f"[Exchange] Failed to fetch ticker for {symbol}: {e}")
-        return {}
+        return {"_data_reliable": False}
 
 
 async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config: dict | None = None) -> dict:
@@ -2302,8 +2312,8 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
                     "liquidation_price": pos.get('liquidationPrice'),
                     "percentage": percentage,
                     "leverage": pos.get('leverage'),
-                    "marginMode": pos.get('marginMode'),
                     "margin_mode": pos.get('marginMode'),
+                    "_data_reliable": True,
                 })
         return result
     except Exception as e:

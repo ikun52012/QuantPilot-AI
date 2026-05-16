@@ -187,7 +187,7 @@ def _calculate_ghost_threshold(position: PositionModel) -> int:
         # Fallback: recalculate from entry_price, quantity, and stored contract_size
         ts_config = loads_dict(position.trailing_stop_config_json)
         contract_size = safe_float(ts_config.get("_contract_size"), 1.0)
-        position_value = (entry_price * quantity * contract_size) / leverage if entry_price > 0 and quantity > 0 else 0.0
+        position_value = (entry_price * quantity * contract_size) if entry_price > 0 and quantity > 0 else 0.0
 
     # Dynamic thresholds based on position value
     if position_value < _POSITION_VALUE_THRESHOLDS[0]:  # < $100
@@ -359,7 +359,7 @@ async def _reevaluate_trailing_stop_config(
         timeframe = str(trailing_config.get("_signal_timeframe") or "60")
 
         tp_levels = loads_list(position.take_profit_json)
-        num_tp_levels = len(tp_levels) if tp_levels else 1
+        num_tp_levels = len(tp_levels) if tp_levels else 4
 
         decision = select_smart_trailing_stop(
             confidence=confidence,
@@ -796,10 +796,22 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
             await update_user_balance(session, position.user_id, total_level_pnl_usdt)
 
         if remaining_qty > 0:
-            from exchange import place_protective_stop
-            exchange_config = _get_exchange_config_for_position(position)
-            if exchange_config:
-                await _adjust_trailing_stop_on_tp_hit(position, tp_levels, hit_levels, exchange_config, place_protective_stop)
+            if position.live_trading:
+                from exchange import place_protective_stop
+                exchange_config = _get_exchange_config_for_position(position)
+                if exchange_config:
+                    await _adjust_trailing_stop_on_tp_hit(position, tp_levels, hit_levels, exchange_config, place_protective_stop)
+            else:
+                new_stop = _compute_paper_trailing_stop(position, hit_levels)
+                if new_stop and new_stop > 0:
+                    old_sl = safe_float(position.stop_loss)
+                    direction = str(position.direction or "long").lower()
+                    if direction == "short":
+                        if old_sl <= 0 or new_stop < old_sl:
+                            position.stop_loss = new_stop
+                    else:
+                        if old_sl <= 0 or new_stop > old_sl:
+                            position.stop_loss = new_stop
 
         if remaining_qty <= max(0.00000001, opened_qty * 0.000001):
             final_price = safe_float(hit_levels[-1].get("price"), close)
@@ -814,6 +826,53 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
             stats["closed"] += 1
 
     return stats
+
+
+def _compute_paper_trailing_stop(position: PositionModel, hit_levels: list[dict]) -> float | None:
+    trailing_config = loads_dict(position.trailing_stop_config_json)
+    trailing_mode = _resolve_trailing_mode(trailing_config, position)
+    if trailing_mode not in {"breakeven_on_tp1", "step_trailing"}:
+        return None
+    if not hit_levels:
+        return None
+
+    direction = str(position.direction or "long").lower()
+    entry_price = safe_float(position.entry_price)
+    if entry_price <= 0:
+        return None
+
+    breakeven_buffer = safe_float(trailing_config.get("breakeven_buffer_pct"), 0.2)
+    step_buffer = safe_float(trailing_config.get("step_buffer_pct"), 0.3)
+
+    hit_count = max(hit_lvl.get("level", 0) for hit_lvl in hit_levels) if hit_levels else 0
+
+    if trailing_mode == "breakeven_on_tp1":
+        if direction == "short":
+            return entry_price * (1 + breakeven_buffer / 100.0)
+        return entry_price * (1 - breakeven_buffer / 100.0)
+
+    if trailing_mode == "step_trailing":
+        tp_levels = loads_list(position.take_profit_json)
+        if not tp_levels:
+            if direction == "short":
+                return entry_price * (1 + breakeven_buffer / 100.0)
+            return entry_price * (1 - breakeven_buffer / 100.0)
+
+        reverse_sort = direction == "short"
+        all_levels = sorted(tp_levels, key=lambda x: safe_float(x.get("price")), reverse=reverse_sort)
+
+        if hit_count == 1:
+            if direction == "short":
+                return entry_price * (1 + breakeven_buffer / 100.0)
+            return entry_price * (1 - breakeven_buffer / 100.0)
+        elif hit_count >= 2 and hit_count - 1 < len(all_levels):
+            ref_price = safe_float(all_levels[hit_count - 2].get("price"))
+            if ref_price > 0:
+                if direction == "short":
+                    return ref_price * (1 + step_buffer / 100.0)
+                return ref_price * (1 - step_buffer / 100.0)
+
+    return None
 
 
 def _hit_take_profit_levels(direction: str, levels: list[dict], high: float, low: float) -> list[dict]:
@@ -1039,9 +1098,25 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                             cancel_confirmed = True
                         except ccxt.OrderNotFound:
                             logger.warning(
-                                f"[PositionMonitor] Limit order not found during timeout cancel for {position.ticker}; "
-                                "treating as expired (order already removed from exchange)"
+                                f"[PositionMonitor] Limit order not found during timeout cancel for {position.ticker}. "
+                                f"Re-fetching to check if it was filled before we could cancel."
                             )
+                            try:
+                                recheck = await asyncio.to_thread(exchange.fetch_order, position.entry_order_id, symbol)
+                                if str(recheck.get("status", "")).lower() in {"closed", "filled"}:
+                                    filled_qty = safe_float(recheck.get("filled") or recheck.get("amount") or 0)
+                                    if filled_qty > 0:
+                                        logger.info(
+                                            f"[PositionMonitor] Order was actually filled before cancel: {position.ticker} qty={filled_qty}"
+                                        )
+                                        position.status = "open"
+                                        position.quantity = filled_qty
+                                        position.remaining_quantity = filled_qty
+                                        position.updated_at = utcnow()
+                                        await session.flush()
+                                        return {"status": "filled", "order": recheck}
+                            except Exception:
+                                pass
                             cancel_confirmed = True
                         except ccxt.NetworkError as e:
                             logger.warning(f"[PositionMonitor] Network error cancelling limit order: {e}")
@@ -1491,7 +1566,6 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 safe_float(position.entry_price, 0.0)
                 * safe_float(position.quantity, 0.0)
                 * contract_size
-                / max(1.0, safe_float(position.leverage, 1.0))
             )
             logger.warning(
                 f"[P0-FIX] GHOST POSITION: {position.id[:8]} on {position.ticker} "
@@ -1596,7 +1670,7 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
             level_status = str(level.get("status") or "pending").lower()
             if level_status in {"hit", "filled", "closed"}:
                 continue
-            if level_price > 0 and abs(order_price - level_price) / level_price < 0.001:
+            if level_price > 0 and (abs(order_price - level_price) / level_price < 0.001 or order_id in tp_order_ids):
                 level_qty_pct = safe_float(level.get("qty_pct"), 100.0)
 
                 hit_info = {
@@ -1652,13 +1726,18 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
 def _find_exchange_position(position: PositionModel, exchange_positions: list[dict]) -> dict | None:
     target = _symbol_key(position.ticker)
     direction = str(position.direction or "").lower()
+    SIDE_LONG = {"long", "buy"}
+    SIDE_SHORT = {"short", "sell"}
     for item in exchange_positions:
         symbol = _symbol_key(item.get("symbol"))
         side = str(item.get("side") or "").lower()
         if target != symbol:
             continue
-        if direction and side and direction not in side:
-            continue
+        if direction and side:
+            if direction in SIDE_LONG and side not in SIDE_LONG:
+                continue
+            if direction in SIDE_SHORT and side not in SIDE_SHORT:
+                continue
         return item
     return None
 
@@ -1684,7 +1763,9 @@ async def _find_recent_close_order(position: PositionModel, exchange_config: dic
     for order in orders:
         if str(order.get("id") or "") in order_ids and _order_has_close_status(order):
             filled_qty = safe_float(order.get("filled") or 0)
-            if filled_qty > 0 and remaining_qty > 0:
+            if filled_qty <= 0:
+                continue
+            if remaining_qty > 0:
                 filled_pct = (filled_qty / remaining_qty) * 100
                 if filled_pct >= 90:
                     return order
@@ -1697,7 +1778,9 @@ async def _find_recent_close_order(position: PositionModel, exchange_config: dic
     for order in orders:
         if _order_matches_position_close(position, order):
             filled_qty = safe_float(order.get("filled") or 0)
-            if filled_qty > 0 and remaining_qty > 0:
+            if filled_qty <= 0:
+                continue
+            if remaining_qty > 0:
                 filled_pct = (filled_qty / remaining_qty) * 100
                 if filled_pct >= 90:
                     return order
@@ -1735,7 +1818,7 @@ def _order_matches_position_close(position: PositionModel, order: dict) -> bool:
 def _order_has_close_status(order: dict) -> bool:
     status = str(order.get("status") or "").lower()
     filled = safe_float(order.get("filled") or 0)
-    return status in {"closed", "filled"} or (status in {"open", "new", "partial"} and filled > 0)
+    return status in {"closed", "filled"} or (status == "partial" and filled > 0)
 
 
 def _symbols_match(left: str, right: str) -> bool:
@@ -2046,7 +2129,7 @@ async def check_position_risk(position: dict, config: dict) -> dict:
         return {"risk_level": "unknown"}
 
     side = str(position.get("side") or "long").lower()
-    pnl_pct = _price_pnl_pct(side, entry_price, mark_price, 1.0)
+    pnl_pct = _price_pnl_pct(side, entry_price, mark_price, leverage)
 
     liq_distance = 0.0
     if liquidation_price > 0:
@@ -2346,7 +2429,8 @@ async def _enable_emergency_trailing_stop(
     """
     direction = str(position.direction or "long").lower()
     entry_price = safe_float(position.entry_price)
-    pnl_pct = _price_pnl_pct(direction, entry_price, current_price, 1.0)
+    leverage = max(1.0, safe_float(position.leverage, 1.0))
+    pnl_pct = _price_pnl_pct(direction, entry_price, current_price, leverage)
 
     if pnl_pct <= 0:
         return False
@@ -2362,10 +2446,10 @@ async def _enable_emergency_trailing_stop(
         if current_sl > 0 and emergency_sl <= current_sl:
             emergency_sl = current_sl * (1 + 0.2 / 100.0)  # Slightly higher
     else:
-        emergency_sl = entry_price * (1 - buffer_pct / 100.0)
+        emergency_sl = entry_price * (1 + buffer_pct / 100.0)
         current_sl = safe_float(position.stop_loss)
-        if current_sl > 0 and emergency_sl >= current_sl:
-            emergency_sl = current_sl * (1 - 0.2 / 100.0)
+        if current_sl > 0 and emergency_sl <= current_sl:
+            emergency_sl = current_sl * (1 + 0.2 / 100.0)
 
     # Update position with emergency trailing config
     original_config = loads_dict(position.trailing_stop_config_json)

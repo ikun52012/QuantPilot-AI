@@ -2286,8 +2286,8 @@ class SignalProcessor:
                     "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else settings.exchange.api_key,
                     "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else settings.exchange.api_secret,
                     "password": user_exchange.get("password") if "password" in user_exchange else settings.exchange.password,
-                    "live_trading": bool(user_exchange.get("live_trading", False)),
-                    "sandbox_mode": bool(user_exchange.get("sandbox_mode", False)),
+                    "live_trading": bool(user_exchange.get("live_trading")) if "live_trading" in user_exchange else bool(settings.exchange.live_trading),
+                    "sandbox_mode": bool(user_exchange.get("sandbox_mode")) if "sandbox_mode" in user_exchange else bool(settings.exchange.sandbox_mode),
                     "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
                     "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
                     "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
@@ -2678,8 +2678,8 @@ class SignalProcessor:
             # Allow same-direction (scaling in)
             return (None, None)
         except Exception as e:
-            logger.error(f"[Signal] Position conflict check failed: {e}")
-            return (f"Position conflict check failed: {e}", None)
+            logger.warning(f"[Signal] Position conflict check failed (allowing trade): {e}")
+            return (None, None)
 
     async def _close_conflicting_position(
         self,
