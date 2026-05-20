@@ -38,7 +38,7 @@ from core.utils.common import (
     safe_float,
     suggested_limit_timeout_secs,
 )
-from core.utils.datetime import utcnow
+from core.utils.datetime import utcnow, to_utc
 
 _safe_float = safe_float
 _loads_list = loads_list
@@ -926,8 +926,7 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
             else:
                 opened_at = position.opened_at
                 if opened_at:
-                    if opened_at.tzinfo is None:
-                        opened_at = opened_at.replace(tzinfo=timezone.utc)
+                    opened_at = to_utc(opened_at)
                     age_secs = (utcnow() - opened_at).total_seconds()
                     if age_secs > limit_timeout:
                         position.status = "closed"
@@ -1806,8 +1805,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 limit_timeout = _position_limit_timeout_secs(position)
                 opened_at = position.opened_at
                 if opened_at:
-                    if opened_at.tzinfo is None:
-                        opened_at = opened_at.replace(tzinfo=timezone.utc)
+                    opened_at = to_utc(opened_at)
                     age_secs = (utcnow() - opened_at).total_seconds()
                     if age_secs < limit_timeout:
                         logger.info(
@@ -1942,8 +1940,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             limit_timeout = _position_limit_timeout_secs(position)
             opened_at = position.opened_at
             if opened_at:
-                if opened_at.tzinfo is None:
-                    opened_at = opened_at.replace(tzinfo=timezone.utc)
+                opened_at = to_utc(opened_at)
                 age_secs = (utcnow() - opened_at).total_seconds()
                 if age_secs < limit_timeout:
                     logger.info(
