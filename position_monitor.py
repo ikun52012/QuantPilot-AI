@@ -38,7 +38,7 @@ from core.utils.common import (
     safe_float,
     suggested_limit_timeout_secs,
 )
-from core.utils.datetime import utcnow, to_utc
+from core.utils.datetime import to_utc, utcnow
 
 _safe_float = safe_float
 _loads_list = loads_list
