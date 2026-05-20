@@ -7,7 +7,7 @@ which can exceed the 40-character limit.
 from alembic import op
 
 revision = "004_widen_ticker"
-down_revision = "003_add_position_margin_liquidation"
+down_revision = "003"
 branch_labels = None
 depends_on = None
 
