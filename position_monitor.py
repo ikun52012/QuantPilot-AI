@@ -252,6 +252,7 @@ async def _fetch_market_price_changes(symbol: str, exchange_config: dict, curren
         live=bool(exchange_config.get("live_trading", False)),
         sandbox=bool(exchange_config.get("sandbox_mode", False)),
         market_type=exchange_config.get("market_type", settings.exchange.market_type),
+        margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
     )
 
     try:
@@ -839,6 +840,7 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
         "live_trading": bool(position.live_trading),
         "sandbox_mode": bool(position.sandbox_mode),
         "market_type": settings.exchange.market_type,
+        "margin_mode": settings.risk.margin_mode,
     }
     if position.user_id and position.user_id in user_configs:
         config.update(user_configs[position.user_id])
@@ -859,6 +861,7 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
                     "live_trading": safe_bool(exchange.get("live_trading"), config["live_trading"]),
                     "sandbox_mode": safe_bool(exchange.get("sandbox_mode"), config["sandbox_mode"]),
                     "market_type": exchange.get("market_type") or config["market_type"],
+                    "margin_mode": exchange.get("margin_mode") or config["margin_mode"],
                 })
             except (ValueError, TypeError, KeyError) as exc:
                 logger.warning(f"[PositionMonitor] Could not decrypt user exchange config: {exc}")
@@ -1139,6 +1142,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
             live=bool(exchange_config.get("live_trading", False)),
             sandbox=bool(exchange_config.get("sandbox_mode", False)),
             market_type=exchange_config.get("market_type", settings.exchange.market_type),
+            margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
         )
 
         try:
@@ -1563,6 +1567,7 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
         live=bool(exchange_config.get("live_trading", False)),
         sandbox=bool(exchange_config.get("sandbox_mode", False)),
         market_type=exchange_config.get("market_type", ""),
+        margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
     )
 
     try:
@@ -1840,6 +1845,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         live=bool(exchange_config.get("live_trading", False)),
                         sandbox=bool(exchange_config.get("sandbox_mode", False)),
                         market_type=exchange_config.get("market_type", settings.exchange.market_type),
+                        margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
                     )
                     symbol = await asyncio.to_thread(
                         _resolve_symbol,
@@ -2060,6 +2066,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         live=bool(exchange_config.get("live_trading", False)),
                         sandbox=bool(exchange_config.get("sandbox_mode", False)),
                         market_type=exchange_config.get("market_type", settings.exchange.market_type),
+                        margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
                     )
                     symbol = await asyncio.to_thread(
                         _resolve_symbol,
