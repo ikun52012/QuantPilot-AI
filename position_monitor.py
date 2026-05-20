@@ -1481,6 +1481,7 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
     exchange-side order cancellations (e.g. after server restart, disconnect).
     """
     from exchange import (
+        _cancel_exchange_order,
         _create_conditional_order,
         _get_or_create_exchange,
         _resolve_symbol,
@@ -1628,10 +1629,30 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                 position.take_profit_order_ids_json = json.dumps(tp_ids, ensure_ascii=False)
                 position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
 
-        # Re-place missing SL order
+        # Re-place missing SL order (cancel old first to avoid duplicates)
         if sl_missing:
             sl_price = safe_float(position.stop_loss)
             if sl_price > 0:
+                if sl_id:
+                    try:
+                        cancel_result = await asyncio.to_thread(
+                            _cancel_exchange_order, exchange, symbol, sl_id
+                        )
+                        if cancel_result.get("status") not in {"cancelled", "not_found"}:
+                            logger.warning(
+                                f"[PositionMonitor] Old SL {sl_id[:8]} for {position.ticker} "
+                                f"could not be cancelled: {cancel_result}. Aborting new SL placement."
+                            )
+                            return re_placed
+                        logger.info(
+                            f"[PositionMonitor] Cancelled old SL {sl_id[:8]} for {position.ticker} "
+                            f"before re-placing (status={cancel_result.get('status')})"
+                        )
+                    except Exception as cancel_exc:
+                        logger.warning(
+                            f"[PositionMonitor] Failed to cancel old SL {sl_id[:8]} for {position.ticker}: "
+                            f"{cancel_exc}. Proceeding with new SL placement anyway."
+                        )
                 try:
                     sl_order = await _create_conditional_order(
                         exchange, symbol, "stop_loss", tp_close_side,
@@ -1725,6 +1746,38 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                     order_details={"trigger": "take_profit", "levels": tp_hit_levels},
                 )
                 stats["closed"] += 1
+            else:
+                # If all configured TPs are hit but position not fully closed,
+                # update SL to cover remaining quantity so it isn't left unprotected.
+                all_tp_hit = all(
+                    str((lv.get("status") or "pending").lower()) in {"hit", "filled", "closed"}
+                    for lv in tp_levels if isinstance(lv, dict)
+                )
+                if all_tp_hit and safe_float(position.stop_loss) > 0:
+                    sl_qty = safe_float(position.remaining_quantity, safe_float(position.quantity, 0.0))
+                    if sl_qty > 0:
+                        try:
+                            sl_result = await place_protective_stop(
+                                position.ticker,
+                                position.direction,
+                                sl_qty,
+                                safe_float(position.stop_loss),
+                                exchange_config,
+                                existing_order_id=str(position.stop_loss_order_id or ""),
+                            )
+                            if sl_result.get("order_id"):
+                                position.stop_loss_order_id = sl_result["order_id"]
+                                logger.info(
+                                    f"[PositionMonitor] Updated SL for remaining {sl_qty} "
+                                    f"after all TPs hit on {position.ticker}, "
+                                    f"order_id={str(sl_result['order_id'])[:8]}"
+                                )
+                                stats["adjusted"] += 1
+                        except Exception as sl_exc:
+                            logger.warning(
+                                f"[PositionMonitor] Failed to update SL for remaining qty "
+                                f"after all TPs hit on {position.ticker}: {sl_exc}"
+                            )
 
         now = utcnow()
         last_verify = _PROTECTIVE_ORDERS_LAST_VERIFY.get(position.id)
