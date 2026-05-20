@@ -1481,11 +1481,11 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
     exchange-side order cancellations (e.g. after server restart, disconnect).
     """
     from exchange import (
-        _cancel_exchange_order,
         _create_conditional_order,
         _get_or_create_exchange,
         _resolve_symbol,
         get_open_orders,
+        place_protective_stop,
     )
 
     raw_tp_ids = [str(oid or "") for oid in loads_list(position.take_profit_order_ids_json)]
@@ -1629,48 +1629,29 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                 position.take_profit_order_ids_json = json.dumps(tp_ids, ensure_ascii=False)
                 position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
 
-        # Re-place missing SL order (cancel old first to avoid duplicates)
+        # Re-place missing SL order (cancel old first via place_protective_stop)
         if sl_missing:
             sl_price = safe_float(position.stop_loss)
             if sl_price > 0:
-                if sl_id:
-                    try:
-                        cancel_result = await asyncio.to_thread(
-                            _cancel_exchange_order, exchange, symbol, sl_id
-                        )
-                        if cancel_result.get("status") not in {"cancelled", "not_found"}:
-                            logger.warning(
-                                f"[PositionMonitor] Old SL {sl_id[:8]} for {position.ticker} "
-                                f"could not be cancelled: {cancel_result}. Aborting new SL placement."
-                            )
-                            return re_placed
-                        logger.info(
-                            f"[PositionMonitor] Cancelled old SL {sl_id[:8]} for {position.ticker} "
-                            f"before re-placing (status={cancel_result.get('status')})"
-                        )
-                    except Exception as cancel_exc:
-                        logger.warning(
-                            f"[PositionMonitor] Failed to cancel old SL {sl_id[:8]} for {position.ticker}: "
-                            f"{cancel_exc}. Proceeding with new SL placement anyway."
-                        )
                 try:
-                    sl_order = await _create_conditional_order(
-                        exchange, symbol, "stop_loss", tp_close_side,
-                        remaining_qty, sl_price, pos_side,
+                    sl_result = await place_protective_stop(
+                        position.ticker,
+                        position.direction,
+                        remaining_qty,
+                        sl_price,
+                        exchange_config,
+                        existing_order_id=sl_id,
                     )
-                    new_sl_id = str(sl_order.get("id") or "")
-                    if new_sl_id:
-                        position.stop_loss_order_id = new_sl_id
+                    if sl_result.get("order_id"):
+                        position.stop_loss_order_id = sl_result["order_id"]
                         logger.info(
                             f"[PositionMonitor] SL re-placed for {position.ticker} @ {sl_price}, "
-                            f"new order id={new_sl_id[:8]}"
+                            f"new order id={str(sl_result['order_id'])[:8]}"
                         )
                         re_placed = True
                     else:
-                        position.stop_loss_order_id = ""
-                        logger.error(
-                            f"[PositionMonitor] Failed to re-place SL for {position.ticker}: "
-                            f"no order id returned"
+                        logger.warning(
+                            f"[PositionMonitor] SL re-place for {position.ticker} returned no order id: {sl_result}"
                         )
                 except Exception as e:
                     position.stop_loss_order_id = ""
@@ -1686,6 +1667,7 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
 
 
 async def _reconcile_exchange_position(session, position: PositionModel, exchange_config: dict) -> dict:
+    from exchange import _close_position as _exchange_close
     from exchange import get_open_positions, get_recent_orders, get_ticker, place_protective_stop
 
     stats = {"updated": 0, "partials": 0, "closed": 0, "adjusted": 0}
@@ -1747,36 +1729,58 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 )
                 stats["closed"] += 1
             else:
-                # If all configured TPs are hit but position not fully closed,
-                # update SL to cover remaining quantity so it isn't left unprotected.
-                all_tp_hit = all(
-                    str((lv.get("status") or "pending").lower()) in {"hit", "filled", "closed"}
-                    for lv in tp_levels if isinstance(lv, dict)
-                )
-                if all_tp_hit and safe_float(position.stop_loss) > 0:
-                    sl_qty = safe_float(position.remaining_quantity, safe_float(position.quantity, 0.0))
-                    if sl_qty > 0:
+                # All configured TPs hit but position not fully closed —
+                # market-close the remaining quantity to avoid orphaned position.
+                close_remaining = any(h.get("close_remaining") for h in tp_hit_levels)
+                if close_remaining:
+                    remaining_qty = safe_float(position.remaining_quantity, safe_float(position.quantity, 0.0))
+                    if remaining_qty > 0:
+                        logger.warning(
+                            f"[PositionMonitor] All TPs hit but {remaining_qty} remaining for "
+                            f"{position.ticker} — market-closing residual"
+                        )
                         try:
-                            sl_result = await place_protective_stop(
-                                position.ticker,
-                                position.direction,
-                                sl_qty,
-                                safe_float(position.stop_loss),
-                                exchange_config,
-                                existing_order_id=str(position.stop_loss_order_id or ""),
+                            from exchange import _get_or_create_exchange, _resolve_symbol
+                            close_exchange = _get_or_create_exchange(
+                                exchange_id=exchange_config.get("exchange", settings.exchange.name),
+                                api_key=exchange_config.get("api_key", settings.exchange.api_key),
+                                api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
+                                password=exchange_config.get("password", settings.exchange.password),
+                                live=True,
+                                sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+                                market_type=exchange_config.get("market_type", settings.exchange.market_type),
+                                margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
                             )
-                            if sl_result.get("order_id"):
-                                position.stop_loss_order_id = sl_result["order_id"]
-                                logger.info(
-                                    f"[PositionMonitor] Updated SL for remaining {sl_qty} "
-                                    f"after all TPs hit on {position.ticker}, "
-                                    f"order_id={str(sl_result['order_id'])[:8]}"
+                            close_symbol = await asyncio.to_thread(
+                                _resolve_symbol, close_exchange, position.ticker,
+                                exchange_config.get("market_type", settings.exchange.market_type),
+                            )
+                            pos_side = str((match or {}).get("side") or position.direction or "long").lower()
+                            close_result = await _exchange_close(
+                                close_exchange, close_symbol,
+                                position_side=pos_side if pos_side in ("long", "short") else None,
+                                close_quantity=remaining_qty,
+                            )
+                            if close_result.get("status") in {"closed", "ok"}:
+                                exit_price = safe_float(tp_hit_levels[-1].get("price")) if tp_hit_levels else safe_float(position.entry_price)
+                                await record_position_close_trade_async(
+                                    session=session,
+                                    position=position,
+                                    exit_price=exit_price,
+                                    close_reason="take_profit",
+                                    order_status="exchange_closed",
+                                    order_details={"trigger": "take_profit_residual_close", "levels": tp_hit_levels},
                                 )
-                                stats["adjusted"] += 1
-                        except Exception as sl_exc:
-                            logger.warning(
-                                f"[PositionMonitor] Failed to update SL for remaining qty "
-                                f"after all TPs hit on {position.ticker}: {sl_exc}"
+                                stats["closed"] += 1
+                            else:
+                                logger.error(
+                                    f"[PositionMonitor] Market-close residual for {position.ticker} "
+                                    f"failed: {close_result}"
+                                )
+                        except Exception as close_exc:
+                            logger.error(
+                                f"[PositionMonitor] Market-close residual for {position.ticker} "
+                                f"raised exception: {close_exc}"
                             )
 
         now = utcnow()
@@ -2358,6 +2362,15 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
                 f"remaining_qty updated from {current_remaining} to {new_remaining}, "
                 f"realized_pnl_pct={position.realized_pnl_pct:.2f}%"
             )
+
+        # Flag: all TP levels hit but position not fully closed — need market close
+        all_tp_hit = all(
+            str((lv.get("status") or "pending").lower()) in {"hit", "filled", "closed"}
+            for lv in tp_levels if isinstance(lv, dict)
+        )
+        if all_tp_hit and safe_float(position.remaining_quantity) > 0:
+            for hit in hit_levels:
+                hit["close_remaining"] = True
 
     return hit_levels
 
