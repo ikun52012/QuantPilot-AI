@@ -17,7 +17,6 @@ from loguru import logger
 
 from core.config import settings
 
-
 KEY_PREFIX = "quantpilot"
 _CLIENT: Any | None = None
 _CLIENT_LOCK = asyncio.Lock()

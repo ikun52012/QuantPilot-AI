@@ -11,10 +11,16 @@ from enum import Enum
 from loguru import logger
 
 from core.config import settings
-from core.redis_coordination import distributed_lock, make_key, redis_hdel, redis_hget_json, redis_hgetall_json, redis_hset_json
+from core.redis_coordination import (
+    distributed_lock,
+    make_key,
+    redis_hdel,
+    redis_hget_json,
+    redis_hgetall_json,
+    redis_hset_json,
+)
 from core.utils.datetime import utcnow
 from models import SignalDirection, TradeDecision
-
 
 _GRID_STATE_HASH = make_key("strategy", "grid", "state")
 _GRID_ACTIVE_HASH = make_key("strategy", "grid", "active")
