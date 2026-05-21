@@ -405,7 +405,7 @@ async def fetch_fear_greed_index() -> dict[str, Any]:
 async def calculate_directional_volume_delta(ohlcv_data: list[list[float]], lookback: int = 20) -> dict[str, Any]:
     """
     Calculate Directional Volume Delta (DVD) - estimated from OHLCV data.
-    
+
     NOTE: This is a proxy estimation, NOT true Cumulative Volume Delta (CVD).
     True CVD requires order-flow data (active/passive trade flags) which is
     not available from standard OHLCV candles. This implementation correlates
@@ -711,10 +711,8 @@ async def analyze_liquidity_structure(
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# VWAP Deviation (P0 — institutional must-have)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# VWAP Deviation (P0 鈥?institutional must-have)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 async def calculate_vwap_deviation(
     ohlcv_data: list[list[float]],
     current_price: float,
@@ -722,10 +720,10 @@ async def calculate_vwap_deviation(
 ) -> dict[str, Any]:
     """
     Calculate VWAP (Volume-Weighted Average Price) deviation.
-    
+
     Uses (High + Low + Close) / 3 as typical price weighted by volume.
-    VWAP is the institutional benchmark — price above VWAP on longs is favorable.
-    
+    VWAP is the institutional benchmark 鈥?price above VWAP on longs is favorable.
+
     Returns deviation percentage and direction.
     """
     if len(ohlcv_data) < lookback or current_price <= 0:
@@ -758,10 +756,8 @@ async def calculate_vwap_deviation(
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# OI-Price Divergence (P0 — detects smart money distribution)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# OI-Price Divergence (P0 鈥?detects smart money distribution)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 async def check_oi_price_divergence(
     oi_change_pct: float | None,
     price_change_1h: float,
@@ -770,14 +766,14 @@ async def check_oi_price_divergence(
     price_stall_threshold: float = 1.0,
 ) -> dict[str, Any]:
     """
-    Check for OI-Price divergence — a leading indicator of trend reversals.
-    
+    Check for OI-Price divergence 鈥?a leading indicator of trend reversals.
+
     Patterns:
-    - OI up + price flat/down → bearish divergence (distribution)
-    - OI up + price up → healthy uptrend (accumulation)
-    - OI down + price flat/up → bullish divergence (short covering)
-    - OI down + price down → healthy downtrend (liquidation cascade)
-    
+    - OI up + price flat/down 鈫?bearish divergence (distribution)
+    - OI up + price up 鈫?healthy uptrend (accumulation)
+    - OI down + price flat/up 鈫?bullish divergence (short covering)
+    - OI down + price down 鈫?healthy downtrend (liquidation cascade)
+
     Returns divergence type and strength.
     """
     result: dict[str, Any] = {
@@ -793,47 +789,44 @@ async def check_oi_price_divergence(
         return result
 
     abs_oi = abs(oi_change_pct)
-    abs_price_1h = abs(price_change_1h)
 
     # Bearish divergence: OI rising hard + price barely moving or falling
     if oi_change_pct > oi_change_threshold and price_change_1h < price_stall_threshold:
         result["divergence_type"] = "bearish_divergence"
         result["strength"] = round(abs_oi, 2)
         result["is_bearish"] = True
-        result["note"] = f"OI +{oi_change_pct:.1f}% while price only +{price_change_1h:.1f}% — distribution likely"
+        result["note"] = f"OI +{oi_change_pct:.1f}% while price only +{price_change_1h:.1f}% 鈥?distribution likely"
     elif oi_change_pct > oi_change_threshold and price_change_1h < -price_stall_threshold:
         result["divergence_type"] = "bearish_confirmed"
         result["strength"] = round(abs_oi + abs(price_change_1h), 2)
         result["is_bearish"] = True
-        result["note"] = f"OI +{oi_change_pct:.1f}% with price {price_change_1h:.1f}% — aggressive distribution"
+        result["note"] = f"OI +{oi_change_pct:.1f}% with price {price_change_1h:.1f}% 鈥?aggressive distribution"
 
     # Bullish divergence: OI dropping hard + price holding or rising
     elif oi_change_pct < -oi_change_threshold and price_change_1h > -price_stall_threshold:
         result["divergence_type"] = "bullish_divergence"
         result["strength"] = round(abs_oi, 2)
         result["is_bullish"] = True
-        result["note"] = f"OI {oi_change_pct:.1f}% while price holds — short covering likely"
+        result["note"] = f"OI {oi_change_pct:.1f}% while price holds 鈥?short covering likely"
     elif oi_change_pct < -oi_change_threshold and price_change_1h > price_stall_threshold:
         result["divergence_type"] = "bullish_confirmed"
         result["strength"] = round(abs_oi + abs(price_change_1h), 2)
         result["is_bullish"] = True
-        result["note"] = f"OI {oi_change_pct:.1f}% with price +{price_change_1h:.1f}% — aggressive short squeeze"
+        result["note"] = f"OI {oi_change_pct:.1f}% with price +{price_change_1h:.1f}% 鈥?aggressive short squeeze"
 
     return result
 
 
-# ═══════════════════════════════════════════════════════════════
-# Exchange Reserve Flow (P1 — whale movement detection)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Exchange Reserve Flow (P1 鈥?whale movement detection)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 async def fetch_exchange_reserves(base_asset: str = "BTC") -> dict[str, Any]:
     """
     Fetch exchange reserve flow data.
-    
+
     Free source: CryptoQuant community API / Glassnode alternatives.
     Net outflow from exchanges = accumulation (bullish).
     Net inflow to exchanges = potential selling pressure (bearish).
-    
+
     Falls back gracefully if API is unavailable.
     """
     async def _fetch() -> dict[str, Any]:
@@ -867,7 +860,7 @@ async def fetch_exchange_reserves(base_asset: str = "BTC") -> dict[str, Any]:
                 if reserve_data["net_flow_24h"] is None:
                     gn_key = os.getenv("GLASSNODE_API_KEY", "")
                     if gn_key:
-                        gn_url = f"https://api.glassnode.com/v1/metrics/transactions/transfers_volume_to_exchanges_sum"
+                        gn_url = "https://api.glassnode.com/v1/metrics/transactions/transfers_volume_to_exchanges_sum"
                         async with session.get(gn_url, headers={"X-API-KEY": gn_key}) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
@@ -900,20 +893,18 @@ async def fetch_exchange_reserves(base_asset: str = "BTC") -> dict[str, Any]:
     return await _fetch_with_cache(f"exchange_reserves:{base_asset}", _fetch, ttl=300)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Funding Rate Term Structure (P1 — sentiment curve)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Funding Rate Term Structure (P1 鈥?sentiment curve)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 async def calculate_funding_term_structure(
     symbol: str,
     current_funding_rate: float | None,
 ) -> dict[str, Any]:
     """
-    Analyze funding rate term structure — how funding has evolved over time.
-    
+    Analyze funding rate term structure 鈥?how funding has evolved over time.
+
     Steepening funding (rising faster) = growing extreme sentiment = reversal risk.
     Flattening funding (returning to normal) = sentiment normalizing.
-    
+
     Uses Binance funding rate history endpoint.
     """
     async def _fetch() -> dict[str, Any]:
@@ -945,7 +936,6 @@ async def calculate_funding_term_structure(
                         data = await resp.json()
                         if data and len(data) >= 3:
                             # Most funding intervals are 8h, so 3 entries = ~24h
-                            now = utcnow()
                             rates = []
                             for entry in data:
                                 try:
@@ -984,7 +974,7 @@ async def calculate_funding_term_structure(
                                 elif abs(recent_slope) < abs(older_slope) * 0.5:
                                     result["trend"] = "flattening"
                                     result["is_flattening"] = True
-                                    result["note"] = "Funding rate normalizing — sentiment cooling"
+                                    result["note"] = "Funding rate normalizing 鈥?sentiment cooling"
                                 else:
                                     result["trend"] = "stable"
 
@@ -1000,23 +990,21 @@ async def calculate_funding_term_structure(
     return await _fetch_with_cache(f"funding_term:{symbol}", _fetch, ttl=300)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Multi-Exchange Price Discrepancy (P2 — liquidity fragmentation)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Multi-Exchange Price Discrepancy (P2 鈥?liquidity fragmentation)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 async def check_exchange_price_discrepancy(
     symbol: str,
     reference_price: float,
 ) -> dict[str, Any]:
     """
     Check if the same asset trades at significantly different prices across exchanges.
-    
+
     Large discrepancies indicate:
     - Liquidity fragmentation
     - Arbitrage activity
     - Exchange-specific issues
     - Extreme market conditions
-    
+
     Returns discrepancy data across exchanges.
     """
     async def _fetch() -> dict[str, Any]:
@@ -1102,10 +1090,8 @@ async def check_exchange_price_discrepancy(
     return await _fetch_with_cache(f"price_discrepancy:{symbol}", _fetch, ttl=60)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Fetch All Enhanced Data (updated with new checks)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Fetch All Enhanced Data (updated with new checks)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 async def fetch_all_enhanced_data(symbol: str, ohlcv_data: list[list[float]] | None = None) -> dict[str, Any]:
     """
     Fetch all enhanced market data in parallel.

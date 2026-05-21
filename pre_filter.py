@@ -18,7 +18,7 @@ import json
 import os
 import threading
 import time
-from collections import defaultdict, deque
+from collections import deque
 from datetime import timedelta
 from typing import Any
 
@@ -31,10 +31,8 @@ from core.utils.datetime import utcnow
 from models import MarketContext, PreFilterResult, SignalDirection, TradingViewSignal
 from trade_logger import get_recent_trade_results_async, get_today_pnl_async
 
-# ═══════════════════════════════════════════════════════════════
-# Filter Statistics (with periodic cleanup)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Filter Statistics (with periodic cleanup)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 _filter_stats_lock = threading.RLock()
 _filter_stats: dict[str, dict[str, int]] = {}
 _filter_stats_buffer: dict[str, dict[str, int]] = {}
@@ -170,10 +168,8 @@ def reset_filter_stats() -> None:
         _save_filter_stats({})
 
 
-# ═══════════════════════════════════════════════════════════════
-# Configurable Thresholds (Institutional-Grade)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Configurable Thresholds (Institutional-Grade)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 class FilterThresholds:
     """Configurable thresholds for pre-filter checks with dynamic profile support."""
 
@@ -231,7 +227,7 @@ class FilterThresholds:
         "signal_velocity_window_seconds": 300,
         "position_concentration_soft_limit": 3,
         "position_concentration_hard_limit": 6,
-        # NEW v5.1 thresholds — institutional-grade indicators
+        # NEW v5.1 thresholds 鈥?institutional-grade indicators
         "vwap_deviation_pct_max": 2.0,
         "vwap_lookback_candles": 24,
         "oi_divergence_threshold_pct": 5.0,
@@ -301,7 +297,7 @@ class FilterThresholds:
     # FIX #5: Dynamic profile resolution based on actual market conditions
     def get_with_profile(self, key: str, ticker: str = "", atr_pct: float | None = None, volume_24h: float = 0) -> Any:
         """Get threshold value with dynamic profile (HIGH_VOLATILITY / LOW_VOLUME) applied.
-        
+
         Priority: custom > ticker-specific > dynamic profile > default
         """
         ticker_upper = ticker.upper().strip()
@@ -379,10 +375,8 @@ def get_thresholds() -> FilterThresholds:
     return FilterThresholds.instance()
 
 
-# ═══════════════════════════════════════════════════════════════
-# Weighted Scoring System
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Weighted Scoring System
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 FILTER_WEIGHTS: dict[str, float] = {
     "daily_trade_limit": 10.0,
     "daily_loss_limit": 10.0,
@@ -420,7 +414,7 @@ FILTER_WEIGHTS: dict[str, float] = {
     "mtf_confirmation": 7.0,
     "signal_velocity": 5.0,
     "circuit_breaker": 10.0,
-    # NEW v5.1 — institutional-grade indicators
+    # NEW v5.1 鈥?institutional-grade indicators
     "vwap_deviation": 7.0,
     "oi_price_divergence": 8.0,
     "exchange_reserves": 6.0,
@@ -447,10 +441,8 @@ def calculate_filter_score(checks: dict[str, dict]) -> float:
     return (earned_weight / active_weight) * 100.0 if active_weight > 0 else 100.0
 
 
-# ═══════════════════════════════════════════════════════════════
-# Signal Memory (Bucketed, Time-Based Eviction)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Signal Memory (Bucketed, Time-Based Eviction)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 _state_lock = threading.Lock()
 # FIX #15: Bucketed storage by (user_id, ticker_key) for O(1) lookups
 _signal_buckets: dict[str, deque[dict[str, Any]]] = {}
@@ -545,15 +537,11 @@ def update_daily_pnl(pnl: float):
         _daily_pnl += float(pnl or 0)
 
 
-# ═══════════════════════════════════════════════════════════════
-# Helper Functions (cooldown, saturation, block rate, circuit breaker)
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Helper Functions (cooldown, saturation, block rate, circuit breaker)
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 def _check_cooldown(signal: TradingViewSignal, cooldown_seconds: int = 300, user_id: str | None = None) -> bool:
     """Check if we received a similar signal recently (O(1) bucketed)."""
     cutoff = utcnow() - timedelta(seconds=cooldown_seconds)
-    scope = user_id or "admin"
-    target_key = position_symbol_key(signal.ticker)
     key = _bucket_key(user_id, signal.ticker)
     with _state_lock:
         bucket = _signal_buckets.get(key, deque())
@@ -593,7 +581,6 @@ def _check_block_rate_throttle(ticker_key: str, thresholds: FilterThresholds) ->
     """Check if this ticker has been blocked too many times recently."""
     threshold = int(thresholds.get("block_rate_threshold", ""))
     window = int(thresholds.get("block_rate_window_seconds", ""))
-    throttle_secs = int(thresholds.get("block_rate_throttle_seconds", ""))
 
     cutoff = time.time() - window
     recent_blocks = [b for b in _block_history if b["ticker"] == ticker_key and b["timestamp"] > cutoff]
@@ -669,7 +656,7 @@ def _check_mtf_confirmation(
     thresholds: FilterThresholds,
 ) -> tuple[bool, dict[str, Any]]:
     """Check if higher timeframe structure supports the signal direction.
-    
+
     Uses EMA alignment on multiple timeframes as a proxy for HTF confirmation.
     """
     result = {"htf_aligned": False, "htf_timeframe": None, "htf_trend": "neutral"}
@@ -717,12 +704,12 @@ def _check_mtf_confirmation(
 # FIX #18: Relative volume drop detection
 def _check_volume_drop(market: MarketContext, thresholds: FilterThresholds) -> tuple[bool, str | None]:
     """Check if current volume has dropped significantly vs. recent average.
-    
+
     Uses the _volume_history attribute if available on market context.
     """
     vol_max_drop = float(thresholds.get("volume_drop_pct_max", ""))
     vol_history = getattr(market, "_volume_history", None) or []
-    
+
     if len(vol_history) < 24:
         return True, None  # Not enough data
 
@@ -757,8 +744,9 @@ async def _check_position_concentration(
     hard_limit = int(thresholds.get("position_concentration_hard_limit", ""))
 
     try:
-        from core.database import PositionModel
         from sqlalchemy import select
+
+        from core.database import PositionModel
 
         stmt = select(PositionModel).where(PositionModel.status.in_(["open", "pending"]))
         result_set = await db_session.execute(stmt)
@@ -796,13 +784,11 @@ async def _check_position_concentration(
     return True, result
 
 
-# ═══════════════════════════════════════════════════════════════
-# Main Pre-Filter Engine
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Main Pre-Filter Engine
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 async def count_today_executed_trades_async(user_id: str | None = None) -> int:
     """Count today's executed trades from the async database.
-    
+
     P0-3 FIX: On database failure, returns max_daily_trades to BLOCK the trade.
     FIX #2: Excludes asyncio.CancelledError from broad except.
     """
@@ -859,10 +845,10 @@ async def run_pre_filter_async(
     ticker_key = position_symbol_key(signal.ticker).upper() or ticker.upper()
     disabled = {str(item).strip().lower() for item in (disabled_checks or []) if str(item).strip()}
 
-    # ── v5.2: Pipeline latency tracking ──
+    # 鈹€鈹€ v5.2: Pipeline latency tracking 鈹€鈹€
     _pipeline_start = time.perf_counter()
 
-    # ── v5.2: Evaluate past blocked signal outcomes ──
+    # 鈹€鈹€ v5.2: Evaluate past blocked signal outcomes 鈹€鈹€
     try:
         evaluate_blocked_outcomes(current_prices={ticker_key: market.current_price} if market.current_price > 0 else None)
     except Exception:
@@ -890,7 +876,7 @@ async def run_pre_filter_async(
     atr_for_profile = float(market.atr_pct) if market.atr_pct is not None else None
     vol_for_profile = float(market.volume_24h) if market.volume_24h > 0 else 0.0
 
-    # ── Check 1: Daily trade limit ──
+    # 鈹€鈹€ Check 1: Daily trade limit 鈹€鈹€
     daily_count_snapshot = await count_today_executed_trades_async(user_id=user_id)
     daily_ok = True if max_daily_trades <= 0 else daily_count_snapshot < max_daily_trades
     checks["daily_trade_limit"] = {
@@ -902,7 +888,7 @@ async def run_pre_filter_async(
         reasons.append(f"Daily trade limit reached ({daily_count_snapshot}/{max_daily_trades})")
         record_filter_block("daily_trade_limit")
 
-    # ── Check 2: Daily loss limit ──
+    # 鈹€鈹€ Check 2: Daily loss limit 鈹€鈹€
     from core.database import get_user_balance_async
     account_equity = await get_user_balance_async(user_id) if user_id else 10000.0
     if account_equity <= 0:
@@ -925,7 +911,7 @@ async def run_pre_filter_async(
         )
         record_filter_block("daily_loss_limit")
 
-    # ── Check 3: Account-level loss limit ──
+    # 鈹€鈹€ Check 3: Account-level loss limit 鈹€鈹€
     loss_allowed, loss_reason = await check_account_loss_limits(
         user_id=user_id,
         account_equity_usdt=account_equity,
@@ -940,7 +926,7 @@ async def run_pre_filter_async(
         reasons.append(loss_reason)
         record_filter_block("account_daily_loss_limit")
 
-    # ── Check 4: Circuit breaker / kill switch (NEW v5.0) ──
+    # 鈹€鈹€ Check 4: Circuit breaker / kill switch (NEW v5.0) 鈹€鈹€
     cb_ok, cb_reason = _check_circuit_breaker(ticker_key, thresholds)
     checks["circuit_breaker"] = {
         "passed": cb_ok,
@@ -950,7 +936,7 @@ async def run_pre_filter_async(
         reasons.append(cb_reason)
         record_filter_block("circuit_breaker")
 
-    # ── Check 5: Block rate throttle (NEW v5.0) ──
+    # 鈹€鈹€ Check 5: Block rate throttle (NEW v5.0) 鈹€鈹€
     throttle_ok, throttle_reason = _check_block_rate_throttle(ticker_key, thresholds)
     checks["block_rate"] = {
         "passed": throttle_ok,
@@ -960,7 +946,7 @@ async def run_pre_filter_async(
         reasons.append(throttle_reason)
         record_filter_block("block_rate")
 
-    # ── Check 6: Duplicate signal cooldown (Dynamic) ──
+    # 鈹€鈹€ Check 6: Duplicate signal cooldown (Dynamic) 鈹€鈹€
     # FIX #1: fetch recent_results ONCE for both cooldown and consecutive_loss
     base_cooldown = int(thresholds.get_with_profile("cooldown_seconds", ticker))
     dynamic_enabled = bool(thresholds.get_with_profile("dynamic_cooldown_enabled", ticker))
@@ -998,7 +984,7 @@ async def run_pre_filter_async(
         reasons.append(f"Duplicate signal within {cooldown_secs}s cooldown (dynamic)")
         record_filter_block("cooldown")
 
-    # ── Check 7: Price sanity check ──
+    # 鈹€鈹€ Check 7: Price sanity check 鈹€鈹€
     price_ok = True
     price_deviation_max = float(thresholds.get_with_profile("price_deviation_pct_max", ticker))
     if has_price_data and signal.price > 0:
@@ -1018,7 +1004,7 @@ async def run_pre_filter_async(
         checks["price_sanity"] = {"passed": True, "missing_data": True, "note": "No price data available"}
         missing_data_checks.append("price_sanity")
 
-    # ── Check 8: Extreme volatility guard ──
+    # 鈹€鈹€ Check 8: Extreme volatility guard 鈹€鈹€
     vol_ok = True
     atr_max = float(thresholds.get_with_profile("atr_pct_max", ticker, atr_pct=atr_for_profile))
     if has_atr_data:
@@ -1035,7 +1021,7 @@ async def run_pre_filter_async(
         checks["volatility_guard"] = {"passed": True, "missing_data": True, "note": "No ATR data available"}
         missing_data_checks.append("volatility_guard")
 
-    # ── Check 9: Spread check ──
+    # 鈹€鈹€ Check 9: Spread check 鈹€鈹€
     spread_ok = True
     spread_max = float(thresholds.get_with_profile("spread_pct_max", ticker, volume_24h=vol_for_profile))
     if has_spread_data:
@@ -1052,7 +1038,7 @@ async def run_pre_filter_async(
         checks["spread"] = {"passed": True, "missing_data": True, "note": "No spread data available"}
         missing_data_checks.append("spread")
 
-    # ── Check 10: Volume sanity ──
+    # 鈹€鈹€ Check 10: Volume sanity 鈹€鈹€
     volume_ok = True
     volume_min = float(thresholds.get_with_profile("volume_24h_min", ticker, volume_24h=vol_for_profile))
     if has_volume_data:
@@ -1069,7 +1055,7 @@ async def run_pre_filter_async(
         checks["volume"] = {"passed": True, "missing_data": True, "note": "No volume data available"}
         missing_data_checks.append("volume")
 
-    # ── Check 11: Relative volume drop (NEW v5.0) ──
+    # 鈹€鈹€ Check 11: Relative volume drop (NEW v5.0) 鈹€鈹€
     vol_drop_ok, vol_drop_reason = _check_volume_drop(market, thresholds)
     checks["volume_drop"] = {
         "passed": vol_drop_ok,
@@ -1079,7 +1065,7 @@ async def run_pre_filter_async(
         soft_fail_reasons.append(vol_drop_reason)
         checks["volume_drop"]["soft_fail"] = True
 
-    # ── Check 12: Large sudden move guard ──
+    # 鈹€鈹€ Check 12: Large sudden move guard 鈹€鈹€
     sudden_move_ok = True
     move_max = float(thresholds.get_with_profile("price_change_1h_max", ticker, atr_pct=atr_for_profile))
     if market.price_change_1h != 0:
@@ -1093,11 +1079,9 @@ async def run_pre_filter_async(
             reasons.append(f"Sudden move: {market.price_change_1h:+.2f}% in 1h")
             record_filter_block("sudden_move")
 
-    # ═══════════════════════════════════════════
-    # ENHANCED CHECKS (v3+)
-    # ═══════════════════════════════════════════
-
-    # ── Check 13: VWAP Deviation (P0 — institutional benchmark) ──
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    # ENHANCED CHECKS (v3+)
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    # 鈹€鈹€ Check 13: VWAP Deviation (P0 鈥?institutional benchmark) 鈹€鈹€
     vwap_ok = True
     vwap_dev_max = float(thresholds.get("vwap_deviation_pct_max", ""))
     vwap_data = None
@@ -1136,7 +1120,7 @@ async def run_pre_filter_async(
         if len(ohlcv_1h_vwap) < 24:
             missing_data_checks.append("vwap_deviation")
 
-    # ── Check 14: RSI Extreme Guard ──
+    # 鈹€鈹€ Check 14: RSI Extreme Guard 鈹€鈹€
     rsi_ok = True
     rsi_long_max = float(thresholds.get_with_profile("rsi_long_max", ticker))
     rsi_short_min = float(thresholds.get_with_profile("rsi_short_min", ticker))
@@ -1163,7 +1147,7 @@ async def run_pre_filter_async(
         checks["rsi_extreme"] = {"passed": True, "missing_data": True, "note": "No RSI data available"}
         missing_data_checks.append("rsi_extreme")
 
-    # ── Check 14: Funding Rate Guard ──
+    # 鈹€鈹€ Check 14: Funding Rate Guard 鈹€鈹€
     funding_ok = True
     funding_threshold = float(thresholds.get_with_profile("funding_rate_threshold", ticker))
     if has_funding_data:
@@ -1188,7 +1172,7 @@ async def run_pre_filter_async(
         checks["funding_rate"] = {"passed": True, "missing_data": True, "note": "No funding rate data available"}
         missing_data_checks.append("funding_rate")
 
-    # ── Check 15: Orderbook Imbalance Guard ──
+    # 鈹€鈹€ Check 15: Orderbook Imbalance Guard 鈹€鈹€
     ob_ok = True
     ob_long_min = float(thresholds.get_with_profile("orderbook_long_min", ticker))
     ob_short_max = float(thresholds.get_with_profile("orderbook_short_max", ticker))
@@ -1215,7 +1199,7 @@ async def run_pre_filter_async(
         checks["orderbook_imbalance"] = {"passed": True, "missing_data": True, "note": "No orderbook data available"}
         missing_data_checks.append("orderbook_imbalance")
 
-    # ── Check 16: Weekend / Low Liquidity Hours Guard ──
+    # 鈹€鈹€ Check 16: Weekend / Low Liquidity Hours Guard 鈹€鈹€
     # FIX #9: Configurable low-liquidity hours
     time_ok = True
     now_utc = utcnow()
@@ -1249,7 +1233,7 @@ async def run_pre_filter_async(
         soft_fail_reasons.append("Low liquidity period (soft fail)")
         checks["market_hours"]["soft_fail"] = True
 
-    # ── Check 17: Consecutive Loss Protection (Smart) ──
+    # 鈹€鈹€ Check 17: Consecutive Loss Protection (Smart) 鈹€鈹€
     # FIX #1: Uses the same recent_results already fetched for cooldown
     # FIX #2: Excludes asyncio.CancelledError
     consec_ok = True
@@ -1280,13 +1264,13 @@ async def run_pre_filter_async(
         "reduce_pct": position_reduce_pct if consec_losses >= 2 else 0,
     }
     if not consec_ok:
-        reasons.append(f"{consec_max} consecutive losses — cooling off, suggest {position_suggestion}")
+        reasons.append(f"{consec_max} consecutive losses 鈥?cooling off, suggest {position_suggestion}")
         record_filter_block("consecutive_loss")
     elif consec_losses >= 2:
-        soft_fail_reasons.append(f"{consec_losses} recent losses — suggest reduce position by {position_reduce_pct}%")
+        soft_fail_reasons.append(f"{consec_losses} recent losses 鈥?suggest reduce position by {position_reduce_pct}%")
         checks["consecutive_loss"]["soft_fail"] = True
 
-    # ── Check 18: Same-Direction Signal Saturation ──
+    # 鈹€鈹€ Check 18: Same-Direction Signal Saturation 鈹€鈹€
     saturation_ok = True
     saturation_max = int(thresholds.get("signal_saturation_max", ticker))
     same_dir_count = _count_recent_same_direction(signal, window_minutes=60, user_id=user_id)
@@ -1313,7 +1297,7 @@ async def run_pre_filter_async(
         soft_fail_reasons.append(f"Reverse signal opportunity: {opposite_dir_count} opposite signals recently")
         checks["signal_saturation"]["note"] = "reverse_opportunity"
 
-    # ── Check 19: Signal velocity (NEW v5.0) ──
+    # 鈹€鈹€ Check 19: Signal velocity (NEW v5.0) 鈹€鈹€
     vel_ok, velocity, vel_reason = _check_signal_velocity(ticker_key, thresholds)
     checks["signal_velocity"] = {
         "passed": vel_ok,
@@ -1324,7 +1308,7 @@ async def run_pre_filter_async(
         soft_fail_reasons.append(vel_reason)
         checks["signal_velocity"]["soft_fail"] = True
 
-    # ── Check 20: Signal source consistency (NEW v5.0) ──
+    # 鈹€鈹€ Check 20: Signal source consistency (NEW v5.0) 鈹€鈹€
     consist_ok, consist_reason = _check_signal_consistency(ticker_key, signal, user_id)
     checks["signal_consistency"] = {
         "passed": consist_ok,
@@ -1334,7 +1318,7 @@ async def run_pre_filter_async(
         soft_fail_reasons.append(consist_reason)
         checks["signal_consistency"]["soft_fail"] = True
 
-    # ── Check 21: EMA Trend Alignment ──
+    # 鈹€鈹€ Check 21: EMA Trend Alignment 鈹€鈹€
     ema_ok = True
     ema_diff_min = float(thresholds.get_with_profile("ema_diff_pct_min", ticker))
     if has_ema_data:
@@ -1365,7 +1349,7 @@ async def run_pre_filter_async(
         checks["ema_alignment"] = {"passed": True, "missing_data": True, "note": "No EMA data available"}
         missing_data_checks.append("ema_alignment")
 
-    # ── Check 22: Multi-Timeframe Confirmation (NEW v5.0) ──
+    # 鈹€鈹€ Check 22: Multi-Timeframe Confirmation (NEW v5.0) 鈹€鈹€
     mtf_ok, mtf_data = _check_mtf_confirmation(signal, market, thresholds)
     checks["mtf_confirmation"] = {
         "passed": mtf_ok,
@@ -1375,7 +1359,7 @@ async def run_pre_filter_async(
         soft_fail_reasons.append(f"HTF {mtf_data.get('htf_trend')} conflicts with {signal.direction.value} (soft fail)")
         checks["mtf_confirmation"]["soft_fail"] = True
 
-    # ── Check 23: Market Structure (SMC) Validation ──
+    # 鈹€鈹€ Check 23: Market Structure (SMC) Validation 鈹€鈹€
     # FIX #3: Log warnings on failures
     structure_ok = True
     try:
@@ -1417,7 +1401,7 @@ async def run_pre_filter_async(
         logger.warning(f"[PreFilter] Market structure check failed: {e}")
         checks["market_structure"] = {"passed": True, "note": f"Error: {e}"}
 
-    # ── Check 24: Open Interest Change ──
+    # 鈹€鈹€ Check 24: Open Interest Change 鈹€鈹€
     oi_ok = True
     oi_max = float(thresholds.get_with_profile("oi_change_pct_max", ticker))
     if has_oi_data:
@@ -1435,7 +1419,7 @@ async def run_pre_filter_async(
         checks["oi_change"] = {"passed": True, "missing_data": True, "note": "No OI data available"}
         missing_data_checks.append("oi_change")
 
-    # ── Check 25: OI-Price Divergence (P0 — smart money detection) ──
+    # 鈹€鈹€ Check 25: OI-Price Divergence (P0 鈥?smart money detection) 鈹€鈹€
     oi_div_ok = True
     if has_oi_data and market.price_change_1h != 0:
         try:
@@ -1477,7 +1461,7 @@ async def run_pre_filter_async(
     else:
         checks["oi_price_divergence"] = {"passed": True, "note": "No price change data"}
 
-    # ── Check 26: Correlated Assets Check ──
+    # 鈹€鈹€ Check 26: Correlated Assets Check 鈹€鈹€
     correlated_ok = True
     corr_max = float(thresholds.get("correlated_asset_change_max", ticker))
     correlated_data = getattr(market, "_correlated_assets", None) or {}
@@ -1504,7 +1488,7 @@ async def run_pre_filter_async(
             soft_fail_reasons.append("Correlated assets moving opposite (soft fail)")
             checks["correlated_assets"]["soft_fail"] = True
 
-    # ── Check 26: Whale Activity ──
+    # 鈹€鈹€ Check 26: Whale Activity 鈹€鈹€
     whale_ok = True
     whale_data = getattr(market, "_whale_activity", None) or {}
     whale_threshold = float(thresholds.get_with_profile("whale_threshold_usd", ticker, volume_24h=vol_for_profile))
@@ -1532,13 +1516,11 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Whale flow opposite: ${abs(net_flow):,.0f} (threshold: ${whale_threshold:,.0f})")
             checks["whale_activity"]["soft_fail"] = True
 
-    # ═══════════════════════════════════════════
-    # ENHANCED CHECKS (v4+) - External Market Data
-    # ═══════════════════════════════════════════
-
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    # ENHANCED CHECKS (v4+) - External Market Data
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     async def _enhanced_call(name: str, coro):
         if is_check_degraded(name):
-            return TimeoutError(f"{name} degraded — skipped to protect pipeline latency")
+            return TimeoutError(f"{name} degraded 鈥?skipped to protect pipeline latency")
         try:
             return await asyncio.wait_for(coro, timeout=6.0)
         except asyncio.TimeoutError:
@@ -1602,7 +1584,7 @@ async def run_pre_filter_async(
         macro_result = liq_result = ls_result = basis_result = fg_result = e
         reserve_result = funding_term_result = price_disc_result = dvd_result = vol_result = None
 
-    # ── Check 27: Macro Events Risk ──
+    # 鈹€鈹€ Check 27: Macro Events Risk 鈹€鈹€
     if isinstance(macro_result, Exception) and not isinstance(macro_result, asyncio.CancelledError):
         checks["macro_events"] = {"passed": True, "note": f"Skip: {macro_result}"}
         unavailable_data_checks.append("macro_events")
@@ -1616,7 +1598,7 @@ async def run_pre_filter_async(
             reasons.append(f"Macro event risk: {macro_reason}")
             record_filter_block("macro_events")
 
-    # ── Check 28: Liquidation Heatmap ──
+    # 鈹€鈹€ Check 28: Liquidation Heatmap 鈹€鈹€
     liq_ok = True
     liq_distance_min = float(thresholds.get("liquidation_distance_pct_min", ticker))
     if isinstance(liq_result, Exception) and not isinstance(liq_result, asyncio.CancelledError):
@@ -1642,7 +1624,7 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Large liquidations nearby (${total_liq/1e6:.1f}M within {nearest_distance:.1f}%)")
             checks["liquidation_heatmap"]["soft_fail"] = True
 
-    # ── Check 29: Long/Short Ratio Extreme ──
+    # 鈹€鈹€ Check 29: Long/Short Ratio Extreme 鈹€鈹€
     ls_ok = True
     ls_high = float(thresholds.get("long_short_ratio_extreme_high", ticker))
     ls_low = float(thresholds.get("long_short_ratio_extreme_low", ticker))
@@ -1673,7 +1655,7 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Long/Short ratio extreme: {current_ratio:.2f} (soft fail)")
             checks["long_short_ratio"]["soft_fail"] = True
 
-    # ── Check 30: Basis (Spot vs Futures) ──
+    # 鈹€鈹€ Check 30: Basis (Spot vs Futures) 鈹€鈹€
     basis_ok = True
     basis_max = float(thresholds.get("basis_pct_max", ticker))
     if isinstance(basis_result, Exception) and not isinstance(basis_result, asyncio.CancelledError):
@@ -1697,7 +1679,7 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Basis abnormal: {basis_pct:.3f}% (soft fail)")
             checks["basis_check"]["soft_fail"] = True
 
-    # ── Check 31: Fear & Greed Index ──
+    # 鈹€鈹€ Check 31: Fear & Greed Index 鈹€鈹€
     fg_ok = True
     fg_threshold = float(thresholds.get("fear_greed_extreme_threshold", ticker))
     if isinstance(fg_result, Exception) and not isinstance(fg_result, asyncio.CancelledError):
@@ -1727,7 +1709,7 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Fear & Greed extreme: {fg_value} ({fg_class})")
             checks["fear_greed"]["soft_fail"] = True
 
-    # ── Check 32: Directional Volume Delta (formerly CVD - renamed for accuracy) ──
+    # 鈹€鈹€ Check 32: Directional Volume Delta (formerly CVD - renamed for accuracy) 鈹€鈹€
     dvd_ok = True
     dvd_threshold = float(thresholds.get("cvd_divergence_threshold", ticker))
     if dvd_result is None:
@@ -1763,7 +1745,7 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"DVD divergence: {div_type} ({strength:.1f}%)")
             checks["cvd_divergence"]["soft_fail"] = True
 
-    # ── Check 33: Volatility Regime ──
+    # 鈹€鈹€ Check 33: Volatility Regime 鈹€鈹€
     # FIX #10: Configurable regime thresholds
     regime_ok = True
     if vol_result is None:
@@ -1797,11 +1779,9 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Volatility regime: {regime} - {suggestion}")
             checks["volatility_regime"]["soft_fail"] = True
 
-    # ═══════════════════════════════════════════
-    # NEW v5.1 CHECKS — Institutional-Grade Indicators
-    # ═══════════════════════════════════════════
-
-    # ── Check 34: Exchange Reserve Flow (P1) ──
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    # NEW v5.1 CHECKS 鈥?Institutional-Grade Indicators
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    # 鈹€鈹€ Check 34: Exchange Reserve Flow (P1) 鈹€鈹€
     reserve_ok = True
     if isinstance(reserve_result, Exception) and not isinstance(reserve_result, asyncio.CancelledError):
         checks["exchange_reserves"] = {"passed": True, "note": f"Skip: {reserve_result}"}
@@ -1832,7 +1812,7 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Exchange reserves: {flow_direction} against {signal.direction.value}")
             checks["exchange_reserves"]["soft_fail"] = True
 
-    # ── Check 35: Funding Rate Term Structure (P1) ──
+    # 鈹€鈹€ Check 35: Funding Rate Term Structure (P1) 鈹€鈹€
     fterm_ok = True
     if isinstance(funding_term_result, Exception) and not isinstance(funding_term_result, asyncio.CancelledError):
         checks["funding_term_structure"] = {"passed": True, "note": f"Skip: {funding_term_result}"}
@@ -1864,7 +1844,7 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Funding term structure steepening: {ft_data.get('note', ft_trend)}")
             checks["funding_term_structure"]["soft_fail"] = True
 
-    # ── Check 36: Multi-Exchange Price Discrepancy (P2) ──
+    # 鈹€鈹€ Check 36: Multi-Exchange Price Discrepancy (P2) 鈹€鈹€
     price_disc_ok = True
     disc_max = float(thresholds.get("exchange_price_discrepancy_pct_max", ""))
     if isinstance(price_disc_result, Exception) and not isinstance(price_disc_result, asyncio.CancelledError):
@@ -1890,11 +1870,9 @@ async def run_pre_filter_async(
             soft_fail_reasons.append(f"Exchange price discrepancy: {max_disc:.2f}% across exchanges")
             checks["exchange_price_discrepancy"]["soft_fail"] = True
 
-    # ═══════════════════════════════════════════
-    # NEW v5.0 CHECKS
-    # ═══════════════════════════════════════════
-
-    # ── Check 37: Position concentration / portfolio heat ──
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    # NEW v5.0 CHECKS
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    # 鈹€鈹€ Check 37: Position concentration / portfolio heat 鈹€鈹€
     conc_ok, conc_data = await _check_position_concentration(
         ticker_key, signal, thresholds, db_session=db_session
     )
@@ -1911,11 +1889,9 @@ async def run_pre_filter_async(
         # Include for AI context even when passing
         checks["position_concentration"]["active"] = True
 
-    # ═══════════════════════════════════════════
-    # Data completeness & live quality
-    # ═══════════════════════════════════════════
-
-    # ── Check 35: Market Data Completeness ──
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    # Data completeness & live quality
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    # 鈹€鈹€ Check 35: Market Data Completeness 鈹€鈹€
     missing_soft_fail_count = int(thresholds.get("data_completeness_soft_fail_count", ticker) or 5)
     data_complete_ok = len(missing_data_checks) < missing_soft_fail_count
     checks["data_completeness"] = {
@@ -1933,7 +1909,7 @@ async def run_pre_filter_async(
         checks["data_completeness"]["soft_fail"] = True
         record_filter_block("data_completeness")
 
-    # ── Check 36: Live trading data quality gate ──
+    # 鈹€鈹€ Check 36: Live trading data quality gate 鈹€鈹€
     live_quality_mode = str(data_quality_mode or "warn").lower().strip()
     live_missing_limit = int(max_missing_data_checks if max_missing_data_checks is not None else 0)
     live_quality_issues = len(missing_data_checks) + len(unavailable_data_checks)
@@ -1956,10 +1932,8 @@ async def run_pre_filter_async(
         )
         record_filter_block("live_data_quality")
 
-    # ═══════════════════════════════════════════
-    # Final Verdict
-    # ═══════════════════════════════════════════
-
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    # Final Verdict
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     for name in disabled:
         for check_name, check in checks.items():
             if check_name.lower() == name:
@@ -1997,11 +1971,11 @@ async def run_pre_filter_async(
 
     final_reason = "; ".join(all_reasons) if all_reasons else f"All {total_checks} checks passed"
 
-    # ── v5.2: Pipeline latency recording ──
+    # 鈹€鈹€ v5.2: Pipeline latency recording 鈹€鈹€
     _pipeline_duration = time.perf_counter() - _pipeline_start
     record_pipeline_latency(_pipeline_duration)
 
-    # ── v5.2: Record blocked signal for feedback loop outcome evaluation ──
+    # 鈹€鈹€ v5.2: Record blocked signal for feedback loop outcome evaluation 鈹€鈹€
     if not all_passed:
         _tracker_record_blocked_signal(
             ticker=ticker_key,
@@ -2019,11 +1993,9 @@ async def run_pre_filter_async(
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-# v5.2 — Filter Performance Feedback Loop
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# v5.2 鈥?Filter Performance Feedback Loop
 # Tracks per-check precision by evaluating blocked signal outcomes.
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 _PERF_LOCK = threading.RLock()
 _OUTCOME_WINDOW_SECONDS = 3600  # Check outcomes after 1 hour
 _MAX_PENDING_OUTCOMES = 500
@@ -2088,13 +2060,13 @@ def evaluate_blocked_outcomes(
 ) -> dict[str, Any]:
     """
     Evaluate outcomes of previously blocked signals.
-    
+
     For each blocked signal older than _OUTCOME_WINDOW_SECONDS:
     - Compare entry price to current price
-    - If signal would have lost money → True Positive (correct block)
-    - If signal would have made money → False Positive (wrong block)
+    - If signal would have lost money 鈫?True Positive (correct block)
+    - If signal would have made money 鈫?False Positive (wrong block)
     - Update per-check precision
-    
+
     Returns evaluation summary.
     """
     global _check_performance
@@ -2173,7 +2145,7 @@ def get_check_performance() -> dict[str, dict[str, float]]:
 def get_weight_suggestions() -> dict[str, dict[str, Any]]:
     """
     Generate weight adjustment suggestions based on performance data.
-    
+
     Low-precision checks (<40% precision) should have weight reduced.
     High-precision checks (>80% precision) should have weight increased.
     """
@@ -2225,11 +2197,9 @@ def reset_check_performance() -> None:
         _save_performance({})
 
 
-# ═══════════════════════════════════════════════════════════════
-# v5.2 — Prefilter Latency Monitor with Degradation
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# v5.2 鈥?Prefilter Latency Monitor with Degradation
 # Tracks per-check timing and auto-degrades slow checks.
-# ═══════════════════════════════════════════════════════════════
-
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 _LATENCY_LOCK = threading.RLock()
 _check_latency: dict[str, deque[float]] = {}  # check_name -> deque of recent durations
 _LATENCY_WINDOW_SIZE = 20
@@ -2319,7 +2289,7 @@ def get_latency_stats() -> dict[str, Any]:
         return {
             "checks": check_stats,
             "pipeline": pipeline_stats,
-            "degraded_checks": sorted(list(_DEGRADED_CHECKS)),
+            "degraded_checks": sorted(_DEGRADED_CHECKS),
             "degradation_threshold_secs": _DEGRADATION_THRESHOLD_SECS,
         }
 
@@ -2329,7 +2299,7 @@ def clear_degraded_checks() -> None:
     global _DEGRADED_CHECKS
     with _LATENCY_LOCK:
         _DEGRADED_CHECKS.clear()
-        logger.info("[PrefilterLatency] Degraded checks cleared — all checks re-enabled")
+        logger.info("[PrefilterLatency] Degraded checks cleared 鈥?all checks re-enabled")
 
 
 def reset_latency_stats() -> None:
