@@ -17,6 +17,7 @@ from loguru import logger
 
 from core.ai_cost_tracker import ai_costs, extract_usage_from_response
 from core.config import settings
+from core.redis_coordination import distributed_lock, make_key, redis_get_json, redis_set_json
 from core.utils.common import first_valid, safe_float, safe_int
 from models import AIAnalysis, MarketContext, SignalDirection, TradingViewSignal
 from models import TrailingStopMode as _TrailingStopMode
@@ -98,6 +99,23 @@ async def _get_volatility_lock() -> asyncio.Lock:
     return _VOLATILITY_TRACKER_LOCK
 
 
+def _redis_cache_key(scope: str, raw_key: str) -> str:
+    digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:32]
+    return make_key("ai", scope, digest)
+
+
+def _analysis_to_cache_dict(analysis: AIAnalysis) -> dict[str, Any]:
+    return analysis.model_dump(mode="json")
+
+
+def _analysis_from_cache_dict(payload: dict[str, Any]) -> AIAnalysis | None:
+    try:
+        return AIAnalysis.model_validate(payload)
+    except Exception as exc:
+        logger.debug(f"[AI/Cache] Failed to restore Redis analysis payload: {exc}")
+        return None
+
+
 def _ohlcv_signature(ohlcv: list[list], samples: int = 5) -> str:
     """Generate hash signature from last N OHLCV candles to detect data changes."""
     if not ohlcv or len(ohlcv) < samples:
@@ -132,6 +150,18 @@ async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, cache_key
                 _SMC_CACHE.move_to_end(cache_key)  # LRU: mark as recently used
                 logger.debug(f"[SMC_CACHE] Hit for {ticker}:{timeframe} (age={age:.1f}s, ttl={ttl}s)")
                 return smc_dict
+
+    redis_payload = await redis_get_json(_redis_cache_key("smc", cache_key))
+    if isinstance(redis_payload, dict) and isinstance(redis_payload.get("value"), dict):
+        smc_dict = redis_payload["value"]
+        ttl = float(redis_payload.get("ttl") or _SMC_CACHE_BASE_TTL)
+        async with lock:
+            while len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
+                _SMC_CACHE.popitem(last=False)
+            _SMC_CACHE[cache_key] = (_time.monotonic(), ttl, smc_dict)
+            _SMC_CACHE.move_to_end(cache_key)
+        logger.debug(f"[SMC_CACHE] Redis hit for {ticker}:{timeframe}")
+        return smc_dict
     return None
 
 
@@ -151,15 +181,22 @@ async def _set_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, smc_ctx: 
         "timing_recommendation": smc_ctx.timing_recommendation,
     }
 
-    lock = await _get_smc_cache_lock()  # BUG-1 FIX: Lazy init
-    async with lock:
-        # Enforce max size by removing least-recently-used entries (OrderedDict LRU)
-        while len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
-            _SMC_CACHE.popitem(last=False)
+    async with distributed_lock(f"ai:smc:{cache_key}", ttl_seconds=10, blocking_timeout_seconds=2):
+        lock = await _get_smc_cache_lock()  # BUG-1 FIX: Lazy init
+        async with lock:
+            # Enforce max size by removing least-recently-used entries (OrderedDict LRU)
+            while len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
+                _SMC_CACHE.popitem(last=False)
 
-        _SMC_CACHE[cache_key] = (_time.monotonic(), ttl, smc_dict)
-        _SMC_CACHE.move_to_end(cache_key)
-        logger.debug(f"[SMC_CACHE] Stored for {ticker}:{timeframe} (ttl={ttl}s)")
+            _SMC_CACHE[cache_key] = (_time.monotonic(), ttl, smc_dict)
+            _SMC_CACHE.move_to_end(cache_key)
+            logger.debug(f"[SMC_CACHE] Stored for {ticker}:{timeframe} (ttl={ttl}s)")
+
+        await redis_set_json(
+            _redis_cache_key("smc", cache_key),
+            {"value": smc_dict, "ttl": ttl},
+            ttl_seconds=max(1, int(ttl)),
+        )
 
 
 def _reconstruct_smc_context(smc_dict: dict[str, Any], timeframe: str) -> Any:
@@ -268,6 +305,12 @@ async def _update_volatility_tracker(ticker: str, market: MarketContext) -> floa
         if len(_VOLATILITY_TRACKER) > 200:
             _VOLATILITY_TRACKER.popitem(last=False)  # Remove LRU entry
 
+    await redis_set_json(
+        make_key("ai", "volatility", ticker),
+        {"volatility_pct": volatility_pct},
+        ttl_seconds=900,
+    )
+
     return volatility_pct
 
 
@@ -284,6 +327,14 @@ async def _get_dynamic_cache_ttl(ticker: str) -> float:
     lock = await _get_volatility_lock()  # BUG-1 FIX: Lazy init
     async with lock:
         volatility = _VOLATILITY_TRACKER.get(ticker, 0.0)
+
+    if volatility == 0.0:
+        redis_payload = await redis_get_json(make_key("ai", "volatility", ticker))
+        if isinstance(redis_payload, dict):
+            try:
+                volatility = float(redis_payload.get("volatility_pct") or 0.0)
+            except (TypeError, ValueError):
+                volatility = 0.0
 
     base_ttl = settings.ai.dynamic_cache_ttl_base
 
@@ -372,6 +423,19 @@ async def _get_cached_analysis(
             if (_time.monotonic() - timestamp) < ttl:
                 _AI_CACHE.move_to_end(key)  # LRU: mark as recently used
                 return analysis
+
+    redis_payload = await redis_get_json(_redis_cache_key("analysis", key))
+    if isinstance(redis_payload, dict) and isinstance(redis_payload.get("analysis"), dict):
+        analysis = _analysis_from_cache_dict(redis_payload["analysis"])
+        if analysis is not None:
+            ttl = float(redis_payload.get("ttl") or _AI_CACHE_BASE_TTL)
+            async with lock:
+                _AI_CACHE[key] = (_time.monotonic(), ttl, analysis)
+                _AI_CACHE.move_to_end(key)
+                while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:
+                    _AI_CACHE.popitem(last=False)
+            logger.debug(f"[AI/Cache] Redis hit for {ticker}:{direction}")
+            return analysis
     return None
 
 
@@ -389,19 +453,26 @@ async def _set_cached_analysis(
     key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature, user_id)
     ttl = await _get_dynamic_cache_ttl(ticker)
 
-    lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
-    async with lock:
-        _AI_CACHE[key] = (_time.monotonic(), ttl, analysis)
-        _AI_CACHE.move_to_end(key)  # LRU: mark as most recently set
+    async with distributed_lock(f"ai:analysis:{key}", ttl_seconds=10, blocking_timeout_seconds=2):
+        lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
+        async with lock:
+            _AI_CACHE[key] = (_time.monotonic(), ttl, analysis)
+            _AI_CACHE.move_to_end(key)  # LRU: mark as most recently set
 
-        now = _time.monotonic()
-        stale = [k for k, (ts, t, _) in _AI_CACHE.items() if now - ts > t]
-        for k in stale:
-            del _AI_CACHE[k]
+            now = _time.monotonic()
+            stale = [k for k, (ts, t, _) in _AI_CACHE.items() if now - ts > t]
+            for k in stale:
+                del _AI_CACHE[k]
 
-        # LRU eviction: remove least-recently-used entries
-        while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:
-            _AI_CACHE.popitem(last=False)
+            # LRU eviction: remove least-recently-used entries
+            while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:
+                _AI_CACHE.popitem(last=False)
+
+        await redis_set_json(
+            _redis_cache_key("analysis", key),
+            {"analysis": _analysis_to_cache_dict(analysis), "ttl": ttl},
+            ttl_seconds=max(1, int(ttl)),
+        )
 
 
 # ─────────────────────────────────────────────

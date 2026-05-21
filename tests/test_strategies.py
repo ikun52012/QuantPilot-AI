@@ -143,6 +143,21 @@ class TestDCAEngine:
         assert position.status == "closed"
         assert position.close_reason == "take_profit"
 
+    @pytest.mark.asyncio
+    async def test_live_close_failure_keeps_dca_position_active(self, engine, config, monkeypatch):
+        position = engine.create_position(config, 50000.0)
+        config.paper_mode = False
+        engine.configs[position.config_id] = config
+
+        execute_trade = AsyncMock(return_value={"status": "error", "reason": "not closed"})
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+
+        with pytest.raises(RuntimeError):
+            await engine._close_position(position.config_id, 49000.0, "stop_loss", {"live_trading": True})
+
+        assert position.status == "active"
+        assert position.close_reason == ""
+
 
 class TestGridConfig:
     def test_default_config(self):
@@ -340,6 +355,24 @@ class TestGridEngine:
         assert cancel_order.await_count == 2
         execute_trade.assert_not_awaited()
         assert all(level.exchange_order_status == "cancelled" for level in pending_levels)
+
+    @pytest.mark.asyncio
+    async def test_close_live_grid_closes_net_exposure_before_marking_closed(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        buy_level = next(level for level in grid.grid_levels if level.side == "buy")
+        await engine._execute_grid_level(grid.config_id, buy_level, buy_level.price, config)
+        config.paper_mode = False
+        engine.configs[grid.config_id] = config
+
+        cancel_order = AsyncMock(return_value={"status": "cancelled"})
+        execute_trade = AsyncMock(return_value={"status": "filled", "order_id": "close-net"})
+        monkeypatch.setattr("exchange.cancel_order", cancel_order)
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+
+        await engine._close_grid(grid.config_id, 53000.0, "out_of_range", {"live_trading": True})
+
+        execute_trade.assert_awaited_once()
+        assert grid.status == "closed"
 
 
 class TestDCAEntry:

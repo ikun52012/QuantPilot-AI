@@ -291,7 +291,7 @@ async def get_dca_status(
     row = await _load_strategy_state(db, user_id, "dca", strategy_id)
     if not row and dca_engine.configs.get(strategy_id, DCAConfig()).user_id != user_id:
         raise HTTPException(404, "Position not found")
-    status = dca_engine.get_position_status(strategy_id)
+    status = await dca_engine.get_position_status_async(strategy_id)
 
     if "error" in status:
         raise HTTPException(404, status["error"])
@@ -307,6 +307,7 @@ async def list_dca_strategies(
     """List all active DCA strategies."""
     user_id = _user_id(user)
     await _hydrate_user_strategies(db, user_id, "dca")
+    await dca_engine.refresh_active_from_redis()
     strategies = _list_dca_for_user(user_id)
     return {
         "active_count": len(strategies),
@@ -328,7 +329,7 @@ async def check_dca_strategy(
         if not row:
             raise HTTPException(404, "Position not found")
 
-        status = dca_engine.get_position_status(strategy_id)
+        status = await dca_engine.get_position_status_async(strategy_id)
         if "error" in status:
             raise HTTPException(404, status["error"])
 
@@ -385,7 +386,7 @@ async def close_dca_strategy(
         if not row:
             raise HTTPException(404, "Position not found")
 
-        status = dca_engine.get_position_status(strategy_id)
+        status = await dca_engine.get_position_status_async(strategy_id)
         if "error" in status:
             raise HTTPException(404, status["error"])
 
@@ -393,9 +394,18 @@ async def close_dca_strategy(
         context = await fetch_market_context(ticker)
         current_price = context.current_price
 
-        dca_engine.positions[strategy_id].status = "manual_close"
-        dca_engine.positions[strategy_id].closed_at = utcnow()
-        dca_engine.positions[strategy_id].close_reason = "manual"
+        config = dca_engine.configs.get(strategy_id)
+        exchange_config = None
+        if config and not config.paper_mode:
+            exchange_config = {
+                "live_trading": True,
+                "sandbox_mode": settings.exchange.sandbox_mode,
+                "exchange": settings.exchange.name,
+                "api_key": settings.exchange.api_key,
+                "api_secret": settings.exchange.api_secret,
+                "password": settings.exchange.password,
+            }
+        await dca_engine._close_position(strategy_id, current_price, "manual", exchange_config)
 
         final_status = dca_engine.get_position_status(strategy_id)
         await _persist_strategy_state(
@@ -495,7 +505,7 @@ async def get_grid_status(
     row = await _load_strategy_state(db, user_id, "grid", strategy_id)
     if not row and grid_engine.configs.get(strategy_id, GridConfig()).user_id != user_id:
         raise HTTPException(404, "Position not found")
-    status = grid_engine.get_grid_status(strategy_id)
+    status = await grid_engine.get_grid_status_async(strategy_id)
 
     if "error" in status:
         raise HTTPException(404, status["error"])
@@ -511,6 +521,7 @@ async def list_grid_strategies(
     """List all active grid strategies."""
     user_id = _user_id(user)
     await _hydrate_user_strategies(db, user_id, "grid")
+    await grid_engine.refresh_active_from_redis()
     strategies = _list_grid_for_user(user_id)
     return {
         "active_count": len(strategies),
@@ -532,7 +543,7 @@ async def check_grid_strategy(
         if not row:
             raise HTTPException(404, "Position not found")
 
-        status = grid_engine.get_grid_status(strategy_id)
+        status = await grid_engine.get_grid_status_async(strategy_id)
         if "error" in status:
             raise HTTPException(404, status["error"])
 
@@ -589,7 +600,7 @@ async def close_grid_strategy(
         if not row:
             raise HTTPException(404, "Position not found")
 
-        status = grid_engine.get_grid_status(strategy_id)
+        status = await grid_engine.get_grid_status_async(strategy_id)
         if "error" in status:
             raise HTTPException(404, status["error"])
 
@@ -597,9 +608,18 @@ async def close_grid_strategy(
         context = await fetch_market_context(ticker)
         current_price = context.current_price
 
-        grid_engine.positions[strategy_id].status = "manual_close"
-        grid_engine.positions[strategy_id].closed_at = utcnow()
-        grid_engine.positions[strategy_id].close_reason = "manual"
+        config = grid_engine.configs.get(strategy_id)
+        exchange_config = None
+        if config and not config.paper_mode:
+            exchange_config = {
+                "live_trading": True,
+                "sandbox_mode": settings.exchange.sandbox_mode,
+                "exchange": settings.exchange.name,
+                "api_key": settings.exchange.api_key,
+                "api_secret": settings.exchange.api_secret,
+                "password": settings.exchange.password,
+            }
+        await grid_engine._close_grid(strategy_id, current_price, "manual", exchange_config)
 
         final_status = grid_engine.get_grid_status(strategy_id)
         await _persist_strategy_state(
@@ -634,6 +654,8 @@ async def get_strategies_overview(
     user_id = _user_id(user)
     await _hydrate_user_strategies(db, user_id, "dca")
     await _hydrate_user_strategies(db, user_id, "grid")
+    await dca_engine.refresh_active_from_redis()
+    await grid_engine.refresh_active_from_redis()
     dca_strategies = _list_dca_for_user(user_id)
     grid_strategies = _list_grid_for_user(user_id)
     return {
@@ -793,6 +815,9 @@ async def start_strategy_monitor(
                     "api_secret": settings.exchange.api_secret,
                     "password": settings.exchange.password,
                 }
+
+                await dca_engine.refresh_active_from_redis()
+                await grid_engine.refresh_active_from_redis()
 
                 for strategy_id in list(dca_engine.positions.keys()):
                     position = dca_engine.positions.get(strategy_id)

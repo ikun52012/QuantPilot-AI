@@ -4,14 +4,34 @@ Manages position averaging down/up with configurable parameters.
 Enhanced with live exchange execution support.
 """
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 
 from loguru import logger
 
+from core.config import settings
+from core.redis_coordination import distributed_lock, make_key, redis_hdel, redis_hget_json, redis_hgetall_json, redis_hset_json
 from core.utils.datetime import utcnow
 from models import SignalDirection, TradeDecision
+
+
+_DCA_STATE_HASH = make_key("strategy", "dca", "state")
+_DCA_ACTIVE_HASH = make_key("strategy", "dca", "active")
+
+
+def _parse_datetime(value):
+    if isinstance(value, datetime) or value is None:
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return utcnow()
+
+
+def _filter_dataclass(cls, data: dict) -> dict:
+    fields = getattr(cls, "__dataclass_fields__", {})
+    return {key: value for key, value in dict(data or {}).items() if key in fields}
 
 
 class DCAMode(Enum):
@@ -102,6 +122,98 @@ class DCAEngine:
         self.price_cache: dict[str, float] = {}
         self._monitor_task: asyncio.Task | None = None
 
+    def _state_record(self, position_id: str) -> dict | None:
+        position = self.positions.get(position_id)
+        config = self.configs.get(position_id)
+        if not position or not config:
+            return None
+        return {
+            "strategy_type": "dca",
+            "strategy_id": position_id,
+            "ticker": position.ticker,
+            "user_id": config.user_id,
+            "status": position.status,
+            "config": asdict(config),
+            "position": asdict(position),
+            "updated_at": utcnow().isoformat(),
+        }
+
+    def _restore_state_record(self, record: dict) -> bool:
+        try:
+            config_data = _filter_dataclass(DCAConfig, record.get("config") or {})
+            position_data = _filter_dataclass(DCAPosition, record.get("position") or {})
+            entries = []
+            for raw_entry in position_data.get("entries", []):
+                entry_data = _filter_dataclass(DCAEntry, dict(raw_entry or {}))
+                entry_data["entry_time"] = _parse_datetime(entry_data.get("entry_time"))
+                entries.append(DCAEntry(**entry_data))
+
+            position_data["entries"] = entries
+            for key in ("started_at", "updated_at", "closed_at"):
+                if key in position_data:
+                    position_data[key] = _parse_datetime(position_data.get(key))
+
+            config = DCAConfig(**config_data)
+            position = DCAPosition(**position_data)
+            position_id = str(record.get("strategy_id") or position.config_id or config.strategy_id)
+            if not position_id:
+                return False
+            config.strategy_id = position_id
+            position.config_id = position_id
+            self.configs[position_id] = config
+            self.positions[position_id] = position
+            return True
+        except Exception as exc:
+            logger.warning(f"[DCA/Redis] Failed to restore Redis state: {exc}")
+            return False
+
+    def _position_lock_name(self, position_id: str, position: DCAPosition, config: DCAConfig | None) -> str:
+        owner = (config.user_id if config else "") or "global"
+        return f"dca:{owner}:{position.ticker}"
+
+    def _schedule_state_sync(self, position_id: str) -> None:
+        if not settings.redis.enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.sync_position_state(position_id))
+            return
+        loop.create_task(self.sync_position_state(position_id))
+
+    async def sync_position_state(self, position_id: str) -> bool:
+        """Persist latest local DCA state into Redis hashes."""
+        record = self._state_record(position_id)
+        if not record:
+            return False
+
+        saved = await redis_hset_json(_DCA_STATE_HASH, position_id, record)
+        if record["status"] == "active":
+            saved = await redis_hset_json(_DCA_ACTIVE_HASH, position_id, record) or saved
+        else:
+            await redis_hdel(_DCA_ACTIVE_HASH, position_id)
+        return saved
+
+    async def load_position_state(self, position_id: str, *, refresh: bool = False) -> bool:
+        """Load a DCA position from Redis if local state is missing or stale."""
+        if not refresh and position_id in self.positions and position_id in self.configs:
+            return True
+        record = await redis_hget_json(_DCA_ACTIVE_HASH, position_id)
+        if record is None:
+            record = await redis_hget_json(_DCA_STATE_HASH, position_id)
+        if not isinstance(record, dict):
+            return False
+        return self._restore_state_record(record)
+
+    async def refresh_active_from_redis(self) -> int:
+        """Hydrate all Redis active DCA positions into this process."""
+        records = await redis_hgetall_json(_DCA_ACTIVE_HASH)
+        restored = 0
+        for record in records.values():
+            if isinstance(record, dict) and self._restore_state_record(record):
+                restored += 1
+        return restored
+
     def _ensure_strategy_id(self, config: DCAConfig) -> None:
         if not config.strategy_id:
             config.strategy_id = f"dca_{config.ticker}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -164,7 +276,9 @@ class DCAEngine:
         exchange_config: dict | None = None,
     ) -> DCAPosition:
         if config.paper_mode:
-            return self._create_position_paper(config, current_price)
+            position = self._create_position_paper(config, current_price)
+            self._schedule_state_sync(position.config_id)
+            return position
 
         try:
             asyncio.get_running_loop()
@@ -180,54 +294,59 @@ class DCAEngine:
         exchange_config: dict | None = None
     ) -> DCAPosition:
         if config.paper_mode:
-            return self._create_position_paper(config, current_price)
+            position = self._create_position_paper(config, current_price)
+            await self.sync_position_state(position.config_id)
+            return position
 
         self._ensure_strategy_id(config)
-        position = self._build_position(config)
+        async with distributed_lock(f"dca:create:{config.user_id or 'global'}:{config.ticker}:{config.direction}", ttl_seconds=45):
+            position = self._build_position(config)
 
-        initial_qty = self._calculate_initial_quantity(config, current_price)
+            initial_qty = self._calculate_initial_quantity(config, current_price)
 
-        try:
-            from exchange import execute_trade
+            try:
+                from exchange import execute_trade
 
-            direction = SignalDirection.LONG if config.direction == "long" else SignalDirection.SHORT
-            decision = TradeDecision(
-                execute=True,
-                direction=direction,
-                ticker=config.ticker,
-                entry_price=current_price,
-                quantity=initial_qty,
-                stop_loss=self._calculate_stop_loss_price(config, current_price, direction),
-                take_profit=self._calculate_take_profit_price(config, current_price, direction),
-                reason="DCA initial entry",
-                order_type="market",
-            )
-
-            order_result = await execute_trade(decision, exchange_config)
-
-            if order_result.get("status") in ["filled", "simulated"]:
-                filled_price = float(order_result.get("entry_price") or current_price)
-                filled_capital = initial_qty * filled_price
-                entry = DCAEntry(
-                    entry_price=filled_price,
+                direction = SignalDirection.LONG if config.direction == "long" else SignalDirection.SHORT
+                decision = TradeDecision(
+                    execute=True,
+                    direction=direction,
+                    ticker=config.ticker,
+                    entry_price=current_price,
                     quantity=initial_qty,
-                    capital_usdt=filled_capital,
-                    entry_time=utcnow(),
-                    entry_idx=1,
-                    reason="initial_entry",
-                    order_id=order_result.get("order_id", ""),
-                    fees_usdt=filled_capital * config.fee_pct / 100,
+                    stop_loss=self._calculate_stop_loss_price(config, current_price, direction),
+                    take_profit=self._calculate_take_profit_price(config, current_price, direction),
+                    reason="DCA initial entry",
+                    order_type="market",
                 )
-                logger.info(f"[DCA] Placed initial order: {order_result.get('order_id')}")
-            else:
-                logger.error(f"[DCA] Failed to place initial order: {order_result}")
-                raise Exception(f"Failed to place initial order: {order_result.get('reason')}")
 
-        except Exception as e:
-            logger.error(f"[DCA] Exchange execution failed: {e}")
-            raise
+                order_result = await execute_trade(decision, exchange_config)
 
-        return self._finalize_position(position, config, entry, current_price)
+                if order_result.get("status") in ["filled", "simulated"]:
+                    filled_price = float(order_result.get("entry_price") or current_price)
+                    filled_capital = initial_qty * filled_price
+                    entry = DCAEntry(
+                        entry_price=filled_price,
+                        quantity=initial_qty,
+                        capital_usdt=filled_capital,
+                        entry_time=utcnow(),
+                        entry_idx=1,
+                        reason="initial_entry",
+                        order_id=order_result.get("order_id", ""),
+                        fees_usdt=filled_capital * config.fee_pct / 100,
+                    )
+                    logger.info(f"[DCA] Placed initial order: {order_result.get('order_id')}")
+                else:
+                    logger.error(f"[DCA] Failed to place initial order: {order_result}")
+                    raise Exception(f"Failed to place initial order: {order_result.get('reason')}")
+
+            except Exception as e:
+                logger.error(f"[DCA] Exchange execution failed: {e}")
+                raise
+
+            finalized = self._finalize_position(position, config, entry, current_price)
+            await self.sync_position_state(finalized.config_id)
+            return finalized
 
     def _calculate_initial_quantity(self, config: DCAConfig, price: float) -> float:
         if config.initial_capital_usdt > 0:
@@ -315,6 +434,9 @@ class DCAEngine:
         result: dict[str, object] = {"action": "none", "reason": ""}
 
         if position_id not in self.positions:
+            await self.load_position_state(position_id)
+
+        if position_id not in self.positions:
             return {"action": "error", "reason": "Position not found"}
 
         position = self.positions[position_id]
@@ -323,31 +445,40 @@ class DCAEngine:
         if not config:
             return {"action": "error", "reason": "Config not found"}
 
-        position.current_price = current_price
-        position.highest_price = max(position.highest_price, current_price)
-        position.lowest_price = min(position.lowest_price, current_price)
+        async with distributed_lock(self._position_lock_name(position_id, position, config), ttl_seconds=45):
+            await self.load_position_state(position_id, refresh=True)
+            position = self.positions[position_id]
+            config = self.configs.get(position_id)
+            if not config:
+                return {"action": "error", "reason": "Config not found"}
 
-        self._update_pnl(position)
+            position.current_price = current_price
+            position.highest_price = max(position.highest_price, current_price)
+            position.lowest_price = min(position.lowest_price, current_price)
 
-        if position.status != "active":
-            return {"action": "none", "reason": f"Position {position.status}"}
+            self._update_pnl(position)
 
-        if self._check_stop_loss(position, current_price):
-            await self._close_position(position_id, current_price, "stop_loss", exchange_config)
-            result = {"action": "close", "reason": "stop_loss_hit", "pnl_pct": position.unrealized_pnl_pct}
-            return result
+            if position.status != "active":
+                return {"action": "none", "reason": f"Position {position.status}"}
 
-        if self._check_take_profit(position, current_price):
-            await self._close_position(position_id, current_price, "take_profit", exchange_config)
-            result = {"action": "close", "reason": "take_profit_hit", "pnl_pct": position.unrealized_pnl_pct}
-            return result
+            if self._check_stop_loss(position, current_price):
+                await self._close_position(position_id, current_price, "stop_loss", exchange_config)
+                result = {"action": "close", "reason": "stop_loss_hit", "pnl_pct": position.unrealized_pnl_pct}
+                return result
 
-        if position.entries_remaining > 0:
-            should_dca = self._should_add_entry(position, config, current_price)
+            if self._check_take_profit(position, current_price):
+                await self._close_position(position_id, current_price, "take_profit", exchange_config)
+                result = {"action": "close", "reason": "take_profit_hit", "pnl_pct": position.unrealized_pnl_pct}
+                return result
 
-            if should_dca:
-                entry_result = await self._add_entry(position_id, config, current_price, exchange_config)
-                result = {"action": "dca_entry", "reason": entry_result.get("reason", ""), "entry_idx": len(position.entries)}
+            if position.entries_remaining > 0:
+                should_dca = self._should_add_entry(position, config, current_price)
+
+                if should_dca:
+                    entry_result = await self._add_entry(position_id, config, current_price, exchange_config)
+                    result = {"action": "dca_entry", "reason": entry_result.get("reason", ""), "entry_idx": len(position.entries)}
+
+            await self.sync_position_state(position_id)
 
         return result
 
@@ -478,6 +609,8 @@ class DCAEngine:
 
         logger.info(f"[DCA] Added entry #{new_entry_idx} for {position.ticker}: price={current_price}, qty={new_quantity}, avg_entry={weighted_avg:.4f}")
 
+        await self.sync_position_state(position_id)
+
         return {"success": True, "entry_idx": new_entry_idx, "quantity": new_quantity, "average_entry": weighted_avg}
 
     def _update_pnl(self, position: DCAPosition) -> None:
@@ -493,6 +626,7 @@ class DCAEngine:
         config = self.configs.get(position_id)
 
         if config and not config.paper_mode:
+            close_confirmed = False
             try:
                 from exchange import execute_trade
 
@@ -513,11 +647,20 @@ class DCAEngine:
 
                 if order_result.get("status") in ["closed", "filled", "simulated"]:
                     logger.info(f"[DCA] Closed position via exchange: {order_result.get('order_id')}")
+                    close_confirmed = True
                 else:
                     logger.error(f"[DCA] Failed to close position: {order_result}")
 
             except Exception as e:
                 logger.error(f"[DCA] Exchange close failed: {e}")
+                position.updated_at = utcnow()
+                await self.sync_position_state(position_id)
+                raise RuntimeError(f"DCA exchange close failed; keeping position active: {e}") from e
+
+            if not close_confirmed:
+                position.updated_at = utcnow()
+                await self.sync_position_state(position_id)
+                raise RuntimeError("DCA exchange close was not confirmed; keeping position active")
 
         if position.direction == "long":
             pnl_usdt = (exit_price - position.average_entry_price) * position.total_quantity
@@ -534,6 +677,8 @@ class DCAEngine:
         position.current_price = exit_price
 
         logger.info(f"[DCA] Closed position {position_id}: reason={reason}, pnl_usdt={pnl_usdt:.2f}, entries={len(position.entries)}")
+
+        await self.sync_position_state(position_id)
 
     def get_position_status(self, position_id: str) -> dict:
         position = self.positions.get(position_id)
@@ -572,6 +717,11 @@ class DCAEngine:
             ],
         }
 
+    async def get_position_status_async(self, position_id: str) -> dict:
+        if position_id not in self.positions:
+            await self.load_position_state(position_id)
+        return self.get_position_status(position_id)
+
     def list_active_positions(self) -> list[dict]:
         return [
             self.get_position_status(pid)
@@ -579,13 +729,32 @@ class DCAEngine:
             if pos.status == "active"
         ]
 
+    async def list_active_positions_async(self) -> list[dict]:
+        await self.refresh_active_from_redis()
+        return self.list_active_positions()
+
     def remove_position(self, position_id: str) -> bool:
         if position_id in self.positions:
             del self.positions[position_id]
             if position_id in self.configs:
                 del self.configs[position_id]
+            if settings.redis.enabled:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(self.remove_position_async(position_id))
+                else:
+                    loop.create_task(self.remove_position_async(position_id))
             return True
         return False
+
+    async def remove_position_async(self, position_id: str) -> bool:
+        existed = position_id in self.positions
+        self.positions.pop(position_id, None)
+        self.configs.pop(position_id, None)
+        await redis_hdel(_DCA_ACTIVE_HASH, position_id)
+        await redis_hdel(_DCA_STATE_HASH, position_id)
+        return existed
 
     def to_dict(self) -> dict:
         return {
