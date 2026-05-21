@@ -402,13 +402,27 @@ async def fetch_fear_greed_index() -> dict[str, Any]:
     return await _fetch_with_cache(FEAR_GREED_CACHE_KEY, _fetch, ttl=3600)
 
 
-async def calculate_cvd_divergence(ohlcv_data: list[list[float]], lookback: int = 20) -> dict[str, Any]:
+async def calculate_directional_volume_delta(ohlcv_data: list[list[float]], lookback: int = 20) -> dict[str, Any]:
     """
-    Calculate CVD (Cumulative Volume Delta) divergence.
+    Calculate Directional Volume Delta (DVD) - estimated from OHLCV data.
+    
+    NOTE: This is a proxy estimation, NOT true Cumulative Volume Delta (CVD).
+    True CVD requires order-flow data (active/passive trade flags) which is
+    not available from standard OHLCV candles. This implementation correlates
+    price direction with volume as an approximation.
+
     Uses local OHLCV data - no external API needed.
 
     Returns divergence status and strength.
     """
+
+
+async def calculate_cvd_divergence(ohlcv_data: list[list[float]], lookback: int = 20) -> dict[str, Any]:
+    """
+    Backward-compatible alias for calculate_directional_volume_delta.
+    DEPRECATED: Use calculate_directional_volume_delta instead.
+    """
+    return await calculate_directional_volume_delta(ohlcv_data, lookback)
     if len(ohlcv_data) < lookback:
         return {"divergence": None, "strength": 0, "type": None}
 
@@ -446,10 +460,15 @@ async def calculate_cvd_divergence(ohlcv_data: list[list[float]], lookback: int 
     return divergence_data
 
 
-async def detect_volatility_regime(ohlcv_data: list[list[float]], lookback: int = 100) -> dict[str, Any]:
+async def detect_volatility_regime(ohlcv_data: list[list[float]], lookback: int = 100, thresholds: Any | None = None) -> dict[str, Any]:
     """
     Detect current volatility regime.
     Uses local OHLCV data - no external API needed.
+
+    Args:
+        ohlcv_data: OHLCV candles [timestamp, open, high, low, close, volume]
+        lookback: Number of candles to analyze
+        thresholds: Optional FilterThresholds instance for configurable volatility regime multipliers
 
     Returns regime classification and position sizing suggestion.
     """
@@ -484,13 +503,26 @@ async def detect_volatility_regime(ohlcv_data: list[list[float]], lookback: int 
         "suggestion": "normal_position",
     }
 
+    # FIX #10: Configurable regime thresholds via FilterThresholds
+    extreme_mult = 2.0
+    high_mult = 1.5
+    if thresholds is not None:
+        try:
+            extreme_mult = float(thresholds.get("volatility_regime_extreme_multiplier", ""))
+        except (TypeError, ValueError, AttributeError):
+            pass
+        try:
+            high_mult = float(thresholds.get("volatility_regime_multiplier", ""))
+        except (TypeError, ValueError, AttributeError):
+            pass
+
     if current_atr_pct < avg_atr_pct * 0.5:
         regime_data["regime"] = "low_volatility"
         regime_data["suggestion"] = "breakout_approach"
-    elif current_atr_pct > avg_atr_pct * 2.0:
+    elif current_atr_pct > avg_atr_pct * extreme_mult:
         regime_data["regime"] = "extreme_volatility"
         regime_data["suggestion"] = "pause_trading"
-    elif current_atr_pct > avg_atr_pct * 1.5:
+    elif current_atr_pct > avg_atr_pct * high_mult:
         regime_data["regime"] = "high_volatility"
         regime_data["suggestion"] = "reduce_position"
 
@@ -678,6 +710,401 @@ async def analyze_liquidity_structure(
         "has_liquidity_data": bool(orderbook.get("bids") or orderbook.get("asks")),
     }
 
+
+# ═══════════════════════════════════════════════════════════════
+# VWAP Deviation (P0 — institutional must-have)
+# ═══════════════════════════════════════════════════════════════
+
+async def calculate_vwap_deviation(
+    ohlcv_data: list[list[float]],
+    current_price: float,
+    lookback: int = 24,
+) -> dict[str, Any]:
+    """
+    Calculate VWAP (Volume-Weighted Average Price) deviation.
+    
+    Uses (High + Low + Close) / 3 as typical price weighted by volume.
+    VWAP is the institutional benchmark — price above VWAP on longs is favorable.
+    
+    Returns deviation percentage and direction.
+    """
+    if len(ohlcv_data) < lookback or current_price <= 0:
+        return {"vwap": None, "deviation_pct": None, "direction": None, "note": "Insufficient data"}
+
+    recent = ohlcv_data[-lookback:]
+    cumulative_tpv = 0.0
+    cumulative_vol = 0.0
+
+    for candle in recent:
+        high = float(candle[2]) if len(candle) > 2 else 0
+        low = float(candle[3]) if len(candle) > 3 else 0
+        close = float(candle[4]) if len(candle) > 4 else 0
+        volume = float(candle[5]) if len(candle) > 5 else 0
+        typical_price = (high + low + close) / 3.0
+        cumulative_tpv += typical_price * volume
+        cumulative_vol += volume
+
+    if cumulative_vol <= 0:
+        return {"vwap": None, "deviation_pct": None, "direction": None, "note": "Zero volume"}
+
+    vwap = cumulative_tpv / cumulative_vol
+    deviation_pct = (current_price - vwap) / vwap * 100
+
+    return {
+        "vwap": round(vwap, 8),
+        "deviation_pct": round(deviation_pct, 4),
+        "direction": "above_vwap" if deviation_pct > 0 else "below_vwap",
+        "lookback_candles": lookback,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# OI-Price Divergence (P0 — detects smart money distribution)
+# ═══════════════════════════════════════════════════════════════
+
+async def check_oi_price_divergence(
+    oi_change_pct: float | None,
+    price_change_1h: float,
+    price_change_4h: float = 0.0,
+    oi_change_threshold: float = 5.0,
+    price_stall_threshold: float = 1.0,
+) -> dict[str, Any]:
+    """
+    Check for OI-Price divergence — a leading indicator of trend reversals.
+    
+    Patterns:
+    - OI up + price flat/down → bearish divergence (distribution)
+    - OI up + price up → healthy uptrend (accumulation)
+    - OI down + price flat/up → bullish divergence (short covering)
+    - OI down + price down → healthy downtrend (liquidation cascade)
+    
+    Returns divergence type and strength.
+    """
+    result: dict[str, Any] = {
+        "divergence_type": None,
+        "strength": 0.0,
+        "is_bearish": False,
+        "is_bullish": False,
+        "note": None,
+    }
+
+    if oi_change_pct is None:
+        result["note"] = "No OI data"
+        return result
+
+    abs_oi = abs(oi_change_pct)
+    abs_price_1h = abs(price_change_1h)
+
+    # Bearish divergence: OI rising hard + price barely moving or falling
+    if oi_change_pct > oi_change_threshold and price_change_1h < price_stall_threshold:
+        result["divergence_type"] = "bearish_divergence"
+        result["strength"] = round(abs_oi, 2)
+        result["is_bearish"] = True
+        result["note"] = f"OI +{oi_change_pct:.1f}% while price only +{price_change_1h:.1f}% — distribution likely"
+    elif oi_change_pct > oi_change_threshold and price_change_1h < -price_stall_threshold:
+        result["divergence_type"] = "bearish_confirmed"
+        result["strength"] = round(abs_oi + abs(price_change_1h), 2)
+        result["is_bearish"] = True
+        result["note"] = f"OI +{oi_change_pct:.1f}% with price {price_change_1h:.1f}% — aggressive distribution"
+
+    # Bullish divergence: OI dropping hard + price holding or rising
+    elif oi_change_pct < -oi_change_threshold and price_change_1h > -price_stall_threshold:
+        result["divergence_type"] = "bullish_divergence"
+        result["strength"] = round(abs_oi, 2)
+        result["is_bullish"] = True
+        result["note"] = f"OI {oi_change_pct:.1f}% while price holds — short covering likely"
+    elif oi_change_pct < -oi_change_threshold and price_change_1h > price_stall_threshold:
+        result["divergence_type"] = "bullish_confirmed"
+        result["strength"] = round(abs_oi + abs(price_change_1h), 2)
+        result["is_bullish"] = True
+        result["note"] = f"OI {oi_change_pct:.1f}% with price +{price_change_1h:.1f}% — aggressive short squeeze"
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# Exchange Reserve Flow (P1 — whale movement detection)
+# ═══════════════════════════════════════════════════════════════
+
+async def fetch_exchange_reserves(base_asset: str = "BTC") -> dict[str, Any]:
+    """
+    Fetch exchange reserve flow data.
+    
+    Free source: CryptoQuant community API / Glassnode alternatives.
+    Net outflow from exchanges = accumulation (bullish).
+    Net inflow to exchanges = potential selling pressure (bearish).
+    
+    Falls back gracefully if API is unavailable.
+    """
+    async def _fetch() -> dict[str, Any]:
+        reserve_data: dict[str, Any] = {
+            "net_flow_24h": None,
+            "total_reserves": None,
+            "flow_direction": None,
+            "is_accumulation": False,
+            "is_distribution": False,
+            "source": "unavailable",
+        }
+
+        base = str(base_asset or "BTC").upper().strip()
+
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                # CryptoQuant-style free API (may require key in production)
+                cq_url = f"https://api.cryptoquant.com/v1/{base.lower()}/exchange-reserves"
+                cq_key = os.getenv("CRYPTOQUANT_API_KEY", "")
+                if cq_key:
+                    async with session.get(cq_url, headers={"Authorization": f"Bearer {cq_key}"}) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            reserve_data.update({
+                                "net_flow_24h": data.get("net_flow_24h"),
+                                "total_reserves": data.get("total_reserves"),
+                                "source": "cryptoquant",
+                            })
+
+                # Fallback: Glassnode free tier
+                if reserve_data["net_flow_24h"] is None:
+                    gn_key = os.getenv("GLASSNODE_API_KEY", "")
+                    if gn_key:
+                        gn_url = f"https://api.glassnode.com/v1/metrics/transactions/transfers_volume_to_exchanges_sum"
+                        async with session.get(gn_url, headers={"X-API-KEY": gn_key}) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                reserve_data["net_flow_24h"] = data[-1].get("v") if data else None
+                                reserve_data["source"] = "glassnode"
+
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+            logger.debug(f"[EnhancedData] Exchange reserves fetch failed for {base}: {e}")
+        except Exception as e:
+            logger.debug(f"[EnhancedData] Unexpected error in exchange reserves for {base}: {e}")
+
+        # Classify flow direction
+        net_flow = reserve_data.get("net_flow_24h")
+        if net_flow is not None:
+            try:
+                nf = float(net_flow)
+                if nf < -100:
+                    reserve_data["flow_direction"] = "outflow"
+                    reserve_data["is_accumulation"] = True
+                elif nf > 100:
+                    reserve_data["flow_direction"] = "inflow"
+                    reserve_data["is_distribution"] = True
+                else:
+                    reserve_data["flow_direction"] = "neutral"
+            except (TypeError, ValueError):
+                pass
+
+        return reserve_data
+
+    return await _fetch_with_cache(f"exchange_reserves:{base_asset}", _fetch, ttl=300)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Funding Rate Term Structure (P1 — sentiment curve)
+# ═══════════════════════════════════════════════════════════════
+
+async def calculate_funding_term_structure(
+    symbol: str,
+    current_funding_rate: float | None,
+) -> dict[str, Any]:
+    """
+    Analyze funding rate term structure — how funding has evolved over time.
+    
+    Steepening funding (rising faster) = growing extreme sentiment = reversal risk.
+    Flattening funding (returning to normal) = sentiment normalizing.
+    
+    Uses Binance funding rate history endpoint.
+    """
+    async def _fetch() -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "current_funding": round(float(current_funding_rate or 0), 6),
+            "funding_8h_ago": None,
+            "funding_24h_ago": None,
+            "trend": "stable",
+            "is_steepening": False,
+            "is_flattening": False,
+            "note": None,
+        }
+
+        if current_funding_rate is None:
+            result["note"] = "No current funding rate"
+            return result
+
+        from enhanced_market_data import _binance_usdt_symbol
+        binance_symbol = _binance_usdt_symbol(symbol)
+        if not binance_symbol:
+            result["note"] = "Could not resolve symbol"
+            return result
+
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={binance_symbol}&limit=24"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data and len(data) >= 3:
+                            # Most funding intervals are 8h, so 3 entries = ~24h
+                            now = utcnow()
+                            rates = []
+                            for entry in data:
+                                try:
+                                    ft = datetime.fromtimestamp(
+                                        float(entry.get("fundingTime", 0)) / 1000,
+                                        tz=timezone.utc,
+                                    )
+                                    fr = float(entry.get("fundingRate", 0))
+                                    rates.append((ft, fr))
+                                except (ValueError, TypeError, AttributeError):
+                                    continue
+
+                            rates.sort(key=lambda x: x[0])
+
+                            if len(rates) >= 2:
+                                result["funding_8h_ago"] = rates[-2][1]
+                            if len(rates) >= 3:
+                                result["funding_24h_ago"] = rates[0][1]
+
+                            # Determine term structure trend
+                            curr = result["current_funding"]
+                            prev8 = result.get("funding_8h_ago")
+                            prev24 = result.get("funding_24h_ago")
+
+                            if prev8 is not None and prev24 is not None:
+                                recent_slope = curr - prev8
+                                older_slope = prev8 - prev24
+
+                                if abs(recent_slope) > abs(older_slope) * 2.0:
+                                    result["trend"] = "steepening"
+                                    result["is_steepening"] = True
+                                    result["note"] = (
+                                        f"Funding {curr*100:.4f}%, steepening from "
+                                        f"{prev8*100:.4f}% (8h) and {prev24*100:.4f}% (24h)"
+                                    )
+                                elif abs(recent_slope) < abs(older_slope) * 0.5:
+                                    result["trend"] = "flattening"
+                                    result["is_flattening"] = True
+                                    result["note"] = "Funding rate normalizing — sentiment cooling"
+                                else:
+                                    result["trend"] = "stable"
+
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+            logger.debug(f"[EnhancedData] Funding term structure fetch failed: {e}")
+            result["note"] = f"Fetch failed: {e}"
+        except Exception as e:
+            logger.debug(f"[EnhancedData] Unexpected error in funding term structure: {e}")
+            result["note"] = f"Error: {e}"
+
+        return result
+
+    return await _fetch_with_cache(f"funding_term:{symbol}", _fetch, ttl=300)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Multi-Exchange Price Discrepancy (P2 — liquidity fragmentation)
+# ═══════════════════════════════════════════════════════════════
+
+async def check_exchange_price_discrepancy(
+    symbol: str,
+    reference_price: float,
+) -> dict[str, Any]:
+    """
+    Check if the same asset trades at significantly different prices across exchanges.
+    
+    Large discrepancies indicate:
+    - Liquidity fragmentation
+    - Arbitrage activity
+    - Exchange-specific issues
+    - Extreme market conditions
+    
+    Returns discrepancy data across exchanges.
+    """
+    async def _fetch() -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "max_discrepancy_pct": 0.0,
+            "exchanges_checked": [],
+            "is_concerning": False,
+            "prices": {},
+            "note": None,
+        }
+
+        if reference_price <= 0:
+            result["note"] = "Invalid reference price"
+            return result
+
+        base = _base_asset(symbol)
+        exchanges_to_check = [
+            ("Binance", f"https://api.binance.com/api/v3/ticker/price?symbol={base}USDT"),
+            ("OKX", f"https://www.okx.com/api/v5/market/ticker?instId={base}-USDT"),
+            ("Bybit", f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={base}USDT"),
+            ("Gate.io", f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={base}_USDT"),
+        ]
+
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async def _fetch_exchange(name: str, url: str) -> tuple[str, float | None]:
+                    try:
+                        async with session.get(url) as resp:
+                            if resp.status != 200:
+                                return name, None
+                            data = await resp.json()
+
+                            if name == "Binance":
+                                return name, float(data.get("price", 0))
+                            elif name == "OKX":
+                                tickers = data.get("data", [])
+                                return name, float(tickers[0].get("last", 0)) if tickers else None
+                            elif name == "Bybit":
+                                tickers = data.get("result", {}).get("list", [])
+                                return name, float(tickers[0].get("lastPrice", 0)) if tickers else None
+                            elif name == "Gate.io":
+                                ticker = data[0] if isinstance(data, list) and data else data
+                                return name, float(ticker.get("last", 0))
+                            return name, None
+                    except Exception:
+                        return name, None
+
+                tasks = [_fetch_exchange(name, url) for name, url in exchanges_to_check]
+                results_list = await asyncio.gather(*tasks, return_exceptions=True)
+
+                prices = {}
+                for item in results_list:
+                    if isinstance(item, tuple) and item[1] is not None:
+                        name, price = item
+                        if price > 0:
+                            prices[name] = price
+                            result["exchanges_checked"].append(name)
+
+                result["prices"] = prices
+
+                if len(prices) >= 2:
+                    prices_list = list(prices.values())
+                    max_price = max(prices_list)
+                    min_price = min(prices_list)
+                    if min_price > 0:
+                        result["max_discrepancy_pct"] = round((max_price - min_price) / min_price * 100, 4)
+
+                    if result["max_discrepancy_pct"] > 2.0:
+                        result["is_concerning"] = True
+                        result["note"] = (
+                            f"Price discrepancy {result['max_discrepancy_pct']:.2f}% across {len(prices)} exchanges"
+                        )
+
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+            logger.debug(f"[EnhancedData] Exchange price check failed: {e}")
+            result["note"] = f"Fetch failed: {e}"
+        except Exception as e:
+            logger.debug(f"[EnhancedData] Unexpected error in price discrepancy: {e}")
+            result["note"] = f"Error: {e}"
+
+        return result
+
+    return await _fetch_with_cache(f"price_discrepancy:{symbol}", _fetch, ttl=60)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Fetch All Enhanced Data (updated with new checks)
+# ═══════════════════════════════════════════════════════════════
 
 async def fetch_all_enhanced_data(symbol: str, ohlcv_data: list[list[float]] | None = None) -> dict[str, Any]:
     """

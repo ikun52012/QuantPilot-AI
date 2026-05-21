@@ -1793,6 +1793,82 @@ async def reset_filter_statistics(
 
 
 # ─────────────────────────────────────────────
+# v5.2 — Filter Performance Feedback Loop
+# ─────────────────────────────────────────────
+
+@router.get("/filter-performance")
+async def get_filter_performance(
+    admin: dict = Depends(require_admin),
+):
+    """Get per-check precision statistics from the feedback loop."""
+    from pre_filter import get_check_performance, get_weight_suggestions
+
+    performance = get_check_performance()
+    suggestions = get_weight_suggestions()
+
+    return {
+        "performance": performance,
+        "weight_suggestions": suggestions,
+    }
+
+
+@router.post("/filter-performance/reset")
+async def reset_filter_performance(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Reset filter performance tracking data."""
+    from pre_filter import reset_check_performance
+
+    reset_check_performance()
+    await _add_audit_log(db, admin, "reset_filter_performance", "settings", "", "Reset filter performance data", request)
+    return {"status": "success", "message": "Filter performance data reset"}
+
+
+# ─────────────────────────────────────────────
+# v5.2 — Prefilter Latency Monitor
+# ─────────────────────────────────────────────
+
+@router.get("/filter-latency")
+async def get_filter_latency(
+    admin: dict = Depends(require_admin),
+):
+    """Get prefilter pipeline latency statistics."""
+    from pre_filter import get_latency_stats
+
+    return get_latency_stats()
+
+
+@router.post("/filter-latency/reset")
+async def reset_filter_latency(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Reset prefilter latency statistics."""
+    from pre_filter import reset_latency_stats
+
+    reset_latency_stats()
+    await _add_audit_log(db, admin, "reset_filter_latency", "settings", "", "Reset filter latency stats", request)
+    return {"status": "success", "message": "Filter latency statistics reset"}
+
+
+@router.post("/filter-latency/clear-degraded")
+async def clear_degraded_filter_checks(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    request: Request = None,
+):
+    """Clear degraded check status (re-enable all checks)."""
+    from pre_filter import clear_degraded_checks
+
+    clear_degraded_checks()
+    await _add_audit_log(db, admin, "clear_degraded_checks", "settings", "", "Cleared degraded filter checks", request)
+    return {"status": "success", "message": "Degraded checks cleared — all checks re-enabled"}
+
+
+# ─────────────────────────────────────────────
 # External API Keys Management
 # ─────────────────────────────────────────────
 

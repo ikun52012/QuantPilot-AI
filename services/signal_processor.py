@@ -900,6 +900,7 @@ class SignalProcessor:
             live_trading=live_trading,
             data_quality_mode=live_data_quality_mode,
             max_missing_data_checks=max_live_missing_data_checks,
+            db_session=self.session,
         )
 
         record_prefilter_result(

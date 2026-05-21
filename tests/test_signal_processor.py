@@ -462,12 +462,29 @@ class TestSignalProcessorBuildDecision:
 
     @pytest.mark.asyncio
     async def test_live_prefilter_blocks_when_data_quality_missing(self, processor, monkeypatch):
-        with pre_filter._state_lock:
-            pre_filter._recent_signals.clear()
+        import enhanced_market_data as emd
 
-        monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=0))
-        monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
-        monkeypatch.setattr("pre_filter.get_recent_trade_results_async", AsyncMock(return_value=[]))
+        pre_filter.clear_signal_memory()
+
+        # Direct setattr mocking (proven approach)
+        emd.check_macro_event_risk = AsyncMock(return_value=(True, None))
+        emd.fetch_liquidation_heatmap = AsyncMock(return_value={"nearest_liq_distance_pct": None, "total_long_liq_usd": 0, "total_short_liq_usd": 0})
+        emd.fetch_long_short_ratio = AsyncMock(return_value={"current_ratio": None})
+        emd.fetch_basis_data = AsyncMock(return_value={"basis_pct": None})
+        emd.fetch_fear_greed_index = AsyncMock(return_value={"value": None})
+        emd.calculate_directional_volume_delta = AsyncMock(return_value=None)
+        emd.detect_volatility_regime = AsyncMock(return_value=None)
+        emd.fetch_exchange_reserves = AsyncMock(return_value={"is_accumulation": False, "is_distribution": False, "flow_direction": "neutral", "net_flow_24h": 0, "source": "mock"})
+        emd.calculate_funding_term_structure = AsyncMock(return_value={"is_steepening": False, "trend": "stable", "current_funding": 0.0001})
+        emd.check_exchange_price_discrepancy = AsyncMock(return_value={"max_discrepancy_pct": 0.1, "is_concerning": False})
+
+        pre_filter.count_today_executed_trades_async = AsyncMock(return_value=0)
+        pre_filter.get_today_pnl_async = AsyncMock(return_value=0.0)
+        pre_filter.get_recent_trade_results_async = AsyncMock(return_value=[])
+        pre_filter.check_account_loss_limits = AsyncMock(return_value=(True, None))
+        pre_filter._check_position_concentration = AsyncMock(return_value=(True, {"long_positions": 0, "short_positions": 0, "note": ""}))
+
+        monkeypatch.setattr("core.database.get_user_balance_async", AsyncMock(return_value=10000.0))
 
         signal = TradingViewSignal(
             secret="test",
@@ -496,13 +513,30 @@ class TestSignalProcessorBuildDecision:
 
     @pytest.mark.asyncio
     async def test_prefilter_disabled_hard_check_does_not_leave_failure_reason(self, processor, monkeypatch):
-        with pre_filter._state_lock:
-            pre_filter._recent_signals.clear()
+        import enhanced_market_data as emd
+        emd.check_macro_event_risk = AsyncMock(return_value=(True, None))
+        emd.fetch_liquidation_heatmap = AsyncMock(return_value={"nearest_liq_distance_pct": None, "total_long_liq_usd": 0, "total_short_liq_usd": 0})
+        emd.fetch_long_short_ratio = AsyncMock(return_value={"current_ratio": None})
+        emd.fetch_basis_data = AsyncMock(return_value={"basis_pct": None})
+        emd.fetch_fear_greed_index = AsyncMock(return_value={"value": None})
+        emd.calculate_directional_volume_delta = AsyncMock(return_value=None)
+        emd.detect_volatility_regime = AsyncMock(return_value=None)
+        emd.fetch_exchange_reserves = AsyncMock(return_value={"is_accumulation": False, "is_distribution": False, "flow_direction": "neutral", "net_flow_24h": 0, "source": "mock"})
+        emd.calculate_funding_term_structure = AsyncMock(return_value={"is_steepening": False, "trend": "stable", "current_funding": 0.0001})
+        emd.check_exchange_price_discrepancy = AsyncMock(return_value={"max_discrepancy_pct": 0.1, "is_concerning": False})
+
+        pre_filter.clear_signal_memory()
+        pre_filter._block_history.clear()
+        pre_filter._CIRCUIT_BREAKERS.clear()
         before_stats = dict(pre_filter._filter_stats_buffer.get("daily_trade_limit", {}))
 
-        monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=1))
-        monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
-        monkeypatch.setattr("pre_filter.get_recent_trade_results_async", AsyncMock(return_value=[]))
+        pre_filter.count_today_executed_trades_async = AsyncMock(return_value=1)
+        pre_filter.get_today_pnl_async = AsyncMock(return_value=0.0)
+        pre_filter.get_recent_trade_results_async = AsyncMock(return_value=[])
+        pre_filter.check_account_loss_limits = AsyncMock(return_value=(True, None))
+        pre_filter._check_position_concentration = AsyncMock(return_value=(True, {"long_positions": 0, "short_positions": 0, "note": ""}))
+
+        monkeypatch.setattr("core.database.get_user_balance_async", AsyncMock(return_value=10000.0))
 
         signal = TradingViewSignal(
             secret="test",
@@ -549,12 +583,26 @@ class TestSignalProcessorBuildDecision:
 
     @pytest.mark.asyncio
     async def test_run_prefilter_blocks_aliased_duplicate_signal_during_cooldown(self, processor, monkeypatch):
-        with pre_filter._state_lock:
-            pre_filter._recent_signals.clear()
+        import enhanced_market_data as emd
+        emd.check_macro_event_risk = AsyncMock(return_value=(True, None))
+        emd.fetch_liquidation_heatmap = AsyncMock(return_value={"nearest_liq_distance_pct": None, "total_long_liq_usd": 0, "total_short_liq_usd": 0})
+        emd.fetch_long_short_ratio = AsyncMock(return_value={"current_ratio": None})
+        emd.fetch_basis_data = AsyncMock(return_value={"basis_pct": None})
+        emd.fetch_fear_greed_index = AsyncMock(return_value={"value": None})
+        emd.calculate_directional_volume_delta = AsyncMock(return_value=None)
+        emd.detect_volatility_regime = AsyncMock(return_value=None)
+        emd.fetch_exchange_reserves = AsyncMock(return_value={"is_accumulation": False, "is_distribution": False, "flow_direction": "neutral", "net_flow_24h": 0, "source": "mock"})
+        emd.calculate_funding_term_structure = AsyncMock(return_value={"is_steepening": False, "trend": "stable", "current_funding": 0.0001})
+        emd.check_exchange_price_discrepancy = AsyncMock(return_value={"max_discrepancy_pct": 0.1, "is_concerning": False})
 
-        monkeypatch.setattr("pre_filter.count_today_executed_trades_async", AsyncMock(return_value=0))
-        monkeypatch.setattr("pre_filter.get_today_pnl_async", AsyncMock(return_value=0.0))
-        monkeypatch.setattr("pre_filter.get_recent_trade_results_async", AsyncMock(return_value=[]))
+        pre_filter.clear_signal_memory()
+
+        pre_filter.count_today_executed_trades_async = AsyncMock(return_value=0)
+        pre_filter.get_today_pnl_async = AsyncMock(return_value=0.0)
+        pre_filter.get_recent_trade_results_async = AsyncMock(return_value=[])
+        pre_filter.check_account_loss_limits = AsyncMock(return_value=(True, None))
+        pre_filter._check_position_concentration = AsyncMock(return_value=(True, {"long_positions": 0, "short_positions": 0, "note": ""}))
+        monkeypatch.setattr("core.database.get_user_balance_async", AsyncMock(return_value=10000.0))
 
         signal_a = TradingViewSignal(
             secret="test",
@@ -586,15 +634,8 @@ class TestSignalProcessorBuildDecision:
         assert "cooldown" in second.reason.lower()
 
     def test_signal_saturation_is_scoped_by_ticker(self):
-        with pre_filter._state_lock:
-            pre_filter._recent_signals.clear()
-            pre_filter._recent_signals.append({
-                "user_id": "user-1",
-                "ticker": "BTCUSDT",
-                "ticker_key": pre_filter.position_symbol_key("BTCUSDT"),
-                "direction": SignalDirection.LONG,
-                "timestamp": utcnow(),
-            })
+        pre_filter.clear_signal_memory()
+        pre_filter._inject_signal("user-1", "BTCUSDT", SignalDirection.LONG, timestamp=utcnow())
 
         intc_signal = TradingViewSignal(
             secret="test",
