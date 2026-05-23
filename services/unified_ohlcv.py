@@ -167,7 +167,10 @@ class UnifiedOHLCVProvider:
         if isinstance(raw_map, dict):
             exchange_symbol = str(raw_map.get("exchange_symbol") or watch).upper().strip()
             exchange_name = str(raw_map.get("exchange_name") or settings.exchange.name).lower().strip()
-            market_type = str(raw_map.get("type") or raw_map.get("market_type") or settings.exchange.market_type).lower().strip()
+            market_type = str(
+                raw_map.get("type") or raw_map.get("market_type")
+                or settings.exchange.market_type
+            ).lower().strip()
         else:
             exchange_symbol = watch
             exchange_name = settings.exchange.name
@@ -237,7 +240,11 @@ class UnifiedOHLCVProvider:
     async def _fetch_candles(self, mapping: SymbolMapping, timeframe: str) -> list[NormalizedCandle]:
         if mapping.data_source == "yfinance":
             return await self._fetch_yfinance_candles(mapping.data_symbol, timeframe)
-        rows = await fetch_ohlcv_history(mapping.exchange_symbol, timeframe=timeframe, days=self._days_for_timeframe(timeframe))
+        rows = await fetch_ohlcv_history(
+            mapping.exchange_symbol,
+            timeframe=timeframe,
+            days=self._days_for_timeframe(timeframe),
+        )
         return _candles_from_history(rows)
 
     @staticmethod
@@ -326,9 +333,19 @@ class UnifiedOHLCVProvider:
         now = utcnow()
         min_candles = 50
         configured_primary = (settings.scanner.timeframes or ["1h"])[0]
-        primary_tf = configured_primary if configured_primary in bundle.timeframes else next(iter(bundle.timeframes.keys()), configured_primary)
-        primary = bundle.timeframes.get(primary_tf) or next(iter(bundle.timeframes.values()), [])
-        primary_indicator = bundle.indicators.get(primary_tf) or next(iter(bundle.indicators.values()), {})
+        primary_tf = (
+            configured_primary
+            if configured_primary in bundle.timeframes
+            else next(iter(bundle.timeframes.keys()), configured_primary)
+        )
+        primary = (
+            bundle.timeframes.get(primary_tf)
+            or next(iter(bundle.timeframes.values()), [])
+        )
+        primary_indicator = (
+            bundle.indicators.get(primary_tf)
+            or next(iter(bundle.indicators.values()), {})
+        )
 
         if len(primary) < min_candles:
             reasons.append("ohlcv_insufficient")

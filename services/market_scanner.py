@@ -126,7 +126,10 @@ class MarketScannerService:
         try:
             await asyncio.wait_for(self._wait_until_idle(), timeout=timeout)
         except asyncio.TimeoutError:
-            logger.warning(f"[Scanner] Shutdown timed out after {timeout}s; current scan may still finish in background")
+            logger.warning(
+                f"[Scanner] Shutdown timed out after {timeout}s; "
+                "current scan may still finish in background"
+            )
 
     async def _wait_until_idle(self) -> None:
         while self._last_status.get("running"):
@@ -574,10 +577,15 @@ class MarketScannerService:
         matches.sort(key=lambda item: (item["distance"], -_safe_float(item.get("effectiveness"), 1.0)))
         return matches[0]
 
-    async def _dispatch_candidate(self, run_id: str, candidate: ScannerCandidate, bundle: OHLCVBundle) -> dict[str, Any]:
+    async def _dispatch_candidate(
+        self, run_id: str, candidate: ScannerCandidate, bundle: OHLCVBundle
+    ) -> dict[str, Any]:
         async with db_manager.async_session_factory() as session:
             state = await get_or_create_scanner_state(session, scope=self.scope)
-            if settings.scanner.max_signals_per_day and int(state.signal_count or 0) >= settings.scanner.max_signals_per_day:
+            if (
+                settings.scanner.max_signals_per_day
+                and int(state.signal_count or 0) >= settings.scanner.max_signals_per_day
+            ):
                 await record_scanner_audit(
                     session,
                     scope=self.scope,
@@ -592,7 +600,10 @@ class MarketScannerService:
                 )
                 await session.commit()
                 return {"status": "skipped", "reason": "daily signal limit reached", "setup_hash": candidate.setup_hash}
-            if settings.scanner.max_ai_calls_per_day and int(state.ai_call_count or 0) >= settings.scanner.max_ai_calls_per_day:
+            if (
+                settings.scanner.max_ai_calls_per_day
+                and int(state.ai_call_count or 0) >= settings.scanner.max_ai_calls_per_day
+            ):
                 await update_scanner_state_counts(
                     session,
                     self.scope,
@@ -612,7 +623,11 @@ class MarketScannerService:
                     reason="daily AI call limit reached",
                 )
                 await session.commit()
-                return {"status": "skipped", "reason": "daily AI call limit reached", "setup_hash": candidate.setup_hash}
+                return {
+                    "status": "skipped",
+                    "reason": "daily AI call limit reached",
+                    "setup_hash": candidate.setup_hash,
+                }
 
             market_ok, market_reason, market_limits = await self._validate_live_market(candidate)
             if not market_ok:

@@ -47,7 +47,9 @@ def _state_payload(state: Any) -> dict[str, Any]:
         "signal_count": int(state.signal_count or 0),
         "data_failure_streak": int(getattr(state, "data_failure_streak", 0) or 0),
         "last_scan_at": state.last_scan_at.isoformat() if state.last_scan_at else None,
-        "last_data_failure_at": state.last_data_failure_at.isoformat() if getattr(state, "last_data_failure_at", None) else None,
+        "last_data_failure_at": (
+            state.last_data_failure_at.isoformat() if getattr(state, "last_data_failure_at", None) else None
+        ),
         "degraded_mode": state.degraded_mode or "",
         "degraded_reason": state.degraded_reason or "",
         "updated_at": state.updated_at.isoformat() if state.updated_at else None,
