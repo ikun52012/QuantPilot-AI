@@ -8,6 +8,7 @@ from backtest.engine import BacktestConfig, BacktestEngine, BacktestPosition, Ba
 from backtest.strategies import (
     AIAssistantStrategy,
     BaseStrategy,
+    GGShotStrategy,
     SimpleTrendFollowStrategy,
     SMCTrendStrategy,
     TradingSignal,
@@ -187,6 +188,40 @@ class TestBacktestStrategies:
 
         if signal:
             assert signal.action in ["buy", "sell", "hold"]
+
+    def test_gg_shot_strategy_breakout_long(self):
+        strategy = GGShotStrategy({
+            "range_length": 10,
+            "trend_mode": "balanced",
+            "use_vol_filter": False,
+            "use_flat_filter": False,
+            "cooldown_bars": 0,
+        })
+
+        data = []
+        for i in range(35):
+            base = 100 + (i % 3) * 0.2
+            data.append({
+                "open": base,
+                "high": base + 1.0,
+                "low": base - 1.0,
+                "close": base + 0.1,
+                "volume": 1000,
+            })
+        data.append({
+            "open": 101.0,
+            "high": 113.0,
+            "low": 100.5,
+            "close": 112.0,
+            "volume": 2500,
+        })
+
+        signal = strategy.generate_signal(data, len(data) - 1)
+
+        assert signal is not None
+        assert signal.action == "buy"
+        assert signal.suggested_stop_loss is not None
+        assert signal.suggested_take_profit is not None
 
 
 class TestBacktestPosition:

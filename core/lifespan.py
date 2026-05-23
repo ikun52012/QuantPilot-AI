@@ -16,6 +16,71 @@ from core.database import db_manager, seed_defaults
 _scheduler = None
 
 
+async def _market_scanner_job():
+    try:
+        from services.market_scanner import run_scanner_once
+        result = await run_scanner_once()
+        if result.get("status") not in {"disabled", "skipped"}:
+            logger.info(
+                f"[Scheduler] Market scanner run: status={result.get('status')} "
+                f"scanned={result.get('scanned', 0)} candidates={result.get('candidates', 0)}"
+            )
+    except Exception as e:
+        logger.error(f"[Scheduler] Market scanner failed: {e}")
+
+
+async def _scanner_rejection_summary_job():
+    try:
+        from core.database import get_scanner_rejection_summary
+        from notifier import notify_scanner_rejection_summary
+
+        async with db_manager.async_session_factory() as session:
+            summary = await get_scanner_rejection_summary(session, scope="admin")
+        await notify_scanner_rejection_summary(summary)
+        if int(summary.get("rejected_or_held") or 0) > 0:
+            logger.info(
+                f"[Scheduler] Scanner rejection summary sent: "
+                f"{summary.get('rejected_or_held')}/{summary.get('total_results')} rejected or held"
+            )
+    except Exception as e:
+        logger.error(f"[Scheduler] Scanner rejection summary failed: {e}")
+
+
+def sync_scanner_scheduler() -> dict:
+    """Add, update, or remove the scanner interval job after runtime setting changes."""
+    scheduler = _scheduler
+    if scheduler is None:
+        return {"status": "unavailable", "reason": "scheduler is not initialized"}
+
+    job = scheduler.get_job("market_scanner")
+    if not settings.scanner.enabled:
+        if job:
+            scheduler.remove_job("market_scanner")
+            logger.info("[Scheduler] Market scanner disabled at runtime")
+            return {"status": "removed", "enabled": False}
+        return {"status": "disabled", "enabled": False}
+
+    interval = max(60, int(settings.scanner.interval_secs))
+    if job:
+        job.reschedule(trigger="interval", seconds=interval)
+        job.modify(max_instances=1, coalesce=True)
+        logger.info(f"[Scheduler] Market scanner rescheduled: {interval}s/{settings.scanner.mode}")
+        return {"status": "rescheduled", "enabled": True, "interval_secs": interval}
+
+    scheduler.add_job(
+        _market_scanner_job,
+        "interval",
+        seconds=interval,
+        max_instances=1,
+        coalesce=True,
+        id="market_scanner",
+        name="Automatic market scanner",
+        replace_existing=True,
+    )
+    logger.info(f"[Scheduler] Market scanner enabled: {interval}s/{settings.scanner.mode}")
+    return {"status": "added", "enabled": True, "interval_secs": interval}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
@@ -168,11 +233,26 @@ async def _init_scheduler():
         id="exchange_pool_cleanup",
         name="Exchange pool cleanup",
     )
-    scheduler.start()
-    logger.info(f"[Scheduler] Started (position monitor: {settings.position_monitor_interval_secs}s)")
+    scheduler.add_job(
+        _scanner_rejection_summary_job,
+        CronTrigger(hour=23, minute=55, second=0, timezone="UTC"),
+        id="scanner_rejection_summary",
+        name="Scanner AI rejection daily summary",
+        replace_existing=True,
+    )
 
     global _scheduler
     _scheduler = scheduler
+    scanner_sync = sync_scanner_scheduler()
+    scheduler.start()
+    scanner_msg = (
+        f", scanner: {settings.scanner.interval_secs}s/{settings.scanner.mode}"
+        if settings.scanner.enabled else ", scanner: disabled"
+    )
+    logger.info(
+        f"[Scheduler] Started (position monitor: {settings.position_monitor_interval_secs}s{scanner_msg}; "
+        f"scanner_job={scanner_sync.get('status')})"
+    )
 
 
 async def _restore_strategies():
@@ -211,6 +291,12 @@ async def _restore_strategies():
 async def _on_shutdown():
     """Cleanup all services on application shutdown."""
     global _scheduler
+    try:
+        from services.market_scanner import shutdown_market_scanner_service
+        await shutdown_market_scanner_service()
+    except Exception as e:
+        logger.debug(f"[Scanner] Shutdown cleanup failed: {e}")
+
     if _scheduler:
         _scheduler.shutdown(wait=True)
         _scheduler = None

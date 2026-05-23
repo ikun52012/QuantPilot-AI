@@ -51,6 +51,7 @@ from models import (
     MarketContext,
     PreFilterResult,
     SignalDirection,
+    SignalSource,
     TradeDecision,
     TradingViewSignal,
 )
@@ -463,6 +464,30 @@ class SignalProcessor:
             return bool(risk_cfg.get("block_live_on_risk_check_error"))
         return bool(settings.risk.block_live_on_risk_check_error)
 
+    @staticmethod
+    async def _validate_scanner_live_market(signal: TradingViewSignal, raw_body: dict) -> tuple[bool, str, dict]:
+        """Verify the scanner's live execution market exists before any live order path."""
+        scanner_meta = raw_body.get("scanner") if isinstance(raw_body.get("scanner"), dict) else {}
+        exchange_id = str(
+            scanner_meta.get("exchange_name")
+            or raw_body.get("exchange")
+            or settings.exchange.name
+        ).lower().strip()
+        market_type = str(scanner_meta.get("market_type") or settings.exchange.market_type).lower().strip()
+        try:
+            from exchange import get_market_limits
+
+            limits = await asyncio.to_thread(get_market_limits, exchange_id, signal.ticker, market_type)
+        except Exception as exc:
+            reason = f"Scanner live market validation failed for {signal.ticker}: {exc}"
+            logger.warning(f"[ScannerSignal] {reason}")
+            return False, reason, {}
+
+        if not limits or not limits.get("symbol"):
+            reason = f"Scanner live mode blocked: {signal.ticker} is not listed on {exchange_id}/{market_type}"
+            return False, reason, limits or {}
+        return True, "", limits
+
     async def _record_signal_audit(
         self,
         *,
@@ -577,6 +602,222 @@ class SignalProcessor:
             finally:
                 # Always release queue slot when done
                 await _release_ticker_queue_slot(signal.ticker, user_id)
+
+    async def process_scanner_signal(
+        self,
+        signal: TradingViewSignal,
+        *,
+        scanner_mode: str = "observe",
+        scanner_payload: dict | None = None,
+        market: MarketContext | None = None,
+        user_id: str | None = None,
+    ) -> dict:
+        """Process an internally generated scanner signal.
+
+        This path reuses the same pre-filter, AI analysis, decision building,
+        risk checks, and execution code as webhooks while preserving observe-only
+        behavior for scanner dry runs.
+        """
+        mode = str(scanner_mode or "observe").lower().strip()
+        if mode not in {"observe", "paper", "live"}:
+            mode = "observe"
+
+        raw_body = dict(scanner_payload or signal.model_dump())
+        raw_body["signal_source"] = SignalSource.AUTO_SCANNER.value
+        raw_body.setdefault("source", SignalSource.AUTO_SCANNER.value)
+        raw_body.setdefault("strategy", "AI_Auto_Scanner")
+        scanner_meta = raw_body.get("scanner") if isinstance(raw_body.get("scanner"), dict) else {}
+        fingerprint = compute_webhook_fingerprint(raw_body, user_id)
+        user_settings = await self._load_user_settings(user_id)
+        scoped_user_settings = dict(user_settings or {})
+        exchange_overrides = dict((scoped_user_settings.get("exchange") or {}))
+        exchange_overrides["live_trading"] = mode == "live"
+        if scanner_meta.get("exchange_name"):
+            exchange_overrides["name"] = str(scanner_meta.get("exchange_name")).lower().strip()
+        if scanner_meta.get("market_type"):
+            exchange_overrides["market_type"] = str(scanner_meta.get("market_type")).lower().strip()
+        scoped_user_settings["exchange"] = exchange_overrides
+        scoped_user_settings["_scanner_context"] = {
+            "mode": mode,
+            "payload": raw_body.get("scanner") or raw_body,
+            "min_confidence": 0.70,
+        }
+
+        reservation = await self._reserve_webhook_event(
+            fingerprint=fingerprint,
+            signal=signal,
+            user_id=user_id,
+            client_ip="auto_scanner",
+            payload=raw_body,
+        )
+        if reservation is None:
+            return {"status": "duplicate", "reason": "Duplicate scanner signal within 30 minutes"}
+
+        live_requested = mode == "live"
+        if mode in {"paper", "live"}:
+            if live_requested:
+                whitelist = {str(item).upper().strip() for item in settings.scanner.live_symbol_whitelist}
+                if not settings.exchange.live_trading:
+                    reason = "Scanner live mode requires global LIVE_TRADING=true"
+                    self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
+                    return {"status": "blocked", "reason": reason}
+                if signal.ticker.upper().strip() not in whitelist:
+                    reason = "Scanner live mode blocked: symbol is not in SCANNER_LIVE_SYMBOL_WHITELIST"
+                    self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
+                    return {"status": "blocked", "reason": reason}
+                market_ok, market_reason, market_limits = await self._validate_scanner_live_market(signal, raw_body)
+                if not market_ok:
+                    self._update_reserved_event(reservation, "blocked", 423, market_reason, raw_body)
+                    return {"status": "blocked", "reason": market_reason, "market_limits": market_limits}
+                if not isinstance(raw_body.get("scanner"), dict):
+                    raw_body["scanner"] = {}
+                raw_body["scanner"]["live_market"] = market_limits
+
+            trading_state = await trading_allowed(self.session, user_id=user_id, live_trading=live_requested)
+            if not trading_state.get("allowed"):
+                reason = trading_state.get("block_reason", "Trading is currently disabled")
+                self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
+                return {"status": "blocked", "reason": reason, "trading_mode": trading_state.get("mode")}
+
+        record_signal_received(signal.ticker, signal.direction.value, user_id)
+        await notify_signal_received(signal.ticker, signal.direction.value, signal.price)
+
+        try:
+            if market is None:
+                enhanced_filters = settings.ai.voting_enabled or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
+                market = (
+                    await fetch_enhanced_market_context(signal.ticker)
+                    if enhanced_filters
+                    else await fetch_market_context(signal.ticker)
+                )
+
+            prefilter_result = await self._run_prefilter(signal, market, user_id, scoped_user_settings)
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="scanner_prefilter",
+                outcome="passed" if prefilter_result.passed else "blocked",
+                reason=prefilter_result.reason,
+                payload={"score": prefilter_result.score, "checks": prefilter_result.checks},
+            )
+            if not prefilter_result.passed:
+                self._update_reserved_event(reservation, "blocked", 200, prefilter_result.reason, raw_body)
+                await notify_pre_filter_blocked(signal.ticker, signal.direction.value, prefilter_result.reason)
+                return {"status": "blocked", "reason": prefilter_result.reason, "checks": prefilter_result.checks}
+
+            analysis = await self._run_ai_analysis(signal, market, scoped_user_settings, prefilter_result)
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="scanner_ai_analysis",
+                outcome=analysis.recommendation,
+                reason=analysis.reasoning,
+                payload={"analysis": analysis.model_dump(), "mode": mode},
+            )
+
+            decision = self._build_trade_decision(signal, analysis, market, user_id, scoped_user_settings)
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="scanner_trade_decision",
+                outcome="execute" if decision.execute else "rejected",
+                reason=decision.reason,
+                payload={
+                    "mode": mode,
+                    "entry_price": decision.entry_price,
+                    "stop_loss": decision.stop_loss,
+                    "take_profit_levels": [level.model_dump() for level in decision.take_profit_levels],
+                    "quantity": decision.quantity,
+                    "entry_source": decision.entry_source,
+                },
+            )
+
+            if mode == "observe":
+                result = {
+                    "status": "observed",
+                    "reason": decision.reason,
+                    "would_execute": bool(decision.execute),
+                    "entry_price": decision.entry_price,
+                    "stop_loss": decision.stop_loss,
+                    "take_profit_levels": [level.model_dump() for level in decision.take_profit_levels],
+                    "quantity": decision.quantity,
+                    "analysis": analysis.model_dump(),
+                }
+                self._update_reserved_event(reservation, "observed", 200, decision.reason, raw_body)
+                await self._record_signal_audit(
+                    fingerprint=fingerprint,
+                    signal=signal,
+                    user_id=user_id,
+                    stage="scanner_observe",
+                    outcome="would_execute" if decision.execute else "rejected",
+                    reason=decision.reason,
+                    payload={"result": result},
+                )
+                return result
+
+            if decision.execute:
+                conflict_reason, conflicting_position = await self._check_position_conflict(
+                    decision, user_id, scoped_user_settings
+                )
+                if conflict_reason and not conflicting_position:
+                    decision.execute = False
+                    decision.reason = conflict_reason
+                elif conflict_reason and conflicting_position:
+                    close_result = await self._close_conflicting_position(
+                        conflicting_position, user_id, scoped_user_settings
+                    )
+                    if close_result.get("status") == "error":
+                        decision.execute = False
+                        decision.reason = f"Failed to close existing position: {close_result.get('reason')}"
+                    await self.session.flush()
+
+            if decision.execute:
+                correlation_risk = await self._check_correlation_risk(decision, user_id, scoped_user_settings)
+                if correlation_risk.get("exceeded"):
+                    decision.execute = False
+                    decision.reason = correlation_risk.get("reason")
+
+            if decision.execute:
+                result = await self._execute_trade(decision, user_id, scoped_user_settings)
+            else:
+                result = {"status": "rejected", "reason": decision.reason}
+                await notify_trade_executed(decision, result)
+
+            result["analysis"] = analysis.model_dump()
+            self._update_reserved_event(
+                reservation,
+                str(result.get("status", "processed")),
+                200,
+                str(result.get("reason", "")),
+                raw_body,
+            )
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="scanner_execution",
+                outcome=str(result.get("status", "unknown")),
+                reason=str(result.get("reason", "")),
+                payload={"result": result, "mode": mode},
+            )
+            return result
+        except Exception as e:
+            logger.error(f"[ScannerSignal] Processing error: {e}")
+            await notify_error(str(e))
+            await self._record_signal_audit(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                stage="scanner_error",
+                outcome="error",
+                reason=str(e),
+                payload={"error": str(e)},
+            )
+            self._update_reserved_event(reservation, "error", 500, str(e), raw_body)
+            return {"status": "error", "reason": str(e)}
 
     async def _process_signal_locked(
         self,
@@ -962,7 +1203,10 @@ class SignalProcessor:
             latency,
         )
 
-        await notify_ai_analysis(signal.ticker, analysis)
+        scanner_context = scoped_user_settings.get("_scanner_context") if isinstance(scoped_user_settings, dict) else None
+        scanner_rejected = scanner_context and str(analysis.recommendation or "").lower() in {"reject", "hold"}
+        if not scanner_rejected:
+            await notify_ai_analysis(signal.ticker, analysis)
 
         return analysis
 
@@ -1014,6 +1258,11 @@ class SignalProcessor:
         if analysis.confidence < 0.4:
             decision.execute = False
             decision.reason = f"Low confidence: {analysis.confidence:.2f}"
+            return decision
+
+        if signal.strategy == "AI_Auto_Scanner" and analysis.confidence < 0.70:
+            decision.execute = False
+            decision.reason = f"Auto scanner requires confidence >= 0.70; got {analysis.confidence:.2f}"
             return decision
 
         if (
@@ -2355,6 +2604,11 @@ class SignalProcessor:
         signal_data = decision.signal.model_dump() if decision.signal else {}
         risk_cfg = (user_settings or {}).get("risk") or {}
         user_risk_profile = str(risk_cfg.get("ai_risk_profile") or settings.risk.ai_risk_profile)
+        signal_source = (
+            SignalSource.AUTO_SCANNER.value
+            if str(signal_data.get("strategy") or "") == "AI_Auto_Scanner"
+            else SignalSource.TRADINGVIEW.value
+        )
 
         trade = await log_trade_db(
             session=self.session,
@@ -2365,6 +2619,7 @@ class SignalProcessor:
             order_status=order_status,
             pnl_pct=0.0,  # Will be updated on close
             payload={
+                "signal_source": signal_source,
                 "signal": signal_data,
                 "analysis": decision.ai_analysis.model_dump() if decision.ai_analysis else {},
                 "entry_exit_quality": {

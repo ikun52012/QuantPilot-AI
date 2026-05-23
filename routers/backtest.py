@@ -10,7 +10,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from backtest.engine import BacktestConfig, BacktestEngine
-from backtest.strategies import AIAssistantStrategy, BaseStrategy, SimpleTrendFollowStrategy, SMCTrendStrategy
+from backtest.strategies import AIAssistantStrategy, BaseStrategy, GGShotStrategy, SimpleTrendFollowStrategy, SMCTrendStrategy
 from core.auth import require_admin as get_current_admin
 from market_data import fetch_ohlcv_history
 
@@ -21,7 +21,7 @@ class BacktestRequest(BaseModel):
     ticker: str = Field(default="BTCUSDT", description="Trading pair symbol")
     timeframe: str = Field(default="1h", description="Timeframe: 1m, 5m, 15m, 1h, 4h, 1d")
     days: int = Field(default=30, ge=7, le=365, description="Historical days to backtest")
-    strategy: str = Field(default="simple_trend", description="Strategy: simple_trend, smc_trend, ai_assistant")
+    strategy: str = Field(default="simple_trend", description="Strategy: simple_trend, smc_trend, ai_assistant, gg_shot")
     initial_capital: float = Field(default=10000.0, ge=100, description="Starting capital in USDT")
     position_size_pct: float = Field(default=10.0, ge=1, le=100, description="Position size as % of capital")
     leverage: float = Field(default=1.0, ge=1, le=125, description="Leverage multiplier")
@@ -278,6 +278,19 @@ async def list_strategies(admin: dict = Depends(get_current_admin)):
                     "cooldown_bars": {"type": "int", "default": 10},
                 },
             },
+            {
+                "name": "gg_shot",
+                "description": "GG-Shot-style range breakout strategy with ATR TP/SL and volume/flat filters",
+                "params": {
+                    "range_length": {"type": "int", "default": 20},
+                    "trend_mode": {"type": "string", "default": "balanced"},
+                    "atr_period": {"type": "int", "default": 14},
+                    "tp1_mult": {"type": "float", "default": 1.5},
+                    "sl_atr_mult": {"type": "float", "default": 1.8},
+                    "use_vol_filter": {"type": "bool", "default": True},
+                    "use_flat_filter": {"type": "bool", "default": True},
+                },
+            },
         ],
     }
 
@@ -307,7 +320,7 @@ async def compare_strategies(
     admin: dict = Depends(get_current_admin),
 ):
     """Run multiple strategies and compare results."""
-    strategies = ["simple_trend", "smc_trend", "ai_assistant"]
+    strategies = ["simple_trend", "smc_trend", "ai_assistant", "gg_shot"]
     results = []
 
     for strategy_name in strategies:
@@ -352,6 +365,7 @@ def _get_strategy(name: str, params: dict) -> BaseStrategy | None:
         "simple_trend": SimpleTrendFollowStrategy,
         "smc_trend": SMCTrendStrategy,
         "ai_assistant": AIAssistantStrategy,
+        "gg_shot": GGShotStrategy,
     }
 
     strategy_class = strategies.get(name)

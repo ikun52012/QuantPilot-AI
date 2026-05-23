@@ -26,6 +26,7 @@ RISK_KEY = "runtime_risk"
 TAKE_PROFIT_KEY = "runtime_take_profit"
 TRAILING_STOP_KEY = "runtime_trailing_stop"
 ORDER_EXECUTION_KEY = "runtime_order_execution"
+SCANNER_KEY = "runtime_scanner"
 
 
 def _to_bool(value: Any, default: bool = False) -> bool:
@@ -92,6 +93,73 @@ def _coalesce_str(*values: Any, default: str = "") -> str:
     return str(value)
 
 
+def _to_string_list(value: Any, default: list[str] | None = None, *, lowercase: bool = False) -> list[str]:
+    """Normalize JSON/comma/list inputs into a clean string list."""
+    if value is None:
+        raw_items = list(default or [])
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raw_items = []
+        else:
+            try:
+                parsed = json.loads(text)
+                raw_items = parsed if isinstance(parsed, list) else [text]
+            except json.JSONDecodeError:
+                raw_items = [item.strip() for item in text.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = list(default or [])
+
+    normalized: list[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        normalized.append(text.lower() if lowercase else text.upper())
+    return list(dict.fromkeys(normalized))
+
+
+def _to_dict(value: Any, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    if value is None:
+        return dict(default or {})
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return dict(parsed) if isinstance(parsed, dict) else dict(default or {})
+        except json.JSONDecodeError:
+            return dict(default or {})
+    return dict(default or {})
+
+
+def _normalize_scanner_symbol_map(value: Any, default: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+    raw = _to_dict(value, default)
+    normalized: dict[str, dict[str, Any]] = {}
+    for key, item in raw.items():
+        watch_symbol = str(key or "").upper().strip()
+        if not watch_symbol:
+            continue
+        if isinstance(item, dict):
+            exchange_symbol = str(item.get("exchange_symbol") or item.get("symbol") or watch_symbol).upper().strip()
+            exchange_name = str(item.get("exchange_name") or item.get("exchange") or settings.exchange.name).lower().strip()
+            market_type = str(item.get("market_type") or item.get("type") or settings.exchange.market_type).lower().strip()
+        else:
+            exchange_symbol = str(item or watch_symbol).upper().strip()
+            exchange_name = settings.exchange.name
+            market_type = settings.exchange.market_type
+        if market_type not in {"spot", "contract"}:
+            market_type = settings.exchange.market_type
+        normalized[watch_symbol] = {
+            "exchange_symbol": exchange_symbol or watch_symbol,
+            "exchange_name": exchange_name or settings.exchange.name,
+            "type": market_type,
+        }
+    return normalized
+
+
 async def _load_encrypted_dict(session: AsyncSession, key: str) -> dict[str, Any]:
     raw = await get_admin_setting(session, key, "")
     if not raw:
@@ -122,6 +190,7 @@ async def load_admin_runtime_settings(session: AsyncSession) -> dict[str, dict[s
         "take_profit": await _load_encrypted_dict(session, TAKE_PROFIT_KEY),
         "trailing_stop": await _load_encrypted_dict(session, TRAILING_STOP_KEY),
         "order_execution": await _load_encrypted_dict(session, ORDER_EXECUTION_KEY),
+        "scanner": await _load_encrypted_dict(session, SCANNER_KEY),
     }
 
 
@@ -258,6 +327,42 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
             settings.trailing_stop.step_buffer_pct = _to_float(
                 trailing_stop.get("step_buffer_pct"), 0.3, 0, 2.0
             )
+
+    scanner = runtime.get("scanner") or {}
+    if scanner:
+        settings.scanner.enabled = _to_bool(scanner.get("enabled"), settings.scanner.enabled)
+        mode = str(scanner.get("mode") or settings.scanner.mode).lower().strip()
+        settings.scanner.mode = mode if mode in {"observe", "paper", "live"} else "observe"
+        settings.scanner.interval_secs = _to_int(scanner.get("interval_secs"), settings.scanner.interval_secs, 60)
+        settings.scanner.watchlist = _to_string_list(scanner.get("watchlist"), settings.scanner.watchlist)
+        settings.scanner.timeframes = _to_string_list(scanner.get("timeframes"), settings.scanner.timeframes, lowercase=True)
+        settings.scanner.min_score = _to_float(scanner.get("min_score"), settings.scanner.min_score, 0, 100)
+        settings.scanner.max_candidates_per_run = _to_int(
+            scanner.get("max_candidates_per_run"), settings.scanner.max_candidates_per_run, 1, 50
+        )
+        settings.scanner.symbol_cooldown_secs = _to_int(
+            scanner.get("symbol_cooldown_secs"), settings.scanner.symbol_cooldown_secs, 0, 86400
+        )
+        settings.scanner.setup_cooldown_secs = _to_int(
+            scanner.get("setup_cooldown_secs"), settings.scanner.setup_cooldown_secs, 60, 604800
+        )
+        settings.scanner.max_signals_per_day = _to_int(
+            scanner.get("max_signals_per_day"), settings.scanner.max_signals_per_day, 0, 10000
+        )
+        settings.scanner.max_ai_calls_per_day = _to_int(
+            scanner.get("max_ai_calls_per_day"), settings.scanner.max_ai_calls_per_day, 0, 10000
+        )
+        settings.scanner.rsi_lower = _to_float(scanner.get("rsi_lower"), settings.scanner.rsi_lower, 1, 99)
+        settings.scanner.rsi_upper = _to_float(scanner.get("rsi_upper"), settings.scanner.rsi_upper, 1, 99)
+        settings.scanner.min_atr_pct = _to_float(scanner.get("min_atr_pct"), settings.scanner.min_atr_pct, 0, 100)
+        settings.scanner.max_spread_pct = _to_float(scanner.get("max_spread_pct"), settings.scanner.max_spread_pct, 0, 100)
+        settings.scanner.live_symbol_whitelist = _to_string_list(
+            scanner.get("live_symbol_whitelist"), settings.scanner.live_symbol_whitelist
+        )
+        settings.scanner.shutdown_timeout_secs = _to_int(
+            scanner.get("shutdown_timeout_secs"), settings.scanner.shutdown_timeout_secs, 1, 600
+        )
+        settings.scanner.symbol_map = _normalize_scanner_symbol_map(scanner.get("symbol_map"), settings.scanner.symbol_map)
 
 
 async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dict[str, Any]]:
@@ -588,6 +693,75 @@ async def save_order_execution_settings(session: AsyncSession, data: dict[str, A
     return updated
 
 
+async def save_scanner_settings(session: AsyncSession, data: dict[str, Any]) -> dict[str, Any]:
+    """Persist scanner runtime settings and apply them to the current process."""
+    current = await _load_encrypted_dict(session, SCANNER_KEY)
+
+    def pick(key: str, default: Any) -> Any:
+        return data[key] if key in data else current.get(key, default)
+
+    mode = str(pick("mode", settings.scanner.mode) or "observe").lower().strip()
+    if mode not in {"observe", "paper", "live"}:
+        mode = "observe"
+
+    updated = {
+        "enabled": _to_bool(pick("enabled", settings.scanner.enabled), settings.scanner.enabled),
+        "mode": mode,
+        "interval_secs": _to_int(pick("interval_secs", settings.scanner.interval_secs), settings.scanner.interval_secs, 60),
+        "watchlist": _to_string_list(pick("watchlist", settings.scanner.watchlist), settings.scanner.watchlist),
+        "timeframes": _to_string_list(pick("timeframes", settings.scanner.timeframes), settings.scanner.timeframes, lowercase=True),
+        "min_score": _to_float(pick("min_score", settings.scanner.min_score), settings.scanner.min_score, 0, 100),
+        "max_candidates_per_run": _to_int(
+            pick("max_candidates_per_run", settings.scanner.max_candidates_per_run),
+            settings.scanner.max_candidates_per_run,
+            1,
+            50,
+        ),
+        "symbol_cooldown_secs": _to_int(
+            pick("symbol_cooldown_secs", settings.scanner.symbol_cooldown_secs),
+            settings.scanner.symbol_cooldown_secs,
+            0,
+            86400,
+        ),
+        "setup_cooldown_secs": _to_int(
+            pick("setup_cooldown_secs", settings.scanner.setup_cooldown_secs),
+            settings.scanner.setup_cooldown_secs,
+            60,
+            604800,
+        ),
+        "max_signals_per_day": _to_int(
+            pick("max_signals_per_day", settings.scanner.max_signals_per_day),
+            settings.scanner.max_signals_per_day,
+            0,
+            10000,
+        ),
+        "max_ai_calls_per_day": _to_int(
+            pick("max_ai_calls_per_day", settings.scanner.max_ai_calls_per_day),
+            settings.scanner.max_ai_calls_per_day,
+            0,
+            10000,
+        ),
+        "rsi_lower": _to_float(pick("rsi_lower", settings.scanner.rsi_lower), settings.scanner.rsi_lower, 1, 99),
+        "rsi_upper": _to_float(pick("rsi_upper", settings.scanner.rsi_upper), settings.scanner.rsi_upper, 1, 99),
+        "min_atr_pct": _to_float(pick("min_atr_pct", settings.scanner.min_atr_pct), settings.scanner.min_atr_pct, 0, 100),
+        "max_spread_pct": _to_float(pick("max_spread_pct", settings.scanner.max_spread_pct), settings.scanner.max_spread_pct, 0, 100),
+        "live_symbol_whitelist": _to_string_list(
+            pick("live_symbol_whitelist", settings.scanner.live_symbol_whitelist),
+            settings.scanner.live_symbol_whitelist,
+        ),
+        "shutdown_timeout_secs": _to_int(
+            pick("shutdown_timeout_secs", settings.scanner.shutdown_timeout_secs),
+            settings.scanner.shutdown_timeout_secs,
+            1,
+            600,
+        ),
+        "symbol_map": _normalize_scanner_symbol_map(pick("symbol_map", settings.scanner.symbol_map), settings.scanner.symbol_map),
+    }
+    await _save_encrypted_dict(session, SCANNER_KEY, updated)
+    apply_runtime_settings({"scanner": updated})
+    return updated
+
+
 def runtime_status() -> dict[str, Any]:
     """Return non-secret runtime status for the dashboard."""
     return {
@@ -679,6 +853,26 @@ def runtime_status() -> dict[str, Any]:
             "models": settings.ai.voting_models,
             "weights": settings.ai.voting_weights,
             "strategy": settings.ai.voting_strategy,
+        },
+        "scanner": {
+            "enabled": settings.scanner.enabled,
+            "mode": settings.scanner.mode,
+            "interval_secs": settings.scanner.interval_secs,
+            "watchlist": settings.scanner.watchlist,
+            "timeframes": settings.scanner.timeframes,
+            "min_score": settings.scanner.min_score,
+            "max_candidates_per_run": settings.scanner.max_candidates_per_run,
+            "symbol_cooldown_secs": settings.scanner.symbol_cooldown_secs,
+            "setup_cooldown_secs": settings.scanner.setup_cooldown_secs,
+            "max_signals_per_day": settings.scanner.max_signals_per_day,
+            "max_ai_calls_per_day": settings.scanner.max_ai_calls_per_day,
+            "rsi_lower": settings.scanner.rsi_lower,
+            "rsi_upper": settings.scanner.rsi_upper,
+            "min_atr_pct": settings.scanner.min_atr_pct,
+            "max_spread_pct": settings.scanner.max_spread_pct,
+            "live_symbol_whitelist": settings.scanner.live_symbol_whitelist,
+            "shutdown_timeout_secs": settings.scanner.shutdown_timeout_secs,
+            "symbol_map": settings.scanner.symbol_map,
         },
     }
 

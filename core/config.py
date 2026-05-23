@@ -311,7 +311,7 @@ class RiskConfig(BaseModel):
             position_sizing_mode=os.getenv("POSITION_SIZING_MODE", "percentage"),
             fixed_position_size_usdt=float(os.getenv("FIXED_POSITION_SIZE_USDT", "100")),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
-max_same_direction_positions=int(os.getenv("MAX_SAME_DIRECTION_POSITIONS", "5")),
+            max_same_direction_positions=int(os.getenv("MAX_SAME_DIRECTION_POSITIONS", "5")),
             max_correlated_exposure_pct=float(os.getenv("MAX_CORRELATED_EXPOSURE_PCT", "50.0")),
             margin_mode=os.getenv("MARGIN_MODE", "cross"),
             live_data_quality_mode=os.getenv("LIVE_DATA_QUALITY_MODE", "fail_closed"),
@@ -465,6 +465,80 @@ class RateLimitConfig(BaseModel):
         )
 
 
+class ScannerConfig(BaseModel):
+    """Automatic market scanner configuration."""
+    enabled: bool = False
+    mode: str = "observe"
+    interval_secs: int = 600
+    watchlist: list[str] = Field(default_factory=list)
+    timeframes: list[str] = Field(default_factory=lambda: ["15m", "1h", "4h"])
+    min_score: float = 65.0
+    max_candidates_per_run: int = 3
+    symbol_cooldown_secs: int = 1800
+    setup_cooldown_secs: int = 14400
+    max_signals_per_day: int = 15
+    max_ai_calls_per_day: int = 30
+    rsi_lower: float = 35.0
+    rsi_upper: float = 65.0
+    min_atr_pct: float = 0.10
+    max_spread_pct: float = 0.35
+    live_symbol_whitelist: list[str] = Field(default_factory=list)
+    shutdown_timeout_secs: int = 30
+    symbol_map: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        normalized = str(v or "observe").lower().strip()
+        if normalized not in {"observe", "paper", "live"}:
+            raise ValueError("SCANNER_MODE must be one of: observe, paper, live")
+        return normalized
+
+    @field_validator("watchlist", "live_symbol_whitelist")
+    @classmethod
+    def validate_string_list(cls, v: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in v or []:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            normalized.append(value.upper() if "/" not in value else value.upper())
+        return normalized
+
+    @field_validator("timeframes")
+    @classmethod
+    def validate_timeframes(cls, v: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in v or []:
+            value = str(item or "").strip().lower()
+            if value:
+                normalized.append(value)
+        return normalized or ["15m", "1h", "4h"]
+
+    @classmethod
+    def from_env(cls) -> "ScannerConfig":
+        return cls(
+            enabled=os.getenv("SCANNER_ENABLED", "false").lower() == "true",
+            mode=os.getenv("SCANNER_MODE", "observe"),
+            interval_secs=max(60, int(os.getenv("SCANNER_INTERVAL_SECS", "600"))),
+            watchlist=_json_env("SCANNER_WATCHLIST", []),
+            timeframes=_json_env("SCANNER_TIMEFRAMES", ["15m", "1h", "4h"]),
+            min_score=float(os.getenv("SCANNER_MIN_SCORE", "65")),
+            max_candidates_per_run=max(1, int(os.getenv("SCANNER_MAX_CANDIDATES_PER_RUN", "3"))),
+            symbol_cooldown_secs=max(0, int(os.getenv("SCANNER_SYMBOL_COOLDOWN_SECS", "1800"))),
+            setup_cooldown_secs=max(60, int(os.getenv("SCANNER_SETUP_COOLDOWN_SECS", "14400"))),
+            max_signals_per_day=max(0, int(os.getenv("SCANNER_MAX_SIGNALS_PER_DAY", "15"))),
+            max_ai_calls_per_day=max(0, int(os.getenv("SCANNER_MAX_AI_CALLS_PER_DAY", "30"))),
+            rsi_lower=float(os.getenv("SCANNER_RSI_LOWER", "35")),
+            rsi_upper=float(os.getenv("SCANNER_RSI_UPPER", "65")),
+            min_atr_pct=max(0.0, float(os.getenv("SCANNER_MIN_ATR_PCT", "0.10"))),
+            max_spread_pct=max(0.0, float(os.getenv("SCANNER_MAX_SPREAD_PCT", "0.35"))),
+            live_symbol_whitelist=_json_env("SCANNER_LIVE_SYMBOL_WHITELIST", []),
+            shutdown_timeout_secs=max(1, int(os.getenv("SCANNER_SHUTDOWN_TIMEOUT_SECS", "30"))),
+            symbol_map=_json_env("SCANNER_SYMBOL_MAP", {}),
+        )
+
+
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
     app_name: str = "QuantPilot AI"
@@ -496,6 +570,7 @@ class Settings(BaseModel):
     database: DatabaseConfig = None  # type: ignore[assignment]
     redis: RedisConfig = None  # type: ignore[assignment]
     rate_limit: RateLimitConfig = None  # type: ignore[assignment]
+    scanner: ScannerConfig = None  # type: ignore[assignment]
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -619,6 +694,7 @@ class Settings(BaseModel):
             database=DatabaseConfig.from_env(),
             redis=RedisConfig.from_env(),
             rate_limit=RateLimitConfig.from_env(),
+            scanner=ScannerConfig.from_env(),
         )
         instance._validate_production_settings()
         return instance

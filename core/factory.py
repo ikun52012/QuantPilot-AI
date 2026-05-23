@@ -24,6 +24,7 @@ from routers.backtest import router as backtest_router
 from routers.chart import router as chart_router
 from routers.health import router as health_router
 from routers.i18n import router as i18n_router
+from routers.scanner import router as scanner_router
 from routers.social import router as social_router
 from routers.strategies import router as strategies_router
 from routers.strategy_editor import router as strategy_editor_router
@@ -286,13 +287,14 @@ def create_app() -> FastAPI:
     app.include_router(strategy_editor_router)
     app.include_router(social_router)
     app.include_router(i18n_router)
+    app.include_router(scanner_router)
     app.include_router(health_router)
 
     # API v1 aliases
     for router in [
         webhook_router, auth_router, admin_router, user_router, subscription_router,
         ai_config_router, backtest_router, strategies_router, chart_router,
-        strategy_editor_router, social_router, i18n_router,
+        strategy_editor_router, social_router, i18n_router, scanner_router,
     ]:
         _mount_v1_aliases(app, router)
 

@@ -24,6 +24,8 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
+    delete,
     event,
     func,
     inspect,
@@ -202,6 +204,73 @@ class SignalDecisionAuditModel(Base):
     direction = Column(String(20), default="")
     stage = Column(String(40), nullable=False, index=True)
     outcome = Column(String(40), default="")
+    reason = Column(Text, default="")
+    payload_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=lambda: utcnow(), index=True)
+
+
+class ScannerStateModel(Base):
+    """Daily persistent state for the automatic market scanner."""
+    __tablename__ = "scanner_states"
+    __table_args__ = (
+        UniqueConstraint("scope", "date_key", name="uq_scanner_states_scope_date"),
+        Index("idx_scanner_states_scope_date", "scope", "date_key"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scope = Column(String(40), default="admin", nullable=False)
+    date_key = Column(String(10), nullable=False)
+    scan_count = Column(Integer, default=0)
+    ai_call_count = Column(Integer, default=0)
+    signal_count = Column(Integer, default=0)
+    data_failure_streak = Column(Integer, default=0)
+    last_scan_at = Column(DateTime, nullable=True)
+    last_data_failure_at = Column(DateTime, nullable=True)
+    degraded_mode = Column(String(40), default="")
+    degraded_reason = Column(Text, default="")
+    updated_at = Column(DateTime, default=lambda: utcnow())
+
+
+class ScannerSetupLockModel(Base):
+    """Persistent setup/symbol cooldown lock for scanner candidates."""
+    __tablename__ = "scanner_setup_locks"
+    __table_args__ = (
+        UniqueConstraint("scope", "setup_hash", name="uq_scanner_setup_locks_scope_hash"),
+        Index("idx_scanner_setup_hash_expires", "setup_hash", "expires_at"),
+        Index("idx_scanner_symbol_expires", "scope", "exchange_symbol", "expires_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scope = Column(String(40), default="admin", nullable=False)
+    setup_hash = Column(String(64), nullable=False)
+    watch_symbol = Column(String(60), default="")
+    exchange_symbol = Column(String(60), default="")
+    direction = Column(String(20), default="")
+    timeframe = Column(String(20), default="")
+    setup_type = Column(String(80), default="")
+    price_zone = Column(String(80), default="")
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=lambda: utcnow())
+
+
+class ScannerAuditModel(Base):
+    """Append-only scanner funnel audit log."""
+    __tablename__ = "scanner_audits"
+    __table_args__ = (
+        Index("idx_scanner_audit_run", "run_id"),
+        Index("idx_scanner_audit_created", "created_at"),
+        Index("idx_scanner_audit_symbol_created", "exchange_symbol", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scope = Column(String(40), default="admin", nullable=False, index=True)
+    run_id = Column(String(64), default="", index=True)
+    event_type = Column(String(40), nullable=False, index=True)
+    watch_symbol = Column(String(60), default="")
+    exchange_symbol = Column(String(60), default="")
+    direction = Column(String(20), default="")
+    score = Column(Float, default=0.0)
+    setup_hash = Column(String(64), default="", index=True)
     reason = Column(Text, default="")
     payload_json = Column(Text, default="{}")
     created_at = Column(DateTime, default=lambda: utcnow(), index=True)
@@ -493,7 +562,8 @@ class DatabaseManager:
             "trades", "webhook_events", "invite_codes", "redeem_codes",
             "admin_settings", "admin_audit_logs", "positions",
             "order_events", "strategy_states", "shared_signals", "signal_subscriptions",
-            "signal_decision_audits",
+            "signal_decision_audits", "scanner_states", "scanner_setup_locks",
+            "scanner_audits",
         }
         VALID_COLUMN_TYPES = {
             "FLOAT", "BOOLEAN", "TIMESTAMP", "TEXT", "VARCHAR", "INTEGER",
@@ -752,6 +822,44 @@ class DatabaseManager:
             "max_position_pct": "FLOAT DEFAULT 10",
             "created_at": "TIMESTAMP",
         })
+        add_missing_columns("scanner_states", {
+            "scope": "VARCHAR(40) DEFAULT 'admin'",
+            "date_key": "VARCHAR(10) DEFAULT ''",
+            "scan_count": "INTEGER DEFAULT 0",
+            "ai_call_count": "INTEGER DEFAULT 0",
+            "signal_count": "INTEGER DEFAULT 0",
+            "data_failure_streak": "INTEGER DEFAULT 0",
+            "last_scan_at": "TIMESTAMP",
+            "last_data_failure_at": "TIMESTAMP",
+            "degraded_mode": "VARCHAR(40) DEFAULT ''",
+            "degraded_reason": "TEXT DEFAULT ''",
+            "updated_at": "TIMESTAMP",
+        })
+        add_missing_columns("scanner_setup_locks", {
+            "scope": "VARCHAR(40) DEFAULT 'admin'",
+            "setup_hash": "VARCHAR(64) DEFAULT ''",
+            "watch_symbol": "VARCHAR(60) DEFAULT ''",
+            "exchange_symbol": "VARCHAR(60) DEFAULT ''",
+            "direction": "VARCHAR(20) DEFAULT ''",
+            "timeframe": "VARCHAR(20) DEFAULT ''",
+            "setup_type": "VARCHAR(80) DEFAULT ''",
+            "price_zone": "VARCHAR(80) DEFAULT ''",
+            "expires_at": "TIMESTAMP",
+            "created_at": "TIMESTAMP",
+        })
+        add_missing_columns("scanner_audits", {
+            "scope": "VARCHAR(40) DEFAULT 'admin'",
+            "run_id": "VARCHAR(64) DEFAULT ''",
+            "event_type": "VARCHAR(40) DEFAULT ''",
+            "watch_symbol": "VARCHAR(60) DEFAULT ''",
+            "exchange_symbol": "VARCHAR(60) DEFAULT ''",
+            "direction": "VARCHAR(20) DEFAULT ''",
+            "score": "FLOAT DEFAULT 0",
+            "setup_hash": "VARCHAR(64) DEFAULT ''",
+            "reason": "TEXT DEFAULT ''",
+            "payload_json": "TEXT DEFAULT '{}'",
+            "created_at": "TIMESTAMP",
+        })
         create_index_if_missing("idx_users_webhook_secret_hash", "CREATE INDEX idx_users_webhook_secret_hash ON users(webhook_secret_hash)")
         create_index_if_missing("idx_trades_user_timestamp", "CREATE INDEX idx_trades_user_timestamp ON trades(user_id, timestamp)")
         create_index_if_missing("idx_webhook_fingerprint_created", "CREATE INDEX idx_webhook_fingerprint_created ON webhook_events(fingerprint, created_at)")
@@ -765,6 +873,12 @@ class DatabaseManager:
         create_index_if_missing("idx_shared_signals_ticker_direction", "CREATE INDEX idx_shared_signals_ticker_direction ON shared_signals(ticker, direction)")
         create_index_if_missing("idx_signal_subscriptions_user", "CREATE INDEX idx_signal_subscriptions_user ON signal_subscriptions(user_id)")
         create_index_if_missing("idx_signal_subscriptions_signal", "CREATE INDEX idx_signal_subscriptions_signal ON signal_subscriptions(signal_id)")
+        create_index_if_missing("idx_scanner_states_scope_date", "CREATE INDEX idx_scanner_states_scope_date ON scanner_states(scope, date_key)")
+        create_index_if_missing("idx_scanner_setup_hash_expires", "CREATE INDEX idx_scanner_setup_hash_expires ON scanner_setup_locks(setup_hash, expires_at)")
+        create_index_if_missing("idx_scanner_symbol_expires", "CREATE INDEX idx_scanner_symbol_expires ON scanner_setup_locks(scope, exchange_symbol, expires_at)")
+        create_index_if_missing("idx_scanner_audit_run", "CREATE INDEX idx_scanner_audit_run ON scanner_audits(run_id)")
+        create_index_if_missing("idx_scanner_audit_created", "CREATE INDEX idx_scanner_audit_created ON scanner_audits(created_at)")
+        create_index_if_missing("idx_scanner_audit_symbol_created", "CREATE INDEX idx_scanner_audit_symbol_created ON scanner_audits(exchange_symbol, created_at)")
         if dialect_name in {"sqlite", "postgresql"}:
             create_index_if_missing(
                 "uq_payments_tx_hash_non_empty",
@@ -1026,6 +1140,12 @@ async def log_trade_db(
         "strategy_name": payload.get("strategy_name") or (payload.get("signal") or {}).get("strategy", ""),
         "user_risk_profile": payload.get("user_risk_profile") or "balanced",
     }
+    signal_source = (
+        payload.get("signal_source")
+        or entry["signal"].get("signal_source")
+        or entry["signal"].get("source")
+        or "tradingview"
+    )
 
     entry = await sync_position_from_trade_entry_async(session, entry)
     payload.update({
@@ -1044,6 +1164,7 @@ async def log_trade_db(
         execute=execute,
         order_status=entry.get("order_status") or order_status,
         pnl_pct=float(entry.get("pnl_pct") or 0.0),
+        signal_source=str(signal_source or "tradingview")[:20],
         payload_json=json.dumps(payload, default=str),
     )
     session.add(trade)
@@ -1701,6 +1822,310 @@ async def record_signal_decision_audit(
     except Exception as exc:
         logger.warning(f"[Audit] Failed to record signal decision audit: {exc}")
         return None
+
+
+# ─────────────────────────────────────────────
+# Scanner State & Audit
+# ─────────────────────────────────────────────
+
+def scanner_date_key(ts: datetime | None = None) -> str:
+    """Return the UTC date key used by scanner daily counters."""
+    return (ts or utcnow()).date().isoformat()
+
+
+async def get_or_create_scanner_state(
+    session: AsyncSession,
+    scope: str = "admin",
+    date_key: str | None = None,
+) -> ScannerStateModel:
+    """Load or create the daily scanner state row."""
+    key = date_key or scanner_date_key()
+    result = await session.execute(
+        select(ScannerStateModel).where(
+            ScannerStateModel.scope == scope,
+            ScannerStateModel.date_key == key,
+        )
+    )
+    state = result.scalar_one_or_none()
+    if state:
+        return state
+    state = ScannerStateModel(scope=scope, date_key=key, updated_at=utcnow())
+    session.add(state)
+    await session.flush()
+    return state
+
+
+async def update_scanner_state_counts(
+    session: AsyncSession,
+    scope: str = "admin",
+    *,
+    scan_delta: int = 0,
+    ai_call_delta: int = 0,
+    signal_delta: int = 0,
+    degraded_mode: str | None = None,
+    degraded_reason: str | None = None,
+    data_failure_delta: int = 0,
+    reset_data_failure_streak: bool = False,
+    mark_scan: bool = False,
+) -> ScannerStateModel:
+    """Increment scanner counters and optionally update degradation state."""
+    state = await get_or_create_scanner_state(session, scope=scope)
+    state.scan_count = int(state.scan_count or 0) + int(scan_delta or 0)
+    state.ai_call_count = int(state.ai_call_count or 0) + int(ai_call_delta or 0)
+    state.signal_count = int(state.signal_count or 0) + int(signal_delta or 0)
+    if reset_data_failure_streak:
+        state.data_failure_streak = 0
+    elif data_failure_delta:
+        state.data_failure_streak = int(state.data_failure_streak or 0) + int(data_failure_delta or 0)
+        state.last_data_failure_at = utcnow()
+    if degraded_mode is not None:
+        state.degraded_mode = str(degraded_mode or "")[:40]
+    if degraded_reason is not None:
+        state.degraded_reason = str(degraded_reason or "")
+    if mark_scan:
+        state.last_scan_at = utcnow()
+    state.updated_at = utcnow()
+    await session.flush()
+    return state
+
+
+async def record_scanner_audit(
+    session: AsyncSession,
+    *,
+    scope: str = "admin",
+    run_id: str = "",
+    event_type: str,
+    watch_symbol: str = "",
+    exchange_symbol: str = "",
+    direction: str = "",
+    score: float = 0.0,
+    setup_hash: str = "",
+    reason: str = "",
+    payload: dict | None = None,
+) -> ScannerAuditModel | None:
+    """Record an append-only scanner audit event."""
+    try:
+        audit = ScannerAuditModel(
+            scope=str(scope or "admin")[:40],
+            run_id=str(run_id or "")[:64],
+            event_type=str(event_type or "")[:40],
+            watch_symbol=str(watch_symbol or "")[:60],
+            exchange_symbol=str(exchange_symbol or "")[:60],
+            direction=str(direction or "")[:20],
+            score=float(score or 0.0),
+            setup_hash=str(setup_hash or "")[:64],
+            reason=str(reason or ""),
+            payload_json=json.dumps(payload or {}, default=str),
+        )
+        session.add(audit)
+        await session.flush()
+        return audit
+    except Exception as exc:
+        logger.warning(f"[ScannerAudit] Failed to record scanner audit: {exc}")
+        return None
+
+
+async def acquire_scanner_setup_lock(
+    session: AsyncSession,
+    *,
+    scope: str,
+    setup_hash: str,
+    watch_symbol: str,
+    exchange_symbol: str,
+    direction: str,
+    timeframe: str,
+    setup_type: str,
+    price_zone: str,
+    ttl_seconds: int,
+) -> tuple[bool, ScannerSetupLockModel | None]:
+    """Acquire or refresh a setup cooldown lock.
+
+    Returns (True, row) when acquired. Returns (False, active_row) when the
+    setup is still cooling down.
+    """
+    now = utcnow()
+    await session.execute(delete(ScannerSetupLockModel).where(ScannerSetupLockModel.expires_at < now))
+    result = await session.execute(
+        select(ScannerSetupLockModel).where(
+            ScannerSetupLockModel.scope == scope,
+            ScannerSetupLockModel.setup_hash == setup_hash,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row and row.expires_at and row.expires_at > now:
+        return False, row
+
+    expires_at = now + timedelta(seconds=max(60, int(ttl_seconds or 60)))
+    if row:
+        row.watch_symbol = watch_symbol
+        row.exchange_symbol = exchange_symbol
+        row.direction = direction
+        row.timeframe = timeframe
+        row.setup_type = setup_type
+        row.price_zone = price_zone
+        row.expires_at = expires_at
+        row.created_at = now
+    else:
+        row = ScannerSetupLockModel(
+            scope=scope,
+            setup_hash=setup_hash,
+            watch_symbol=watch_symbol,
+            exchange_symbol=exchange_symbol,
+            direction=direction,
+            timeframe=timeframe,
+            setup_type=setup_type,
+            price_zone=price_zone,
+            expires_at=expires_at,
+            created_at=now,
+        )
+        session.add(row)
+    await session.flush()
+    return True, row
+
+
+async def scanner_symbol_on_cooldown(
+    session: AsyncSession,
+    *,
+    scope: str,
+    exchange_symbol: str,
+) -> ScannerSetupLockModel | None:
+    """Return an active symbol cooldown lock if present."""
+    now = utcnow()
+    result = await session.execute(
+        select(ScannerSetupLockModel)
+        .where(
+            ScannerSetupLockModel.scope == scope,
+            ScannerSetupLockModel.exchange_symbol == exchange_symbol,
+            ScannerSetupLockModel.setup_type == "__symbol_cooldown__",
+            ScannerSetupLockModel.expires_at > now,
+        )
+        .order_by(ScannerSetupLockModel.expires_at.desc())
+    )
+    return result.scalars().first()
+
+
+async def set_scanner_symbol_cooldown(
+    session: AsyncSession,
+    *,
+    scope: str,
+    watch_symbol: str,
+    exchange_symbol: str,
+    ttl_seconds: int,
+) -> None:
+    """Set a coarse per-symbol cooldown lock."""
+    digest = hashlib.sha256(f"{scope}|symbol|{exchange_symbol}".encode("utf-8")).hexdigest()
+    await acquire_scanner_setup_lock(
+        session,
+        scope=scope,
+        setup_hash=digest,
+        watch_symbol=watch_symbol,
+        exchange_symbol=exchange_symbol,
+        direction="",
+        timeframe="",
+        setup_type="__symbol_cooldown__",
+        price_zone="symbol",
+        ttl_seconds=ttl_seconds,
+    )
+
+
+async def list_scanner_audits(
+    session: AsyncSession,
+    *,
+    event_type: str | None = None,
+    symbol: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[ScannerAuditModel]:
+    """List recent scanner audit events."""
+    stmt = select(ScannerAuditModel).order_by(ScannerAuditModel.created_at.desc())
+    if event_type:
+        stmt = stmt.where(ScannerAuditModel.event_type == event_type)
+    if symbol:
+        normalized = symbol.upper().strip()
+        stmt = stmt.where(
+            (ScannerAuditModel.watch_symbol == normalized)
+            | (ScannerAuditModel.exchange_symbol == normalized)
+        )
+    stmt = stmt.limit(max(1, min(int(limit or 100), 500))).offset(max(0, int(offset or 0)))
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_scanner_rejection_summary(
+    session: AsyncSession,
+    *,
+    scope: str = "admin",
+    date_key: str | None = None,
+) -> dict[str, Any]:
+    """Summarize scanner signals rejected or held by AI for one UTC date."""
+    key = date_key or scanner_date_key()
+    start = datetime.fromisoformat(key)
+    end = start + timedelta(days=1)
+    result = await session.execute(
+        select(ScannerAuditModel)
+        .where(
+            ScannerAuditModel.scope == scope,
+            ScannerAuditModel.event_type == "result",
+            ScannerAuditModel.created_at >= start,
+            ScannerAuditModel.created_at < end,
+        )
+        .order_by(ScannerAuditModel.created_at.desc())
+    )
+    rows = list(result.scalars().all())
+    summary: dict[str, Any] = {
+        "date_key": key,
+        "scope": scope,
+        "total_results": len(rows),
+        "rejected_or_held": 0,
+        "reject": 0,
+        "hold": 0,
+        "blocked": 0,
+        "observed_rejected": 0,
+        "symbols": {},
+        "top_reasons": {},
+        "items": [],
+    }
+    for row in rows:
+        try:
+            payload = json.loads(row.payload_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        data = payload.get("result") if isinstance(payload, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        analysis = data.get("analysis") if isinstance(data.get("analysis"), dict) else {}
+        recommendation = str(analysis.get("recommendation") or "").lower().strip()
+        status = str(data.get("status") or "").lower().strip()
+        would_execute = bool(data.get("would_execute"))
+        rejected = recommendation in {"reject", "hold"} or status in {"blocked", "rejected"} or (
+            status == "observed" and not would_execute
+        )
+        if not rejected:
+            continue
+        symbol = row.exchange_symbol or row.watch_symbol or "unknown"
+        reason = str(data.get("reason") or analysis.get("reasoning") or row.reason or "No reason")[:240]
+        summary["rejected_or_held"] += 1
+        if recommendation in {"reject", "hold"}:
+            summary[recommendation] += 1
+        if status == "blocked":
+            summary["blocked"] += 1
+        if status == "observed" and not would_execute:
+            summary["observed_rejected"] += 1
+        summary["symbols"][symbol] = int(summary["symbols"].get(symbol, 0)) + 1
+        summary["top_reasons"][reason] = int(summary["top_reasons"].get(reason, 0)) + 1
+        if len(summary["items"]) < 20:
+            summary["items"].append({
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "symbol": symbol,
+                "direction": row.direction,
+                "score": row.score,
+                "recommendation": recommendation or status,
+                "reason": reason,
+                "setup_hash": row.setup_hash,
+            })
+    summary["symbols"] = dict(sorted(summary["symbols"].items(), key=lambda item: item[1], reverse=True))
+    summary["top_reasons"] = dict(sorted(summary["top_reasons"].items(), key=lambda item: item[1], reverse=True)[:10])
+    return summary
 
 
 # ─────────────────────────────────────────────

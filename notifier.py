@@ -309,6 +309,45 @@ async def notify_daily_summary(trades: int, win_rate: float, pnl: float):
     await send_telegram(text)
 
 
+async def notify_scanner_rejection_summary(summary: dict):
+    """Send a daily digest for scanner signals rejected/held by AI or safety checks."""
+    rejected = int(summary.get("rejected_or_held") or 0)
+    if rejected <= 0:
+        logger.debug("[Telegram] Scanner rejection summary empty, skipping")
+        return
+
+    lang = _lang()
+    title = "🤖 <b>扫描器 AI 拒绝每日摘要</b>" if lang == "zh" else "🤖 <b>Scanner AI Rejection Daily Summary</b>"
+    date_label = "日期" if lang == "zh" else "Date"
+    total_label = "AI 结果数" if lang == "zh" else "AI Results"
+    rejected_label = "拒绝/观望" if lang == "zh" else "Rejected/Held"
+    breakdown_label = "分布" if lang == "zh" else "Breakdown"
+    symbols_label = "主要标的" if lang == "zh" else "Top Symbols"
+    reasons_label = "主要原因" if lang == "zh" else "Top Reasons"
+
+    symbols = list((summary.get("symbols") or {}).items())[:5]
+    reasons = list((summary.get("top_reasons") or {}).items())[:5]
+    symbol_text = ", ".join(f"{_safe_html(symbol)}({count})" for symbol, count in symbols) or "-"
+    reason_text = "\n".join(
+        f"  • {_safe_html(reason)} <code>x{count}</code>"
+        for reason, count in reasons
+    ) or "  -"
+
+    text = (
+        f"{title}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{date_label}: <code>{_safe_html(summary.get('date_key', ''))}</code>\n"
+        f"{total_label}: <b>{int(summary.get('total_results') or 0)}</b>\n"
+        f"{rejected_label}: <b>{rejected}</b>\n"
+        f"{breakdown_label}: reject={int(summary.get('reject') or 0)}, "
+        f"hold={int(summary.get('hold') or 0)}, blocked={int(summary.get('blocked') or 0)}, "
+        f"observe_no_trade={int(summary.get('observed_rejected') or 0)}\n"
+        f"{symbols_label}: {symbol_text}\n"
+        f"{reasons_label}:\n{reason_text}"
+    )
+    await send_telegram(text)
+
+
 async def notify_subscription_expired(user_id: str):
     """Notify user when their subscription expires."""
     text = (

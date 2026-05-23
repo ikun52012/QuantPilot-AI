@@ -3,6 +3,7 @@ QuantPilot AI - Data Models
 """
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -20,6 +21,7 @@ class SignalDirection(str, Enum):
 class SignalSource(str, Enum):
     TRADINGVIEW = "tradingview"
     MANUAL = "manual"
+    AUTO_SCANNER = "auto_scanner"
 
 
 # ─────────────────────────────────────────────
@@ -293,3 +295,4 @@ class TradeLog(BaseModel):
     ai_reasoning: str = ""
     signal_source: str = "tradingview"
     close_reason: str = ""
+    extra: dict[str, Any] = Field(default_factory=dict)
