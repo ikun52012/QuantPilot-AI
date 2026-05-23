@@ -192,6 +192,12 @@ _TRANSLATIONS = {
             "admin": {
                 "kicker": "Operations Console",
                 "description": "Control trading modes, reconcile order events, manage users, monitor filters, and review system health.",
+                "scanner_title": "Auto Market Scanner",
+                "scanner_audit_title": "Scanner Audit Log",
+                "scanner_save": "Save Scanner Settings",
+                "scanner_refresh": "Refresh",
+                "scanner_run_once": "Run Scan Once",
+                "scanner_send_summary": "Send Rejection Summary",
             },
             "charts": {
                 "kicker": "Market Workspace",

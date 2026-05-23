@@ -1890,6 +1890,7 @@ async function loadAdmin() {
         renderAdminEnhancedFilters(enhancedFilters || {});
         loadAdminRiskConsole();
         loadAIProviderConfig();
+        loadScanner();
     } catch (err) { showToast(err.message, 'error', 'Admin Load Failed'); }
 }
 
@@ -5154,4 +5155,297 @@ async function handleSavedStrategyImportFile(event) {
         showToast('Invalid JSON file.', 'error', 'Import Failed');
     }
     event.target.value = '';
+}
+
+// ─── Scanner Functions ────────────────────────────────────────────────────────
+
+async function loadScanner() {
+    try {
+        const status = await fetchAPI('/api/scanner/status');
+        renderScannerStatus(status);
+    } catch (err) {
+        const el = document.getElementById('admin-scanner');
+        if (el) el.innerHTML = '<p class="empty-state">Failed to load scanner status.</p>';
+    }
+}
+
+function renderScannerStatus(status) {
+    const el = document.getElementById('admin-scanner');
+    if (!el) return;
+
+    const enabled = status.enabled || false;
+    const mode = status.mode || 'observe';
+    const interval = status.interval_secs || 600;
+    const watchlist = (status.watchlist || []).join(', ') || '--';
+    const timeframes = (status.timeframes || []).join(', ') || '--';
+    const minScore = status.min_score ?? 65;
+    const maxCandidates = status.max_candidates_per_run ?? 3;
+    const liveWl = (status.live_symbol_whitelist || []).join(', ') || '--';
+    const symMap = status.symbol_map || {};
+    const symMapStr = Object.keys(symMap).length ? Object.entries(symMap).map(([k, v]) => `${escapeHtml(k)} \u2192 ${escapeHtml(v.exchange_symbol || k)}`).join('<br>') : 'None';
+    const maxSignals = (status.daily_limits || {}).max_signals_per_day ?? 15;
+    const maxAiCalls = (status.daily_limits || {}).max_ai_calls_per_day ?? 30;
+    const symCd = (status.cooldowns || {}).symbol_cooldown_secs ?? 1800;
+    const setupCd = (status.cooldowns || {}).setup_cooldown_secs ?? 14400;
+    const rsiLower = (status.thresholds || {}).rsi_lower ?? 35;
+    const rsiUpper = (status.thresholds || {}).rsi_upper ?? 65;
+    const minAtr = (status.thresholds || {}).min_atr_pct ?? 0.10;
+    const maxSpread = (status.thresholds || {}).max_spread_pct ?? 0.35;
+    const aiMinConf = (status.thresholds || {}).ai_min_confidence ?? 0.70;
+    const shutdownTimeout = status.shutdown_timeout_secs ?? 30;
+
+    const st = status.state || {};
+    const scanCount = st.scan_count ?? 0;
+    const aiCallCount = st.ai_call_count ?? 0;
+    const signalCount = st.signal_count ?? 0;
+    const degradedMode = st.degraded_mode || '';
+    const lastScan = st.last_scan_at || '--';
+    const rt = status.runtime || {};
+
+    const modeOptions = ['observe', 'paper', 'live'].map(m => `<option value="${m}" ${m === mode ? 'selected' : ''}>${m.charAt(0).toUpperCase() + m.slice(1)}</option>`).join('');
+
+    const modeClass = mode === 'live' ? 'badge-error' : mode === 'paper' ? 'badge-pending' : 'badge-active';
+
+    document.getElementById('scanner-mode-badge').textContent = enabled ? `${mode.charAt(0).toUpperCase() + mode.slice(1)}` : 'Disabled';
+    document.getElementById('scanner-mode-badge').className = `badge ${enabled ? modeClass : 'badge-inactive'}`;
+
+    el.innerHTML = `
+        <div class="settings-form">
+            <div class="form-row" style="background:rgba(59,130,246,0.06);padding:12px;border-radius:8px;border:1px solid rgba(59,130,246,0.14);margin-bottom:16px">
+                <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+                    <div class="metric-item"><span class="metric-label">Mode</span><span class="metric-value badge ${enabled ? modeClass : 'badge-inactive'}">${enabled ? mode.toUpperCase() : 'DISABLED'}</span></div>
+                    <div class="metric-item"><span class="metric-label">Scans Today</span><span class="metric-value">${scanCount}</span></div>
+                    <div class="metric-item"><span class="metric-label">AI Calls</span><span class="metric-value">${aiCallCount}/${maxAiCalls}</span></div>
+                    <div class="metric-item"><span class="metric-label">Signals</span><span class="metric-value">${signalCount}/${maxSignals}</span></div>
+                    <div class="metric-item"><span class="metric-label">Last Scan</span><span class="metric-value">${escapeHtml(lastScan ? formatDateTime(lastScan) : '--')}</span></div>
+                    ${degradedMode ? `<div class="metric-item"><span class="metric-label">Degraded</span><span class="metric-value badge badge-warning">${escapeHtml(degradedMode)}</span></div>` : ''}
+                    <div class="metric-item"><span class="metric-label">Running</span><span class="metric-value">${rt.running ? 'Yes' : 'No'}</span></div>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-enabled">Enabled</label>
+                    <select id="scanner-enabled" class="text-input">
+                        <option value="true" ${enabled ? 'selected' : ''}>Yes</option>
+                        <option value="false" ${!enabled ? 'selected' : ''}>No</option>
+                    </select>
+                    <p class="hint">Master switch for auto market scanning</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-mode">Mode</label>
+                    <select id="scanner-mode" class="text-input">${modeOptions}</select>
+                    <p class="hint">observe=paper analysis only, paper=simulated, live=real orders</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-interval">Interval (seconds)</label>
+                    <input type="number" id="scanner-interval" class="text-input" value="${interval}" min="60" step="60">
+                    <p class="hint">Min 60s between scans</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-watchlist">Watchlist</label>
+                    <input type="text" id="scanner-watchlist" class="text-input" value="${escapeHtml(watchlist)}" placeholder="BTCUSDT,ETHUSDT,XAUUSD">
+                    <p class="hint">Comma-separated symbols to scan</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-timeframes">Timeframes</label>
+                    <input type="text" id="scanner-timeframes" class="text-input" value="${escapeHtml(timeframes)}" placeholder="15m,1h,4h">
+                    <p class="hint">Comma-separated timeframes</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-min-score">Min Score</label>
+                    <input type="number" id="scanner-min-score" class="text-input" value="${minScore}" min="0" max="100" step="1">
+                    <p class="hint">Minimum candidate score (0-100)</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-max-candidates">Max Candidates/Run</label>
+                    <input type="number" id="scanner-max-candidates" class="text-input" value="${maxCandidates}" min="1" max="50" step="1">
+                    <p class="hint">Top-N candidates dispatched per scan</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-rsi-lower">RSI Lower</label>
+                    <input type="number" id="scanner-rsi-lower" class="text-input" value="${rsiLower}" step="1" min="1" max="99">
+                    <p class="hint">Below = potential long signal</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-rsi-upper">RSI Upper</label>
+                    <input type="number" id="scanner-rsi-upper" class="text-input" value="${rsiUpper}" step="1" min="1" max="99">
+                    <p class="hint">Above = potential short signal</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-min-atr">Min ATR%</label>
+                    <input type="number" id="scanner-min-atr" class="text-input" value="${minAtr}" step="0.01" min="0">
+                    <p class="hint">Min volatility to trade (filter flat markets)</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-max-spread">Max Spread%</label>
+                    <input type="number" id="scanner-max-spread" class="text-input" value="${maxSpread}" step="0.01" min="0">
+                    <p class="hint">Max allowed bid-ask spread percentage</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-sym-cd">Symbol Cooldown (sec)</label>
+                    <input type="number" id="scanner-sym-cd" class="text-input" value="${symCd}" min="0" step="60">
+                    <p class="hint">Cooldown per symbol after a signal</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-setup-cd">Setup Cooldown (sec)</label>
+                    <input type="number" id="scanner-setup-cd" class="text-input" value="${setupCd}" min="60" step="60">
+                    <p class="hint">Same setup hash cooldown (dedup window)</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-max-signals">Max Signals/Day</label>
+                    <input type="number" id="scanner-max-signals" class="text-input" value="${maxSignals}" min="0" step="1">
+                    <p class="hint">Daily scanner signal cap (all modes)</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-max-ai">Max AI Calls/Day</label>
+                    <input type="number" id="scanner-max-ai" class="text-input" value="${maxAiCalls}" min="0" step="1">
+                    <p class="hint">Daily AI budget cap for scanner</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-shutdown-timeout">Shutdown Timeout (sec)</label>
+                    <input type="number" id="scanner-shutdown-timeout" class="text-input" value="${shutdownTimeout}" min="1" step="1">
+                    <p class="hint">Graceful shutdown wait time</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-live-wl">Live Whitelist</label>
+                    <input type="text" id="scanner-live-wl" class="text-input" value="${escapeHtml(liveWl)}" placeholder="BTCUSDT,ETHUSDT">
+                    <p class="hint">Symbols allowed for live auto-trading</p>
+                </div>
+                <div class="form-group">
+                    <label>Symbol Map</label>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;min-height:20px">${symMapStr}</div>
+                    <p class="hint">Configured via .env SCANNER_SYMBOL_MAP</p>
+                </div>
+            </div>
+
+            <div class="form-row" style="margin-top:16px">
+                <button class="btn btn-primary" onclick="saveScannerSettings()"><i class="ri-save-line"></i> Save Scanner Settings</button>
+                <button class="btn btn-secondary" onclick="loadScanner()"><i class="ri-refresh-line"></i> Refresh</button>
+                <button class="btn btn-success" onclick="runScannerOnce()" id="btn-scanner-run"><i class="ri-play-line"></i> Run Scan Once</button>
+                <button class="btn btn-warning" onclick="sendScannerRejectionSummary()"><i class="ri-mail-send-line"></i> Send Rejection Summary</button>
+            </div>
+
+            <div style="margin-top:16px;padding:12px;background:rgba(217,119,6,0.08);border:1px solid rgba(217,119,6,0.2);border-radius:8px">
+                <p style="font-size:12px;color:var(--text-secondary);margin:0">
+                    <i class="ri-information-line" style="color:#fbbf24"></i>
+                    <strong>AI Confidence Gate:</strong> Scanner signals require confidence &ge; ${(aiMinConf * 100).toFixed(0)}% (vs 60% for manual). Observe mode never creates orders.
+                </p>
+            </div>
+        </div>`;
+
+    loadScannerAudits();
+}
+
+async function saveScannerSettings() {
+    const data = {
+        enabled: document.getElementById('scanner-enabled').value === 'true',
+        mode: document.getElementById('scanner-mode').value,
+        interval_secs: parseInt(document.getElementById('scanner-interval').value) || 600,
+        watchlist: document.getElementById('scanner-watchlist').value.split(',').map(s => s.trim()).filter(Boolean),
+        timeframes: document.getElementById('scanner-timeframes').value.split(',').map(s => s.trim()).filter(Boolean),
+        min_score: parseFloat(document.getElementById('scanner-min-score').value) || 65,
+        max_candidates_per_run: parseInt(document.getElementById('scanner-max-candidates').value) || 3,
+        rsi_lower: parseFloat(document.getElementById('scanner-rsi-lower').value) || 35,
+        rsi_upper: parseFloat(document.getElementById('scanner-rsi-upper').value) || 65,
+        min_atr_pct: parseFloat(document.getElementById('scanner-min-atr').value) || 0.10,
+        max_spread_pct: parseFloat(document.getElementById('scanner-max-spread').value) || 0.35,
+        symbol_cooldown_secs: parseInt(document.getElementById('scanner-sym-cd').value) || 1800,
+        setup_cooldown_secs: parseInt(document.getElementById('scanner-setup-cd').value) || 14400,
+        max_signals_per_day: parseInt(document.getElementById('scanner-max-signals').value) || 15,
+        max_ai_calls_per_day: parseInt(document.getElementById('scanner-max-ai').value) || 30,
+        shutdown_timeout_secs: parseInt(document.getElementById('scanner-shutdown-timeout').value) || 30,
+        live_symbol_whitelist: document.getElementById('scanner-live-wl').value.split(',').map(s => s.trim()).filter(Boolean),
+    };
+    await saveSettings('/api/scanner/settings', data, 'btn-scanner-save');
+    setTimeout(() => loadScanner(), 1500);
+}
+
+async function runScannerOnce() {
+    const btn = document.getElementById('btn-scanner-run');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ri-loader-4-line"></i> Running...';
+    try {
+        const result = await fetchAPI('/api/scanner/run-once', { method: 'POST' });
+        showToast(`Scan completed: ${result.status} \u2014 scanned ${result.scanned || 0}, candidates ${result.candidates || 0}`, 'success', 'Scanner');
+        loadScanner();
+    } catch (err) {
+        showToast(err.message, 'error', 'Scan Failed');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-play-line"></i> Run Scan Once';
+    }
+}
+
+async function sendScannerRejectionSummary() {
+    try {
+        const result = await fetchAPI('/api/scanner/rejection-summary/send', { method: 'POST' });
+        showToast(result.sent ? 'Rejection summary sent to Telegram' : 'No rejections to send', 'success');
+    } catch (err) {
+        showToast(err.message, 'error', 'Send Failed');
+    }
+}
+
+async function loadScannerAudits() {
+    try {
+        const data = await fetchAPI('/api/scanner/audits?limit=50');
+        renderScannerAudits(data.items || []);
+    } catch (err) {
+        const el = document.getElementById('admin-scanner-audits');
+        if (el) el.innerHTML = '<p class="empty-state">Failed to load audit log.</p>';
+    }
+}
+
+function renderScannerAudits(items) {
+    const el = document.getElementById('admin-scanner-audits');
+    if (!el) return;
+
+    const eventBadge = (type) => {
+        const map = {
+            'scanned': 'badge-active', 'candidate': 'badge-active',
+            'filtered': 'badge-pending', 'cooldown': 'badge-pending',
+            'data_error': 'badge-error', 'live_market_invalid': 'badge-error',
+            'deduped': 'badge-warning', 'sent_to_ai': 'badge-long',
+            'daily_limit': 'badge-warning', 'ai_budget_exhausted': 'badge-error',
+            'result': 'badge-success', 'error': 'badge-error',
+        };
+        return map[type] || 'badge-inactive';
+    };
+
+    const rows = items.length ? items.slice(0, 40).map(a => {
+        const ts = a.created_at ? formatDateTime(a.created_at) : '--';
+        const payload = a.payload || {};
+        const aiRec = payload.analysis ? (payload.analysis.recommendation || '') : '';
+        const aiConf = payload.analysis ? ((payload.analysis.confidence || 0) * 100).toFixed(0) + '%' : '';
+        const detail = aiRec ? `<span class="badge badge-${aiRec === 'execute' ? 'success' : aiRec === 'reject' ? 'error' : 'pending'}">${escapeHtml(aiRec)}</span> ${aiConf}` : escapeHtml(a.reason || '').substring(0, 80);
+        return `<tr>
+            <td style="font-size:11px;white-space:nowrap">${ts}</td>
+            <td><span class="badge ${eventBadge(a.event_type)}">${escapeHtml(a.event_type)}</span></td>
+            <td>${escapeHtml(a.watch_symbol || a.exchange_symbol || '--')}</td>
+            <td>${a.direction ? escapeHtml(a.direction) : '--'}</td>
+            <td>${a.score ? a.score.toFixed(1) : '--'}</td>
+            <td style="font-size:11px">${detail}</td>
+        </tr>`;
+    }).join('') : '<tr><td colspan="6" class="empty-state">No scanner audit events yet</td></tr>';
+
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table">
+        <thead><tr><th>Time</th><th>Event</th><th>Symbol</th><th>Dir</th><th>Score</th><th>Detail</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table></div>`;
 }
