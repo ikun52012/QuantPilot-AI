@@ -5335,7 +5335,7 @@ function renderScannerStatus(status) {
             </div>
 
             <div class="form-row" style="margin-top:16px">
-                <button class="btn btn-primary" onclick="saveScannerSettings()"><i class="ri-save-line"></i> Save Scanner Settings</button>
+                <button class="btn btn-primary" id="btn-scanner-save" onclick="saveScannerSettings()"><i class="ri-save-line"></i> Save Scanner Settings</button>
                 <button class="btn btn-secondary" onclick="loadScanner()"><i class="ri-refresh-line"></i> Refresh</button>
                 <button class="btn btn-success" onclick="runScannerOnce()" id="btn-scanner-run"><i class="ri-play-line"></i> Run Scan Once</button>
                 <button class="btn btn-warning" onclick="sendScannerRejectionSummary()"><i class="ri-mail-send-line"></i> Send Rejection Summary</button>

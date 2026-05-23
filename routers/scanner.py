@@ -114,7 +114,7 @@ async def scanner_status(
     }
 
 
-@router.patch("/settings")
+@router.post("/settings")
 async def scanner_update_settings(
     update: ScannerSettingsUpdate,
     admin: dict = Depends(require_admin),
