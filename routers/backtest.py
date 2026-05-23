@@ -10,7 +10,13 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from backtest.engine import BacktestConfig, BacktestEngine
-from backtest.strategies import AIAssistantStrategy, BaseStrategy, GGShotStrategy, SimpleTrendFollowStrategy, SMCTrendStrategy
+from backtest.strategies import (
+    AIAssistantStrategy,
+    BaseStrategy,
+    GGShotStrategy,
+    SimpleTrendFollowStrategy,
+    SMCTrendStrategy,
+)
 from core.auth import require_admin as get_current_admin
 from market_data import fetch_ohlcv_history
 

@@ -630,7 +630,7 @@ class SignalProcessor:
         fingerprint = compute_webhook_fingerprint(raw_body, user_id)
         user_settings = await self._load_user_settings(user_id)
         scoped_user_settings = dict(user_settings or {})
-        exchange_overrides = dict((scoped_user_settings.get("exchange") or {}))
+        exchange_overrides = dict(scoped_user_settings.get("exchange") or {})
         exchange_overrides["live_trading"] = mode == "live"
         if scanner_meta.get("exchange_name"):
             exchange_overrides["name"] = str(scanner_meta.get("exchange_name")).lower().strip()

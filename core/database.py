@@ -2013,7 +2013,7 @@ async def set_scanner_symbol_cooldown(
     ttl_seconds: int,
 ) -> None:
     """Set a coarse per-symbol cooldown lock."""
-    digest = hashlib.sha256(f"{scope}|symbol|{exchange_symbol}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{scope}|symbol|{exchange_symbol}".encode()).hexdigest()
     await acquire_scanner_setup_lock(
         session,
         scope=scope,
