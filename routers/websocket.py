@@ -146,10 +146,30 @@ def _ws_message(msg_type: str, data: dict, ticker: str | None = None) -> dict:
     return message
 
 
+def _normalize_price_tickers(tickers: object) -> set[str]:
+    if isinstance(tickers, str):
+        raw_tickers = tickers.split(",")
+    elif tickers is None:
+        raw_tickers = []
+    else:
+        try:
+            raw_tickers = list(tickers)
+        except TypeError:
+            raw_tickers = []
+
+    normalized: set[str] = set()
+    for ticker in raw_tickers:
+        value = str(ticker or "").strip().upper()
+        if value:
+            normalized.add(value)
+    return normalized
+
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, list[WebSocket]] = defaultdict(list)
         self.user_connections: dict[WebSocket, str] = {}
+        self.price_subscriptions: dict[WebSocket, set[str]] = {}
         self._broadcast_task = None
 
     async def connect(self, websocket: WebSocket, user_id: str):
@@ -178,6 +198,7 @@ class ConnectionManager:
 
     def disconnect(self, websocket: WebSocket):
         user_id = self.user_connections.get(websocket)
+        self.price_subscriptions.pop(websocket, None)
         if user_id:
             if websocket in self.active_connections[user_id]:
                 self.active_connections[user_id].remove(websocket)
@@ -215,6 +236,18 @@ class ConnectionManager:
 
     def get_online_users(self) -> list[str]:
         return list(self.active_connections.keys())
+
+    def set_price_subscriptions(self, websocket: WebSocket, tickers: set[str]):
+        if tickers:
+            self.price_subscriptions[websocket] = set(tickers)
+        else:
+            self.price_subscriptions.pop(websocket, None)
+
+    def get_price_tickers(self) -> set[str]:
+        all_tickers: set[str] = set()
+        for tickers in list(self.price_subscriptions.values()):
+            all_tickers.update(tickers)
+        return all_tickers
 
 
 manager = ConnectionManager()
@@ -372,8 +405,9 @@ async def websocket_prices(websocket: WebSocket):
                     msg_type = message.get("type")
 
                     if msg_type == "subscribe_tickers":
-                        tickers = message.get("tickers", [])
+                        tickers = _normalize_price_tickers(message.get("tickers", []))
                         subscribed_tickers.update(tickers)
+                        manager.set_price_subscriptions(websocket, subscribed_tickers)
 
                         if subscribed_tickers and not price_task:
                             price_task = asyncio.create_task(
@@ -386,8 +420,9 @@ async def websocket_prices(websocket: WebSocket):
                         }, websocket)
 
                     elif msg_type == "unsubscribe_tickers":
-                        tickers = message.get("tickers", [])
+                        tickers = _normalize_price_tickers(message.get("tickers", []))
                         subscribed_tickers.difference_update(tickers)
+                        manager.set_price_subscriptions(websocket, subscribed_tickers)
 
                         if not subscribed_tickers and price_task:
                             price_task.cancel()
@@ -408,6 +443,7 @@ async def websocket_prices(websocket: WebSocket):
                 except json.JSONDecodeError:
                     pass
         finally:
+            manager.set_price_subscriptions(websocket, set())
             if price_task:
                 price_task.cancel()
                 try:
@@ -603,9 +639,7 @@ async def _update_price_cache():
     while True:
         try:
             # Collect all unique tickers from active subscriptions
-            all_tickers = set()
-            for subscriptions in manager.subscriptions.values():
-                all_tickers.update(subscriptions.get("prices", set()))
+            all_tickers = manager.get_price_tickers()
 
             if not all_tickers:
                 await asyncio.sleep(_PRICE_CACHE_UPDATE_INTERVAL)

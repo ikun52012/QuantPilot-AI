@@ -25,6 +25,8 @@ let _adminLoadSeq = 0;
 let _adminLogType = 'admin';
 let _adminLogOffset = 0;
 const ADMIN_LOG_PAGE_SIZE = 20;
+let _scannerAuditOffset = 0;
+const SCANNER_AUDIT_PAGE_SIZE = 20;
 const ADMIN_NAV_PAGES = new Set([
     'dashboard',
     'positions',
@@ -5746,14 +5748,20 @@ async function sendScannerRejectionSummary() {
     }
 }
 
-async function loadScannerAudits() {
+async function loadScannerAudits(offset = _scannerAuditOffset) {
+    _scannerAuditOffset = Math.max(0, offset);
     try {
-        const data = await fetchAPI('/api/scanner/audits?limit=25');
+        const data = await fetchAPI(`/api/scanner/audits?limit=${SCANNER_AUDIT_PAGE_SIZE}&offset=${_scannerAuditOffset}`);
         renderScannerAudits(data.items || []);
     } catch (err) {
         const el = document.getElementById('admin-scanner-audits');
         if (el) el.innerHTML = '<p class="empty-state">Failed to load audit log.</p>';
     }
+}
+
+function changeScannerAuditPage(direction) {
+    const nextOffset = Math.max(0, _scannerAuditOffset + direction * SCANNER_AUDIT_PAGE_SIZE);
+    loadScannerAudits(nextOffset);
 }
 
 function renderScannerAudits(items) {
@@ -5775,13 +5783,14 @@ function renderScannerAudits(items) {
         return map[type] || 'badge-inactive';
     };
 
-    const rows = items.length ? items.slice(0, 40).map(a => {
+    const rows = items.length ? items.map(a => {
         const ts = a.created_at ? formatDateTime(a.created_at) : '--';
         const payload = a.payload || {};
         const result = payload.result || {};
         const analysis = payload.analysis || result.analysis || {};
         const aiRec = analysis.recommendation || '';
         const aiConf = analysis.confidence ? ((analysis.confidence || 0) * 100).toFixed(0) + '%' : '';
+        const score = Number(a.score);
         const summaryDetail = a.event_type === 'run_summary'
             ? `scanned ${payload.scanned || 0}, candidates ${payload.candidates || 0}, conflicts ${payload.direction_conflicts || 0}, ai ${payload.ai_used || 0}`
             : '';
@@ -5791,13 +5800,22 @@ function renderScannerAudits(items) {
             <td><span class="badge ${eventBadge(a.event_type)}">${escapeHtml(a.event_type)}</span></td>
             <td>${escapeHtml(a.watch_symbol || a.exchange_symbol || '--')}</td>
             <td>${a.direction ? escapeHtml(a.direction) : '--'}</td>
-            <td>${a.score ? a.score.toFixed(1) : '--'}</td>
+            <td>${Number.isFinite(score) ? score.toFixed(1) : '--'}</td>
             <td style="font-size:11px">${detail}</td>
         </tr>`;
     }).join('') : '<tr><td colspan="6" class="empty-state">No scanner audit events yet</td></tr>';
 
+    const page = Math.floor(_scannerAuditOffset / SCANNER_AUDIT_PAGE_SIZE) + 1;
+    const hasPrevious = _scannerAuditOffset > 0;
+    const hasNext = items.length === SCANNER_AUDIT_PAGE_SIZE;
+
     el.innerHTML = `<div class="table-wrapper"><table class="data-table">
         <thead><tr><th>Time</th><th>Event</th><th>Symbol</th><th>Dir</th><th>Score</th><th>Detail</th></tr></thead>
         <tbody>${rows}</tbody>
-    </table></div>`;
+    </table></div>
+    <div class="form-row mt-4" style="justify-content:flex-end;gap:8px">
+        <span class="hint" style="margin-right:auto">Page ${page} · ${items.length} rows</span>
+        <button class="btn btn-secondary btn-sm" onclick="changeScannerAuditPage(-1)" ${hasPrevious ? '' : 'disabled'}><i class="ri-arrow-left-line"></i> Previous</button>
+        <button class="btn btn-secondary btn-sm" onclick="changeScannerAuditPage(1)" ${hasNext ? '' : 'disabled'}>Next <i class="ri-arrow-right-line"></i></button>
+    </div>`;
 }

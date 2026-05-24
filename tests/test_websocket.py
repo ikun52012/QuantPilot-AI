@@ -24,6 +24,7 @@ class TestConnectionManager:
     def test_manager_initialization(self, manager):
         assert manager.active_connections == {}
         assert manager.user_connections == {}
+        assert manager.price_subscriptions == {}
 
     async def test_connect_user(self, manager, mock_websocket):
         await manager.connect(mock_websocket, "user123")
@@ -58,6 +59,23 @@ class TestConnectionManager:
 
         count = manager.get_user_count()
         assert count == 1
+
+    def test_price_subscription_tracking(self, manager, mock_websocket):
+        manager.set_price_subscriptions(mock_websocket, {"BTCUSDT", "ETHUSDT"})
+
+        assert manager.get_price_tickers() == {"BTCUSDT", "ETHUSDT"}
+
+        manager.set_price_subscriptions(mock_websocket, set())
+
+        assert manager.get_price_tickers() == set()
+
+    def test_disconnect_clears_price_subscriptions(self, manager, mock_websocket):
+        asyncio.run(manager.connect(mock_websocket, "prices_user123"))
+        manager.set_price_subscriptions(mock_websocket, {"BTCUSDT"})
+
+        manager.disconnect(mock_websocket)
+
+        assert manager.get_price_tickers() == set()
 
 
 class TestWebSocketPositions:
@@ -136,6 +154,12 @@ class TestWebSocketPositions:
 
 
 class TestWebSocketPrices:
+    def test_normalize_price_tickers(self):
+        from routers.websocket import _normalize_price_tickers
+
+        assert _normalize_price_tickers(["btcusdt", " ETHUSDT ", ""]) == {"BTCUSDT", "ETHUSDT"}
+        assert _normalize_price_tickers("btcusdt,ethusdt") == {"BTCUSDT", "ETHUSDT"}
+
     @patch('market_data.fetch_market_context')
     async def test_price_streaming(self, mock_fetch):
         mock_context = Mock()

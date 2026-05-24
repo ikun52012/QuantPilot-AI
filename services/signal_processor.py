@@ -1410,13 +1410,20 @@ class SignalProcessor:
             user_settings=user_settings,
         )
         if decision.quantity and decision.position_size_multiplier < 1.0:
-            original_qty = decision.quantity
-            decision.quantity = float(round(decision.quantity * decision.position_size_multiplier, 6))
-            logger.info(
-                f"[Signal] Position size adjusted by entry/exit quality: "
-                f"{original_qty} -> {decision.quantity} (multiplier={decision.position_size_multiplier:.2f}, "
-                f"score={decision.exit_quality_score:.1f})"
-            )
+            risk_settings = self._resolved_risk_settings(user_settings)
+            if risk_settings.get("position_sizing_mode") == "fixed":
+                logger.info(
+                    f"[Signal] Fixed sizing active: keeping configured margin despite quality multiplier "
+                    f"{decision.position_size_multiplier:.2f} (score={decision.exit_quality_score:.1f})"
+                )
+            else:
+                original_qty = decision.quantity
+                decision.quantity = float(round(decision.quantity * decision.position_size_multiplier, 6))
+                logger.info(
+                    f"[Signal] Position size adjusted by entry/exit quality: "
+                    f"{original_qty} -> {decision.quantity} (multiplier={decision.position_size_multiplier:.2f}, "
+                    f"score={decision.exit_quality_score:.1f})"
+                )
 
         decision.reason = analysis.reasoning
         return decision
@@ -2385,7 +2392,8 @@ class SignalProcessor:
             margin_value = equity * (max_position / 100.0) * size_fraction
             notional_value = margin_value * leverage
 
-        notional_value = self._cap_notional_by_stop_risk(notional_value, price, decision, risk_settings)
+        if sizing_mode != "fixed":
+            notional_value = self._cap_notional_by_stop_risk(notional_value, price, decision, risk_settings)
 
         # Calculate initial quantity
         if price <= 0:
@@ -2731,10 +2739,10 @@ class SignalProcessor:
             # For contract markets: notional = quantity * price * contractSize
             current_notional = decision.quantity * decision.entry_price * contract_size
             if abs(current_notional - expected_notional) > 1.0:
-                logger.warning(
-                    f"[Signal] Fixed mode: correcting notional from {current_notional:.2f}USDT "
-                    f"to {expected_notional:.2f}USDT (margin={fixed_amount}USDT, leverage={leverage}, "
-                    f"contractSize={contract_size})"
+                logger.debug(
+                    f"[Signal] Fixed mode: normalizing notional from {current_notional:.2f}USDT "
+                    f"to {expected_notional:.2f}USDT before exchange-limit rounding "
+                    f"(margin={fixed_amount}USDT, leverage={leverage}, contractSize={contract_size})"
                 )
                 decision.quantity = round(expected_notional / (decision.entry_price * contract_size), 6)
                 current_notional = decision.quantity * decision.entry_price * contract_size

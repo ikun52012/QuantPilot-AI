@@ -748,6 +748,34 @@ class TestSignalProcessorBuildDecision:
         assert decision.position_size_multiplier == 0.8
         assert "server_fallback_stop_loss" in decision.exit_quality_reasons
 
+    def test_fixed_sizing_keeps_fixed_quantity_when_quality_multiplier_applies(self, processor, sample_signal, sample_market):
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="modify",
+            reasoning="Entry unavailable but thesis valid",
+            suggested_stop_loss=49000,
+            suggested_tp1=51500,
+            tp1_qty_pct=100.0,
+            position_size_pct=1.0,
+            recommended_leverage=10,
+        )
+
+        with patch(
+            "exchange.get_market_limits",
+            return_value={"contract_size": 1.0, "min_amount": 0.0, "max_amount": 100.0, "amount_precision": 6},
+        ):
+            decision = processor._build_trade_decision(
+                sample_signal,
+                analysis,
+                sample_market,
+                None,
+                {"risk": {"position_sizing_mode": "fixed", "fixed_position_size_usdt": 100.0}},
+            )
+
+        assert decision.execute is True
+        assert decision.position_size_multiplier == 0.75
+        assert decision.quantity == pytest.approx(0.02)
+
 
 class TestPositionSizeCalculation:
     """Tests for position size calculation."""
@@ -814,6 +842,19 @@ class TestPositionSizeCalculation:
             qty = processor._calculate_position_size(price=100, size_pct=1.0, leverage=1, decision=decision)
 
             assert qty == 5.0
+
+    def test_fixed_position_size_ignores_stop_loss_risk_cap(self, processor):
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 10000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.risk_per_trade_pct = 1.0
+            mock_settings.risk.position_sizing_mode = "fixed"
+            decision = TradeDecision(direction=SignalDirection.LONG, entry_price=100.0, stop_loss=80.0)
+
+            qty = processor._calculate_position_size(price=100, size_pct=1.0, leverage=10, decision=decision)
+
+            assert qty == 10.0
 
     def test_apply_position_limits_uses_user_account_equity(self, processor):
         with patch("services.signal_processor.settings") as mock_settings:
