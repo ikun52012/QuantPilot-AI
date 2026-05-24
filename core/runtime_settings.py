@@ -163,6 +163,20 @@ def _normalize_scanner_symbol_map(value: Any, default: dict[str, Any] | None = N
     return normalized
 
 
+def _normalize_float_dict(value: Any, default: dict[str, Any] | None = None) -> dict[str, float]:
+    raw = _to_dict(value, default)
+    normalized: dict[str, float] = {}
+    for key, item in raw.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        try:
+            normalized[name] = float(item)
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
 async def _load_encrypted_dict(session: AsyncSession, key: str) -> dict[str, Any]:
     raw = await get_admin_setting(session, key, "")
     if not raw:
@@ -366,6 +380,40 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
             scanner.get("shutdown_timeout_secs"), settings.scanner.shutdown_timeout_secs, 1, 600
         )
         settings.scanner.symbol_map = _normalize_scanner_symbol_map(scanner.get("symbol_map"), settings.scanner.symbol_map)
+        settings.scanner.max_concurrent_fetches = _to_int(
+            scanner.get("max_concurrent_fetches"), settings.scanner.max_concurrent_fetches, 1, 50
+        )
+        settings.scanner.bundle_cache_ttl_secs = _to_int(
+            scanner.get("bundle_cache_ttl_secs"), settings.scanner.bundle_cache_ttl_secs, 0, 3600
+        )
+        settings.scanner.ai_min_confidence = _to_float(
+            scanner.get("ai_min_confidence"), settings.scanner.ai_min_confidence, 0, 1
+        )
+        settings.scanner.rejected_symbol_cooldown_secs = _to_int(
+            scanner.get("rejected_symbol_cooldown_secs"), settings.scanner.rejected_symbol_cooldown_secs, 0, 86400
+        )
+        settings.scanner.blocked_symbol_cooldown_secs = _to_int(
+            scanner.get("blocked_symbol_cooldown_secs"), settings.scanner.blocked_symbol_cooldown_secs, 0, 86400
+        )
+        settings.scanner.mtf_confirmation_bonus = _to_float(
+            scanner.get("mtf_confirmation_bonus"), settings.scanner.mtf_confirmation_bonus, 0, 50
+        )
+        settings.scanner.mtf_conflict_penalty = _to_float(
+            scanner.get("mtf_conflict_penalty"), settings.scanner.mtf_conflict_penalty, 0, 50
+        )
+        settings.scanner.min_volume_ratio = _to_float(
+            scanner.get("min_volume_ratio"), settings.scanner.min_volume_ratio, 0, 100
+        )
+        settings.scanner.max_candle_gap_ratio = _to_float(
+            scanner.get("max_candle_gap_ratio"), settings.scanner.max_candle_gap_ratio, 0, 1
+        )
+        settings.scanner.max_price_deviation_pct = _to_float(
+            scanner.get("max_price_deviation_pct"), settings.scanner.max_price_deviation_pct, 0, 100
+        )
+        settings.scanner.score_weights = _normalize_float_dict(scanner.get("score_weights"), settings.scanner.score_weights)
+        settings.scanner.ema200_enabled = _to_bool(scanner.get("ema200_enabled"), settings.scanner.ema200_enabled)
+        settings.scanner.htf_conflict_enabled = _to_bool(scanner.get("htf_conflict_enabled"), settings.scanner.htf_conflict_enabled)
+        settings.scanner.regime_filter_enabled = _to_bool(scanner.get("regime_filter_enabled"), settings.scanner.regime_filter_enabled)
 
 
 async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dict[str, Any]]:
@@ -759,6 +807,70 @@ async def save_scanner_settings(session: AsyncSession, data: dict[str, Any]) -> 
             600,
         ),
         "symbol_map": _normalize_scanner_symbol_map(pick("symbol_map", settings.scanner.symbol_map), settings.scanner.symbol_map),
+        "max_concurrent_fetches": _to_int(
+            pick("max_concurrent_fetches", settings.scanner.max_concurrent_fetches),
+            settings.scanner.max_concurrent_fetches,
+            1,
+            50,
+        ),
+        "bundle_cache_ttl_secs": _to_int(
+            pick("bundle_cache_ttl_secs", settings.scanner.bundle_cache_ttl_secs),
+            settings.scanner.bundle_cache_ttl_secs,
+            0,
+            3600,
+        ),
+        "ai_min_confidence": _to_float(
+            pick("ai_min_confidence", settings.scanner.ai_min_confidence),
+            settings.scanner.ai_min_confidence,
+            0,
+            1,
+        ),
+        "rejected_symbol_cooldown_secs": _to_int(
+            pick("rejected_symbol_cooldown_secs", settings.scanner.rejected_symbol_cooldown_secs),
+            settings.scanner.rejected_symbol_cooldown_secs,
+            0,
+            86400,
+        ),
+        "blocked_symbol_cooldown_secs": _to_int(
+            pick("blocked_symbol_cooldown_secs", settings.scanner.blocked_symbol_cooldown_secs),
+            settings.scanner.blocked_symbol_cooldown_secs,
+            0,
+            86400,
+        ),
+        "mtf_confirmation_bonus": _to_float(
+            pick("mtf_confirmation_bonus", settings.scanner.mtf_confirmation_bonus),
+            settings.scanner.mtf_confirmation_bonus,
+            0,
+            50,
+        ),
+        "mtf_conflict_penalty": _to_float(
+            pick("mtf_conflict_penalty", settings.scanner.mtf_conflict_penalty),
+            settings.scanner.mtf_conflict_penalty,
+            0,
+            50,
+        ),
+        "min_volume_ratio": _to_float(
+            pick("min_volume_ratio", settings.scanner.min_volume_ratio),
+            settings.scanner.min_volume_ratio,
+            0,
+            100,
+        ),
+        "max_candle_gap_ratio": _to_float(
+            pick("max_candle_gap_ratio", settings.scanner.max_candle_gap_ratio),
+            settings.scanner.max_candle_gap_ratio,
+            0,
+            1,
+        ),
+        "max_price_deviation_pct": _to_float(
+            pick("max_price_deviation_pct", settings.scanner.max_price_deviation_pct),
+            settings.scanner.max_price_deviation_pct,
+            0,
+            100,
+        ),
+        "score_weights": _normalize_float_dict(pick("score_weights", settings.scanner.score_weights), settings.scanner.score_weights),
+        "ema200_enabled": _to_bool(pick("ema200_enabled", settings.scanner.ema200_enabled), settings.scanner.ema200_enabled),
+        "htf_conflict_enabled": _to_bool(pick("htf_conflict_enabled", settings.scanner.htf_conflict_enabled), settings.scanner.htf_conflict_enabled),
+        "regime_filter_enabled": _to_bool(pick("regime_filter_enabled", settings.scanner.regime_filter_enabled), settings.scanner.regime_filter_enabled),
     }
     await _save_encrypted_dict(session, SCANNER_KEY, updated)
     apply_runtime_settings({"scanner": updated})

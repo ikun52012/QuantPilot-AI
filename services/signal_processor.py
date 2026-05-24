@@ -640,7 +640,7 @@ class SignalProcessor:
         scoped_user_settings["_scanner_context"] = {
             "mode": mode,
             "payload": raw_body.get("scanner") or raw_body,
-            "min_confidence": 0.70,
+            "min_confidence": settings.scanner.ai_min_confidence,
         }
 
         reservation = await self._reserve_webhook_event(
@@ -1260,9 +1260,14 @@ class SignalProcessor:
             decision.reason = f"Low confidence: {analysis.confidence:.2f}"
             return decision
 
-        if signal.strategy == "AI_Auto_Scanner" and analysis.confidence < 0.70:
+        scanner_context = (user_settings or {}).get("_scanner_context") or {}
+        scanner_min_confidence = float(scanner_context.get("min_confidence") or settings.scanner.ai_min_confidence)
+        if signal.strategy == "AI_Auto_Scanner" and analysis.confidence < scanner_min_confidence:
             decision.execute = False
-            decision.reason = f"Auto scanner requires confidence >= 0.70; got {analysis.confidence:.2f}"
+            decision.reason = (
+                f"Auto scanner requires confidence >= {scanner_min_confidence:.2f}; "
+                f"got {analysis.confidence:.2f}"
+            )
             return decision
 
         if (

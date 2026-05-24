@@ -26,7 +26,7 @@ from core.utils.common import position_symbol_key
 from core.utils.datetime import utcnow
 from services.signal_processor import SignalProcessor
 from services.synthetic_signal import build_synthetic_signal, market_context_from_bundle
-from services.unified_ohlcv import OHLCVBundle, UnifiedOHLCVProvider
+from services.unified_ohlcv import OHLCVBundle, UnifiedOHLCVProvider, timeframe_to_seconds
 
 
 @dataclass
@@ -49,6 +49,8 @@ class ScannerCandidate:
     indicator_summary: dict[str, Any] = field(default_factory=dict)
     smc_summary: dict[str, Any] = field(default_factory=dict)
     quality: dict[str, Any] = field(default_factory=dict)
+    fused_timeframes: list[str] = field(default_factory=list)
+    fusion_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -117,6 +119,7 @@ class MarketScannerService:
             "last_started_at": None,
             "last_finished_at": None,
             "last_error": "",
+            "last_summary": {},
         }
 
     @property
@@ -196,81 +199,19 @@ class MarketScannerService:
             )
             await session.commit()
 
+        scan_results = await self._scan_watchlist_concurrently(run_id)
         candidates: list[tuple[ScannerCandidate, OHLCVBundle]] = []
         scanned = 0
         data_failures = 0
         filtered = 0
+        for item in scan_results:
+            scanned += int(item.get("scanned") or 0)
+            data_failures += int(item.get("data_failures") or 0)
+            filtered += int(item.get("filtered") or 0)
+            candidates.extend(item.get("candidates") or [])
 
-        for watch_symbol in settings.scanner.watchlist:
-            if self._shutdown_event.is_set():
-                break
-            scanned += 1
-            try:
-                bundle = await self._fetch_bundle_with_retry(watch_symbol)
-            except Exception as exc:
-                data_failures += 1
-                await self._audit(
-                    run_id,
-                    "data_error",
-                    watch_symbol=watch_symbol,
-                    reason=str(exc),
-                )
-                logger.warning(f"[Scanner] Data fetch failed for {watch_symbol}: {exc}")
-                continue
-
-            mapping = bundle.mapping
-            await self._audit(
-                run_id,
-                "scanned",
-                watch_symbol=mapping.watch_symbol,
-                exchange_symbol=mapping.exchange_symbol,
-                reason="quality_ok" if bundle.quality_passed else ";".join(bundle.quality_reasons),
-                payload={"quality": bundle.quality_reasons, "data_source": mapping.data_source},
-            )
-
-            if not bundle.quality_passed:
-                data_failures += 1
-                filtered += 1
-                continue
-
-            symbol_lock = await self._symbol_cooldown(mapping.exchange_symbol)
-            if symbol_lock:
-                filtered += 1
-                await self._audit(
-                    run_id,
-                    "cooldown",
-                    watch_symbol=mapping.watch_symbol,
-                    exchange_symbol=mapping.exchange_symbol,
-                    reason="symbol cooldown active",
-                    payload={"expires_at": getattr(symbol_lock, "expires_at", None)},
-                )
-                continue
-
-            symbol_candidates = self._build_candidates(bundle)
-            if not symbol_candidates:
-                filtered += 1
-                await self._audit(
-                    run_id,
-                    "filtered",
-                    watch_symbol=mapping.watch_symbol,
-                    exchange_symbol=mapping.exchange_symbol,
-                    reason="no candidate reached pre-scan score",
-                )
-                continue
-            for candidate in symbol_candidates:
-                await self._audit(
-                    run_id,
-                    "candidate",
-                    watch_symbol=candidate.watch_symbol,
-                    exchange_symbol=candidate.exchange_symbol,
-                    direction=candidate.direction,
-                    score=candidate.score,
-                    setup_hash=candidate.setup_hash,
-                    reason="candidate accepted by scanner",
-                    payload=candidate.to_payload(),
-                )
-                candidates.append((candidate, bundle))
-
+        candidates, direction_conflicts = await self._resolve_direction_conflicts(run_id, candidates)
+        filtered += direction_conflicts
         candidates.sort(key=lambda item: item[0].score, reverse=True)
         selected = candidates[: max(1, int(settings.scanner.max_candidates_per_run))]
         processed: list[dict[str, Any]] = []
@@ -298,15 +239,112 @@ class MarketScannerService:
             )
             await session.commit()
 
-        return {
+        funnel = self._build_run_funnel(
+            scanned=scanned,
+            data_failures=data_failures,
+            filtered=filtered,
+            direction_conflicts=direction_conflicts,
+            candidates=len(candidates),
+            selected=len(selected),
+            processed=processed,
+        )
+        await self._audit(run_id, "run_summary", reason="scanner run summary", payload=funnel)
+        summary = {
             "status": "ok",
             "run_id": run_id,
             "mode": settings.scanner.mode,
             "scanned": scanned,
             "filtered": filtered,
             "candidates": len(candidates),
+            "selected": len(selected),
             "processed": processed,
+            "funnel": funnel,
         }
+        self._last_status["last_summary"] = summary
+        return summary
+
+    async def _scan_watchlist_concurrently(self, run_id: str) -> list[dict[str, Any]]:
+        semaphore = asyncio.Semaphore(max(1, int(settings.scanner.max_concurrent_fetches)))
+
+        async def worker(watch_symbol: str) -> dict[str, Any]:
+            async with semaphore:
+                if self._shutdown_event.is_set():
+                    return {"scanned": 0, "data_failures": 0, "filtered": 0, "candidates": []}
+                return await self._scan_watch_symbol(run_id, watch_symbol)
+
+        tasks = [asyncio.create_task(worker(symbol)) for symbol in settings.scanner.watchlist]
+        if not tasks:
+            return []
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        normalized: list[dict[str, Any]] = []
+        for symbol, result in zip(settings.scanner.watchlist, results, strict=False):
+            if isinstance(result, Exception):
+                logger.warning(f"[Scanner] Symbol scan failed for {symbol}: {result}")
+                await self._audit(run_id, "data_error", watch_symbol=symbol, reason=str(result))
+                normalized.append({"scanned": 1, "data_failures": 1, "filtered": 0, "candidates": []})
+            else:
+                normalized.append(result)
+        return normalized
+
+    async def _scan_watch_symbol(self, run_id: str, watch_symbol: str) -> dict[str, Any]:
+        try:
+            bundle = await self._fetch_bundle_with_retry(watch_symbol)
+        except Exception as exc:
+            await self._audit(run_id, "data_error", watch_symbol=watch_symbol, reason=str(exc))
+            logger.warning(f"[Scanner] Data fetch failed for {watch_symbol}: {exc}")
+            return {"scanned": 1, "data_failures": 1, "filtered": 0, "candidates": []}
+
+        mapping = bundle.mapping
+        await self._audit(
+            run_id,
+            "scanned",
+            watch_symbol=mapping.watch_symbol,
+            exchange_symbol=mapping.exchange_symbol,
+            reason="quality_ok" if bundle.quality_passed else ";".join(bundle.quality_reasons),
+            payload={"quality": bundle.data_quality, "data_source": mapping.data_source},
+        )
+
+        if not bundle.quality_passed:
+            return {"scanned": 1, "data_failures": 1, "filtered": 1, "candidates": []}
+
+        symbol_lock = await self._symbol_cooldown(mapping.exchange_symbol)
+        if symbol_lock:
+            await self._audit(
+                run_id,
+                "cooldown",
+                watch_symbol=mapping.watch_symbol,
+                exchange_symbol=mapping.exchange_symbol,
+                reason="symbol cooldown active",
+                payload={"expires_at": getattr(symbol_lock, "expires_at", None)},
+            )
+            return {"scanned": 1, "data_failures": 0, "filtered": 1, "candidates": []}
+
+        symbol_candidates = self._build_candidates(bundle)
+        if not symbol_candidates:
+            await self._audit(
+                run_id,
+                "filtered",
+                watch_symbol=mapping.watch_symbol,
+                exchange_symbol=mapping.exchange_symbol,
+                reason="no candidate reached pre-scan score",
+            )
+            return {"scanned": 1, "data_failures": 0, "filtered": 1, "candidates": []}
+
+        accepted: list[tuple[ScannerCandidate, OHLCVBundle]] = []
+        for candidate in symbol_candidates:
+            await self._audit(
+                run_id,
+                "candidate",
+                watch_symbol=candidate.watch_symbol,
+                exchange_symbol=candidate.exchange_symbol,
+                direction=candidate.direction,
+                score=candidate.score,
+                setup_hash=candidate.setup_hash,
+                reason="candidate accepted by scanner",
+                payload=candidate.to_payload(),
+            )
+            accepted.append((candidate, bundle))
+        return {"scanned": 1, "data_failures": 0, "filtered": 0, "candidates": accepted}
 
     def _build_candidates(self, bundle: OHLCVBundle) -> list[ScannerCandidate]:
         primary_tf = bundle.primary_timeframe
@@ -315,20 +353,205 @@ class MarketScannerService:
         if current <= 0:
             return []
 
-        directions = self._candidate_directions(indicators, current)
+        directions: list[str] = []
+        for tf_indicators in bundle.indicators.values():
+            directions.extend(self._candidate_directions(tf_indicators, current))
+        directions = list(dict.fromkeys(directions))
+
+        all_smc: dict[str, dict[str, Any]] = {}
+        for direction in directions:
+            all_smc[direction] = self._analyze_smc(bundle, direction)
+
+        htf_trend: str | None = None
+        if settings.scanner.htf_conflict_enabled:
+            tf_list = sorted(bundle.candles.keys(), key=lambda tf: timeframe_to_seconds(tf))
+            if len(tf_list) >= 2:
+                htf = tf_list[-1]
+                for direction in directions:
+                    htf_ctx = all_smc.get(direction, {}).get(htf)
+                    if htf_ctx:
+                        struct = getattr(htf_ctx, "structure", None)
+                        htf_trend = str(getattr(struct, "trend", "") or "").lower()
+                        break
+
         candidates: list[ScannerCandidate] = []
         for direction in directions:
-            smc_contexts = self._analyze_smc(bundle, direction)
-            for timeframe, ctx in smc_contexts.items():
-                candidate = self._score_smc_candidate(bundle, ctx, timeframe, direction, indicators)
-                if candidate and candidate.score >= float(settings.scanner.min_score):
+            for timeframe, ctx in all_smc[direction].items():
+                tf_indicators = bundle.indicators.get(timeframe) or indicators
+                candidate = self._score_smc_candidate(
+                    bundle, ctx, timeframe, direction, tf_indicators,
+                    htf_trend=htf_trend if timeframe != sorted(bundle.candles.keys(), key=lambda tf: timeframe_to_seconds(tf))[-1] else None,
+                )
+                if candidate:
                     candidates.append(candidate)
 
-        by_key: dict[str, ScannerCandidate] = {}
-        for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
-            key = f"{candidate.watch_symbol}_{candidate.direction}"
-            by_key.setdefault(key, candidate)
-        return list(by_key.values())
+        return self._fuse_timeframe_candidates(candidates, bundle)
+
+    def _fuse_timeframe_candidates(
+        self,
+        candidates: list[ScannerCandidate],
+        bundle: OHLCVBundle,
+    ) -> list[ScannerCandidate]:
+        if not candidates:
+            return []
+
+        by_direction: dict[str, list[ScannerCandidate]] = {}
+        for candidate in candidates:
+            by_direction.setdefault(candidate.direction, []).append(candidate)
+
+        fused: list[ScannerCandidate] = []
+        opposite_best = {
+            direction: max((item.score for item in items), default=0.0)
+            for direction, items in by_direction.items()
+        }
+        for direction, items in by_direction.items():
+            ordered = sorted(items, key=lambda item: item.score, reverse=True)
+            base = ordered[0]
+            timeframes = list(dict.fromkeys(item.timeframe for item in ordered if item.timeframe))
+            confirmations = len(timeframes)
+            avg_score = sum(item.score for item in ordered) / max(1, len(ordered))
+            bonus = max(0.0, confirmations - 1) * float(settings.scanner.mtf_confirmation_bonus)
+            bonus = min(18.0, self._weighted("mtf_confirmation", bonus))
+            opposite_direction = "short" if direction == "long" else "long"
+            conflict_score = opposite_best.get(opposite_direction, 0.0)
+            conflict_penalty = 0.0
+            if conflict_score and conflict_score >= base.score - 8.0:
+                conflict_penalty = self._weighted("conflict_penalty", float(settings.scanner.mtf_conflict_penalty))
+
+            base.score = round(max(0.0, min(100.0, base.score + bonus - conflict_penalty)), 2)
+            if confirmations > 1:
+                base.reasons.append(f"multi-timeframe confirmation: {', '.join(timeframes)}")
+            if conflict_penalty:
+                base.reasons.append(f"opposite timeframe pressure penalized ({conflict_score:.1f})")
+            base.fused_timeframes = timeframes
+            base.fusion_summary = {
+                "enabled": True,
+                "timeframes": timeframes,
+                "confirmations": confirmations,
+                "avg_score": round(avg_score, 2),
+                "bonus": round(bonus, 2),
+                "conflict_penalty": round(conflict_penalty, 2),
+                "opposite_best_score": round(conflict_score, 2),
+                "candidates": [
+                    {
+                        "timeframe": item.timeframe,
+                        "score": item.score,
+                        "setup_type": item.setup_type,
+                        "zone": item.price_zone,
+                    }
+                    for item in ordered
+                ],
+            }
+            base.smc_summary["multi_timeframe"] = base.fusion_summary
+            base.indicator_summary["multi_timeframe"] = {
+                tf: bundle.indicators.get(tf, {}) for tf in timeframes
+            }
+            base.setup_hash = _setup_hash(
+                ticker=base.exchange_symbol,
+                direction=base.direction,
+                timeframe="mtf:" + ",".join(timeframes),
+                setup_type=base.setup_type,
+                price_zone=base.price_zone,
+                reference_price=base.entry_reference,
+            )
+            if base.score >= float(settings.scanner.min_score):
+                fused.append(base)
+
+        if not fused:
+            return []
+        best = max(fused, key=lambda item: item.score)
+        return [best]
+
+    async def _resolve_direction_conflicts(
+        self,
+        run_id: str,
+        candidates: list[tuple[ScannerCandidate, OHLCVBundle]],
+    ) -> tuple[list[tuple[ScannerCandidate, OHLCVBundle]], int]:
+        """Keep only the highest-score candidate per exchange symbol for this scan."""
+        if not candidates:
+            return [], 0
+
+        by_symbol: dict[str, list[tuple[ScannerCandidate, OHLCVBundle]]] = {}
+        for candidate, bundle in candidates:
+            key = candidate.exchange_symbol.upper().strip() or candidate.watch_symbol.upper().strip()
+            by_symbol.setdefault(key, []).append((candidate, bundle))
+
+        kept: list[tuple[ScannerCandidate, OHLCVBundle]] = []
+        dropped_count = 0
+        for symbol, items in by_symbol.items():
+            ordered = sorted(items, key=lambda item: item[0].score, reverse=True)
+            winner, winner_bundle = ordered[0]
+            kept.append((winner, winner_bundle))
+            for loser, _ in ordered[1:]:
+                dropped_count += 1
+                event_type = "direction_conflict" if loser.direction != winner.direction else "symbol_deduped"
+                await self._audit(
+                    run_id,
+                    event_type,
+                    watch_symbol=loser.watch_symbol,
+                    exchange_symbol=loser.exchange_symbol,
+                    direction=loser.direction,
+                    score=loser.score,
+                    setup_hash=loser.setup_hash,
+                    reason=(
+                        f"same scan kept {winner.direction} score {winner.score:.1f}; "
+                        f"dropped {loser.direction} score {loser.score:.1f} for {symbol}"
+                    ),
+                    payload={
+                        "kept": {
+                            "direction": winner.direction,
+                            "score": winner.score,
+                            "setup_hash": winner.setup_hash,
+                            "timeframe": winner.timeframe,
+                            "fused_timeframes": winner.fused_timeframes,
+                        },
+                        "dropped": {
+                            "direction": loser.direction,
+                            "score": loser.score,
+                            "setup_hash": loser.setup_hash,
+                            "timeframe": loser.timeframe,
+                            "fused_timeframes": loser.fused_timeframes,
+                        },
+                    },
+                )
+        return kept, dropped_count
+
+    def _build_run_funnel(
+        self,
+        *,
+        scanned: int,
+        data_failures: int,
+        filtered: int,
+        direction_conflicts: int,
+        candidates: int,
+        selected: int,
+        processed: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        statuses: dict[str, int] = {}
+        ai_used = 0
+        for item in processed:
+            status = str(item.get("status") or "unknown")
+            statuses[status] = statuses.get(status, 0) + 1
+            if item.get("ai_used"):
+                ai_used += 1
+        return {
+            "scanned": scanned,
+            "data_failures": data_failures,
+            "filtered": filtered,
+            "direction_conflicts": direction_conflicts,
+            "candidates": candidates,
+            "selected": selected,
+            "processed": len(processed),
+            "ai_used": ai_used,
+            "statuses": statuses,
+        }
+
+    def _weighted(self, name: str, value: float) -> float:
+        try:
+            factor = float((settings.scanner.score_weights or {}).get(name, 1.0))
+        except (TypeError, ValueError):
+            factor = 1.0
+        return value * factor
 
     async def _fetch_bundle_with_retry(self, watch_symbol: str) -> OHLCVBundle:
         last_error: Exception | None = None
@@ -397,6 +620,7 @@ class MarketScannerService:
         timeframe: str,
         direction: str,
         primary_indicators: dict[str, Any],
+        htf_trend: str | None = None,
     ) -> ScannerCandidate | None:
         mapping = bundle.mapping
         current = float(bundle.current_price or 0.0)
@@ -404,6 +628,16 @@ class MarketScannerService:
         rsi = _safe_float(primary_indicators.get("rsi"), 50.0)
         ema_fast = _safe_float(primary_indicators.get("ema_fast"))
         ema_slow = _safe_float(primary_indicators.get("ema_slow"))
+        ema200 = _safe_float(primary_indicators.get("ema200"))
+        macd_hist = _safe_float(primary_indicators.get("macd_hist"))
+        adx = _safe_float(primary_indicators.get("adx"))
+        volume_ratio_raw = primary_indicators.get("volume_ratio")
+        volume_ratio = _safe_float(volume_ratio_raw)
+        vwap = _safe_float(primary_indicators.get("vwap"))
+        vwap_dist = _safe_float(primary_indicators.get("vwap_distance_pct"))
+        poc = _safe_float(primary_indicators.get("volume_profile_poc"))
+        regime = str(primary_indicators.get("market_regime") or "unknown").lower()
+        oi_change = bundle.oi_change_pct
         atr_price = max(current * max(atr_pct, 0.05) / 100.0, current * 0.001)
 
         support = self._best_support_zone(ctx, direction, current, atr_price)
@@ -418,65 +652,137 @@ class MarketScannerService:
 
         if direction == "long":
             if ema_fast > ema_slow > 0:
-                score += 16
+                score += self._weighted("ema_alignment", 16)
                 reasons.append("EMA bullish alignment")
             if rsi <= float(settings.scanner.rsi_lower):
-                score += 12
+                score += self._weighted("rsi_extreme", 12)
                 reasons.append("RSI oversold")
             if trend == "bullish":
-                score += 18
+                score += self._weighted("smc_trend", 18)
                 reasons.append("SMC trend bullish")
             elif trend == "ranging":
-                score += 8
+                score += self._weighted("smc_ranging", 8)
             if discount and current <= discount:
-                score += 22
+                score += self._weighted("price_zone", 22)
                 price_zone = "discount"
                 reasons.append("price in discount zone")
             elif equilibrium and current <= equilibrium:
-                score += 12
+                score += self._weighted("price_zone", 12)
                 price_zone = "below_equilibrium"
             else:
                 price_zone = "premium_or_neutral"
         else:
             if ema_fast < ema_slow and ema_fast > 0 and ema_slow > 0:
-                score += 16
+                score += self._weighted("ema_alignment", 16)
                 reasons.append("EMA bearish alignment")
             if rsi >= float(settings.scanner.rsi_upper):
-                score += 12
+                score += self._weighted("rsi_extreme", 12)
                 reasons.append("RSI overbought")
             if trend == "bearish":
-                score += 18
+                score += self._weighted("smc_trend", 18)
                 reasons.append("SMC trend bearish")
             elif trend == "ranging":
-                score += 8
+                score += self._weighted("smc_ranging", 8)
             if premium and current >= premium:
-                score += 22
+                score += self._weighted("price_zone", 22)
                 price_zone = "premium"
                 reasons.append("price in premium zone")
             elif equilibrium and current >= equilibrium:
-                score += 12
+                score += self._weighted("price_zone", 12)
                 price_zone = "above_equilibrium"
             else:
                 price_zone = "discount_or_neutral"
 
         if atr_pct >= float(settings.scanner.min_atr_pct):
-            score += 12
+            score += self._weighted("atr", 12)
             reasons.append("ATR volatility acceptable")
         if bundle.bid_ask_spread_pct <= float(settings.scanner.max_spread_pct):
-            score += 6
+            score += self._weighted("spread", 6)
+        if (direction == "long" and macd_hist > 0) or (direction == "short" and macd_hist < 0):
+            score += self._weighted("macd_confirmation", 6)
+            reasons.append("MACD confirms direction")
+        elif macd_hist:
+            score -= abs(self._weighted("macd_confirmation", 4))
+        if adx >= 18:
+            score += self._weighted("adx_confirmation", 4)
+            reasons.append("ADX trend strength acceptable")
+        if volume_ratio_raw is not None and volume_ratio >= 1.0:
+            score += self._weighted("volume_confirmation", 4)
+            reasons.append("volume confirms participation")
+        elif volume_ratio_raw is not None and volume_ratio < float(settings.scanner.min_volume_ratio):
+            score -= abs(self._weighted("volume_confirmation", 6))
         if support:
-            score += 24
+            score += self._weighted("support_zone", 24)
             reasons.append(f"near {support['type']} support zone")
         else:
             score -= 10
 
         risk_score = _safe_float(getattr(ctx, "risk_score", 0.5), 0.5)
         timing_score = _safe_float(getattr(ctx, "entry_timing_score", 0.5), 0.5)
-        score += max(0.0, (1.0 - risk_score) * 8.0)
-        score += max(0.0, timing_score * 8.0)
+        score += self._weighted("risk", max(0.0, (1.0 - risk_score) * 8.0))
+        score += self._weighted("timing", max(0.0, timing_score * 8.0))
+
+        if settings.scanner.ema200_enabled and ema200 > 0:
+            if direction == "long" and current > ema200:
+                score += self._weighted("ema200_alignment", 10)
+                reasons.append("EMA200 bullish alignment")
+            elif direction == "short" and current < ema200:
+                score += self._weighted("ema200_alignment", 10)
+                reasons.append("EMA200 bearish alignment")
+            else:
+                penalty = self._weighted("ema200_conflict", 15)
+                score -= penalty
+                reasons.append(f"EMA200 conflict penalized ({-penalty:.0f})")
+
+        if htf_trend and settings.scanner.htf_conflict_enabled:
+            htf_bullish = htf_trend == "bullish"
+            htf_bearish = htf_trend == "bearish"
+            conflicting = (direction == "long" and htf_bearish) or (direction == "short" and htf_bullish)
+            if conflicting:
+                penalty = self._weighted("htf_conflict", 20)
+                score -= penalty
+                reasons.append(f"HTF structure conflict ({htf_trend}) penalized ({-penalty:.0f})")
+
+        if vwap > 0:
+            if direction == "long" and current > vwap:
+                score += self._weighted("vwap", 6)
+                reasons.append("price above VWAP")
+            elif direction == "short" and current < vwap:
+                score += self._weighted("vwap", 6)
+                reasons.append("price below VWAP")
+            elif vwap_dist is not None:
+                score -= abs(self._weighted("vwap", 4))
+
+        if poc > 0:
+            if (direction == "long" and current > poc) or (direction == "short" and current < poc):
+                score += self._weighted("poc", 5)
+                reasons.append("price favorable to POC")
+
+        if oi_change is not None:
+            oi_bullish = oi_change > 3.0
+            oi_bearish = oi_change < -3.0
+            if direction == "long" and oi_bullish:
+                score += self._weighted("oi_confirmation", 6)
+                reasons.append(f"OI rising {oi_change:+.1f}% confirms long")
+            elif direction == "short" and oi_bearish:
+                score += self._weighted("oi_confirmation", 6)
+                reasons.append(f"OI falling {oi_change:+.1f}% confirms short")
+            elif direction == "long" and oi_bearish:
+                score -= self._weighted("oi_divergence", 5)
+                reasons.append(f"OI divergence: OI {oi_change:+.1f}% vs long signal")
+
+        if settings.scanner.regime_filter_enabled:
+            if regime == "trending":
+                score += self._weighted("regime_trending", 4)
+                reasons.append("trending market regime")
+            elif regime == "ranging":
+                score -= self._weighted("regime_ranging", 6)
+                reasons.append("ranging market regime penalized")
+
         score = max(0.0, min(100.0, score))
 
-        if score < float(settings.scanner.min_score):
+        fusion_floor = max(0.0, float(settings.scanner.min_score) - max(12.0, float(settings.scanner.mtf_confirmation_bonus) * 2.0))
+        if score < fusion_floor:
             return None
 
         support_mid = _safe_float((support or {}).get("midpoint"), current)
@@ -527,7 +833,17 @@ class MarketScannerService:
                 "atr_pct": atr_pct,
                 "ema_fast": ema_fast,
                 "ema_slow": ema_slow,
+                "ema200": ema200,
+                "macd_hist": macd_hist,
+                "adx": adx,
+                "volume_ratio": volume_ratio,
                 "spread_pct": bundle.bid_ask_spread_pct,
+                "vwap": vwap,
+                "vwap_distance_pct": vwap_dist,
+                "poc": poc,
+                "regime": regime,
+                "oi_change_pct": oi_change,
+                "htf_trend": htf_trend or "",
             },
             smc_summary=smc_summary,
             quality={"reasons": bundle.quality_reasons, "passed": bundle.quality_passed},
@@ -743,7 +1059,6 @@ class MarketScannerService:
                 await session.commit()
                 return {"status": "skipped", "reason": "setup cooldown active", "setup_hash": candidate.setup_hash}
 
-            await update_scanner_state_counts(session, self.scope, ai_call_delta=1, signal_delta=1)
             await record_scanner_audit(
                 session,
                 scope=self.scope,
@@ -754,7 +1069,7 @@ class MarketScannerService:
                 direction=candidate.direction,
                 score=candidate.score,
                 setup_hash=candidate.setup_hash,
-                reason="synthetic signal dispatched",
+                reason="synthetic signal dispatched to processor",
                 payload=candidate.to_payload(),
             )
             await session.commit()
@@ -769,13 +1084,19 @@ class MarketScannerService:
                 market=market,
             )
 
-            await set_scanner_symbol_cooldown(
-                session,
-                scope=self.scope,
-                watch_symbol=candidate.watch_symbol,
-                exchange_symbol=candidate.exchange_symbol,
-                ttl_seconds=settings.scanner.symbol_cooldown_secs,
-            )
+            ai_used = isinstance(result.get("analysis"), dict)
+            if ai_used:
+                await update_scanner_state_counts(session, self.scope, ai_call_delta=1, signal_delta=1)
+
+            cooldown_ttl = self._symbol_cooldown_ttl_for_result(result)
+            if cooldown_ttl > 0:
+                await set_scanner_symbol_cooldown(
+                    session,
+                    scope=self.scope,
+                    watch_symbol=candidate.watch_symbol,
+                    exchange_symbol=candidate.exchange_symbol,
+                    ttl_seconds=cooldown_ttl,
+                )
             await record_scanner_audit(
                 session,
                 scope=self.scope,
@@ -787,7 +1108,7 @@ class MarketScannerService:
                 score=candidate.score,
                 setup_hash=candidate.setup_hash,
                 reason=str(result.get("reason", "")),
-                payload={"result": result},
+                payload={"result": result, "ai_used": ai_used, "cooldown_ttl_secs": cooldown_ttl},
             )
             await session.commit()
             return {
@@ -797,7 +1118,22 @@ class MarketScannerService:
                 "direction": candidate.direction,
                 "score": candidate.score,
                 "setup_hash": candidate.setup_hash,
+                "ai_used": ai_used,
+                "cooldown_ttl_secs": cooldown_ttl,
             }
+
+    def _symbol_cooldown_ttl_for_result(self, result: dict[str, Any]) -> int:
+        status = str(result.get("status") or "").lower().strip()
+        reason = str(result.get("reason") or "").lower()
+        analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+        recommendation = str(analysis.get("recommendation") or "").lower().strip()
+        if status in {"duplicate", "blocked", "error"}:
+            return max(0, int(settings.scanner.blocked_symbol_cooldown_secs))
+        if status == "rejected" or recommendation in {"reject", "hold"} or "rejected" in reason:
+            return max(0, int(settings.scanner.rejected_symbol_cooldown_secs))
+        if status == "observed" and not bool(result.get("would_execute")):
+            return max(0, int(settings.scanner.rejected_symbol_cooldown_secs))
+        return max(0, int(settings.scanner.symbol_cooldown_secs))
 
     async def _validate_live_market(self, candidate: ScannerCandidate) -> tuple[bool, str, dict[str, Any]]:
         """Fail closed before AI calls if a live scanner symbol is not tradable."""

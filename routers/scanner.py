@@ -36,6 +36,20 @@ class ScannerSettingsUpdate(BaseModel):
     live_symbol_whitelist: list[str] | str | None = None
     shutdown_timeout_secs: int | None = Field(default=None, ge=1)
     symbol_map: dict[str, Any] | str | None = None
+    max_concurrent_fetches: int | None = Field(default=None, ge=1, le=50)
+    bundle_cache_ttl_secs: int | None = Field(default=None, ge=0, le=3600)
+    ai_min_confidence: float | None = Field(default=None, ge=0, le=1)
+    rejected_symbol_cooldown_secs: int | None = Field(default=None, ge=0)
+    blocked_symbol_cooldown_secs: int | None = Field(default=None, ge=0)
+    mtf_confirmation_bonus: float | None = Field(default=None, ge=0, le=50)
+    mtf_conflict_penalty: float | None = Field(default=None, ge=0, le=50)
+    min_volume_ratio: float | None = Field(default=None, ge=0)
+    max_candle_gap_ratio: float | None = Field(default=None, ge=0, le=1)
+    max_price_deviation_pct: float | None = Field(default=None, ge=0)
+    score_weights: dict[str, Any] | str | None = None
+    ema200_enabled: bool | None = None
+    htf_conflict_enabled: bool | None = None
+    regime_filter_enabled: bool | None = None
 
 
 def _state_payload(state: Any) -> dict[str, Any]:
@@ -94,6 +108,7 @@ async def scanner_status(
         "max_candidates_per_run": settings.scanner.max_candidates_per_run,
         "live_symbol_whitelist": settings.scanner.live_symbol_whitelist,
         "symbol_map": settings.scanner.symbol_map,
+        "shutdown_timeout_secs": settings.scanner.shutdown_timeout_secs,
         "daily_limits": {
             "max_signals_per_day": settings.scanner.max_signals_per_day,
             "max_ai_calls_per_day": settings.scanner.max_ai_calls_per_day,
@@ -101,13 +116,30 @@ async def scanner_status(
         "cooldowns": {
             "symbol_cooldown_secs": settings.scanner.symbol_cooldown_secs,
             "setup_cooldown_secs": settings.scanner.setup_cooldown_secs,
+            "rejected_symbol_cooldown_secs": settings.scanner.rejected_symbol_cooldown_secs,
+            "blocked_symbol_cooldown_secs": settings.scanner.blocked_symbol_cooldown_secs,
         },
         "thresholds": {
             "rsi_lower": settings.scanner.rsi_lower,
             "rsi_upper": settings.scanner.rsi_upper,
             "min_atr_pct": settings.scanner.min_atr_pct,
             "max_spread_pct": settings.scanner.max_spread_pct,
-            "ai_min_confidence": 0.70,
+            "ai_min_confidence": settings.scanner.ai_min_confidence,
+            "min_volume_ratio": settings.scanner.min_volume_ratio,
+            "max_candle_gap_ratio": settings.scanner.max_candle_gap_ratio,
+            "max_price_deviation_pct": settings.scanner.max_price_deviation_pct,
+        },
+        "performance": {
+            "max_concurrent_fetches": settings.scanner.max_concurrent_fetches,
+            "bundle_cache_ttl_secs": settings.scanner.bundle_cache_ttl_secs,
+        },
+        "scoring": {
+            "mtf_confirmation_bonus": settings.scanner.mtf_confirmation_bonus,
+            "mtf_conflict_penalty": settings.scanner.mtf_conflict_penalty,
+            "score_weights": settings.scanner.score_weights,
+            "ema200_enabled": settings.scanner.ema200_enabled,
+            "htf_conflict_enabled": settings.scanner.htf_conflict_enabled,
+            "regime_filter_enabled": settings.scanner.regime_filter_enabled,
         },
         "state": _state_payload(state),
         "runtime": service.last_status,

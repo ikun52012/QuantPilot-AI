@@ -485,6 +485,21 @@ class ScannerConfig(BaseModel):
     live_symbol_whitelist: list[str] = Field(default_factory=list)
     shutdown_timeout_secs: int = 30
     symbol_map: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    max_concurrent_fetches: int = 4
+    bundle_cache_ttl_secs: int = 45
+    ai_min_confidence: float = 0.70
+    rejected_symbol_cooldown_secs: int = 300
+    blocked_symbol_cooldown_secs: int = 0
+    mtf_confirmation_bonus: float = 6.0
+    mtf_conflict_penalty: float = 10.0
+    min_volume_ratio: float = 0.15
+    max_candle_gap_ratio: float = 0.15
+    max_price_deviation_pct: float = 2.0
+    score_weights: dict[str, float] = Field(default_factory=dict)
+    ema200_enabled: bool = True
+    htf_conflict_enabled: bool = True
+    regime_filter_enabled: bool = True
+
 
     @field_validator("mode")
     @classmethod
@@ -536,7 +551,22 @@ class ScannerConfig(BaseModel):
             live_symbol_whitelist=_json_env("SCANNER_LIVE_SYMBOL_WHITELIST", []),
             shutdown_timeout_secs=max(1, int(os.getenv("SCANNER_SHUTDOWN_TIMEOUT_SECS", "30"))),
             symbol_map=_json_env("SCANNER_SYMBOL_MAP", {}),
+            max_concurrent_fetches=max(1, int(os.getenv("SCANNER_MAX_CONCURRENT_FETCHES", "4"))),
+            bundle_cache_ttl_secs=max(0, int(os.getenv("SCANNER_BUNDLE_CACHE_TTL_SECS", "45"))),
+            ai_min_confidence=max(0.0, min(1.0, float(os.getenv("SCANNER_AI_MIN_CONFIDENCE", "0.70")))),
+            rejected_symbol_cooldown_secs=max(0, int(os.getenv("SCANNER_REJECTED_SYMBOL_COOLDOWN_SECS", "300"))),
+            blocked_symbol_cooldown_secs=max(0, int(os.getenv("SCANNER_BLOCKED_SYMBOL_COOLDOWN_SECS", "0"))),
+            mtf_confirmation_bonus=max(0.0, float(os.getenv("SCANNER_MTF_CONFIRMATION_BONUS", "6"))),
+            mtf_conflict_penalty=max(0.0, float(os.getenv("SCANNER_MTF_CONFLICT_PENALTY", "10"))),
+            min_volume_ratio=max(0.0, float(os.getenv("SCANNER_MIN_VOLUME_RATIO", "0.15"))),
+            max_candle_gap_ratio=max(0.0, min(1.0, float(os.getenv("SCANNER_MAX_CANDLE_GAP_RATIO", "0.15")))),
+            max_price_deviation_pct=max(0.0, float(os.getenv("SCANNER_MAX_PRICE_DEVIATION_PCT", "2"))),
+            score_weights=_json_env("SCANNER_SCORE_WEIGHTS", {}),
+            ema200_enabled=os.getenv("SCANNER_EMA200_ENABLED", "true").lower() == "true",
+            htf_conflict_enabled=os.getenv("SCANNER_HTF_CONFLICT_ENABLED", "true").lower() == "true",
+            regime_filter_enabled=os.getenv("SCANNER_REGIME_FILTER_ENABLED", "true").lower() == "true",
         )
+
 
 
 class Settings(BaseModel):

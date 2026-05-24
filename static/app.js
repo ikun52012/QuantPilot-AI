@@ -5196,11 +5196,23 @@ function renderScannerStatus(status) {
     const maxAiCalls = (status.daily_limits || {}).max_ai_calls_per_day ?? 30;
     const symCd = (status.cooldowns || {}).symbol_cooldown_secs ?? 1800;
     const setupCd = (status.cooldowns || {}).setup_cooldown_secs ?? 14400;
+    const rejectedCd = (status.cooldowns || {}).rejected_symbol_cooldown_secs ?? 300;
+    const blockedCd = (status.cooldowns || {}).blocked_symbol_cooldown_secs ?? 0;
     const rsiLower = (status.thresholds || {}).rsi_lower ?? 35;
     const rsiUpper = (status.thresholds || {}).rsi_upper ?? 65;
     const minAtr = (status.thresholds || {}).min_atr_pct ?? 0.10;
     const maxSpread = (status.thresholds || {}).max_spread_pct ?? 0.35;
     const aiMinConf = (status.thresholds || {}).ai_min_confidence ?? 0.70;
+    const minVolumeRatio = (status.thresholds || {}).min_volume_ratio ?? 0.15;
+    const maxGapRatio = (status.thresholds || {}).max_candle_gap_ratio ?? 0.15;
+    const maxPriceDev = (status.thresholds || {}).max_price_deviation_pct ?? 2.0;
+    const maxConcurrent = (status.performance || {}).max_concurrent_fetches ?? 4;
+    const cacheTtl = (status.performance || {}).bundle_cache_ttl_secs ?? 45;
+    const mtfBonus = (status.scoring || {}).mtf_confirmation_bonus ?? 6;
+    const mtfPenalty = (status.scoring || {}).mtf_conflict_penalty ?? 10;
+    const ema200Enabled = (status.scoring || {}).ema200_enabled ?? true;
+    const htfConflictEnabled = (status.scoring || {}).htf_conflict_enabled ?? true;
+    const regimeFilterEnabled = (status.scoring || {}).regime_filter_enabled ?? true;
     const shutdownTimeout = status.shutdown_timeout_secs ?? 30;
 
     const st = status.state || {};
@@ -5210,6 +5222,7 @@ function renderScannerStatus(status) {
     const degradedMode = st.degraded_mode || '';
     const lastScan = st.last_scan_at || '--';
     const rt = status.runtime || {};
+    const lastFunnel = ((rt.last_summary || {}).funnel) || {};
 
     const modeOptions = ['observe', 'paper', 'live'].map(m => `<option value="${m}" ${m === mode ? 'selected' : ''}>${m.charAt(0).toUpperCase() + m.slice(1)}</option>`).join('');
 
@@ -5229,6 +5242,7 @@ function renderScannerStatus(status) {
                     <div class="metric-item"><span class="metric-label">Last Scan</span><span class="metric-value">${escapeHtml(lastScan ? formatDateTime(lastScan) : '--')}</span></div>
                     ${degradedMode ? `<div class="metric-item"><span class="metric-label">Degraded</span><span class="metric-value badge badge-warning">${escapeHtml(degradedMode)}</span></div>` : ''}
                     <div class="metric-item"><span class="metric-label">Running</span><span class="metric-value">${rt.running ? 'Yes' : 'No'}</span></div>
+                    <div class="metric-item"><span class="metric-label">Last Funnel</span><span class="metric-value">${lastFunnel.scanned ?? 0}/${lastFunnel.candidates ?? 0}/${lastFunnel.ai_used ?? 0}</span></div>
                 </div>
             </div>
 
@@ -5309,6 +5323,24 @@ function renderScannerStatus(status) {
 
             <div class="form-row three-col">
                 <div class="form-group">
+                    <label for="scanner-rejected-cd">Rejected Cooldown (sec)</label>
+                    <input type="number" id="scanner-rejected-cd" class="text-input" value="${rejectedCd}" min="0" step="60">
+                    <p class="hint">Short cooldown after AI rejection</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-blocked-cd">Blocked Cooldown (sec)</label>
+                    <input type="number" id="scanner-blocked-cd" class="text-input" value="${blockedCd}" min="0" step="60">
+                    <p class="hint">Cooldown after prefilter/duplicate/error</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-ai-conf">AI Min Confidence</label>
+                    <input type="number" id="scanner-ai-conf" class="text-input" value="${aiMinConf}" min="0" max="1" step="0.01">
+                    <p class="hint">Scanner-specific AI execution gate</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
                     <label for="scanner-setup-cd">Setup Cooldown (sec)</label>
                     <input type="number" id="scanner-setup-cd" class="text-input" value="${setupCd}" min="60" step="60">
                     <p class="hint">Same setup hash cooldown (dedup window)</p>
@@ -5324,6 +5356,72 @@ function renderScannerStatus(status) {
                     <p class="hint">Daily AI budget cap for scanner</p>
                 </div>
             </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-max-concurrent">Max Concurrent Fetches</label>
+                    <input type="number" id="scanner-max-concurrent" class="text-input" value="${maxConcurrent}" min="1" max="50" step="1">
+                    <p class="hint">Parallel symbols per scan</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-cache-ttl">Bundle Cache TTL (sec)</label>
+                    <input type="number" id="scanner-cache-ttl" class="text-input" value="${cacheTtl}" min="0" step="5">
+                    <p class="hint">Reuse recent OHLCV bundles</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-min-volume-ratio">Min Volume Ratio</label>
+                    <input type="number" id="scanner-min-volume-ratio" class="text-input" value="${minVolumeRatio}" min="0" step="0.01">
+                    <p class="hint">Current volume vs recent average</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-max-gap-ratio">Max Candle Gap Ratio</label>
+                    <input type="number" id="scanner-max-gap-ratio" class="text-input" value="${maxGapRatio}" min="0" max="1" step="0.01">
+                    <p class="hint">Reject broken OHLCV series</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-max-price-dev">Max Price Deviation%</label>
+                    <input type="number" id="scanner-max-price-dev" class="text-input" value="${maxPriceDev}" min="0" step="0.1">
+                    <p class="hint">OHLCV vs ticker price deviation</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-mtf-bonus">MTF Bonus / Penalty</label>
+                    <div style="display:flex;gap:8px">
+                        <input type="number" id="scanner-mtf-bonus" class="text-input" value="${mtfBonus}" min="0" max="50" step="1" title="confirmation bonus">
+                        <input type="number" id="scanner-mtf-penalty" class="text-input" value="${mtfPenalty}" min="0" max="50" step="1" title="conflict penalty">
+                    </div>
+                    <p class="hint">Multi-timeframe confirmation tuning</p>
+                </div>
+            </div>
++
++            <div class="form-row three-col">
++                <div class="form-group">
++                    <label for="scanner-ema200-enabled">EMA200 Filter</label>
++                    <select id="scanner-ema200-enabled" class="text-input">
++                        <option value="true" ${ema200Enabled ? 'selected' : ''}>Enabled</option>
++                        <option value="false" ${!ema200Enabled ? 'selected' : ''}>Disabled</option>
++                    </select>
++                    <p class="hint">Penalize counter-EMA200 signals</p>
++                </div>
++                <div class="form-group">
++                    <label for="scanner-htf-conflict">HTF Conflict Check</label>
++                    <select id="scanner-htf-conflict" class="text-input">
++                        <option value="true" ${htfConflictEnabled ? 'selected' : ''}>Enabled</option>
++                        <option value="false" ${!htfConflictEnabled ? 'selected' : ''}>Disabled</option>
++                    </select>
++                    <p class="hint">Penalize LTF signals vs HTF structure</p>
++                </div>
++                <div class="form-group">
++                    <label for="scanner-regime-filter">Regime Filter</label>
++                    <select id="scanner-regime-filter" class="text-input">
++                        <option value="true" ${regimeFilterEnabled ? 'selected' : ''}>Enabled</option>
++                        <option value="false" ${!regimeFilterEnabled ? 'selected' : ''}>Disabled</option>
++                    </select>
++                    <p class="hint">Penalize signals in ranging markets</p>
++                </div>
++            </div>
 
             <div class="form-row three-col">
                 <div class="form-group">
@@ -5353,7 +5451,8 @@ function renderScannerStatus(status) {
             <div style="margin-top:16px;padding:12px;background:rgba(217,119,6,0.08);border:1px solid rgba(217,119,6,0.2);border-radius:8px">
                 <p style="font-size:12px;color:var(--text-secondary);margin:0">
                     <i class="ri-information-line" style="color:#fbbf24"></i>
-                    <strong>AI Confidence Gate:</strong> Scanner signals require confidence &ge; ${(aiMinConf * 100).toFixed(0)}% (vs 60% for manual). Observe mode never creates orders.
+                    <strong>AI Confidence Gate:</strong> Scanner signals require confidence &ge; ${(aiMinConf * 100).toFixed(0)}% (vs 60% for manual). Observe mode never creates orders.<br>
+                    <strong>Filters:</strong> EMA200 ${ema200Enabled ? 'enabled' : 'disabled'} | HTF Conflict ${htfConflictEnabled ? 'enabled' : 'disabled'} | Regime ${regimeFilterEnabled ? 'enabled' : 'disabled'}
                 </p>
             </div>
         </div>`;
@@ -5361,24 +5460,44 @@ function renderScannerStatus(status) {
     loadScannerAudits();
 }
 
+function scannerNumberValue(id, fallback, integer = false) {
+    const el = document.getElementById(id);
+    const raw = el ? el.value : '';
+    const parsed = integer ? parseInt(raw, 10) : parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 async function saveScannerSettings() {
     const data = {
         enabled: document.getElementById('scanner-enabled').value === 'true',
         mode: document.getElementById('scanner-mode').value,
-        interval_secs: parseInt(document.getElementById('scanner-interval').value) || 600,
+        interval_secs: scannerNumberValue('scanner-interval', 600, true),
         watchlist: document.getElementById('scanner-watchlist').value.split(',').map(s => s.trim()).filter(Boolean),
         timeframes: document.getElementById('scanner-timeframes').value.split(',').map(s => s.trim()).filter(Boolean),
-        min_score: parseFloat(document.getElementById('scanner-min-score').value) || 65,
-        max_candidates_per_run: parseInt(document.getElementById('scanner-max-candidates').value) || 3,
-        rsi_lower: parseFloat(document.getElementById('scanner-rsi-lower').value) || 35,
-        rsi_upper: parseFloat(document.getElementById('scanner-rsi-upper').value) || 65,
-        min_atr_pct: parseFloat(document.getElementById('scanner-min-atr').value) || 0.10,
-        max_spread_pct: parseFloat(document.getElementById('scanner-max-spread').value) || 0.35,
-        symbol_cooldown_secs: parseInt(document.getElementById('scanner-sym-cd').value) || 1800,
-        setup_cooldown_secs: parseInt(document.getElementById('scanner-setup-cd').value) || 14400,
-        max_signals_per_day: parseInt(document.getElementById('scanner-max-signals').value) || 15,
-        max_ai_calls_per_day: parseInt(document.getElementById('scanner-max-ai').value) || 30,
-        shutdown_timeout_secs: parseInt(document.getElementById('scanner-shutdown-timeout').value) || 30,
+        min_score: scannerNumberValue('scanner-min-score', 65),
+        max_candidates_per_run: scannerNumberValue('scanner-max-candidates', 3, true),
+        rsi_lower: scannerNumberValue('scanner-rsi-lower', 35),
+        rsi_upper: scannerNumberValue('scanner-rsi-upper', 65),
+        min_atr_pct: scannerNumberValue('scanner-min-atr', 0.10),
+        max_spread_pct: scannerNumberValue('scanner-max-spread', 0.35),
+        symbol_cooldown_secs: scannerNumberValue('scanner-sym-cd', 1800, true),
+        rejected_symbol_cooldown_secs: scannerNumberValue('scanner-rejected-cd', 300, true),
+        blocked_symbol_cooldown_secs: scannerNumberValue('scanner-blocked-cd', 0, true),
+        ai_min_confidence: scannerNumberValue('scanner-ai-conf', 0.70),
+        setup_cooldown_secs: scannerNumberValue('scanner-setup-cd', 14400, true),
+        max_signals_per_day: scannerNumberValue('scanner-max-signals', 15, true),
+        max_ai_calls_per_day: scannerNumberValue('scanner-max-ai', 30, true),
+        max_concurrent_fetches: scannerNumberValue('scanner-max-concurrent', 4, true),
+        bundle_cache_ttl_secs: scannerNumberValue('scanner-cache-ttl', 45, true),
+        min_volume_ratio: scannerNumberValue('scanner-min-volume-ratio', 0.15),
+        max_candle_gap_ratio: scannerNumberValue('scanner-max-gap-ratio', 0.15),
+        max_price_deviation_pct: scannerNumberValue('scanner-max-price-dev', 2.0),
+        mtf_confirmation_bonus: scannerNumberValue('scanner-mtf-bonus', 6),
+        mtf_conflict_penalty: scannerNumberValue('scanner-mtf-penalty', 10),
+        ema200_enabled: document.getElementById('scanner-ema200-enabled').value === 'true',
+        htf_conflict_enabled: document.getElementById('scanner-htf-conflict').value === 'true',
+        regime_filter_enabled: document.getElementById('scanner-regime-filter').value === 'true',
+        shutdown_timeout_secs: scannerNumberValue('scanner-shutdown-timeout', 30, true),
         live_symbol_whitelist: document.getElementById('scanner-live-wl').value.split(',').map(s => s.trim()).filter(Boolean),
     };
     await saveSettings('/api/scanner/settings', data, 'btn-scanner-save');
@@ -5392,7 +5511,8 @@ async function runScannerOnce() {
     btn.innerHTML = '<i class="ri-loader-4-line"></i> Running...';
     try {
         const result = await fetchAPI('/api/scanner/run-once', { method: 'POST' });
-        showToast(`Scan completed: ${result.status} \u2014 scanned ${result.scanned || 0}, candidates ${result.candidates || 0}`, 'success', 'Scanner');
+        const funnel = result.funnel || {};
+        showToast(`Scan completed: ${result.status} \u2014 scanned ${result.scanned || 0}, candidates ${result.candidates || 0}, AI ${funnel.ai_used || 0}`, 'success', 'Scanner');
         loadScanner();
     } catch (err) {
         showToast(err.message, 'error', 'Scan Failed');
@@ -5433,6 +5553,8 @@ function renderScannerAudits(items) {
             'deduped': 'badge-warning', 'sent_to_ai': 'badge-long',
             'daily_limit': 'badge-warning', 'ai_budget_exhausted': 'badge-error',
             'result': 'badge-success', 'error': 'badge-error',
+            'run_summary': 'badge-active',
+            'direction_conflict': 'badge-warning', 'symbol_deduped': 'badge-warning',
             'position_conflict': 'badge-warning',
         };
         return map[type] || 'badge-inactive';
@@ -5441,9 +5563,14 @@ function renderScannerAudits(items) {
     const rows = items.length ? items.slice(0, 40).map(a => {
         const ts = a.created_at ? formatDateTime(a.created_at) : '--';
         const payload = a.payload || {};
-        const aiRec = payload.analysis ? (payload.analysis.recommendation || '') : '';
-        const aiConf = payload.analysis ? ((payload.analysis.confidence || 0) * 100).toFixed(0) + '%' : '';
-        const detail = aiRec ? `<span class="badge badge-${aiRec === 'execute' ? 'success' : aiRec === 'reject' ? 'error' : 'pending'}">${escapeHtml(aiRec)}</span> ${aiConf}` : escapeHtml(a.reason || '').substring(0, 80);
+        const result = payload.result || {};
+        const analysis = payload.analysis || result.analysis || {};
+        const aiRec = analysis.recommendation || '';
+        const aiConf = analysis.confidence ? ((analysis.confidence || 0) * 100).toFixed(0) + '%' : '';
+        const summaryDetail = a.event_type === 'run_summary'
+            ? `scanned ${payload.scanned || 0}, candidates ${payload.candidates || 0}, conflicts ${payload.direction_conflicts || 0}, ai ${payload.ai_used || 0}`
+            : '';
+        const detail = summaryDetail || (aiRec ? `<span class="badge badge-${aiRec === 'execute' ? 'success' : aiRec === 'reject' ? 'error' : 'pending'}">${escapeHtml(aiRec)}</span> ${aiConf}` : escapeHtml(a.reason || '').substring(0, 80));
         return `<tr>
             <td style="font-size:11px;white-space:nowrap">${ts}</td>
             <td><span class="badge ${eventBadge(a.event_type)}">${escapeHtml(a.event_type)}</span></td>

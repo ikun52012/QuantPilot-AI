@@ -30,6 +30,16 @@ def _compact_json(payload: dict[str, Any], max_len: int = 1800) -> str:
         for key, value in (payload.get("smc") or {}).items()
         if key in {"timeframe", "trend", "zone", "support_type", "support_midpoint"}
     }
+    payload["indicators"] = {
+        key: value
+        for key, value in (payload.get("indicators") or {}).items()
+        if key in {"rsi", "atr_pct", "ema_fast", "ema_slow", "macd_hist", "adx", "volume_ratio", "spread_pct"}
+    }
+    payload["fusion"] = {
+        key: value
+        for key, value in (payload.get("fusion") or {}).items()
+        if key in {"enabled", "timeframes", "confirmations", "avg_score", "bonus", "conflict_penalty"}
+    }
     text = json.dumps(payload, ensure_ascii=True, default=str, separators=(",", ":"))
     return text[:max_len]
 
@@ -63,6 +73,8 @@ def build_synthetic_signal(candidate: Any, *, secret: str | None = None) -> tupl
         "indicators": _get(candidate, "indicator_summary", {}) or {},
         "smc": _get(candidate, "smc_summary", {}) or {},
         "quality": _get(candidate, "quality", {}) or {},
+        "fused_timeframes": list(_get(candidate, "fused_timeframes", []) or []),
+        "fusion": _get(candidate, "fusion_summary", {}) or {},
     }
     message = _compact_json(scanner_payload)
 
