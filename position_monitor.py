@@ -1863,29 +1863,73 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
             # P0-FIX: Even if status is not "pending", check if there's a pending limit order
             # that hasn't timed out yet. Don't close the position if the order is still valid.
+            # But FIRST verify the order is actually still active on the exchange — a cancelled
+            # order should not keep a position open regardless of timeout.
             if position.entry_order_id and str(position.entry_order_id or "").strip():
-                limit_timeout = _position_limit_timeout_secs(position)
-                opened_at = position.opened_at
-                if opened_at:
-                    opened_at = to_utc(opened_at)
-                    age_secs = (utcnow() - opened_at).total_seconds()
-                    if age_secs < limit_timeout:
-                        logger.info(
-                            f"[P0-FIX] Position {position.ticker} (status={position.status}) has pending limit order "
-                            f"{position.entry_order_id} (age={age_secs:.0f}s < timeout={limit_timeout}s). "
-                            f"Keeping position open — order may still fill."
-                        )
-                        ticker = await get_ticker(position.ticker, exchange_config)
-                        mark_price = safe_float(ticker.get("last") or position.last_price)
-                        if mark_price > 0:
-                            _update_unrealized(position, mark_price)
-                            stats["updated"] += 1
-                        return stats
-                    else:
+                # Check the actual order status on the exchange before deciding to keep open
+                order_alive = None
+                try:
+                    from exchange import _get_or_create_exchange, _resolve_symbol
+
+                    exchange = _get_or_create_exchange(
+                        exchange_id=exchange_config.get("exchange", settings.exchange.name),
+                        api_key=exchange_config.get("api_key", settings.exchange.api_key),
+                        api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
+                        password=exchange_config.get("password", settings.exchange.password),
+                        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
+                        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+                        market_type=exchange_config.get("market_type", settings.exchange.market_type),
+                        margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
+                    )
+                    symbol = await asyncio.to_thread(
+                        _resolve_symbol,
+                        exchange,
+                        position.ticker,
+                        exchange_config.get("market_type", settings.exchange.market_type),
+                    )
+                    order = await asyncio.to_thread(exchange.fetch_order, position.entry_order_id, symbol)
+                    order_status = str(order.get("status") or "").lower()
+                    order_alive = order_status in {"open", "new", "partially_filled"}
+                    if not order_alive:
                         logger.info(
                             f"[P0-FIX] Position {position.ticker} limit order {position.entry_order_id} "
-                            f"has EXCEEDED timeout (age={age_secs:.0f}s > timeout={limit_timeout}s)."
+                            f"is {order_status} on exchange — no longer active, proceeding to close position."
                         )
+                except ccxt.OrderNotFound:
+                    order_alive = False
+                    logger.info(
+                        f"[P0-FIX] Entry order {position.entry_order_id} for {position.ticker} "
+                        f"not found on exchange — order already removed, proceeding to close position."
+                    )
+                except Exception as order_exc:
+                    logger.warning(
+                        f"[P0-FIX] Could not verify order status for {position.entry_order_id}: {order_exc}"
+                    )
+                    order_alive = None
+
+                if order_alive is True:
+                    limit_timeout = _position_limit_timeout_secs(position)
+                    opened_at = position.opened_at
+                    if opened_at:
+                        opened_at = to_utc(opened_at)
+                        age_secs = (utcnow() - opened_at).total_seconds()
+                        if age_secs < limit_timeout:
+                            logger.info(
+                                f"[P0-FIX] Position {position.ticker} (status={position.status}) has verified active limit order "
+                                f"{position.entry_order_id} (age={age_secs:.0f}s < timeout={limit_timeout}s). "
+                                f"Keeping position open — order may still fill."
+                            )
+                            ticker = await get_ticker(position.ticker, exchange_config)
+                            mark_price = safe_float(ticker.get("last") or position.last_price)
+                            if mark_price > 0:
+                                _update_unrealized(position, mark_price)
+                                stats["updated"] += 1
+                            return stats
+                        else:
+                            logger.info(
+                                f"[P0-FIX] Position {position.ticker} limit order {position.entry_order_id} "
+                                f"has EXCEEDED timeout (age={age_secs:.0f}s > timeout={limit_timeout}s)."
+                            )
 
             # P0-FIX: Before closing DB position, cancel any orphaned entry order on exchange.
             # This fixes the XPL/USDT bug where Ghost detection closed DB position but left
