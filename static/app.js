@@ -1850,24 +1850,33 @@ async function adminVerifyPayment(paymentId) {
 async function loadAdmin() {
     if (!isAdmin()) { showToast('Admin access required','error'); return; }
     try {
-        const [users, payments, plans, addresses, registration, invites, redeemCodes, system, auditLogs, webhookEvents, backups, monitorState, filterThresholds, filterStats, externalKeys, enhancedFilters, updateStatus, aiCosts] = await Promise.all([
+        // Phase 1: core data (blockers — wait for these)
+        const [users, payments, plans, system, auditLogs, updateStatus] = await Promise.all([
             fetchAPI('/api/admin/users'),
             fetchAPI('/api/admin/payments'),
             fetchAPI('/api/admin/plans'),
-            fetchAPI('/api/admin/payment-addresses'),
-            fetchAPI('/api/admin/registration'),
-            fetchAPI('/api/admin/invite-codes'),
-            fetchAPI('/api/admin/redeem-codes'),
             fetchAPI('/api/admin/system'),
             fetchAPI('/api/admin/audit-logs?limit=8'),
-            fetchAPI('/api/admin/webhook-events?limit=30'),
-            fetchAPI('/api/admin/backups'),
-            fetchAPI('/api/admin/position-monitor'),
-            fetchAPI('/api/admin/filter-thresholds'),
-            fetchAPI('/api/admin/filter-stats'),
-            fetchAPI('/api/admin/external-api-keys'),
-            fetchAPI('/api/admin/enhanced-filters'),
             fetchAPI('/api/admin/update-status'),
+        ]);
+
+        // Phase 2: secondary data (non-blocking — each falls back independently)
+        const [
+            addresses, registration, invites, redeemCodes,
+            webhookEvents, backups, monitorState, filterThresholds,
+            filterStats, externalKeys, enhancedFilters, aiCosts,
+        ] = await Promise.all([
+            fetchAPI('/api/admin/payment-addresses').catch(() => ({})),
+            fetchAPI('/api/admin/registration').catch(() => ({})),
+            fetchAPI('/api/admin/invite-codes').catch(() => []),
+            fetchAPI('/api/admin/redeem-codes').catch(() => []),
+            fetchAPI('/api/admin/webhook-events?limit=30').catch(() => []),
+            fetchAPI('/api/admin/backups').catch(() => []),
+            fetchAPI('/api/admin/position-monitor').catch(() => ({})),
+            fetchAPI('/api/admin/filter-thresholds').catch(() => ({})),
+            fetchAPI('/api/admin/filter-stats').catch(() => ({})),
+            fetchAPI('/api/admin/external-api-keys').catch(() => ({})),
+            fetchAPI('/api/admin/enhanced-filters').catch(() => ({})),
             fetchAPI('/api/admin/ai-costs').catch(() => ({ costs: {} })),
         ]);
 
@@ -1888,9 +1897,9 @@ async function loadAdmin() {
         loadRiskThresholds();
         renderAdminExternalAPIKeys(externalKeys || {});
         renderAdminEnhancedFilters(enhancedFilters || {});
-        loadAdminRiskConsole();
-        loadAIProviderConfig();
-        loadScanner();
+        loadAdminRiskConsole().catch(() => {});
+        loadAIProviderConfig().catch(() => {});
+        loadScanner().catch(() => {});
     } catch (err) { showToast(err.message, 'error', 'Admin Load Failed'); }
 }
 

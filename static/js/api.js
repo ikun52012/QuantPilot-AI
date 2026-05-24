@@ -15,15 +15,21 @@ class APIClient {
      */
     async request(endpoint, options = {}) {
         const url = `${this.baseURL}${endpoint}`;
+        const timeout = options.timeout || 15000; // default 15s timeout
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
+
         const config = {
             credentials: 'include',
             cache: 'no-store',
             ...options,
+            signal: controller.signal,
             headers: {
                 'Content-Type': 'application/json',
                 ...options.headers,
             },
         };
+        delete config.timeout;
 
         // Add CSRF token for non-GET requests
         if (config.method && config.method !== 'GET') {
@@ -35,6 +41,7 @@ class APIClient {
 
         try {
             const response = await fetch(url, config);
+            clearTimeout(timer);
 
             if (response.status === 401) {
                 // Redirect to login on auth error
@@ -49,6 +56,10 @@ class APIClient {
 
             return await response.json();
         } catch (error) {
+            clearTimeout(timer);
+            if (error.name === 'AbortError') {
+                throw new Error(`Request timeout after ${timeout}ms: ${endpoint}`);
+            }
             console.error(`API Error [${endpoint}]:`, error);
             throw error;
         }
