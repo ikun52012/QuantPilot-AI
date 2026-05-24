@@ -5176,11 +5176,11 @@ function renderScannerStatus(status) {
     const enabled = status.enabled || false;
     const mode = status.mode || 'observe';
     const interval = status.interval_secs || 600;
-    const watchlist = (status.watchlist || []).join(', ') || '--';
-    const timeframes = (status.timeframes || []).join(', ') || '--';
+    const watchlist = (status.watchlist || []).join(', ');
+    const timeframes = (status.timeframes || []).join(', ');
     const minScore = status.min_score ?? 65;
     const maxCandidates = status.max_candidates_per_run ?? 3;
-    const liveWl = (status.live_symbol_whitelist || []).join(', ') || '--';
+    const liveWl = (status.live_symbol_whitelist || []).join(', ');
     const symMap = status.symbol_map || {};
     const symMapStr = Object.keys(symMap).length ? Object.entries(symMap).map(([k, v]) => `${escapeHtml(k)} \u2192 ${escapeHtml(v.exchange_symbol || k)}`).join('<br>') : 'None';
     const maxSignals = (status.daily_limits || {}).max_signals_per_day ?? 15;

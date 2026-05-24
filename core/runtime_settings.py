@@ -112,10 +112,13 @@ def _to_string_list(value: Any, default: list[str] | None = None, *, lowercase: 
     else:
         raw_items = list(default or [])
 
+    _INVALID_SYMBOLS = {"--", "-", "__", "none", "null", "n/a", "na", "undefined", "nan", ""}
     normalized: list[str] = []
     for item in raw_items:
         text = str(item or "").strip()
         if not text:
+            continue
+        if text.lower() in _INVALID_SYMBOLS:
             continue
         normalized.append(text.lower() if lowercase else text.upper())
     return list(dict.fromkeys(normalized))

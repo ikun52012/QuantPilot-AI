@@ -140,6 +140,8 @@ class MarketScannerService:
             return {"status": "disabled", "reason": "SCANNER_ENABLED=false"}
         if not settings.scanner.watchlist:
             return {"status": "skipped", "reason": "SCANNER_WATCHLIST is empty"}
+        if db_manager.async_session_factory is None:
+            return {"status": "error", "reason": "Database not initialized (session_factory is None)"}
         if self._scan_lock.locked():
             return {"status": "skipped", "reason": "Scanner already running"}
 
