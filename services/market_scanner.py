@@ -321,10 +321,11 @@ class MarketScannerService:
                 if candidate and candidate.score >= float(settings.scanner.min_score):
                     candidates.append(candidate)
 
-        by_hash: dict[str, ScannerCandidate] = {}
+        by_key: dict[str, ScannerCandidate] = {}
         for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
-            by_hash.setdefault(candidate.setup_hash, candidate)
-        return list(by_hash.values())
+            key = f"{candidate.direction}"
+            by_key.setdefault(key, candidate)
+        return list(by_key.values())
 
     async def _fetch_bundle_with_retry(self, watch_symbol: str) -> OHLCVBundle:
         last_error: Exception | None = None
