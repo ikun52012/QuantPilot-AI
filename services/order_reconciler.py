@@ -102,12 +102,13 @@ async def list_order_events(
     session: AsyncSession,
     status: str | None = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[OrderEventModel]:
     """Return recent order events for the admin console."""
     query = select(OrderEventModel).order_by(OrderEventModel.created_at.desc())
     if status:
         query = query.where(OrderEventModel.status == status)
-    query = query.limit(max(1, min(int(limit or 100), 500)))
+    query = query.offset(max(0, int(offset or 0))).limit(max(1, min(int(limit or 100), 500)))
     result = await session.execute(query)
     return list(result.scalars().all())
 

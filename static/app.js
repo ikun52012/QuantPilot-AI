@@ -21,6 +21,10 @@ let _priceSocket = null;
 let _priceSocketTicker = '';
 let _chartRealtimeState = null;
 let _launchContext = null;
+let _adminLoadSeq = 0;
+let _adminLogType = 'admin';
+let _adminLogOffset = 0;
+const ADMIN_LOG_PAGE_SIZE = 20;
 const ADMIN_NAV_PAGES = new Set([
     'dashboard',
     'positions',
@@ -31,6 +35,9 @@ const ADMIN_NAV_PAGES = new Set([
     'backtest',
     'strategies',
     'strategy-editor',
+    'prefilter',
+    'scanner',
+    'logs',
 ]);
 const USER_ONLY_PAGES = new Set(['user', 'social']);
 
@@ -122,6 +129,9 @@ function updateNavTexts() {
         'nav-subscription': 'nav.subscription',
         'nav-settings': 'nav.settings',
         'nav-admin': 'nav.admin',
+        'nav-prefilter': 'nav.prefilter',
+        'nav-scanner': 'nav.scanner',
+        'nav-logs': 'nav.logs',
     };
     Object.entries(navMap).forEach(([id, key]) => {
         const el = document.getElementById(id);
@@ -591,6 +601,9 @@ function switchPage(page) {
         settings: t('nav.settings', 'Settings'),
         subscription: t('nav.subscription', 'Subscription'),
         admin: t('nav.admin', 'Admin Panel'),
+        prefilter: t('nav.prefilter', 'Pre-filter'),
+        scanner: t('nav.scanner', 'Scanner'),
+        logs: t('nav.logs', 'Logs'),
         backtest: t('nav.backtest', 'Backtest'),
         strategies: t('nav.strategies', 'Strategies'),
         'strategy-editor': t('nav.strategy_editor', 'Editor'),
@@ -611,6 +624,9 @@ function switchPage(page) {
     if (page === 'user') loadUserPortal();
     if (page === 'subscription') loadSubscription();
     if (page === 'admin') loadAdmin();
+    if (page === 'prefilter') loadPreFilterAdminPage();
+    if (page === 'scanner') loadScanner();
+    if (page === 'logs') loadAdminLogs();
     if (page === 'strategies') {
         loadStrategiesOverview();
         loadDCAList();
@@ -1651,6 +1667,7 @@ async function loadSubscription() {
         ]);
         // Merge latest profile into the in-memory cache
         _cachedUser = { ..._cachedUser, ...me };
+        window._adminPlans = plans || [];
         updateUserUI();
         const balance = Number(me.balance_usdt || 0);
         // Current subscription status
@@ -1678,7 +1695,22 @@ async function loadSubscription() {
         } else {
             payEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No payments yet</p>';
         }
+        if (isAdmin()) await loadSubscriptionAdminManagement(plans || []);
     } catch (err) { showToast(err.message, 'error', 'Subscription Load Failed'); }
+}
+
+async function loadSubscriptionAdminManagement(plans = []) {
+    if (!isAdmin()) return;
+    const data = await fetchAdminBatch([
+        { key: 'addresses', path: '/api/admin/payment-addresses', fallback: {} },
+        { key: 'registration', path: '/api/admin/registration', fallback: {} },
+        { key: 'invites', path: '/api/admin/invite-codes', fallback: [] },
+        { key: 'redeemCodes', path: '/api/admin/redeem-codes', fallback: [] },
+    ], { activePage: 'subscription', concurrency: 2, gapMs: 140 });
+    if (!isActivePage('subscription')) return;
+    renderAdminPaymentAddresses(data.addresses || {});
+    renderAdminRegistration(data.registration || {}, data.invites || []);
+    renderAdminRedeemCodes(data.redeemCodes || [], plans || []);
 }
 
 async function subscribeToPlan(planId, price) {
@@ -1803,6 +1835,12 @@ function reloadBillingViews() {
     else loadSubscription();
 }
 
+async function reloadSubscriptionAdminTools() {
+    if (isAdmin() && isActivePage('subscription')) {
+        await loadSubscriptionAdminManagement(window._adminPlans || []);
+    }
+}
+
 // ─── Admin Panel ───
 async function loadAdminLegacyUnused() {
     return loadAdmin();
@@ -1847,68 +1885,113 @@ async function adminVerifyPayment(paymentId) {
 }
 
 // ─── Helpers ───
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getActivePage() {
+    return document.querySelector('.page.active')?.id?.replace('page-', '') || '';
+}
+
+function isActivePage(page) {
+    return getActivePage() === page;
+}
+
+function isCurrentAdminLoad(seq) {
+    return seq === _adminLoadSeq && isActivePage('admin');
+}
+
+function isCurrentAdminBatch(seq, activePage) {
+    if (activePage === 'admin') return isCurrentAdminLoad(seq);
+    return isActivePage(activePage);
+}
+
+function isRetryableAdminError(err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return message.includes('timeout')
+        || message.includes('failed to fetch')
+        || message.includes('network')
+        || message.includes('api error: 502')
+        || message.includes('api error: 503')
+        || message.includes('api error: 504');
+}
+
+async function fetchAdminBatch(items, { concurrency = 2, gapMs = 120, seq = _adminLoadSeq, activePage = 'admin' } = {}) {
+    const results = {};
+    let index = 0;
+    async function worker() {
+        while (index < items.length && isCurrentAdminBatch(seq, activePage)) {
+            const item = items[index++];
+            try {
+                const runItem = () => item.run ? item.run() : fetchAPI(item.path, item.options || {});
+                try {
+                    results[item.key] = await runItem();
+                } catch (err) {
+                    if (!isRetryableAdminError(err) || !isCurrentAdminBatch(seq, activePage)) throw err;
+                    await sleep(900);
+                    results[item.key] = await runItem();
+                }
+            } catch (err) {
+                console.warn(`[Admin] ${item.key} unavailable:`, err);
+                results[item.key] = typeof item.fallback === 'function' ? item.fallback(err) : item.fallback;
+            }
+            if (gapMs > 0) await sleep(gapMs);
+        }
+    }
+    const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+    await Promise.all(workers);
+    return results;
+}
+
+async function loadAdminSecondary(seq, core) {
+    const data = await fetchAdminBatch([
+        { key: 'backups', path: '/api/admin/backups', fallback: [] },
+        { key: 'monitorState', path: '/api/admin/position-monitor', fallback: {} },
+        { key: 'aiCosts', path: '/api/admin/ai-costs', fallback: { costs: {} } },
+    ], { concurrency: 2, gapMs: 180, seq });
+    if (!isCurrentAdminLoad(seq)) return;
+
+    renderAdminSystem(core.system || {}, core.auditLogs || [], data.aiCosts || {});
+    renderAdminBackups(data.backups || []);
+    renderAdminPositionMonitor(data.monitorState || {});
+}
+
+function scheduleAdminDeferredLoads(seq) {
+    setTimeout(() => { if (isCurrentAdminLoad(seq)) loadAdminRiskConsole().catch(() => {}); }, 500);
+    setTimeout(() => { if (isCurrentAdminLoad(seq)) loadAIProviderConfig().catch(() => {}); }, 1100);
+}
+
 async function loadAdmin() {
     if (!isAdmin()) { showToast('Admin access required','error'); return; }
+    const seq = ++_adminLoadSeq;
     try {
-        // Phase 1: core data (blockers — wait for these)
-        const [users, payments, plans, system, auditLogs, updateStatus] = await Promise.all([
-            fetchAPI('/api/admin/users'),
-            fetchAPI('/api/admin/payments'),
-            fetchAPI('/api/admin/plans'),
-            fetchAPI('/api/admin/system'),
-            fetchAPI('/api/admin/audit-logs?limit=8'),
-            fetchAPI('/api/admin/update-status'),
-        ]);
+        const core = await fetchAdminBatch([
+            { key: 'users', path: '/api/admin/users', fallback: [] },
+            { key: 'payments', path: '/api/admin/payments', fallback: [] },
+            { key: 'plans', path: '/api/admin/plans', fallback: [] },
+            { key: 'system', path: '/api/admin/system', fallback: {} },
+            { key: 'auditLogs', path: '/api/admin/audit-logs?limit=6', fallback: [] },
+            { key: 'updateStatus', path: '/api/admin/update-status', fallback: {} },
+        ], { concurrency: 2, gapMs: 120, seq });
+        if (!isCurrentAdminLoad(seq)) return;
 
-        // Phase 2: secondary data (non-blocking — each falls back independently)
-        const [
-            addresses, registration, invites, redeemCodes,
-            webhookEvents, backups, monitorState, filterThresholds,
-            filterStats, externalKeys, enhancedFilters, aiCosts,
-        ] = await Promise.all([
-            fetchAPI('/api/admin/payment-addresses').catch(() => ({})),
-            fetchAPI('/api/admin/registration').catch(() => ({})),
-            fetchAPI('/api/admin/invite-codes').catch(() => []),
-            fetchAPI('/api/admin/redeem-codes').catch(() => []),
-            fetchAPI('/api/admin/webhook-events?limit=30').catch(() => []),
-            fetchAPI('/api/admin/backups').catch(() => []),
-            fetchAPI('/api/admin/position-monitor').catch(() => ({})),
-            fetchAPI('/api/admin/filter-thresholds').catch(() => ({})),
-            fetchAPI('/api/admin/filter-stats').catch(() => ({})),
-            fetchAPI('/api/admin/external-api-keys').catch(() => ({})),
-            fetchAPI('/api/admin/enhanced-filters').catch(() => ({})),
-            fetchAPI('/api/admin/ai-costs').catch(() => ({ costs: {} })),
-        ]);
+        renderAdminUsers(core.users || [], core.plans || []);
+        renderAdminPlans(core.plans || []);
+        window._adminPlans = core.plans || [];
+        renderAdminPendingPayments(core.payments || []);
+        renderAdminUpdate(core.updateStatus || {});
+        renderAdminSystem(core.system || {}, core.auditLogs || [], { costs: {} });
 
-        renderAdminUsers(users, plans);
-        renderAdminPlans(plans);
-        window._adminPlans = plans;
-        renderAdminPaymentAddresses(addresses || {});
-        renderAdminRegistration(registration || {}, invites || []);
-        renderAdminRedeemCodes(redeemCodes || [], plans || []);
-        renderAdminPendingPayments(payments || []);
-        renderAdminUpdate(updateStatus || {});
-        renderAdminSystem(system || {}, auditLogs || [], aiCosts || {});
-        renderAdminWebhookEvents(webhookEvents || []);
-        renderAdminBackups(backups || []);
-        renderAdminPositionMonitor(monitorState || {});
-        renderAdminFilterThresholds(filterThresholds || {});
-        renderAdminFilterStats(filterStats || {});
-        loadRiskThresholds();
-        renderAdminExternalAPIKeys(externalKeys || {});
-        renderAdminEnhancedFilters(enhancedFilters || {});
-        loadAdminRiskConsole().catch(() => {});
-        loadAIProviderConfig().catch(() => {});
-        loadScanner().catch(() => {});
+        loadAdminSecondary(seq, core)
+            .catch(err => console.warn('[Admin] secondary load failed:', err))
+            .finally(() => scheduleAdminDeferredLoads(seq));
     } catch (err) { showToast(err.message, 'error', 'Admin Load Failed'); }
 }
 
 async function loadAIProviderConfig() {
     try {
-        const [config, models] = await Promise.all([
-            fetchAPI('/api/admin/ai/provider-config'),
-            fetchAPI('/api/admin/ai/models-list'),
-        ]);
+        const config = await fetchAPI('/api/admin/ai/provider-config');
+        const models = await fetchAPI('/api/admin/ai/models-list');
         renderAIProviderConfig(config, models);
     } catch (err) {
         const el = document.getElementById('admin-ai-provider');
@@ -1985,13 +2068,11 @@ async function saveAIProviderConfig() {
 async function loadAdminRiskConsole() {
     if (!isAdmin()) return;
     try {
-        const [controls, orderData] = await Promise.all([
-            fetchAPI('/api/admin/trading-controls'),
-            fetchAPI('/api/admin/order-events?limit=8').catch(() => ({ events: [] })),
-        ]);
+        const controls = await fetchAPI('/api/admin/trading-controls');
+        const orderData = await fetchAPI('/api/admin/order-events?limit=8').catch(() => ({ events: [] }));
         renderTradingControls(controls || {});
         renderOrderEvents(orderData.events || []);
-        loadOrderExecutionSettings();
+        setTimeout(() => loadOrderExecutionSettings().catch(() => {}), 500);
     } catch (err) {
         setText('admin-control-mode', 'Unavailable');
         setText('admin-control-reason', err.message);
@@ -2848,6 +2929,116 @@ function renderAdminWebhookEvents(events) {
     el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>Time</th><th>User</th><th>Ticker</th><th>Direction</th><th>Status</th><th>Reason</th><th>IP</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+function updateAdminLogTabs() {
+    ['admin', 'webhook', 'scanner', 'order'].forEach(type => {
+        const btn = document.getElementById(`log-tab-${type}`);
+        if (btn) btn.className = type === _adminLogType ? 'btn btn-primary' : 'btn btn-secondary';
+    });
+}
+
+function adminLogEndpoint(type, offset) {
+    const limit = ADMIN_LOG_PAGE_SIZE;
+    if (type === 'webhook') return `/api/admin/webhook-events?limit=${limit}&offset=${offset}`;
+    if (type === 'scanner') return `/api/scanner/audits?limit=${limit}&offset=${offset}`;
+    if (type === 'order') return `/api/admin/order-events?limit=${limit}&offset=${offset}`;
+    return `/api/admin/audit-logs?limit=${limit}&offset=${offset}`;
+}
+
+function adminLogItems(data) {
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data?.items)) return data.items;
+    if (Array.isArray(data?.events)) return data.events;
+    return [];
+}
+
+function scannerAuditBadgeClass(type) {
+    const map = {
+        scanned: 'badge-active', candidate: 'badge-active', filtered: 'badge-pending', cooldown: 'badge-pending',
+        data_error: 'badge-error', live_market_invalid: 'badge-error', deduped: 'badge-warning', sent_to_ai: 'badge-long',
+        daily_limit: 'badge-warning', ai_budget_exhausted: 'badge-error', result: 'badge-success', error: 'badge-error',
+        run_summary: 'badge-active', direction_conflict: 'badge-warning', symbol_deduped: 'badge-warning',
+        position_conflict: 'badge-warning',
+    };
+    return map[type] || 'badge-inactive';
+}
+
+function renderAdminLogs(type, items) {
+    const el = document.getElementById('admin-log-table');
+    if (!el) return;
+    let headers = '';
+    let rows = '';
+
+    if (type === 'webhook') {
+        headers = '<tr><th>Time</th><th>User</th><th>Ticker</th><th>Direction</th><th>Status</th><th>Reason</th><th>IP</th></tr>';
+        rows = items.map(e => `<tr><td>${escapeHtml(formatDateTime(e.created_at))}</td><td>${escapeHtml(e.username || e.user_id || 'admin/global')}</td><td>${escapeHtml(e.ticker || '--')}</td><td>${escapeHtml(e.direction || '--')}</td><td><span class="badge badge-${safeClassToken(e.status)}">${escapeHtml(e.status || '--')}</span></td><td>${escapeHtml(e.reason || '')}</td><td>${escapeHtml(e.client_ip || '')}</td></tr>`).join('');
+    } else if (type === 'scanner') {
+        headers = '<tr><th>Time</th><th>Event</th><th>Symbol</th><th>Direction</th><th>Score</th><th>Detail</th></tr>';
+        rows = items.map(a => {
+            const payload = a.payload || {};
+            const result = payload.result || {};
+            const analysis = payload.analysis || result.analysis || {};
+            const aiRec = analysis.recommendation || '';
+            const score = Number(a.score);
+            const detail = a.event_type === 'run_summary'
+                ? `scanned ${payload.scanned || 0}, candidates ${payload.candidates || 0}, conflicts ${payload.direction_conflicts || 0}, ai ${payload.ai_used || 0}`
+                : (aiRec ? `${aiRec} ${analysis.confidence ? Math.round(Number(analysis.confidence || 0) * 100) + '%' : ''}` : String(a.reason || '').slice(0, 120));
+            return `<tr><td>${escapeHtml(formatDateTime(a.created_at))}</td><td><span class="badge ${scannerAuditBadgeClass(a.event_type)}">${escapeHtml(a.event_type || '--')}</span></td><td>${escapeHtml(a.watch_symbol || a.exchange_symbol || '--')}</td><td>${escapeHtml(a.direction || '--')}</td><td>${Number.isFinite(score) ? escapeHtml(score.toFixed(1)) : '--'}</td><td>${escapeHtml(detail)}</td></tr>`;
+        }).join('');
+    } else if (type === 'order') {
+        headers = '<tr><th>Time</th><th>User</th><th>Ticker</th><th>Direction</th><th>Status</th><th>Retry</th><th>Attempts</th><th>Error</th></tr>';
+        rows = items.map(e => `<tr><td>${escapeHtml(formatDateTime(e.updated_at || e.created_at))}</td><td>${escapeHtml(e.user_id || '--')}</td><td>${escapeHtml(e.ticker || '--')}</td><td>${escapeHtml(e.direction || '--')}</td><td><span class="badge badge-${safeClassToken(e.status)}">${escapeHtml(e.status || '--')}</span></td><td>${escapeHtml(e.retry_state || '--')}</td><td>${escapeHtml(e.attempt_count || 0)}</td><td>${escapeHtml(e.last_error || '')}</td></tr>`).join('');
+    } else {
+        headers = '<tr><th>Time</th><th>Admin</th><th>Action</th><th>Target</th><th>Summary</th><th>IP</th></tr>';
+        rows = items.map(log => `<tr><td>${escapeHtml(formatDateTime(log.created_at))}</td><td>${escapeHtml(log.admin_username || log.admin_id || '--')}</td><td>${escapeHtml(log.action || '--')}</td><td>${escapeHtml([log.target_type, log.target_id].filter(Boolean).join(':') || '--')}</td><td>${escapeHtml(log.summary || '')}</td><td>${escapeHtml(log.client_ip || '')}</td></tr>`).join('');
+    }
+
+    const colspan = type === 'order' ? 8 : type === 'webhook' ? 7 : 6;
+    if (!rows) rows = `<tr><td colspan="${colspan}" class="empty-state">No ${escapeHtml(type)} logs found</td></tr>`;
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead>${headers}</thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderAdminLogPagination(items) {
+    const el = document.getElementById('admin-log-pagination');
+    if (!el) return;
+    const page = Math.floor(_adminLogOffset / ADMIN_LOG_PAGE_SIZE) + 1;
+    const hasPrevious = _adminLogOffset > 0;
+    const hasNext = items.length === ADMIN_LOG_PAGE_SIZE;
+    el.innerHTML = `
+        <span class="hint" style="margin-right:auto">Page ${page} · ${items.length} rows</span>
+        <button class="btn btn-secondary btn-sm" onclick="changeAdminLogPage(-1)" ${hasPrevious ? '' : 'disabled'}><i class="ri-arrow-left-line"></i> Previous</button>
+        <button class="btn btn-secondary btn-sm" onclick="changeAdminLogPage(1)" ${hasNext ? '' : 'disabled'}>Next <i class="ri-arrow-right-line"></i></button>`;
+}
+
+function setAdminLogType(type) {
+    if (!['admin', 'webhook', 'scanner', 'order'].includes(type)) return;
+    _adminLogType = type;
+    _adminLogOffset = 0;
+    loadAdminLogs();
+}
+
+function changeAdminLogPage(direction) {
+    _adminLogOffset = Math.max(0, _adminLogOffset + direction * ADMIN_LOG_PAGE_SIZE);
+    loadAdminLogs();
+}
+
+async function loadAdminLogs(offset = _adminLogOffset) {
+    if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+    _adminLogOffset = Math.max(0, offset);
+    updateAdminLogTabs();
+    const tableEl = document.getElementById('admin-log-table');
+    if (tableEl) tableEl.innerHTML = '<div class="empty-state">Loading logs...</div>';
+    try {
+        const data = await fetchAPI(adminLogEndpoint(_adminLogType, _adminLogOffset));
+        if (!isActivePage('logs')) return;
+        const items = adminLogItems(data);
+        renderAdminLogs(_adminLogType, items);
+        renderAdminLogPagination(items);
+    } catch (err) {
+        if (tableEl) tableEl.innerHTML = `<div class="empty-state">Failed to load logs: ${escapeHtml(err.message)}</div>`;
+        renderAdminLogPagination([]);
+    }
+}
+
 function renderAdminPositionMonitor(state) {
     const el = document.getElementById('admin-position-monitor');
     if (!el) return;
@@ -2900,6 +3091,8 @@ function renderAdminFilterThresholds(thresholds) {
         ['max_correlated_exposure_pct', 'Max Correlated Exp', 'Correlation risk: max exposure pct'],
         ['max_live_missing_data_checks', 'Max Missing Checks', 'Live mode: max missing data'],
         ['margin_mode', 'Margin Mode', 'cross (全仓) or isolated (逐仓) - affects position margin'],
+        ['dynamic_cooldown_enabled', 'Dynamic Cooldown', 'Adjust cooldown after wins and losses'],
+        ['block_live_on_risk_check_error', 'Block Live on Risk Error', 'Block live orders if risk checks fail'],
     ];
 
     const inputs = thresholdFields.map(([key, label, hint]) => {
@@ -3045,7 +3238,8 @@ async function resetFilterThresholds() {
         'long_short_ratio_extreme_high', 'long_short_ratio_extreme_low', 'basis_pct_max',
         'fear_greed_extreme_threshold', 'cvd_divergence_threshold', 'volatility_regime_multiplier',
         'position_reduce_on_loss_pct', 'min_pass_score', 'data_completeness_soft_fail_count',
-        'max_same_direction_positions', 'max_correlated_exposure_pct', 'max_live_missing_data_checks'
+        'max_same_direction_positions', 'max_correlated_exposure_pct', 'max_live_missing_data_checks',
+        'margin_mode', 'dynamic_cooldown_enabled', 'block_live_on_risk_check_error'
     ];
 
     const defaults = {
@@ -3154,6 +3348,23 @@ async function loadFilterStats() {
     } catch (err) {
         showToast(err.message, 'error', 'Load Failed');
     }
+}
+
+async function loadPreFilterAdminPage() {
+    if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+    const data = await fetchAdminBatch([
+        { key: 'filterThresholds', path: '/api/admin/filter-thresholds', fallback: {} },
+        { key: 'riskThresholds', path: '/api/admin/risk-thresholds', fallback: {} },
+        { key: 'externalKeys', path: '/api/admin/external-api-keys', fallback: {} },
+        { key: 'enhancedFilters', path: '/api/admin/enhanced-filters', fallback: {} },
+        { key: 'filterStats', path: '/api/admin/filter-stats', fallback: {} },
+    ], { activePage: 'prefilter', concurrency: 2, gapMs: 140 });
+    if (!isActivePage('prefilter')) return;
+    renderAdminFilterThresholds(data.filterThresholds || {});
+    renderAdminRiskThresholds(data.riskThresholds || {});
+    renderAdminExternalAPIKeys(data.externalKeys || {});
+    renderAdminEnhancedFilters(data.enhancedFilters || {});
+    renderAdminFilterStats(data.filterStats || {});
 }
 
 async function resetFilterStats() {
@@ -3566,7 +3777,7 @@ async function savePaymentAddress(network) {
     try {
         await fetchAPI('/api/admin/payment-addresses', { method:'POST', body:JSON.stringify({ network, address }) });
         showToast(`${network} address saved.`, 'success', 'Saved');
-        loadAdmin();
+        await reloadSubscriptionAdminTools();
     } catch (err) { showToast(err.message,'error','Save Failed'); }
 }
 
@@ -3575,7 +3786,7 @@ async function saveRegistrationSettings() {
     try {
         await fetchAPI('/api/admin/registration', { method:'POST', body:JSON.stringify({ invite_required: inviteRequired }) });
         showToast('Registration settings saved.','success','Saved');
-        loadAdmin();
+        await reloadSubscriptionAdminTools();
     } catch (err) { showToast(err.message,'error','Save Failed'); }
 }
 
@@ -3588,7 +3799,7 @@ async function createInviteCode() {
     try {
         const created = await fetchAPI('/api/admin/invite-codes', { method:'POST', body:JSON.stringify(data) });
         showToast(created.code, 'success', 'Invite Code Generated');
-        loadAdmin();
+        await reloadSubscriptionAdminTools();
     } catch (err) { showToast(err.message,'error','Generate Failed'); }
 }
 
@@ -3607,7 +3818,7 @@ async function createRedeemCode() {
     try {
         const created = await fetchAPI('/api/admin/redeem-codes', { method:'POST', body:JSON.stringify(data) });
         showToast(created.code, 'success', 'Card Code Generated');
-        loadAdmin();
+        await reloadSubscriptionAdminTools();
     } catch (err) { showToast(err.message,'error','Generate Failed'); }
 }
 
@@ -3745,6 +3956,7 @@ async function refreshAll() {
     else if (p==='user') await loadUserPortal(); else if (p==='history') await loadHistory(); else if (p==='analytics') await loadAnalytics();
     else if (p==='charts') await loadChartPage(); else if (p==='social') await loadSocialPage(); else if (p==='strategy-editor') await loadStrategyEditorPage();
     else if (p==='subscription') await loadSubscription(); else if (p==='admin') await loadAdmin();
+    else if (p==='prefilter') await loadPreFilterAdminPage(); else if (p==='scanner') await loadScanner(); else if (p==='logs') await loadAdminLogs();
     else if (p==='strategies') { await loadStrategiesOverview(); await loadDCAList(); await loadGridList(); await loadStrategyHistory(); }
 }
 
@@ -5228,8 +5440,11 @@ function renderScannerStatus(status) {
 
     const modeClass = mode === 'live' ? 'badge-error' : mode === 'paper' ? 'badge-pending' : 'badge-active';
 
-    document.getElementById('scanner-mode-badge').textContent = enabled ? `${mode.charAt(0).toUpperCase() + mode.slice(1)}` : 'Disabled';
-    document.getElementById('scanner-mode-badge').className = `badge ${enabled ? modeClass : 'badge-inactive'}`;
+    const modeBadge = document.getElementById('scanner-mode-badge');
+    if (modeBadge) {
+        modeBadge.textContent = enabled ? `${mode.charAt(0).toUpperCase() + mode.slice(1)}` : 'Disabled';
+        modeBadge.className = `badge ${enabled ? modeClass : 'badge-inactive'}`;
+    }
 
     el.innerHTML = `
         <div class="settings-form">
@@ -5395,33 +5610,33 @@ function renderScannerStatus(status) {
                     <p class="hint">Multi-timeframe confirmation tuning</p>
                 </div>
             </div>
-+
-+            <div class="form-row three-col">
-+                <div class="form-group">
-+                    <label for="scanner-ema200-enabled">EMA200 Filter</label>
-+                    <select id="scanner-ema200-enabled" class="text-input">
-+                        <option value="true" ${ema200Enabled ? 'selected' : ''}>Enabled</option>
-+                        <option value="false" ${!ema200Enabled ? 'selected' : ''}>Disabled</option>
-+                    </select>
-+                    <p class="hint">Penalize counter-EMA200 signals</p>
-+                </div>
-+                <div class="form-group">
-+                    <label for="scanner-htf-conflict">HTF Conflict Check</label>
-+                    <select id="scanner-htf-conflict" class="text-input">
-+                        <option value="true" ${htfConflictEnabled ? 'selected' : ''}>Enabled</option>
-+                        <option value="false" ${!htfConflictEnabled ? 'selected' : ''}>Disabled</option>
-+                    </select>
-+                    <p class="hint">Penalize LTF signals vs HTF structure</p>
-+                </div>
-+                <div class="form-group">
-+                    <label for="scanner-regime-filter">Regime Filter</label>
-+                    <select id="scanner-regime-filter" class="text-input">
-+                        <option value="true" ${regimeFilterEnabled ? 'selected' : ''}>Enabled</option>
-+                        <option value="false" ${!regimeFilterEnabled ? 'selected' : ''}>Disabled</option>
-+                    </select>
-+                    <p class="hint">Penalize signals in ranging markets</p>
-+                </div>
-+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-ema200-enabled">EMA200 Filter</label>
+                    <select id="scanner-ema200-enabled" class="text-input">
+                        <option value="true" ${ema200Enabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!ema200Enabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">Penalize counter-EMA200 signals</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-htf-conflict">HTF Conflict Check</label>
+                    <select id="scanner-htf-conflict" class="text-input">
+                        <option value="true" ${htfConflictEnabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!htfConflictEnabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">Penalize LTF signals vs HTF structure</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-regime-filter">Regime Filter</label>
+                    <select id="scanner-regime-filter" class="text-input">
+                        <option value="true" ${regimeFilterEnabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!regimeFilterEnabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">Penalize signals in ranging markets</p>
+                </div>
+            </div>
 
             <div class="form-row three-col">
                 <div class="form-group">
@@ -5457,7 +5672,7 @@ function renderScannerStatus(status) {
             </div>
         </div>`;
 
-    loadScannerAudits();
+    setTimeout(() => loadScannerAudits().catch(() => {}), 700);
 }
 
 function scannerNumberValue(id, fallback, integer = false) {
@@ -5533,7 +5748,7 @@ async function sendScannerRejectionSummary() {
 
 async function loadScannerAudits() {
     try {
-        const data = await fetchAPI('/api/scanner/audits?limit=50');
+        const data = await fetchAPI('/api/scanner/audits?limit=25');
         renderScannerAudits(data.items || []);
     } catch (err) {
         const el = document.getElementById('admin-scanner-audits');

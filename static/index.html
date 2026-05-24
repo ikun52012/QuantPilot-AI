@@ -70,6 +70,15 @@
             <a href="#" class="nav-item admin-only" data-page="admin" id="nav-admin">
                 <i class="ri-admin-line" aria-hidden="true"></i><span data-i18n="nav.admin" data-i18n-fallback="Admin">Admin</span>
             </a>
+            <a href="#" class="nav-item admin-only" data-page="prefilter" id="nav-prefilter">
+                <i class="ri-filter-3-line" aria-hidden="true"></i><span data-i18n="nav.prefilter" data-i18n-fallback="Pre-filter">Pre-filter</span>
+            </a>
+            <a href="#" class="nav-item admin-only" data-page="scanner" id="nav-scanner">
+                <i class="ri-radar-line" aria-hidden="true"></i><span data-i18n="nav.scanner" data-i18n-fallback="Scanner">Scanner</span>
+            </a>
+            <a href="#" class="nav-item admin-only" data-page="logs" id="nav-logs">
+                <i class="ri-file-list-3-line" aria-hidden="true"></i><span data-i18n="nav.logs" data-i18n-fallback="Logs">Logs</span>
+            </a>
         </nav>
         <div class="sidebar-footer">
             <div class="server-status" id="server-status" data-state="connecting">
@@ -2074,6 +2083,18 @@
                 <div class="card-header"><h3><i class="ri-price-tag-3-line"></i> Available Plans</h3></div>
                 <div class="plans-grid" id="plans-grid" style="padding:20px">Loading plans...</div>
             </div>
+            <div class="card mt-4 admin-only">
+                <div class="card-header"><h3><i class="ri-bank-card-line"></i> USDT Payment Addresses</h3></div>
+                <div id="admin-payment-addresses" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4 admin-only">
+                <div class="card-header"><h3><i class="ri-user-add-line"></i> Registration & Invite Codes</h3></div>
+                <div id="admin-registration" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4 admin-only">
+                <div class="card-header"><h3><i class="ri-coupon-3-line"></i> Redeem Card Codes</h3></div>
+                <div id="admin-redeem-codes" style="padding:20px">Loading...</div>
+            </div>
             <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-coupon-3-line"></i> Redeem Card Code</h3></div>
                 <div class="settings-form">
@@ -2110,7 +2131,7 @@
                 <div>
                     <span class="section-kicker" data-i18n="pages.admin.kicker" data-i18n-fallback="Operations Console">Operations Console</span>
                     <h2 data-i18n="nav.admin" data-i18n-fallback="Admin">Admin</h2>
-                    <p data-i18n="pages.admin.description" data-i18n-fallback="Control trading modes, reconcile order events, manage users, monitor filters, and review system health.">Control trading modes, reconcile order events, manage users, monitor filters, and review system health.</p>
+                    <p data-i18n="pages.admin.description" data-i18n-fallback="Control trading modes, reconcile order events, manage users, payments, updates, and system health.">Control trading modes, reconcile order events, manage users, payments, updates, and system health.</p>
                 </div>
             </section>
             <section class="ops-console">
@@ -2162,48 +2183,12 @@
                 <div id="admin-plans" style="padding:20px">Loading...</div>
             </div>
             <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-bank-card-line"></i> USDT Payment Addresses</h3></div>
-                <div id="admin-payment-addresses" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-user-add-line"></i> Registration & Invite Codes</h3></div>
-                <div id="admin-registration" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-coupon-3-line"></i> Redeem Card Codes</h3></div>
-                <div id="admin-redeem-codes" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-money-dollar-circle-line"></i> Pending Payments</h3></div>
                 <div id="admin-payments" style="padding:20px">Loading...</div>
             </div>
             <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-rss-line"></i> Webhook Diagnostics</h3></div>
-                <div id="admin-webhook-events" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-pulse-line"></i> Position Monitor</h3></div>
                 <div id="admin-position-monitor" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-filter-3-line"></i> Pre-Filter Thresholds</h3></div>
-                <div id="admin-filter-thresholds" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-shield-flash-line"></i> Risk Thresholds</h3></div>
-                <div id="admin-risk-thresholds" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-bar-chart-box-line"></i> Filter Blocking Statistics</h3></div>
-                <div id="admin-filter-stats" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-key-2-line"></i> External API Keys <span class="badge badge-experimental">On-chain Data</span></h3></div>
-                <div id="admin-external-api-keys" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header"><h3><i class="ri-fish-line"></i> Enhanced Whale Filters</h3></div>
-                <div id="admin-enhanced-filters" style="padding:20px">Loading...</div>
             </div>
             <div class="card mt-4">
                 <div class="card-header">
@@ -2211,20 +2196,6 @@
                     <button class="btn btn-secondary btn-sm" onclick="loadAIProviderConfig()"><i class="ri-refresh-line"></i></button>
                 </div>
                 <div id="admin-ai-provider" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header">
-                    <h3><i class="ri-radar-line"></i> Auto Market Scanner</h3>
-                    <span class="badge" id="scanner-mode-badge">Disabled</span>
-                </div>
-                <div id="admin-scanner" style="padding:20px">Loading...</div>
-            </div>
-            <div class="card mt-4">
-                <div class="card-header">
-                    <h3><i class="ri-bar-chart-grouped-line"></i> Scanner Audit Log</h3>
-                    <button class="btn btn-secondary btn-sm" onclick="loadScannerAudits()"><i class="ri-refresh-line"></i></button>
-                </div>
-                <div id="admin-scanner-audits" style="padding:20px;max-height:420px;overflow-y:auto">Loading...</div>
             </div>
             <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-archive-line"></i> Backup & Restore</h3></div>
@@ -2240,6 +2211,90 @@
             <div class="card mt-4">
                 <div class="card-header"><h3><i class="ri-server-line"></i> System</h3></div>
                 <div id="admin-system" style="padding:20px">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Page: Pre-filter Admin -->
+        <div class="page admin-workspace" id="page-prefilter">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Signal Quality</span>
+                    <h2>Pre-filter Configuration</h2>
+                    <p>Manage pre-filter thresholds, risk filters, external data keys, and blocking statistics from one focused page.</p>
+                </div>
+            </section>
+            <div class="card">
+                <div class="card-header"><h3><i class="ri-filter-3-line"></i> Pre-Filter Thresholds</h3></div>
+                <div id="admin-filter-thresholds" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-shield-flash-line"></i> Risk Thresholds</h3></div>
+                <div id="admin-risk-thresholds" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-key-2-line"></i> External API Keys <span class="badge badge-experimental">On-chain Data</span></h3></div>
+                <div id="admin-external-api-keys" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-fish-line"></i> Enhanced Whale / OI Filters</h3></div>
+                <div id="admin-enhanced-filters" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h3><i class="ri-bar-chart-box-line"></i> Filter Blocking Statistics</h3></div>
+                <div id="admin-filter-stats" style="padding:20px">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Page: Auto Scanner Admin -->
+        <div class="page admin-workspace" id="page-scanner">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Automation</span>
+                    <h2>Auto Market Scanner</h2>
+                    <p>Configure scan universe, multi-timeframe confirmation, scoring filters, AI budget, and live-trading safeguards.</p>
+                </div>
+                <span class="badge" id="scanner-mode-badge">Disabled</span>
+            </section>
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="ri-radar-line"></i> Scanner Settings</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadScanner()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div id="admin-scanner" style="padding:20px">Loading...</div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-bar-chart-grouped-line"></i> Scanner Audit Log</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadScannerAudits()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div id="admin-scanner-audits" style="padding:20px">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Page: Admin Logs -->
+        <div class="page admin-workspace" id="page-logs">
+            <section class="page-intro terminal-intro">
+                <div>
+                    <span class="section-kicker">Audit Trail</span>
+                    <h2>Logs</h2>
+                    <p>Review admin activity, webhooks, scanner decisions, and order execution events. Each category is paginated at 20 rows per page.</p>
+                </div>
+            </section>
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="ri-file-list-3-line"></i> Log Categories</h3>
+                    <button class="btn btn-secondary btn-sm" onclick="loadAdminLogs()"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div style="padding:20px">
+                    <div class="form-row" style="gap:8px;align-items:center">
+                        <button class="btn btn-secondary" id="log-tab-admin" onclick="setAdminLogType('admin')">Admin Audit</button>
+                        <button class="btn btn-secondary" id="log-tab-webhook" onclick="setAdminLogType('webhook')">Webhooks</button>
+                        <button class="btn btn-secondary" id="log-tab-scanner" onclick="setAdminLogType('scanner')">Scanner</button>
+                        <button class="btn btn-secondary" id="log-tab-order" onclick="setAdminLogType('order')">Orders</button>
+                    </div>
+                    <div id="admin-log-table" class="mt-4">Loading...</div>
+                    <div id="admin-log-pagination" class="form-row mt-4" style="justify-content:flex-end;gap:8px"></div>
+                </div>
             </div>
         </div>
     </main>

@@ -2516,6 +2516,133 @@ body[data-active-page="admin"] #page-admin .btn:not(.btn-primary):not(.btn-succe
     border-color: rgba(184, 199, 218, 0.9);
 }
 
+/* Admin workspaces follow the main light command-center shell. */
+body[data-active-page="admin"],
+body[data-active-page="prefilter"],
+body[data-active-page="scanner"],
+body[data-active-page="logs"] {
+    --bg-page: #f8fafc;
+    --bg-card: #ffffff;
+    --bg-card-hover: #f1f5f9;
+    --bg-input: #f8fafc;
+    --border: #e2e8f0;
+    --border-light: #cbd5e1;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #94a3b8;
+    --accent-blue: #2563eb;
+    --accent-green: #059669;
+    --accent-orange: #d97706;
+    --accent-red: #e11d48;
+    --accent-purple: #7c3aed;
+}
+
+body[data-active-page="admin"] .main-content,
+body[data-active-page="prefilter"] .main-content,
+body[data-active-page="scanner"] .main-content,
+body[data-active-page="logs"] .main-content {
+    background: var(--bg-page);
+}
+
+body[data-active-page="admin"] .sidebar,
+body[data-active-page="prefilter"] .sidebar,
+body[data-active-page="scanner"] .sidebar,
+body[data-active-page="logs"] .sidebar {
+    background: rgba(255, 255, 255, 0.97);
+    border-right-color: var(--border);
+}
+
+body[data-active-page="admin"] .sidebar-logo,
+body[data-active-page="prefilter"] .sidebar-logo,
+body[data-active-page="scanner"] .sidebar-logo,
+body[data-active-page="logs"] .sidebar-logo {
+    color: var(--text-primary);
+    border-bottom-color: var(--border);
+}
+
+body[data-active-page="admin"] .sidebar-logo i,
+body[data-active-page="prefilter"] .sidebar-logo i,
+body[data-active-page="scanner"] .sidebar-logo i,
+body[data-active-page="logs"] .sidebar-logo i {
+    background: rgba(37, 99, 235, 0.10);
+    color: var(--accent-blue);
+}
+
+body[data-active-page="admin"] .sidebar-footer,
+body[data-active-page="prefilter"] .sidebar-footer,
+body[data-active-page="scanner"] .sidebar-footer,
+body[data-active-page="logs"] .sidebar-footer {
+    border-top-color: var(--border);
+}
+
+body[data-active-page="admin"] .server-status,
+body[data-active-page="admin"] .nav-item,
+body[data-active-page="prefilter"] .server-status,
+body[data-active-page="prefilter"] .nav-item,
+body[data-active-page="scanner"] .server-status,
+body[data-active-page="scanner"] .nav-item,
+body[data-active-page="logs"] .server-status,
+body[data-active-page="logs"] .nav-item {
+    color: var(--text-secondary);
+}
+
+body[data-active-page="admin"] .nav-item:hover,
+body[data-active-page="prefilter"] .nav-item:hover,
+body[data-active-page="scanner"] .nav-item:hover,
+body[data-active-page="logs"] .nav-item:hover {
+    background: rgba(37, 99, 235, 0.06);
+    color: var(--accent-blue);
+}
+
+body[data-active-page="admin"] .nav-item.active,
+body[data-active-page="prefilter"] .nav-item.active,
+body[data-active-page="scanner"] .nav-item.active,
+body[data-active-page="logs"] .nav-item.active {
+    background: rgba(37, 99, 235, 0.08);
+    border-color: rgba(37, 99, 235, 0.20);
+    color: var(--accent-blue);
+}
+
+body[data-active-page="admin"] .header,
+body[data-active-page="prefilter"] .header,
+body[data-active-page="scanner"] .header,
+body[data-active-page="logs"] .header {
+    background: rgba(255, 255, 255, 0.92);
+    border-bottom-color: var(--border);
+    box-shadow: none;
+}
+
+body[data-active-page="admin"] #page-admin .page-intro,
+body[data-active-page="prefilter"] #page-prefilter .page-intro,
+body[data-active-page="scanner"] #page-scanner .page-intro,
+body[data-active-page="logs"] #page-logs .page-intro {
+    border-color: var(--border);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    box-shadow: var(--shadow);
+}
+
+body[data-active-page="admin"] #page-admin .page-intro h2,
+body[data-active-page="prefilter"] #page-prefilter .page-intro h2,
+body[data-active-page="scanner"] #page-scanner .page-intro h2,
+body[data-active-page="logs"] #page-logs .page-intro h2 {
+    color: var(--text-primary);
+}
+
+body[data-active-page="admin"] #page-admin .page-intro p,
+body[data-active-page="prefilter"] #page-prefilter .page-intro p,
+body[data-active-page="scanner"] #page-scanner .page-intro p,
+body[data-active-page="logs"] #page-logs .page-intro p {
+    color: var(--text-secondary);
+}
+
+body[data-active-page="admin"] #page-admin .page-intro .section-kicker,
+body[data-active-page="prefilter"] #page-prefilter .page-intro .section-kicker,
+body[data-active-page="scanner"] #page-scanner .page-intro .section-kicker,
+body[data-active-page="logs"] #page-logs .page-intro .section-kicker {
+    color: var(--accent-teal);
+}
+
 body:not([data-role]) .admin-only,
 body:not([data-role]) .user-only,
 body[data-role="admin"] .user-only,

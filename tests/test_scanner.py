@@ -10,7 +10,7 @@ from core.database import get_scanner_rejection_summary, list_scanner_audits, re
 from core.utils.datetime import utcnow
 from services.market_scanner import MarketScannerService, ScannerCandidate
 from services.synthetic_signal import build_synthetic_signal
-from services.unified_ohlcv import NormalizedCandle, OHLCVBundle, SymbolMapping
+from services.unified_ohlcv import NormalizedCandle, OHLCVBundle, SymbolMapping, _indicator_snapshot
 
 
 def _candles(count: int = 80, start: float = 100.0) -> list[NormalizedCandle]:
@@ -53,6 +53,27 @@ def _bundle() -> OHLCVBundle:
         },
         data_quality={"passed": True, "reasons": [], "spread_pct": 0.02, "primary_timeframe": "1h"},
     )
+
+
+def test_ohlcv_bundle_accepts_string_indicator_values():
+    indicators = {"1h": _indicator_snapshot(_candles(80))}
+
+    bundle = OHLCVBundle(
+        mapping=SymbolMapping(
+            watch_symbol="BTCUSDT",
+            data_symbol="BTCUSDT",
+            exchange_symbol="BTCUSDT",
+            exchange_name="binance",
+            market_type="swap",
+            data_source="ccxt",
+        ),
+        current_price=100.0,
+        timeframes={"1h": _candles(80)},
+        indicators=indicators,
+        data_quality={"passed": True, "reasons": [], "primary_timeframe": "1h"},
+    )
+
+    assert bundle.indicators["1h"]["market_regime"] in {"unknown", "ranging", "transitional", "trending"}
 
 
 def _candidate(direction: str = "long", score: float = 80.0, setup_hash: str = "candidate") -> ScannerCandidate:

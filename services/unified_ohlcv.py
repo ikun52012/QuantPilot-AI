@@ -50,7 +50,7 @@ class OHLCVBundle(BaseModel):
     mapping: SymbolMapping
     current_price: float = 0.0
     timeframes: dict[str, list[NormalizedCandle]] = Field(default_factory=dict)
-    indicators: dict[str, dict[str, float | None]] = Field(default_factory=dict)
+    indicators: dict[str, dict[str, Any]] = Field(default_factory=dict)
     data_quality: dict[str, Any] = Field(default_factory=dict)
     oi_change_pct: float | None = None
     oi_current: float | None = None
@@ -135,7 +135,7 @@ def _candles_from_history(rows: list[dict[str, Any]]) -> list[NormalizedCandle]:
     return [c for c in candles if c.open > 0 and c.high > 0 and c.low > 0 and c.close > 0]
 
 
-def _indicator_snapshot(candles: list[NormalizedCandle]) -> dict[str, float | None]:
+def _indicator_snapshot(candles: list[NormalizedCandle]) -> dict[str, Any]:
     closes = [c.close for c in candles]
     ohlcv = [
         [int(c.timestamp.timestamp() * 1000), c.open, c.high, c.low, c.close, c.volume]

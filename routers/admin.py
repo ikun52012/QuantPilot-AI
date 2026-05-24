@@ -1267,13 +1267,14 @@ async def resume_trading(
 async def get_order_events(
     status: str | None = None,
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """List recent order events for reconciliation/audit."""
     from services.order_reconciler import list_order_events
 
-    events = await list_order_events(db, status=status, limit=limit)
+    events = await list_order_events(db, status=status, limit=limit, offset=offset)
     return {
         "events": [
             {
