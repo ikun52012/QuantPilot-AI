@@ -22,7 +22,6 @@ from market_data import (
     _calculate_rsi,
     _calculate_volume_profile,
     _calculate_vwap,
-    _safe_fetch_open_interest,
     fetch_market_context,
     fetch_ohlcv_history,
 )
