@@ -326,7 +326,7 @@ class MarketScannerService:
 
         by_key: dict[str, ScannerCandidate] = {}
         for candidate in sorted(candidates, key=lambda item: item.score, reverse=True):
-            key = f"{candidate.direction}"
+            key = f"{candidate.exchange_symbol}|{candidate.direction}"
             by_key.setdefault(key, candidate)
         return list(by_key.values())
 
