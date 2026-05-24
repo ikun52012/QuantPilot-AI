@@ -5424,6 +5424,7 @@ function renderScannerAudits(items) {
             'deduped': 'badge-warning', 'sent_to_ai': 'badge-long',
             'daily_limit': 'badge-warning', 'ai_budget_exhausted': 'badge-error',
             'result': 'badge-success', 'error': 'badge-error',
+            'position_conflict': 'badge-warning',
         };
         return map[type] || 'badge-inactive';
     };

@@ -901,6 +901,9 @@ db_manager = DatabaseManager()
 
 async def get_db() -> AsyncSession:
     """FastAPI dependency for database session."""
+    if db_manager.async_session_factory is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="Database not initialized. Please try again after startup.")
     async with db_manager.async_session_factory() as session:
         try:
             yield session
