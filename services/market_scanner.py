@@ -9,9 +9,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from loguru import logger
+from sqlalchemy import select
 
 from core.config import settings
 from core.database import (
+    PositionModel,
     acquire_scanner_setup_lock,
     db_manager,
     get_or_create_scanner_state,
@@ -20,6 +22,7 @@ from core.database import (
     set_scanner_symbol_cooldown,
     update_scanner_state_counts,
 )
+from core.utils.common import position_symbol_key
 from core.utils.datetime import utcnow
 from services.signal_processor import SignalProcessor
 from services.synthetic_signal import build_synthetic_signal, market_context_from_bundle
@@ -580,6 +583,40 @@ class MarketScannerService:
         matches.sort(key=lambda item: (item["distance"], -_safe_float(item.get("effectiveness"), 1.0)))
         return matches[0]
 
+    async def _check_existing_position(
+        self, exchange_symbol: str, direction: str
+    ) -> tuple[bool, str]:
+        """Check if an open or pending position already exists for the same symbol+direction.
+
+        Returns (has_conflict, reason).
+        - Same-direction open/pending position → conflict (skip signal).
+        - Opposite-direction open/pending position → no conflict (market reversal, allow signal).
+        - No position → no conflict (allow signal).
+        """
+        try:
+            target_key = position_symbol_key(exchange_symbol)
+            if not target_key:
+                return False, ""
+            async with db_manager.async_session_factory() as session:
+                stmt = select(PositionModel).where(
+                    PositionModel.status.in_(["open", "pending"])
+                )
+                result = await session.execute(stmt)
+                positions = result.scalars().all()
+            for pos in positions:
+                if position_symbol_key(pos.ticker) != target_key:
+                    continue
+                pos_dir = (pos.direction or "").lower()
+                if pos_dir == direction.lower():
+                    return True, (
+                        f"Existing {pos_dir} position/order on {pos.ticker} "
+                        f"(status={pos.status}, id={pos.id[:8]})"
+                    )
+            return False, ""
+        except Exception as exc:
+            logger.warning(f"[Scanner] Position conflict check failed (allowing signal): {exc}")
+            return False, ""
+
     async def _dispatch_candidate(
         self, run_id: str, candidate: ScannerCandidate, bundle: OHLCVBundle
     ) -> dict[str, Any]:
@@ -653,6 +690,29 @@ class MarketScannerService:
                 )
                 await session.commit()
                 return {"status": "skipped", "reason": market_reason, "setup_hash": candidate.setup_hash}
+
+            has_conflict, conflict_reason = await self._check_existing_position(
+                candidate.exchange_symbol, candidate.direction
+            )
+            if has_conflict:
+                await record_scanner_audit(
+                    session,
+                    scope=self.scope,
+                    run_id=run_id,
+                    event_type="position_conflict",
+                    watch_symbol=candidate.watch_symbol,
+                    exchange_symbol=candidate.exchange_symbol,
+                    direction=candidate.direction,
+                    score=candidate.score,
+                    setup_hash=candidate.setup_hash,
+                    reason=f"duplicate signal blocked: {conflict_reason}",
+                )
+                await session.commit()
+                return {
+                    "status": "skipped",
+                    "reason": f"position conflict: {conflict_reason}",
+                    "setup_hash": candidate.setup_hash,
+                }
 
             acquired, lock = await acquire_scanner_setup_lock(
                 session,
