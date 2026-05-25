@@ -41,6 +41,54 @@ def _parse_pg_url() -> dict:
     }
 
 
+def _docker_available() -> bool:
+    """Check if docker CLI is available on this system."""
+    return shutil.which("docker") is not None
+
+
+def _compose_cmd() -> list[str]:
+    """Build base docker compose command with project/file args."""
+    compose_file = Path(__file__).parent / "docker-compose.yml"
+    if not compose_file.exists():
+        # Fallback: search one directory up
+        compose_file = Path(__file__).parent.parent / "docker-compose.yml"
+    project = os.getenv("COMPOSE_PROJECT_NAME", "quantpilot-ai")
+    return [
+        "docker", "compose",
+        "-p", project,
+        "-f", str(compose_file),
+    ]
+
+
+async def _pg_dump_via_docker(dump_file: Path, pg: dict) -> tuple[int, bytes, bytes]:
+    """Run pg_dump inside the postgres container via docker compose exec.
+
+    Returns (returncode, stdout, stderr) similar to create_subprocess_exec.
+    stdout is written to dump_file if returncode == 0.
+    """
+    base_cmd = _compose_cmd()
+    # Inside the postgres container, connect via local socket (no password needed)
+    cmd = base_cmd + [
+        "exec", "-T", "postgres",
+        "pg_dump",
+        "-U", pg["user"],
+        "-d", pg["dbname"],
+        "--format=custom",
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode == 0 and stdout:
+        dump_file.write_bytes(stdout)
+
+    return (proc.returncode if proc.returncode is not None else 1), stdout, stderr
+
+
 async def create_backup(note: str = "") -> dict:
     """Create a database backup (SQLite zip or PostgreSQL pg_dump)."""
     timestamp = utcnow().strftime("%Y%m%d_%H%M%S")
@@ -88,8 +136,24 @@ async def create_backup(note: str = "") -> dict:
             files_to_backup.append(("database.dump", dump_file))
             logger.info(f"[Backup] PostgreSQL dump created: {dump_file.stat().st_size / 1024:.1f} KB")
         except FileNotFoundError:
-            logger.error("[Backup] pg_dump not found. Install PostgreSQL client tools.")
-            return {"status": "error", "reason": "pg_dump not found. Install PostgreSQL client tools."}
+            # Host pg_dump not available — try docker compose exec into postgres container
+            if _docker_available():
+                logger.info("[Backup] Host pg_dump not found, trying docker compose exec fallback.")
+                try:
+                    rc, stdout, stderr = await _pg_dump_via_docker(dump_file, pg)
+                    if rc != 0:
+                        error_msg = stderr.decode().strip() if stderr else "Unknown error"
+                        logger.error(f"[Backup] docker pg_dump failed: {error_msg}")
+                        dump_file.unlink(missing_ok=True)
+                        return {"status": "error", "reason": f"docker pg_dump failed: {error_msg}"}
+                    files_to_backup.append(("database.dump", dump_file))
+                    logger.info(f"[Backup] PostgreSQL dump created via docker: {dump_file.stat().st_size / 1024:.1f} KB")
+                except FileNotFoundError:
+                    logger.error("[Backup] docker compose not found.")
+                    return {"status": "error", "reason": "pg_dump not found and docker compose is unavailable."}
+            else:
+                logger.error("[Backup] pg_dump not found. Install PostgreSQL client tools.")
+                return {"status": "error", "reason": "pg_dump not found. Install PostgreSQL client tools."}
     else:
         # SQLite: copy database file
         db_file = data_dir / "server.db"
