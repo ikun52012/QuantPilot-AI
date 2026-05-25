@@ -819,6 +819,76 @@ def _format_entry_exit_indicators(market: MarketContext) -> str:
     return "\n" + "\n".join(lines) + "\n"
 
 
+def _format_scanner_market_context(market: MarketContext) -> str:
+    """Format scanner-derived regime, quality, and indicator context."""
+    quality = getattr(market, "_scanner_data_quality", None) or {}
+    indicators = getattr(market, "_scanner_indicators", None) or {}
+    source = getattr(market, "_market_data_source", None)
+    primary_tf = str(getattr(market, "_scanner_primary_timeframe", "") or quality.get("primary_timeframe") or "")
+    regime = getattr(market, "_scanner_market_regime", None)
+    if not regime and isinstance(indicators, dict):
+        primary_indicators = indicators.get(primary_tf, {}) if primary_tf else {}
+        if isinstance(primary_indicators, dict):
+            regime = primary_indicators.get("market_regime")
+
+    if not (quality or indicators or regime):
+        return ""
+
+    lines = ["## Scanner Market Data"]
+    if source:
+        lines.append(f"- Data Source: {source}")
+    if isinstance(quality, dict) and quality:
+        reasons = ", ".join(str(item) for item in (quality.get("reasons") or [])) or "none"
+        details = [
+            f"passed={bool(quality.get('passed'))}",
+            f"reasons={reasons}",
+        ]
+        if primary_tf:
+            details.append(f"primary_timeframe={primary_tf}")
+        if quality.get("primary_candles") is not None:
+            details.append(f"primary_candles={quality.get('primary_candles')}")
+        if quality.get("spread_pct") is not None:
+            details.append(f"spread_pct={quality.get('spread_pct')}")
+        if quality.get("price_deviation_pct") is not None:
+            details.append(f"price_deviation_pct={quality.get('price_deviation_pct')}")
+        missing_microstructure = quality.get("missing_microstructure") or []
+        if missing_microstructure:
+            details.append("missing_microstructure=" + ",".join(str(item) for item in missing_microstructure))
+        lines.append("- Data Quality: " + "; ".join(details))
+    if regime:
+        label = f" ({primary_tf})" if primary_tf else ""
+        lines.append(f"- Scanner Regime{label}: {regime}")
+
+    if isinstance(indicators, dict):
+        sorted_items = sorted(
+            indicators.items(),
+            key=lambda item: (0 if str(item[0]) == primary_tf else 1, str(item[0])),
+        )
+        for tf, tf_indicators in sorted_items[:4]:
+            if not isinstance(tf_indicators, dict):
+                continue
+            fields = []
+            for key, label in (
+                ("market_regime", "regime"),
+                ("adx", "ADX"),
+                ("ema200", "EMA200"),
+                ("vwap", "VWAP"),
+                ("vwap_distance_pct", "VWAP distance %"),
+                ("volume_profile_poc", "POC"),
+                ("value_area_low", "VA low"),
+                ("value_area_high", "VA high"),
+                ("volume_ratio", "volume ratio"),
+                ("macd_hist", "MACD hist"),
+            ):
+                value = tf_indicators.get(key)
+                if value is not None:
+                    fields.append(f"{label}={value}")
+            if fields:
+                lines.append(f"- {tf}: " + "; ".join(fields))
+
+    return "\n" + "\n".join(lines) + "\n"
+
+
 def _build_user_prompt(
     signal: TradingViewSignal,
     market: MarketContext,
@@ -832,6 +902,7 @@ def _build_user_prompt(
     prefilter_summary = ((user_settings or {}).get("_prefilter_summary") or {}) if isinstance(user_settings, dict) else {}
     scanner_context = ((user_settings or {}).get("_scanner_context") or {}) if isinstance(user_settings, dict) else {}
     entry_exit_indicator_section = _format_entry_exit_indicators(market)
+    scanner_market_section = _format_scanner_market_context(market)
 
     missing_data_items = []
     if market.current_price <= 0:
@@ -984,6 +1055,7 @@ When market data is limited:
 {tp_section}
 {ts_section}
 {prefilter_section}
+{scanner_market_section}
 {scanner_section}
 
 {timeframe_instruction}

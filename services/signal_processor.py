@@ -2551,28 +2551,30 @@ class SignalProcessor:
             "stop_loss_order_type": settings.exchange.stop_loss_order_type,
             "limit_timeout_overrides": settings.exchange.limit_timeout_overrides,
         }
+        if user_id and user_settings is None:
+            user_settings = await self._load_user_settings(user_id)
+        user_exchange = (user_settings or {}).get("exchange") or {}
+        if user_exchange:
+            exchange_config.update({
+                "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
+                "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else settings.exchange.api_key,
+                "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else settings.exchange.api_secret,
+                "password": user_exchange.get("password") if "password" in user_exchange else settings.exchange.password,
+                "live_trading": bool(user_exchange.get("live_trading")) if "live_trading" in user_exchange else bool(settings.exchange.live_trading),
+                "sandbox_mode": bool(user_exchange.get("sandbox_mode")) if "sandbox_mode" in user_exchange else bool(settings.exchange.sandbox_mode),
+                "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
+                "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
+                "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
+                "limit_timeout_overrides": (
+                    user_exchange.get("limit_timeout_overrides")
+                    if "limit_timeout_overrides" in user_exchange
+                    else settings.exchange.limit_timeout_overrides
+                ),
+            })
         if user_id:
             user = await get_user_by_id(self.session, user_id)
             if user:
-                if user_settings is None:
-                    user_settings = await self._load_user_settings(user_id)
-
-                user_exchange = (user_settings or {}).get("exchange") or {}
                 exchange_config.update({
-                    "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
-                    "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else settings.exchange.api_key,
-                    "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else settings.exchange.api_secret,
-                    "password": user_exchange.get("password") if "password" in user_exchange else settings.exchange.password,
-                    "live_trading": bool(user_exchange.get("live_trading")) if "live_trading" in user_exchange else bool(settings.exchange.live_trading),
-                    "sandbox_mode": bool(user_exchange.get("sandbox_mode")) if "sandbox_mode" in user_exchange else bool(settings.exchange.sandbox_mode),
-                    "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
-                    "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
-                    "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
-                    "limit_timeout_overrides": (
-                        user_exchange.get("limit_timeout_overrides")
-                        if "limit_timeout_overrides" in user_exchange
-                        else settings.exchange.limit_timeout_overrides
-                    ),
                     "max_leverage": user.max_leverage or 20,
                     "max_position_pct": user.max_position_pct or settings.risk.max_position_pct,
                 })
@@ -2646,6 +2648,8 @@ class SignalProcessor:
                     "exchange": exchange_config.get("exchange") or exchange_config.get("name"),
                     "live_trading": bool(exchange_config.get("live_trading")),
                     "sandbox_mode": bool(exchange_config.get("sandbox_mode")),
+                    "market_type": exchange_config.get("market_type") or settings.exchange.market_type,
+                    "limit_timeout_overrides": exchange_config.get("limit_timeout_overrides") or {},
                 },
                 "strategy_name": signal_data.get("strategy", ""),
                 "user_risk_profile": user_risk_profile,

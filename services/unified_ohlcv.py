@@ -49,11 +49,19 @@ class SymbolMapping(BaseModel):
 class OHLCVBundle(BaseModel):
     mapping: SymbolMapping
     current_price: float = 0.0
+    price_change_24h: float = 0.0
+    volume_24h: float = 0.0
+    volume_change_pct: float = 0.0
+    high_24h: float = 0.0
+    low_24h: float = 0.0
     timeframes: dict[str, list[NormalizedCandle]] = Field(default_factory=dict)
     indicators: dict[str, dict[str, Any]] = Field(default_factory=dict)
     data_quality: dict[str, Any] = Field(default_factory=dict)
     oi_change_pct: float | None = None
     oi_current: float | None = None
+    funding_rate: float | None = None
+    orderbook_imbalance: float | None = None
+    long_short_ratio: float | None = None
 
     @property
     def candles(self) -> dict[str, list[NormalizedCandle]]:
@@ -300,7 +308,7 @@ class UnifiedOHLCVProvider:
             if cached and now_monotonic - cached[0] <= ttl:
                 return cached[1]
         timeframes_data: dict[str, list[NormalizedCandle]] = {}
-        indicators: dict[str, dict[str, float | None]] = {}
+        indicators: dict[str, dict[str, Any]] = {}
 
         for tf in requested_tfs:
             candles = await self._fetch_candles(mapping, tf)
@@ -317,10 +325,24 @@ class UnifiedOHLCVProvider:
         price_deviation_pct = 0.0
         oi_change_pct: float | None = None
         oi_current: float | None = None
+        funding_rate: float | None = None
+        orderbook_imbalance: float | None = None
+        long_short_ratio: float | None = None
+        price_change_24h = 0.0
+        volume_24h = 0.0
+        volume_change_pct = 0.0
+        high_24h = 0.0
+        low_24h = 0.0
+        market_context_available = False
+        market_context_source = ""
+        market_context_error = ""
+        missing_microstructure: list[str] = []
         if mapping.data_source == "ccxt":
             try:
                 ohlcv_price = current_price
                 context = await fetch_market_context(mapping.exchange_symbol)
+                market_context_source = str(getattr(context, "_market_data_source", "") or "")
+                market_context_available = bool(market_context_source and float(context.current_price or 0.0) > 0)
                 context_price = float(context.current_price or current_price)
                 if ohlcv_price > 0 and context_price > 0:
                     price_deviation_pct = abs(context_price - ohlcv_price) / ohlcv_price * 100.0
@@ -328,22 +350,51 @@ class UnifiedOHLCVProvider:
                 spread_pct = float(context.bid_ask_spread or 0.0)
                 oi_change_pct = float(context.open_interest_change_pct) if context.open_interest_change_pct is not None else None
                 oi_current = float(context.open_interest) if context.open_interest is not None else None
+                funding_rate = float(context.funding_rate) if context.funding_rate is not None else None
+                orderbook_imbalance = float(context.orderbook_imbalance) if context.orderbook_imbalance is not None else None
+                long_short_ratio = float(context.long_short_ratio) if context.long_short_ratio is not None else None
+                price_change_24h = float(context.price_change_24h or 0.0)
+                volume_24h = float(context.volume_24h or 0.0)
+                volume_change_pct = float(context.volume_change_pct or 0.0)
+                high_24h = float(context.high_24h or 0.0)
+                low_24h = float(context.low_24h or 0.0)
+                if funding_rate is None:
+                    missing_microstructure.append("funding_rate")
+                if orderbook_imbalance is None:
+                    missing_microstructure.append("orderbook_imbalance")
+                if oi_current is None:
+                    missing_microstructure.append("open_interest")
+                if volume_24h <= 0:
+                    missing_microstructure.append("volume_24h")
             except Exception as exc:
+                market_context_error = str(exc)
                 logger.debug(f"[Scanner/OHLCV] market context unavailable for {mapping.exchange_symbol}: {exc}")
 
         bundle = OHLCVBundle(
             mapping=mapping,
             current_price=current_price,
+            price_change_24h=price_change_24h,
+            volume_24h=volume_24h,
+            volume_change_pct=volume_change_pct,
+            high_24h=high_24h,
+            low_24h=low_24h,
             timeframes=timeframes_data,
             indicators=indicators,
             data_quality={},
             oi_change_pct=oi_change_pct,
             oi_current=oi_current,
+            funding_rate=funding_rate,
+            orderbook_imbalance=orderbook_imbalance,
+            long_short_ratio=long_short_ratio,
         )
         bundle.data_quality = self._assess_quality(
             bundle,
             spread_pct=spread_pct,
             price_deviation_pct=price_deviation_pct,
+            market_context_available=market_context_available,
+            market_context_source=market_context_source,
+            market_context_error=market_context_error,
+            missing_microstructure=missing_microstructure,
         )
         if ttl > 0:
             self._bundle_cache[cache_key] = (now_monotonic, bundle)
@@ -458,6 +509,10 @@ class UnifiedOHLCVProvider:
         bundle: OHLCVBundle,
         spread_pct: float = 0.0,
         price_deviation_pct: float = 0.0,
+        market_context_available: bool = False,
+        market_context_source: str = "",
+        market_context_error: str = "",
+        missing_microstructure: list[str] | None = None,
     ) -> dict[str, Any]:
         reasons: list[str] = []
         now = utcnow()
@@ -501,6 +556,8 @@ class UnifiedOHLCVProvider:
             reasons.append("wide_spread")
         if price_deviation_pct > float(settings.scanner.max_price_deviation_pct):
             reasons.append("price_source_deviation")
+        if bundle.mapping.data_source == "ccxt" and not market_context_available:
+            reasons.append("market_context_unavailable")
         if bundle.mapping.mapped_asset and bundle.mapping.exchange_symbol not in settings.scanner.live_symbol_whitelist:
             reasons.append("mapped_asset_live_disabled")
 
@@ -514,6 +571,10 @@ class UnifiedOHLCVProvider:
             "primary_timeframe": primary_tf,
             "primary_candles": len(primary),
             "mapped_asset": bundle.mapping.mapped_asset,
+            "market_context_available": market_context_available if bundle.mapping.data_source == "ccxt" else None,
+            "market_context_source": market_context_source,
+            "market_context_error": market_context_error,
+            "missing_microstructure": list(missing_microstructure or []),
         }
 
 

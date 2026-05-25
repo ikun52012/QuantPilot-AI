@@ -204,6 +204,55 @@ async def test_execute_trade_preserves_explicit_empty_limit_timeout_overrides(mo
 
 
 @pytest.mark.asyncio
+async def test_execute_trade_applies_exchange_overrides_without_user_id(monkeypatch):
+    processor = SignalProcessor(session=AsyncMock())
+    decision = TradeDecision(
+        execute=True,
+        direction=SignalDirection.LONG,
+        ticker="BTCUSDT",
+        entry_price=100.0,
+        quantity=1.0,
+        order_type="market",
+    )
+
+    monkeypatch.setattr(settings.exchange, "name", "binance")
+    monkeypatch.setattr(settings.exchange, "api_key", "GLOBAL_KEY")
+    monkeypatch.setattr(settings.exchange, "api_secret", "GLOBAL_SECRET")
+    monkeypatch.setattr(settings.exchange, "password", "GLOBAL_PASSWORD")
+    monkeypatch.setattr(settings.exchange, "live_trading", True)
+    monkeypatch.setattr(settings.exchange, "sandbox_mode", False)
+    monkeypatch.setattr(settings.exchange, "market_type", "contract")
+    monkeypatch.setattr(settings.exchange, "default_order_type", "market")
+    monkeypatch.setattr(settings.exchange, "stop_loss_order_type", "market")
+    monkeypatch.setattr(settings.risk, "max_position_pct", 10.0)
+
+    async def fake_execute_trade(_decision, exchange_config):
+        return {"status": "simulated", "captured_exchange_config": dict(exchange_config)}
+
+    monkeypatch.setattr(processor, "_apply_position_limits", lambda *args, **kwargs: None)
+    monkeypatch.setattr("services.signal_processor.trading_allowed", AsyncMock(return_value={"allowed": True}))
+    monkeypatch.setattr("services.signal_processor.execute_trade", fake_execute_trade)
+    monkeypatch.setattr(
+        "services.signal_processor.log_trade_db",
+        AsyncMock(return_value=SimpleNamespace(id="trade-1", payload_json="{}")),
+    )
+    monkeypatch.setattr("services.signal_processor.record_order_event", AsyncMock(return_value=SimpleNamespace(id="evt-1")))
+    monkeypatch.setattr("services.signal_processor.notify_trade_executed", AsyncMock())
+    monkeypatch.setattr("services.signal_processor.record_trade", lambda *args, **kwargs: None)
+
+    result = await processor._execute_trade(
+        decision,
+        None,
+        {"exchange": {"name": "okx", "live_trading": False, "market_type": "contract"}},
+    )
+
+    config = result["captured_exchange_config"]
+    assert config["exchange"] == "okx"
+    assert config["live_trading"] is False
+    assert config["market_type"] == "contract"
+
+
+@pytest.mark.asyncio
 async def test_exchange_execute_trade_preserves_explicit_empty_credentials(monkeypatch):
     _set_global_exchange_defaults(monkeypatch)
     monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
@@ -246,7 +295,14 @@ async def test_execute_trade_pending_limit_includes_exit_plan(monkeypatch):
     monkeypatch.setattr(
         exchange_module,
         "_create_exchange_order",
-        AsyncMock(return_value={"id": "entry-1", "status": "open", "filled": 0.0, "price": 100.0}),
+        AsyncMock(return_value={
+            "id": "entry-1",
+            "status": "open",
+            "filled": 0.0,
+            "price": 100.0,
+            "_requested_amount": 1.0,
+            "_submitted_amount": 2.0,
+        }),
     )
 
     result = await exchange_module.execute_trade(
@@ -259,11 +315,16 @@ async def test_execute_trade_pending_limit_includes_exit_plan(monkeypatch):
             stop_loss=98.0,
             take_profit_levels=[TakeProfitLevel(price=103.0, qty_pct=100.0)],
             order_type="limit",
+            limit_timeout_secs=3600,
         ),
         _user_exchange_config(),
     )
 
     assert result["status"] == "pending"
+    assert result["quantity"] == 2.0
+    assert result["requested_quantity"] == 1.0
+    assert result["submitted_quantity"] == 2.0
+    assert result["limit_timeout_secs"] == 3600
     assert result["stop_loss"] == 98.0
     assert result["take_profit_orders"][0]["price"] == 103.0
     assert result["take_profit_orders"][0]["status"] == "pending"

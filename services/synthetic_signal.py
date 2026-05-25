@@ -130,6 +130,30 @@ def _change_pct(candles: list[Any], current: float, seconds: int, timeframe: str
     return ((current - ref) / ref * 100.0) if ref > 0 else 0.0
 
 
+def _candle_to_ohlcv(candle: Any) -> list[float]:
+    timestamp = getattr(candle, "timestamp", None)
+    if hasattr(timestamp, "timestamp"):
+        timestamp_ms = int(timestamp.timestamp() * 1000)
+    else:
+        timestamp_ms = 0
+    return [
+        float(timestamp_ms),
+        float(getattr(candle, "open", 0.0) or 0.0),
+        float(getattr(candle, "high", 0.0) or 0.0),
+        float(getattr(candle, "low", 0.0) or 0.0),
+        float(getattr(candle, "close", 0.0) or 0.0),
+        float(getattr(candle, "volume", 0.0) or 0.0),
+    ]
+
+
+def _tf_attr_name(timeframe: str) -> str:
+    text = str(timeframe or "").lower().strip()
+    if text in {"60", "60m"}:
+        text = "1h"
+    safe = "".join(ch for ch in text if ch.isalnum()) or "unknown"
+    return f"_ohlcv_{safe}"
+
+
 def market_context_from_bundle(bundle: Any, *, ticker: str | None = None) -> MarketContext:
     """Convert a scanner OHLCV bundle into the existing AI market context model."""
     configured_tfs = list(settings.scanner.timeframes or ["1h"])
@@ -146,22 +170,48 @@ def market_context_from_bundle(bundle: Any, *, ticker: str | None = None) -> Mar
     lows = [float(getattr(c, "low", 0.0) or 0.0) for c in recent]
     volumes = [float(getattr(c, "volume", 0.0) or 0.0) for c in recent]
     indicators = getattr(bundle, "indicators", {}) or {}
+    primary_indicators = indicators.get(primary_tf, {}) or {}
+    one_hour_indicators = indicators.get("1h", {}) or primary_indicators
 
-    return MarketContext(
+    context = MarketContext(
         ticker=str(ticker or getattr(getattr(bundle, "mapping", None), "exchange_symbol", "") or ""),
         current_price=current,
         price_change_1h=_change_pct(candles, current, 3600, primary_tf),
         price_change_4h=_change_pct(candles, current, 4 * 3600, primary_tf),
-        price_change_24h=_change_pct(candles, current, 24 * 3600, primary_tf),
-        volume_24h=sum(volumes),
-        volume_change_pct=0.0,
-        high_24h=max(highs) if highs else current,
-        low_24h=min(lows) if lows else current,
+        price_change_24h=float(getattr(bundle, "price_change_24h", 0.0) or _change_pct(candles, current, 24 * 3600, primary_tf)),
+        volume_24h=float(getattr(bundle, "volume_24h", 0.0) or sum(volumes)),
+        volume_change_pct=float(getattr(bundle, "volume_change_pct", 0.0) or primary_indicators.get("volume_change_pct") or 0.0),
+        high_24h=float(getattr(bundle, "high_24h", 0.0) or (max(highs) if highs else current)),
+        low_24h=float(getattr(bundle, "low_24h", 0.0) or (min(lows) if lows else current)),
         bid_ask_spread=float(getattr(bundle, "bid_ask_spread_pct", 0.0) or 0.0),
-        funding_rate=None,
-        rsi_1h=indicators.get(primary_tf, {}).get("rsi"),
-        atr_pct=indicators.get(primary_tf, {}).get("atr_pct"),
-        ema_fast=indicators.get(primary_tf, {}).get("ema_fast"),
-        ema_slow=indicators.get(primary_tf, {}).get("ema_slow"),
-        orderbook_imbalance=None,
+        funding_rate=getattr(bundle, "funding_rate", None),
+        open_interest=getattr(bundle, "oi_current", None),
+        open_interest_change_pct=getattr(bundle, "oi_change_pct", None),
+        rsi_1h=one_hour_indicators.get("rsi") or one_hour_indicators.get("rsi14"),
+        atr_pct=one_hour_indicators.get("atr_pct"),
+        ema_fast=one_hour_indicators.get("ema_fast"),
+        ema_slow=one_hour_indicators.get("ema_slow"),
+        orderbook_imbalance=getattr(bundle, "orderbook_imbalance", None),
+        long_short_ratio=getattr(bundle, "long_short_ratio", None),
     )
+
+    context_any = context
+    for tf, tf_candles in candles_by_tf.items():
+        setattr(context_any, _tf_attr_name(str(tf)), [_candle_to_ohlcv(c) for c in list(tf_candles or [])])
+    context_any._market_data_source = getattr(getattr(bundle, "mapping", None), "data_source", "scanner_bundle")
+    context_any._scanner_data_quality = getattr(bundle, "data_quality", {}) or {}
+    context_any._scanner_indicators = indicators
+    context_any._scanner_primary_timeframe = primary_tf
+    context_any._scanner_market_regime = primary_indicators.get("market_regime") or one_hour_indicators.get("market_regime")
+    try:
+        from market_data import build_entry_exit_indicator_context
+
+        context_any._entry_exit_indicators = build_entry_exit_indicator_context(
+            ohlcv_1h=context_any._ohlcv_1h if hasattr(context_any, "_ohlcv_1h") else [],
+            ohlcv_15m=context_any._ohlcv_15m if hasattr(context_any, "_ohlcv_15m") else [],
+            ohlcv_5m=context_any._ohlcv_5m if hasattr(context_any, "_ohlcv_5m") else [],
+        )
+    except Exception:
+        pass
+
+    return context

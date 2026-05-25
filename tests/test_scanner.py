@@ -8,9 +8,16 @@ pytest.importorskip("greenlet")
 from core.config import settings
 from core.database import get_scanner_rejection_summary, list_scanner_audits, record_scanner_audit
 from core.utils.datetime import utcnow
+from models import MarketContext
 from services.market_scanner import MarketScannerService, ScannerCandidate
-from services.synthetic_signal import build_synthetic_signal
-from services.unified_ohlcv import NormalizedCandle, OHLCVBundle, SymbolMapping, _indicator_snapshot
+from services.synthetic_signal import build_synthetic_signal, market_context_from_bundle
+from services.unified_ohlcv import (
+    NormalizedCandle,
+    OHLCVBundle,
+    SymbolMapping,
+    UnifiedOHLCVProvider,
+    _indicator_snapshot,
+)
 
 
 def _candles(count: int = 80, start: float = 100.0) -> list[NormalizedCandle]:
@@ -74,6 +81,63 @@ def test_ohlcv_bundle_accepts_string_indicator_values():
     )
 
     assert bundle.indicators["1h"]["market_regime"] in {"unknown", "ranging", "transitional", "trending"}
+
+
+def test_market_context_from_bundle_preserves_scanner_market_data():
+    bundle = _bundle()
+    bundle.timeframes["15m"] = _candles(80)
+    bundle.timeframes["4h"] = _candles(120)
+    bundle.indicators["15m"] = dict(bundle.indicators["1h"])
+    bundle.indicators["4h"] = dict(bundle.indicators["1h"])
+    bundle.indicators["1h"]["market_regime"] = "trending"
+    bundle.indicators["1h"]["vwap"] = 101.2
+    bundle.indicators["1h"]["volume_profile_poc"] = 100.8
+    bundle.funding_rate = 0.0001
+    bundle.orderbook_imbalance = 1.25
+    bundle.long_short_ratio = 0.92
+    bundle.oi_current = 123456.0
+    bundle.oi_change_pct = 4.5
+    bundle.volume_24h = 50_000_000.0
+    bundle.volume_change_pct = 12.5
+    bundle.price_change_24h = 2.1
+    bundle.high_24h = 110.0
+    bundle.low_24h = 95.0
+
+    context = market_context_from_bundle(bundle, ticker="BTCUSDT")
+
+    assert context.funding_rate == pytest.approx(0.0001)
+    assert context.orderbook_imbalance == pytest.approx(1.25)
+    assert context.open_interest == pytest.approx(123456.0)
+    assert context.open_interest_change_pct == pytest.approx(4.5)
+    assert context.volume_24h == pytest.approx(50_000_000.0)
+    assert context.volume_change_pct == pytest.approx(12.5)
+    assert context.price_change_24h == pytest.approx(2.1)
+    assert len(context._ohlcv_1h) == 80
+    assert len(context._ohlcv_15m) == 80
+    assert len(context._ohlcv_4h) == 120
+    assert context._scanner_market_regime == "trending"
+    assert context._scanner_indicators["1h"]["vwap"] == pytest.approx(101.2)
+
+
+@pytest.mark.asyncio
+async def test_ohlcv_bundle_marks_missing_market_context_degraded(monkeypatch):
+    monkeypatch.setattr(settings.scanner, "bundle_cache_ttl_secs", 0)
+    monkeypatch.setattr(settings.scanner, "timeframes", ["1h"])
+
+    async def fake_fetch_ohlcv_history(*args, **kwargs):
+        return [candle.model_dump() for candle in _candles(80)]
+
+    async def fake_fetch_market_context(symbol):
+        return MarketContext(ticker=symbol, current_price=0.0)
+
+    monkeypatch.setattr("services.unified_ohlcv.fetch_ohlcv_history", fake_fetch_ohlcv_history)
+    monkeypatch.setattr("services.unified_ohlcv.fetch_market_context", fake_fetch_market_context)
+
+    bundle = await UnifiedOHLCVProvider().get_bundle("BTCUSDT", ["1h"])
+
+    assert bundle.quality_passed is False
+    assert "market_context_unavailable" in bundle.quality_reasons
+    assert bundle.data_quality["market_context_available"] is False
 
 
 def _candidate(direction: str = "long", score: float = 80.0, setup_hash: str = "candidate") -> ScannerCandidate:

@@ -165,6 +165,43 @@ def test_build_user_prompt_includes_entry_exit_indicators(sample_signal, sample_
     assert "bullish_low_sweep" in prompt
 
 
+def test_build_user_prompt_includes_scanner_market_context(sample_signal, sample_market, monkeypatch):
+    monkeypatch.setattr(settings.risk, "exit_management_mode", "ai")
+    sample_signal.strategy = "AI_Auto_Scanner"
+    sample_market._market_data_source = "ccxt"
+    sample_market._scanner_primary_timeframe = "1h"
+    sample_market._scanner_market_regime = "trending"
+    sample_market._scanner_data_quality = {
+        "passed": True,
+        "reasons": [],
+        "primary_timeframe": "1h",
+        "primary_candles": 120,
+        "spread_pct": 0.01,
+        "missing_microstructure": [],
+    }
+    sample_market._scanner_indicators = {
+        "1h": {
+            "market_regime": "trending",
+            "vwap": 50100.0,
+            "vwap_distance_pct": -0.2,
+            "volume_profile_poc": 49900.0,
+            "adx": 28.0,
+        }
+    }
+
+    prompt = _build_user_prompt(
+        sample_signal,
+        sample_market,
+        user_settings={"_scanner_context": {"mode": "paper", "min_confidence": 0.7, "payload": {}}},
+    )
+
+    assert "## Scanner Market Data" in prompt
+    assert "Scanner Regime (1h): trending" in prompt
+    assert "VWAP=50100.0" in prompt
+    assert "POC=49900.0" in prompt
+    assert "Data Quality: passed=True" in prompt
+
+
 @pytest.mark.asyncio
 async def test_deepseek_call_requests_json_output(monkeypatch):
     captured_payload = {}

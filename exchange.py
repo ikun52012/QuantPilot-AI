@@ -376,6 +376,9 @@ async def _create_exchange_order(
                 status="success",
                 latency=time.time() - start,
             )
+            if isinstance(result, dict):
+                result.setdefault("_requested_amount", requested_amount)
+                result.setdefault("_submitted_amount", amount)
             return result
         except ccxt.BaseError as exc:
             latency = time.time() - start
@@ -1444,19 +1447,20 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             logger.warning(f"[Exchange] Order {order_id} returned status=None (type={order_type}), treating as 'open'")
         else:
             order_status = raw_status
+        submitted_qty = safe_float(order.get("_submitted_amount") or order.get("amount") or decision.quantity or 0)
         actual_filled_qty = safe_float(order.get("filled") or 0)
         if raw_status is None and order_type == "limit":
             logger.info(f"[Exchange] OKX sandbox returned status=None for limit order {order_id}, treating as 'open' (pending)")
-        requested_qty = safe_float(decision.quantity or 0)
+        requested_qty = safe_float(order.get("_requested_amount") or decision.quantity or 0)
         if actual_filled_qty == 0 and order_status in {"closed", "filled"}:
-            actual_filled_qty = safe_float(order.get("amount") or 0)
+            actual_filled_qty = safe_float(order.get("amount") or submitted_qty or 0)
             if actual_filled_qty == 0:
                 logger.warning(f"[Exchange] Order {order_id} shows filled status but zero amount - treating as pending")
                 order_status = "open"
                 actual_filled_qty = 0
         is_partial_fill = (
             actual_filled_qty > 0
-            and actual_filled_qty < requested_qty
+            and actual_filled_qty < submitted_qty
         )
         actual_avg_price = safe_float(order.get("average") or order.get("price") or decision.entry_price or 0)
         logger.info(f"[Exchange] Entry order placed: {order_id} (status={order_status}, filled={actual_filled_qty}/{requested_qty})")
@@ -1488,7 +1492,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     actual_filled_qty = safe_float(order.get("amount") or decision.quantity)
                 is_partial_fill = (
                     actual_filled_qty > 0
-                    and actual_filled_qty < requested_qty
+                    and actual_filled_qty < submitted_qty
                 )
                 result_status = (
                     "partial" if is_partial_fill
@@ -1533,11 +1537,13 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "order_id": order_id,
             "symbol": symbol,
             "side": side,
-            "quantity": actual_filled_qty if actual_filled_qty > 0 else decision.quantity,
+            "quantity": actual_filled_qty if actual_filled_qty > 0 else submitted_qty,
             "requested_quantity": requested_qty,
+            "submitted_quantity": submitted_qty,
             "entry_price": actual_avg_price if actual_avg_price > 0 else decision.entry_price,
             "sandbox_mode": sandbox_mode,
             "order_type": order_type,
+            "limit_timeout_secs": decision.limit_timeout_secs,
             "exchange_order_status": order_status,
             "filled_quantity": actual_filled_qty,
             "is_partial_fill": is_partial_fill,
@@ -1546,7 +1552,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             "take_profit_orders": _decision_take_profit_plan(decision),
             # Notional value for correct margin calculation (handles contract markets)
             # Prefer exchange-reported cost, fallback to calculated notional with contract size
-            "notional_value": safe_float(order.get("cost")) or (actual_filled_qty * actual_avg_price * contract_size),
+            "notional_value": safe_float(order.get("cost"))
+            or ((actual_filled_qty if actual_filled_qty > 0 else submitted_qty) * actual_avg_price * contract_size),
             "contract_size": contract_size,
         }
         if leverage:
