@@ -572,7 +572,7 @@ class ScannerConfig(BaseModel):
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
     app_name: str = "QuantPilot AI"
-    app_version: str = "4.5.4"
+    app_version: str = "5.2.0"
     debug: bool = False
     json_logs: bool = False
 
