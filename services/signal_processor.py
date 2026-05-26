@@ -107,6 +107,38 @@ _PREFETCH_GUARD = asyncio.Lock()
 _PREFETCH_TTL_SECONDS = 30.0
 _PREFETCH_MAX_SIZE = 500
 
+# AI Circuit Breaker for scanner signals
+_AI_CB_FAILURES = 0
+_AI_CB_OPEN_UNTIL: float = 0.0
+_AI_CB_GUARD = asyncio.Lock()
+_AI_CB_THRESHOLD = 3
+_AI_CB_COOLDOWN_SECS = 300.0
+
+
+async def _ai_circuit_breaker_check() -> tuple[bool, str]:
+    """Return (allowed, reason) for AI calls. Opens after N consecutive failures."""
+    async with _AI_CB_GUARD:
+        now = _time.time()
+        if now < _AI_CB_OPEN_UNTIL:
+            remaining = int(_AI_CB_OPEN_UNTIL - now)
+            return False, f"AI circuit breaker open: retry after {remaining}s"
+        return True, ""
+
+
+async def _ai_circuit_breaker_record(success: bool) -> None:
+    global _AI_CB_FAILURES, _AI_CB_OPEN_UNTIL
+    async with _AI_CB_GUARD:
+        if success:
+            _AI_CB_FAILURES = 0
+            return
+        _AI_CB_FAILURES += 1
+        if _AI_CB_FAILURES >= _AI_CB_THRESHOLD:
+            _AI_CB_OPEN_UNTIL = _time.time() + _AI_CB_COOLDOWN_SECS
+            logger.warning(
+                f"[AI CircuitBreaker] Tripped after {_AI_CB_FAILURES} consecutive failures. "
+                f"Cooling down for {_AI_CB_COOLDOWN_SECS}s."
+            )
+
 
 async def _track_ai_response_time(response_time: float) -> None:
     """Track AI response time for dynamic interval adjustment."""
@@ -440,6 +472,22 @@ def compute_webhook_fingerprint(body: dict, user_id: str | None = None) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _scanner_payload_from_signal(signal_data: dict, user_settings: dict | None = None) -> dict:
+    scanner_context = (user_settings or {}).get("_scanner_context") if isinstance(user_settings, dict) else None
+    if isinstance(scanner_context, dict) and isinstance(scanner_context.get("payload"), dict):
+        return dict(scanner_context["payload"])
+    if str(signal_data.get("strategy") or "") != "AI_Auto_Scanner":
+        return {}
+    try:
+        payload = json.loads(str(signal_data.get("message") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    nested = payload.get("scanner") if isinstance(payload.get("scanner"), dict) else None
+    return dict(nested or payload)
+
+
 # ─────────────────────────────────────────────
 # Signal Processing Pipeline
 # ─────────────────────────────────────────────
@@ -706,7 +754,27 @@ class SignalProcessor:
                 await notify_pre_filter_blocked(signal.ticker, signal.direction.value, prefilter_result.reason)
                 return {"status": "blocked", "reason": prefilter_result.reason, "checks": prefilter_result.checks}
 
-            analysis = await self._run_ai_analysis(signal, market, scoped_user_settings, prefilter_result)
+            allowed, cb_reason = await _ai_circuit_breaker_check()
+            if not allowed:
+                logger.warning(f"[ScannerSignal] {cb_reason}")
+                await self._record_signal_audit(
+                    fingerprint=fingerprint,
+                    signal=signal,
+                    user_id=user_id,
+                    stage="scanner_ai_analysis",
+                    outcome="held",
+                    reason=cb_reason,
+                    payload={"circuit_breaker": True, "mode": mode},
+                )
+                return {"status": "held", "reason": cb_reason, "circuit_breaker": True}
+
+            try:
+                analysis = await self._run_ai_analysis(signal, market, scoped_user_settings, prefilter_result)
+                await _ai_circuit_breaker_record(True)
+            except Exception as ai_exc:
+                await _ai_circuit_breaker_record(False)
+                raise ai_exc
+
             await self._record_signal_audit(
                 fingerprint=fingerprint,
                 signal=signal,
@@ -2632,6 +2700,9 @@ class SignalProcessor:
             if str(signal_data.get("strategy") or "") == "AI_Auto_Scanner"
             else SignalSource.TRADINGVIEW.value
         )
+        scanner_payload = _scanner_payload_from_signal(signal_data, user_settings)
+        if scanner_payload.get("setup_hash"):
+            result["scanner_setup_hash"] = scanner_payload.get("setup_hash")
 
         trade = await log_trade_db(
             session=self.session,
@@ -2644,6 +2715,7 @@ class SignalProcessor:
             payload={
                 "signal_source": signal_source,
                 "signal": signal_data,
+                "scanner": scanner_payload,
                 "analysis": decision.ai_analysis.model_dump() if decision.ai_analysis else {},
                 "entry_exit_quality": {
                     "entry_source": decision.entry_source,

@@ -8,7 +8,7 @@
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
 
-**QuantPilot AI** 是一款工业级（Production-Grade）加密货币量化交易集成与决策执行平台。系统将 TradingView 的 Webhook 信号机制、极为苛刻的 **v5.2 机构级前置规则过滤器 (40+ 项指标检查)**、**智能资金概念 (SMC/FVG) 市场结构分析** 与先进的 AI 决策管道（支持 OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral 以及 **OpenRouter 100+ 种模型**）完美结合，进行二次智能风控决策与入场点优化，并在全球主流加密货币交易所（如 Binance, OKX, Bybit 等）实现全自动订单执行。
+**QuantPilot AI** 是一款工业级（Production-Grade）加密货币量化交易集成与决策执行平台。系统将 TradingView 的 Webhook 信号机制、极为苛刻的 **v5.3 机构级扫描器与前置过滤栈**、**智能资金概念 (SMC/FVG) 市场结构分析** 与先进的 AI 决策管道（支持 OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral 以及 **OpenRouter 100+ 种模型**）完美结合，进行二次智能风控决策与入场点优化，并在全球主流加密货币交易所（如 Binance, OKX, Bybit 等）实现全自动订单执行。
 
 [English](./README.md) | [中文说明文档](./README_ZH.md)
 
@@ -17,6 +17,11 @@
 ---
 
 ## 🚀 最新特性
+
+### 🆕 v5.3 机构级扫描器精准化
+- **多周期共识信号**：扫描器现在按标的输出一个最终 long/short/neutral 决策，通过高周期加权共识和确认周期门槛减少互相冲突的候选信号。
+- **真实结果学习与 Walk-Forward 阈值**：已关闭的扫描器交易会回写成结果标签，用真实胜负样本调整得分阈值和因子表现。
+- **流动性、事件时段与组合风控门控**：在 AI 复核前加入盘口深度、估算滑点、资金费率/时段黑名单和相关资产同向暴露限制。
 
 ### 🆕 v5.2 扫描器、后台与发布链路强化
 - **自动市场扫描器**：支持多周期候选融合，在 AI 复核前纳入 EMA200、HTF 冲突、VWAP/POC、持仓量、行情 Regime、ADX/MACD 和成交量确认。

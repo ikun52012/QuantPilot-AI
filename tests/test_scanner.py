@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -6,10 +7,23 @@ import pytest
 pytest.importorskip("greenlet")
 
 from core.config import settings
-from core.database import get_scanner_rejection_summary, list_scanner_audits, record_scanner_audit
+from core.database import (
+    PositionModel,
+    TradeModel,
+    get_scanner_rejection_summary,
+    list_scanner_audits,
+    record_scanner_audit,
+)
 from core.utils.datetime import utcnow
 from models import MarketContext
 from services.market_scanner import MarketScannerService, ScannerCandidate
+from services.scanner_learning import (
+    compute_factor_performance,
+    compute_outcome_summary,
+    compute_walk_forward_thresholds,
+    sync_scanner_outcomes,
+)
+from services.scanner_rules import DEFAULT_ENGINE, ScoringContext
 from services.synthetic_signal import build_synthetic_signal, market_context_from_bundle
 from services.unified_ohlcv import (
     NormalizedCandle,
@@ -160,6 +174,44 @@ def _candidate(direction: str = "long", score: float = 80.0, setup_hash: str = "
     )
 
 
+def _scoring_context(**overrides) -> ScoringContext:
+    data = {
+        "direction": "long",
+        "current_price": 100.0,
+        "atr_pct": 1.0,
+        "atr_price": 1.0,
+        "rsi": 45.0,
+        "ema_fast": 99.0,
+        "ema_slow": 98.0,
+        "ema200": 90.0,
+        "macd_hist": 1.0,
+        "adx": 25.0,
+        "volume_ratio": 1.2,
+        "vwap": 95.0,
+        "vwap_distance_pct": 5.0,
+        "poc": 95.0,
+        "regime": "trending",
+        "oi_change_pct": 5.0,
+        "htf_trend": "bullish",
+        "smc_trend": "bullish",
+        "smc_risk_score": 0.2,
+        "smc_timing_score": 0.8,
+        "price_zone": "discount",
+        "support_zone": {"type": "bullish_fvg", "midpoint": 99.5},
+        "premium_zone": 110.0,
+        "discount_zone": 101.0,
+        "equilibrium": 105.0,
+        "spread_pct": 0.05,
+        "bid_ask_spread_pct": 0.05,
+        "bundle_quality_passed": True,
+        "bundle_quality_reasons": [],
+        "timeframe": "1h",
+        "market_type": "contract",
+    }
+    data.update(overrides)
+    return ScoringContext(**data)
+
+
 def test_build_synthetic_signal_marks_auto_scanner():
     candidate = ScannerCandidate(
         watch_symbol="BTCUSDT",
@@ -187,6 +239,126 @@ def test_build_synthetic_signal_marks_auto_scanner():
     assert raw_body["scanner"]["setup_hash"] == "abc123"
     assert raw_body["scanner"]["exchange_name"] == "binance"
     assert raw_body["scanner"]["market_type"] == "contract"
+
+
+def test_penalty_rules_do_not_reward_missing_conflicts(monkeypatch):
+    monkeypatch.setattr(settings.scanner, "ema200_enabled", True)
+    monkeypatch.setattr(settings.scanner, "htf_conflict_enabled", True)
+    monkeypatch.setattr(settings.scanner, "regime_filter_enabled", True)
+
+    _, _, breakdown = DEFAULT_ENGINE.evaluate(_scoring_context())
+
+    assert "ema200_conflict_long" not in breakdown
+    assert "htf_conflict" not in breakdown
+    assert "volume_penalty" not in breakdown
+    assert "no_support_penalty" not in breakdown
+
+
+def test_scanner_feature_toggles_disable_optional_rule_groups(monkeypatch):
+    monkeypatch.setattr(settings.scanner, "ema200_enabled", False)
+    monkeypatch.setattr(settings.scanner, "htf_conflict_enabled", False)
+    monkeypatch.setattr(settings.scanner, "regime_filter_enabled", False)
+
+    _, _, breakdown = DEFAULT_ENGINE.evaluate(
+        _scoring_context(ema200=110.0, htf_trend="bearish", regime="ranging")
+    )
+
+    assert not any(name.startswith("ema200_") for name in breakdown)
+    assert "htf_conflict" not in breakdown
+    assert not any(name.startswith("regime_") for name in breakdown)
+
+
+def test_hard_filter_requires_support_zone(monkeypatch):
+    fake_ctx = SimpleNamespace(
+        fvgs=[],
+        order_blocks=[],
+        structure=SimpleNamespace(trend="bullish"),
+        premium_zone=110.0,
+        discount_zone=101.0,
+        equilibrium=105.0,
+        risk_score=0.2,
+        entry_timing_score=0.9,
+        timing_recommendation="Good",
+    )
+
+    monkeypatch.setattr("smc_analyzer.analyze_smc_single_tf", lambda *args, **kwargs: fake_ctx)
+    monkeypatch.setattr(settings.scanner, "hard_filters_enabled", True)
+    monkeypatch.setattr(settings.scanner, "require_support_zone", True)
+    monkeypatch.setattr(settings.scanner, "min_score", 0.0)
+    monkeypatch.setattr(settings.scanner, "timeframes", ["1h"])
+
+    assert MarketScannerService()._build_candidates(_bundle()) == []
+
+
+def test_hard_filter_rejects_poor_risk_reward(monkeypatch):
+    fake_ctx = SimpleNamespace(
+        fvgs=[SimpleNamespace(type="bullish", bottom=99.0, top=101.0, midpoint=100.0, filled=False, effectiveness=1.0)],
+        order_blocks=[],
+        structure=SimpleNamespace(trend="bullish"),
+        premium_zone=100.4,
+        discount_zone=101.0,
+        equilibrium=100.3,
+        risk_score=0.2,
+        entry_timing_score=0.9,
+        timing_recommendation="Good",
+    )
+
+    monkeypatch.setattr("smc_analyzer.analyze_smc_single_tf", lambda *args, **kwargs: fake_ctx)
+    monkeypatch.setattr(settings.scanner, "hard_filters_enabled", True)
+    monkeypatch.setattr(settings.scanner, "min_rr_ratio", 1.5)
+    monkeypatch.setattr(settings.scanner, "min_score", 0.0)
+    monkeypatch.setattr(settings.scanner, "timeframes", ["1h"])
+
+    assert MarketScannerService()._build_candidates(_bundle()) == []
+
+
+def test_mtf_consensus_returns_neutral_when_margin_too_small(monkeypatch):
+    class FakeFVG:
+        def __init__(self, direction: str):
+            self.type = "bullish" if direction == "long" else "bearish"
+            self.bottom = 99.0
+            self.top = 101.0
+            self.midpoint = 100.0
+            self.filled = False
+            self.effectiveness = 1.0
+
+    def fake_analyze(rows, timeframe, current_price, direction, atr_pct):
+        return SimpleNamespace(
+            fvgs=[FakeFVG(direction)],
+            order_blocks=[],
+            structure=SimpleNamespace(trend="bullish" if direction == "long" else "bearish"),
+            premium_zone=99.0 if direction == "short" else 110.0,
+            discount_zone=101.0,
+            equilibrium=100.5,
+            risk_score=0.2,
+            entry_timing_score=0.9,
+            timing_recommendation="Good",
+        )
+
+    monkeypatch.setattr("smc_analyzer.analyze_smc_single_tf", fake_analyze)
+    monkeypatch.setattr(settings.scanner, "mtf_consensus_enabled", True)
+    monkeypatch.setattr(settings.scanner, "mtf_consensus_min_margin", 100.0)
+    monkeypatch.setattr(settings.scanner, "min_score", 0.0)
+    monkeypatch.setattr(settings.scanner, "timeframes", ["1h"])
+
+    assert MarketScannerService()._build_candidates(_bundle()) == []
+
+
+def test_liquidity_filter_rejects_thin_orderbook(monkeypatch):
+    bundle = _bundle()
+    bundle.volume_24h = 10_000_000.0
+    bundle.data_quality["orderbook_ask_depth_usdt"] = 100.0
+    bundle.data_quality["orderbook_bid_depth_usdt"] = 100.0
+
+    monkeypatch.setattr(settings.scanner, "liquidity_filter_enabled", True)
+    monkeypatch.setattr(settings.scanner, "liquidity_order_size_usdt", 1000.0)
+    monkeypatch.setattr(settings.scanner, "min_orderbook_depth_usdt", 500.0)
+
+    ok, reason, payload = MarketScannerService()._liquidity_filter(bundle, "long")
+
+    assert not ok
+    assert reason == "liquidity_filter:orderbook_depth_too_low"
+    assert payload["side_depth_usdt"] == pytest.approx(100.0)
 
 
 def test_pre_scan_generates_smc_candidate(monkeypatch):
@@ -289,6 +461,36 @@ async def test_direction_conflict_keeps_highest_score(monkeypatch):
     assert kept[0][0].direction == "short"
     assert audits[0][0] == "direction_conflict"
     assert audits[0][1]["direction"] == "long"
+
+
+@pytest.mark.asyncio
+async def test_portfolio_risk_blocks_correlated_same_direction(monkeypatch, db_session):
+    now = utcnow()
+    db_session.add(PositionModel(
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        opened_at=now,
+    ))
+    await db_session.flush()
+    audits = []
+
+    async def fake_audit(run_id, event_type, **kwargs):
+        audits.append((event_type, kwargs))
+
+    service = MarketScannerService()
+    monkeypatch.setattr(service, "_audit", fake_audit)
+    monkeypatch.setattr(settings.scanner, "portfolio_risk_enabled", True)
+    monkeypatch.setattr(settings.scanner, "max_same_direction_exposure", 1)
+    monkeypatch.setattr(settings.scanner, "max_correlated_signals_per_run", 2)
+
+    kept, dropped = await service._apply_portfolio_risk_filters("portfolio-run", [(_candidate("long", 90.0), _bundle())])
+
+    assert kept == []
+    assert dropped == 1
+    assert audits[0][0] == "portfolio_risk"
 
 
 @pytest.mark.asyncio
@@ -547,3 +749,90 @@ def test_ranging_regime_penalizes_score(monkeypatch):
     assert candidates
     reasons = " ".join(candidates[0].reasons)
     assert "ranging market regime" in reasons
+
+
+@pytest.mark.asyncio
+async def test_sync_scanner_outcomes_records_real_pnl_label(monkeypatch, db_session):
+    now = utcnow()
+    open_trade = TradeModel(
+        id="open-scanner-trade",
+        timestamp=now - timedelta(hours=3),
+        ticker="BTCUSDT",
+        direction="long",
+        execute=True,
+        order_status="filled",
+        strategy_name="AI_Auto_Scanner",
+        signal_source="auto_scanner",
+        payload_json=json.dumps({
+            "signal": {"strategy": "AI_Auto_Scanner", "price": 100.0, "timeframe": "1h"},
+            "scanner": {
+                "setup_hash": "outcome-setup",
+                "score": 82.0,
+                "timeframe": "1h",
+                "score_breakdown": {"smc_trend": 18.0},
+            },
+        }),
+    )
+    position = PositionModel(
+        id="scanner-position",
+        ticker="BTCUSDT",
+        direction="long",
+        status="closed",
+        entry_price=101.0,
+        exit_price=104.0,
+        quantity=1.0,
+        remaining_quantity=0.0,
+        opened_at=now - timedelta(hours=3),
+        closed_at=now - timedelta(hours=1),
+        open_trade_id="open-scanner-trade",
+        strategy_name="AI_Auto_Scanner",
+        pnl_pct=3.0,
+        close_reason="take_profit",
+    )
+    db_session.add(open_trade)
+    db_session.add(position)
+    await db_session.flush()
+
+    result = await sync_scanner_outcomes(db_session, include_path_metrics=False)
+    summary = await compute_outcome_summary(db_session)
+    factors = await compute_factor_performance(db_session)
+
+    assert result["synced"] == 1
+    assert summary["wins"] == 1
+    assert summary["avg_entry_slippage_pct"] == pytest.approx(1.0)
+    assert factors["factors"]["smc_trend"]["expectancy_pct"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_walk_forward_thresholds_use_real_outcome_labels(db_session):
+    now = utcnow()
+    for idx in range(12):
+        score = 80.0 + idx if idx >= 6 else 55.0 + idx
+        pnl = 2.0 if idx >= 6 else -1.0
+        await record_scanner_audit(
+            db_session,
+            scope="admin",
+            run_id="wf-test",
+            event_type="outcome_label",
+            watch_symbol="BTCUSDT",
+            exchange_symbol="BTCUSDT",
+            direction="long",
+            score=score,
+            setup_hash=f"wf-{idx}",
+            reason="win" if pnl > 0 else "loss",
+            payload={
+                "symbol": "BTCUSDT",
+                "timeframe": "1h",
+                "direction": "long",
+                "score": score,
+                "pnl_pct": pnl,
+                "closed_at": (now - timedelta(minutes=12 - idx)).isoformat(),
+            },
+        )
+    await db_session.flush()
+
+    thresholds = await compute_walk_forward_thresholds(db_session)
+    exact = thresholds["thresholds"]["BTCUSDT|1h|long"]
+
+    assert exact["threshold"] >= 65.0
+    assert exact["expectancy_pct"] > 0

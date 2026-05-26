@@ -8,7 +8,7 @@
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
 
-**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration and execution platform. It seamlessly combines TradingView's Webhook alert mechanism, a highly institutional **v5.2 Pre-Filter engine (40+ weighted checks)**, and **Smart Money Concepts (SMC/FVG) market structure analysis** with advanced AI voting pipelines (supporting OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral, and **OpenRouter 100+ models**) to perform secondary risk assessment and entry timing optimization. It then automates order execution on mainstream global crypto exchanges (e.g., Binance, OKX, Bybit).
+**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration and execution platform. It seamlessly combines TradingView's Webhook alert mechanism, a highly institutional **v5.3 scanner and pre-filter stack**, and **Smart Money Concepts (SMC/FVG) market structure analysis** with advanced AI voting pipelines (supporting OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral, and **OpenRouter 100+ models**) to perform secondary risk assessment and entry timing optimization. It then automates order execution on mainstream global crypto exchanges (e.g., Binance, OKX, Bybit).
 
 [English](./README.md) | [中文说明文档](./README_ZH.md)
 
@@ -17,6 +17,11 @@
 ---
 
 ## 🚀 What's New
+
+### 🆕 v5.3 Institutional Scanner Precision
+- **MTF Consensus Signals**: The scanner now emits one final long/short/neutral decision per symbol using higher-timeframe weighted consensus and confirmation gates.
+- **Outcome Learning & Walk-Forward Thresholds**: Closed scanner trades are labeled back into audit history so score thresholds and factor performance can adapt from real results.
+- **Liquidity, Event, and Portfolio Gates**: Orderbook depth, estimated slippage, funding/session blackout windows, and correlated exposure caps filter weak setups before AI review.
 
 ### 🆕 v5.2 Scanner, Admin, and Release Hardening
 - **Automatic Market Scanner**: Multi-timeframe scanner candidates with EMA200, HTF conflict, VWAP/POC, Open Interest, regime, ADX/MACD, and volume confirmation before AI review.

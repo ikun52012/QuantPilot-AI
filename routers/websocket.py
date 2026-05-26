@@ -777,3 +777,13 @@ async def broadcast_webhook_received(admin_id: str, webhook: dict):
         **webhook,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
+
+
+async def broadcast_scanner_event(admin_id: str | None, event: dict):
+    """Broadcast scanner progress events to admin system WebSocket connections."""
+    target = f"system_{admin_id}" if admin_id else "system_admin"
+    await manager.broadcast_to_user(target, {
+        "type": "scanner_event",
+        **event,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })

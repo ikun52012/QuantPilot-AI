@@ -124,6 +124,14 @@ def _dt_from_timestamp(value: Any) -> datetime:
     return utcnow()
 
 
+def _optional_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+        return parsed if parsed == parsed else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _candles_from_history(rows: list[dict[str, Any]]) -> list[NormalizedCandle]:
     candles: list[NormalizedCandle] = []
     for row in rows:
@@ -264,11 +272,40 @@ def _candle_gap_ratio(candles: list[NormalizedCandle], timeframe: str) -> float:
     return (gaps / comparisons) if comparisons else 0.0
 
 
+class _BoundedTTLCache:
+    """Simple bounded TTL cache with FIFO eviction."""
+
+    def __init__(self, maxsize: int = 500, ttl: float = 45.0) -> None:
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._store: dict[Any, tuple[float, Any]] = {}
+
+    def get(self, key: Any) -> Any | None:
+        now = time.monotonic()
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        if now - entry[0] > self.ttl:
+            self._store.pop(key, None)
+            return None
+        return entry[1]
+
+    def set(self, key: Any, value: Any) -> None:
+        now = time.monotonic()
+        if len(self._store) >= self.maxsize and key not in self._store:
+            oldest = next(iter(self._store))
+            self._store.pop(oldest, None)
+        self._store[key] = (now, value)
+
+    def clear(self) -> None:
+        self._store.clear()
+
+
 class UnifiedOHLCVProvider:
     """Scanner-only OHLCV facade for crypto and commodity-like symbols."""
 
     def __init__(self) -> None:
-        self._bundle_cache: dict[tuple[str, tuple[str, ...]], tuple[float, OHLCVBundle]] = {}
+        self._bundle_cache = _BoundedTTLCache(maxsize=500, ttl=45.0)
 
     def resolve_mapping(self, watch_symbol: str) -> SymbolMapping:
         watch = str(watch_symbol or "").upper().strip()
@@ -302,11 +339,10 @@ class UnifiedOHLCVProvider:
         requested_tfs = timeframes or settings.scanner.timeframes
         cache_key = (mapping.watch_symbol, tuple(requested_tfs))
         ttl = max(0, int(settings.scanner.bundle_cache_ttl_secs))
-        now_monotonic = time.monotonic()
         if ttl > 0:
             cached = self._bundle_cache.get(cache_key)
-            if cached and now_monotonic - cached[0] <= ttl:
-                return cached[1]
+            if cached is not None:
+                return cached
         timeframes_data: dict[str, list[NormalizedCandle]] = {}
         indicators: dict[str, dict[str, Any]] = {}
 
@@ -336,6 +372,10 @@ class UnifiedOHLCVProvider:
         market_context_available = False
         market_context_source = ""
         market_context_error = ""
+        orderbook_bid_depth_usdt: float | None = None
+        orderbook_ask_depth_usdt: float | None = None
+        orderbook_top_bid_depth_usdt: float | None = None
+        orderbook_top_ask_depth_usdt: float | None = None
         missing_microstructure: list[str] = []
         if mapping.data_source == "ccxt":
             try:
@@ -358,6 +398,10 @@ class UnifiedOHLCVProvider:
                 volume_change_pct = float(context.volume_change_pct or 0.0)
                 high_24h = float(context.high_24h or 0.0)
                 low_24h = float(context.low_24h or 0.0)
+                orderbook_bid_depth_usdt = _optional_float(getattr(context, "_orderbook_bid_depth_usdt", None))
+                orderbook_ask_depth_usdt = _optional_float(getattr(context, "_orderbook_ask_depth_usdt", None))
+                orderbook_top_bid_depth_usdt = _optional_float(getattr(context, "_orderbook_top_bid_depth_usdt", None))
+                orderbook_top_ask_depth_usdt = _optional_float(getattr(context, "_orderbook_top_ask_depth_usdt", None))
                 if funding_rate is None:
                     missing_microstructure.append("funding_rate")
                 if orderbook_imbalance is None:
@@ -366,6 +410,8 @@ class UnifiedOHLCVProvider:
                     missing_microstructure.append("open_interest")
                 if volume_24h <= 0:
                     missing_microstructure.append("volume_24h")
+                if orderbook_bid_depth_usdt is None or orderbook_ask_depth_usdt is None:
+                    missing_microstructure.append("orderbook_depth")
             except Exception as exc:
                 market_context_error = str(exc)
                 logger.debug(f"[Scanner/OHLCV] market context unavailable for {mapping.exchange_symbol}: {exc}")
@@ -395,9 +441,13 @@ class UnifiedOHLCVProvider:
             market_context_source=market_context_source,
             market_context_error=market_context_error,
             missing_microstructure=missing_microstructure,
+            orderbook_bid_depth_usdt=orderbook_bid_depth_usdt,
+            orderbook_ask_depth_usdt=orderbook_ask_depth_usdt,
+            orderbook_top_bid_depth_usdt=orderbook_top_bid_depth_usdt,
+            orderbook_top_ask_depth_usdt=orderbook_top_ask_depth_usdt,
         )
         if ttl > 0:
-            self._bundle_cache[cache_key] = (now_monotonic, bundle)
+            self._bundle_cache.set(cache_key, bundle)
         return bundle
 
     async def get_many(self, watchlist: list[str], timeframes: list[str] | None = None) -> list[OHLCVBundle]:
@@ -513,6 +563,10 @@ class UnifiedOHLCVProvider:
         market_context_source: str = "",
         market_context_error: str = "",
         missing_microstructure: list[str] | None = None,
+        orderbook_bid_depth_usdt: float | None = None,
+        orderbook_ask_depth_usdt: float | None = None,
+        orderbook_top_bid_depth_usdt: float | None = None,
+        orderbook_top_ask_depth_usdt: float | None = None,
     ) -> dict[str, Any]:
         reasons: list[str] = []
         now = utcnow()
@@ -562,7 +616,7 @@ class UnifiedOHLCVProvider:
             reasons.append("mapped_asset_live_disabled")
 
         return {
-            "passed": not any(r not in {"mapped_asset_live_disabled"} for r in reasons),
+            "passed": len(reasons) == 0,
             "reasons": reasons,
             "spread_pct": spread_pct,
             "price_deviation_pct": price_deviation_pct,
@@ -575,6 +629,10 @@ class UnifiedOHLCVProvider:
             "market_context_source": market_context_source,
             "market_context_error": market_context_error,
             "missing_microstructure": list(missing_microstructure or []),
+            "orderbook_bid_depth_usdt": orderbook_bid_depth_usdt,
+            "orderbook_ask_depth_usdt": orderbook_ask_depth_usdt,
+            "orderbook_top_bid_depth_usdt": orderbook_top_bid_depth_usdt,
+            "orderbook_top_ask_depth_usdt": orderbook_top_ask_depth_usdt,
         }
 
 

@@ -1,7 +1,7 @@
 # QuantPilot AI - Deployment Guide
 
 
-> Version: v5.2.0 | Last Updated: 2026-05
+> Version: v5.3.0 | Last Updated: 2026-05
 
 ---
 
@@ -14,7 +14,7 @@
 5. [Environment Variables Configuration](#5-environment-variables-configuration)
 6. [Troubleshooting](#6-troubleshooting)
 7. [Security Checklist](#7-security-checklist)
-8. [New Features in v5.2.0](#8-new-features-in-v520)
+8. [New Features in v5.3.0](#8-new-features-in-v530)
 
 ---
 
@@ -101,7 +101,7 @@ PYTHONIOENCODING=utf-8 uvicorn app:app --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://localhost:8000/health
-# Expected: {"status":"healthy","version":"5.2.0","database":"ok","cache":"ok"}
+# Expected: {"status":"healthy","version":"5.3.0","database":"ok","cache":"ok"}
 ```
 
 Open browser at `http://localhost:8000`, login with default account:
@@ -140,7 +140,7 @@ docker compose up -d
 The production compose file uses the published GHCR image by default:
 
 ```bash
-SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v5.2.0
+SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v5.3.0
 ```
 
 If you want the admin panel one-click update button to work, keep the bundled `updater`
@@ -461,42 +461,22 @@ Verify each item before production deployment:
 
 ---
 
-## 8. New Features in v5.2.0
+## 8. New Features in v5.3.0
 
-### DCA Strategy Engine
-- Dollar-cost averaging with configurable entry spacing
-- Multiple sizing methods: fixed, martingale, geometric, fibonacci
-- Automatic stop-loss and take-profit management
+### Institutional Scanner Consensus
+- One final long, short, or neutral decision per symbol using weighted multi-timeframe consensus
+- Hard gates for SMC structure, minimum R/R, liquidity depth, estimated slippage, funding/session blackout windows, and correlated exposure caps
+- Scanner progress and outcome diagnostics exposed through admin APIs and WebSocket events
 
-### Grid Trading Strategy
-- Arithmetic and geometric grid spacing
-- Auto-replenish grid levels
-- PnL tracking per grid level
+### Outcome Learning
+- Closed scanner positions are converted into append-only `outcome_label` audit records
+- Factor performance and walk-forward score thresholds can use real win/loss labels instead of synthetic assumptions
+- Adaptive score and cooldown state are persisted in `scanner_states` for safe upgrades
 
-### Backtest Engine
-- Historical strategy simulation with realistic execution
-- Multiple strategies: Simple Trend, SMC/FVG, AI Assistant
-- Comprehensive performance metrics (Sharpe, Sortino, max drawdown)
-
-### WebSocket Real-time Updates
-- Position updates streaming
-- Price alerts and market data
-- System status monitoring (admin only)
-
-### Social Signal Sharing
-- Community signal sharing and subscription
-- Auto-execute subscribed signals
-- Signal performance tracking
-
-### Trading Control
-- Global kill-switch for emergency stops
-- Read-only and paused modes
-- Admin audit logging
-
-### Database Improvements
-- Alembic migrations support
-- Order event ledger for reconciliation
-- Strategy state persistence
+### Release and Operations
+- Docker Compose defaults now point to the versioned `v5.3.0` GHCR images
+- Database startup migration adds scanner learning columns to existing deployments automatically
+- Scanner audits are cleaned daily to bound database growth
 
 ---
 

@@ -223,9 +223,16 @@ class ScannerStateModel(Base):
     scan_count = Column(Integer, default=0)
     ai_call_count = Column(Integer, default=0)
     signal_count = Column(Integer, default=0)
+    signal_wins = Column(Integer, default=0)
+    signal_losses = Column(Integer, default=0)
+    signal_win_rate = Column(Float, default=0.0)
+    adaptive_min_score = Column(Float, default=0.0)
+    win_rate_history_json = Column(Text, default="[]")
+    cooldown_level = Column(Integer, default=0)
     data_failure_streak = Column(Integer, default=0)
     last_scan_at = Column(DateTime, nullable=True)
     last_data_failure_at = Column(DateTime, nullable=True)
+    last_win_rate_update_at = Column(DateTime, nullable=True)
     degraded_mode = Column(String(40), default="")
     degraded_reason = Column(Text, default="")
     updated_at = Column(DateTime, default=lambda: utcnow())
@@ -828,9 +835,16 @@ class DatabaseManager:
             "scan_count": "INTEGER DEFAULT 0",
             "ai_call_count": "INTEGER DEFAULT 0",
             "signal_count": "INTEGER DEFAULT 0",
+            "signal_wins": "INTEGER DEFAULT 0",
+            "signal_losses": "INTEGER DEFAULT 0",
+            "signal_win_rate": "FLOAT DEFAULT 0",
+            "adaptive_min_score": "FLOAT DEFAULT 0",
+            "win_rate_history_json": "TEXT DEFAULT '[]'",
+            "cooldown_level": "INTEGER DEFAULT 0",
             "data_failure_streak": "INTEGER DEFAULT 0",
             "last_scan_at": "TIMESTAMP",
             "last_data_failure_at": "TIMESTAMP",
+            "last_win_rate_update_at": "TIMESTAMP",
             "degraded_mode": "VARCHAR(40) DEFAULT ''",
             "degraded_reason": "TEXT DEFAULT ''",
             "updated_at": "TIMESTAMP",

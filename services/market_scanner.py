@@ -3,17 +3,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import desc, select
 
 from core.config import settings
 from core.database import (
     PositionModel,
+    ScannerAuditModel,
     acquire_scanner_setup_lock,
     db_manager,
     get_or_create_scanner_state,
@@ -24,9 +26,27 @@ from core.database import (
 )
 from core.utils.common import position_symbol_key
 from core.utils.datetime import utcnow
+from services.scanner_learning import compute_outcome_summary, compute_walk_forward_thresholds, sync_scanner_outcomes
+from services.scanner_rules import DEFAULT_ENGINE, ScoringContext
 from services.signal_processor import SignalProcessor
 from services.synthetic_signal import build_synthetic_signal, market_context_from_bundle
 from services.unified_ohlcv import OHLCVBundle, UnifiedOHLCVProvider, timeframe_to_seconds
+
+# Lazy import to avoid circular dependency
+_bcast_scanner = None
+
+def _broadcast_scanner(event: dict) -> None:
+    global _bcast_scanner
+    if _bcast_scanner is None:
+        try:
+            from routers.websocket import broadcast_scanner_event
+            _bcast_scanner = broadcast_scanner_event
+        except Exception:
+            return
+    try:
+        asyncio.create_task(_bcast_scanner(None, event))
+    except Exception:
+        pass
 
 
 @dataclass
@@ -51,6 +71,7 @@ class ScannerCandidate:
     quality: dict[str, Any] = field(default_factory=dict)
     fused_timeframes: list[str] = field(default_factory=list)
     fusion_summary: dict[str, Any] = field(default_factory=dict)
+    score_breakdown: dict[str, float] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -102,7 +123,7 @@ def _setup_hash(
 ) -> str:
     price_bucket = round(reference_price, 2) if reference_price >= 10 else round(reference_price, 5)
     raw = f"{ticker}|{direction}|{timeframe}|{setup_type}|{price_zone}|{price_bucket}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+    return hashlib.blake2b(raw.encode("utf-8"), digest_size=16).hexdigest()
 
 
 class MarketScannerService:
@@ -121,6 +142,12 @@ class MarketScannerService:
             "last_error": "",
             "last_summary": {},
         }
+        self._audit_buffer: list[dict[str, Any]] = []
+        self._audit_buffer_lock = asyncio.Lock()
+        self._adaptive_min_score: float = float(settings.scanner.min_score)
+        self._adaptive_min_score_cached_at: float = 0.0
+        self._threshold_overrides: dict[str, dict[str, Any]] = {}
+        self._learning_summary: dict[str, Any] = {}
 
     @property
     def last_status(self) -> dict[str, Any]:
@@ -160,24 +187,20 @@ class MarketScannerService:
                 "last_started_at": started_at,
                 "last_error": "",
             })
+            _broadcast_scanner({"event": "scan_start", "run_id": run_id, "started_at": started_at.isoformat()})
             try:
                 return await self._scan_once_locked(run_id)
             except Exception as exc:
                 self._last_status["last_error"] = str(exc)
                 logger.exception(f"[Scanner] Run {run_id} failed: {exc}")
+                await self._audit(run_id, "error", reason=str(exc))
+                await self._flush_audit_buffer()
                 async with db_manager.async_session_factory() as session:
                     await update_scanner_state_counts(
                         session,
                         self.scope,
                         degraded_mode="error",
                         degraded_reason=str(exc),
-                    )
-                    await record_scanner_audit(
-                        session,
-                        scope=self.scope,
-                        run_id=run_id,
-                        event_type="error",
-                        reason=str(exc),
                     )
                     await session.commit()
                 return {"status": "error", "reason": str(exc), "run_id": run_id}
@@ -188,6 +211,10 @@ class MarketScannerService:
                 })
 
     async def _scan_once_locked(self, run_id: str) -> dict[str, Any]:
+        self._learning_summary = await self._refresh_learning(run_id)
+        self._adaptive_min_score = await self._get_effective_min_score()
+        self._adaptive_min_score_cached_at = __import__("time").time()
+
         async with db_manager.async_session_factory() as session:
             _ = await update_scanner_state_counts(
                 session,
@@ -212,14 +239,30 @@ class MarketScannerService:
 
         candidates, direction_conflicts = await self._resolve_direction_conflicts(run_id, candidates)
         filtered += direction_conflicts
+        candidates, portfolio_filtered = await self._apply_portfolio_risk_filters(run_id, candidates)
+        filtered += portfolio_filtered
         candidates.sort(key=lambda item: item[0].score, reverse=True)
         selected = candidates[: max(1, int(settings.scanner.max_candidates_per_run))]
         processed: list[dict[str, Any]] = []
-        for candidate, bundle in selected:
-            if self._shutdown_event.is_set():
-                break
-            result = await self._dispatch_candidate(run_id, candidate, bundle)
-            processed.append(result)
+
+        if selected:
+            max_concurrent = min(3, len(selected))
+            ai_semaphore = asyncio.Semaphore(max_concurrent)
+
+            async def process_with_semaphore(candidate: ScannerCandidate, bundle: OHLCVBundle) -> dict[str, Any]:
+                async with ai_semaphore:
+                    if self._shutdown_event.is_set():
+                        return {"status": "skipped", "reason": "shutdown requested"}
+                    return await self._dispatch_candidate(run_id, candidate, bundle)
+
+            tasks = [asyncio.create_task(process_with_semaphore(candidate, bundle)) for candidate, bundle in selected]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.warning(f"[Scanner] Parallel dispatch failed: {result}")
+                    processed.append({"status": "error", "reason": str(result)})
+                else:
+                    processed.append(result)
 
         if data_failures and data_failures >= max(2, scanned // 2):
             degraded_mode = "observe_only"
@@ -249,6 +292,7 @@ class MarketScannerService:
             processed=processed,
         )
         await self._audit(run_id, "run_summary", reason="scanner run summary", payload=funnel)
+        await self._flush_audit_buffer()
         summary = {
             "status": "ok",
             "run_id": run_id,
@@ -259,8 +303,14 @@ class MarketScannerService:
             "selected": len(selected),
             "processed": processed,
             "funnel": funnel,
+            "learning": self._learning_summary,
         }
         self._last_status["last_summary"] = summary
+        _broadcast_scanner({
+            "event": "scan_complete",
+            "run_id": run_id,
+            "summary": summary,
+        })
         return summary
 
     async def _scan_watchlist_concurrently(self, run_id: str) -> list[dict[str, Any]]:
@@ -319,6 +369,18 @@ class MarketScannerService:
             )
             return {"scanned": 1, "data_failures": 0, "filtered": 1, "candidates": []}
 
+        event_ok, event_reason, event_payload = self._event_session_filter(bundle)
+        if not event_ok:
+            await self._audit(
+                run_id,
+                "event_filter",
+                watch_symbol=mapping.watch_symbol,
+                exchange_symbol=mapping.exchange_symbol,
+                reason=event_reason,
+                payload=event_payload,
+            )
+            return {"scanned": 1, "data_failures": 0, "filtered": 1, "candidates": []}
+
         symbol_candidates = self._build_candidates(bundle)
         if not symbol_candidates:
             await self._audit(
@@ -343,10 +405,21 @@ class MarketScannerService:
                 reason="candidate accepted by scanner",
                 payload=candidate.to_payload(),
             )
+            _broadcast_scanner({
+                "event": "candidate_found",
+                "run_id": run_id,
+                "symbol": candidate.exchange_symbol,
+                "direction": candidate.direction,
+                "score": candidate.score,
+                "timeframe": candidate.timeframe,
+            })
             accepted.append((candidate, bundle))
         return {"scanned": 1, "data_failures": 0, "filtered": 0, "candidates": accepted}
 
     def _build_candidates(self, bundle: OHLCVBundle) -> list[ScannerCandidate]:
+        if settings.scanner.mtf_consensus_enabled:
+            return self._build_consensus_candidates(bundle)
+
         primary_tf = bundle.primary_timeframe
         indicators = bundle.indicators.get(primary_tf, {})
         current = float(bundle.current_price or 0.0)
@@ -387,6 +460,171 @@ class MarketScannerService:
 
         return self._fuse_timeframe_candidates(candidates, bundle)
 
+    def _build_consensus_candidates(self, bundle: OHLCVBundle) -> list[ScannerCandidate]:
+        current = float(bundle.current_price or 0.0)
+        if current <= 0:
+            return []
+
+        tf_list = sorted(bundle.candles.keys(), key=lambda tf: timeframe_to_seconds(tf))
+        if not tf_list:
+            return []
+
+        direction_items: dict[str, list[ScannerCandidate]] = {"long": [], "short": []}
+        direction_scores: dict[str, dict[str, Any]] = {}
+        all_smc = {direction: self._analyze_smc(bundle, direction) for direction in ("long", "short")}
+
+        htf_trends: dict[str, str | None] = {}
+        htf = tf_list[-1]
+        for direction in ("long", "short"):
+            htf_ctx = all_smc.get(direction, {}).get(htf)
+            if htf_ctx:
+                struct = getattr(htf_ctx, "structure", None)
+                htf_trends[direction] = str(getattr(struct, "trend", "") or "").lower() or None
+            else:
+                htf_trends[direction] = None
+
+        for direction in ("long", "short"):
+            for timeframe in tf_list:
+                ctx = all_smc.get(direction, {}).get(timeframe)
+                if not ctx:
+                    continue
+                tf_indicators = bundle.indicators.get(timeframe) or bundle.indicators.get(bundle.primary_timeframe, {})
+                candidate = self._score_smc_candidate(
+                    bundle,
+                    ctx,
+                    timeframe,
+                    direction,
+                    tf_indicators,
+                    htf_trend=htf_trends.get(direction) if timeframe != htf else None,
+                )
+                if candidate:
+                    direction_items[direction].append(candidate)
+
+        for direction, items in direction_items.items():
+            direction_scores[direction] = self._consensus_direction_summary(items, tf_list)
+
+        best_direction = max(direction_scores, key=lambda direction: float(direction_scores[direction].get("score") or 0.0))
+        opposite_direction = "short" if best_direction == "long" else "long"
+        best_score = float(direction_scores[best_direction].get("score") or 0.0)
+        opposite_score = float(direction_scores[opposite_direction].get("score") or 0.0)
+        margin = best_score - opposite_score
+        min_margin = float(settings.scanner.mtf_consensus_min_margin)
+        required_confirmations = min(max(1, len(tf_list)), max(1, int(settings.scanner.min_mtf_confirmations)))
+        if (
+            best_score <= 0
+            or margin < min_margin
+            or len(direction_items[best_direction]) < required_confirmations
+        ):
+            return []
+
+        return self._finalize_consensus_candidate(
+            bundle=bundle,
+            direction=best_direction,
+            items=direction_items[best_direction],
+            direction_scores=direction_scores,
+            margin=margin,
+            required_confirmations=required_confirmations,
+            tf_list=tf_list,
+        )
+
+    def _consensus_timeframe_weight(self, timeframe: str, tf_list: list[str]) -> float:
+        if not tf_list:
+            return 1.0
+        ordered = list(tf_list)
+        if timeframe == ordered[-1]:
+            return float(settings.scanner.mtf_consensus_htf_weight)
+        if timeframe == ordered[0] and len(ordered) > 1:
+            return float(settings.scanner.mtf_consensus_ltf_weight)
+        return 1.0
+
+    def _consensus_direction_summary(self, items: list[ScannerCandidate], tf_list: list[str]) -> dict[str, Any]:
+        if not items:
+            return {"score": 0.0, "confirmations": 0, "timeframes": [], "weighted_score": 0.0}
+        weighted_total = 0.0
+        weight_sum = 0.0
+        timeframe_scores: dict[str, float] = {}
+        for item in items:
+            weight = self._consensus_timeframe_weight(item.timeframe, tf_list)
+            weighted_total += float(item.score) * weight
+            weight_sum += weight
+            timeframe_scores[item.timeframe] = float(item.score)
+        confirmations = len(timeframe_scores)
+        weighted_score = weighted_total / max(1.0, weight_sum)
+        confirmation_bonus = min(12.0, max(0, confirmations - 1) * float(settings.scanner.mtf_confirmation_bonus))
+        score = round(max(0.0, min(100.0, weighted_score + confirmation_bonus)), 2)
+        return {
+            "score": score,
+            "weighted_score": round(weighted_score, 2),
+            "confirmation_bonus": round(confirmation_bonus, 2),
+            "confirmations": confirmations,
+            "timeframes": list(timeframe_scores.keys()),
+            "timeframe_scores": timeframe_scores,
+        }
+
+    def _finalize_consensus_candidate(
+        self,
+        *,
+        bundle: OHLCVBundle,
+        direction: str,
+        items: list[ScannerCandidate],
+        direction_scores: dict[str, dict[str, Any]],
+        margin: float,
+        required_confirmations: int,
+        tf_list: list[str],
+    ) -> list[ScannerCandidate]:
+        if not items:
+            return []
+        ordered = sorted(items, key=lambda item: item.score, reverse=True)
+        base = ordered[0]
+        summary = direction_scores[direction]
+        consensus_score = float(summary.get("score") or base.score)
+        threshold = self._min_score_for(base.exchange_symbol, "mtf", direction)
+        if consensus_score < threshold:
+            return []
+
+        base.score = round(consensus_score, 2)
+        base.timeframe = "mtf"
+        base.fused_timeframes = list(summary.get("timeframes") or [])
+        base.reasons.append(
+            f"MTF consensus {direction}: score {consensus_score:.1f}, margin {margin:.1f}, "
+            f"confirmations {len(base.fused_timeframes)}/{required_confirmations}"
+        )
+        base.fusion_summary = {
+            "enabled": True,
+            "mode": "consensus",
+            "decision": direction,
+            "margin": round(margin, 2),
+            "min_margin": float(settings.scanner.mtf_consensus_min_margin),
+            "confirmations": len(base.fused_timeframes),
+            "required_confirmations": required_confirmations,
+            "available_timeframes": tf_list,
+            "direction_scores": direction_scores,
+            "min_score_threshold": threshold,
+            "candidates": [
+                {
+                    "timeframe": item.timeframe,
+                    "score": item.score,
+                    "setup_type": item.setup_type,
+                    "zone": item.price_zone,
+                }
+                for item in ordered
+            ],
+        }
+        base.smc_summary["multi_timeframe"] = base.fusion_summary
+        base.indicator_summary["multi_timeframe"] = {tf: bundle.indicators.get(tf, {}) for tf in base.fused_timeframes}
+        base.quality["min_score_threshold"] = threshold
+        base.quality["mtf_confirmations_required"] = required_confirmations
+        base.quality["mtf_consensus_margin"] = round(margin, 2)
+        base.setup_hash = _setup_hash(
+            ticker=base.exchange_symbol,
+            direction=base.direction,
+            timeframe="mtf_consensus:" + ",".join(base.fused_timeframes),
+            setup_type=base.setup_type,
+            price_zone=base.price_zone,
+            reference_price=base.entry_reference,
+        )
+        return [base]
+
     def _fuse_timeframe_candidates(
         self,
         candidates: list[ScannerCandidate],
@@ -409,6 +647,17 @@ class MarketScannerService:
             base = ordered[0]
             timeframes = list(dict.fromkeys(item.timeframe for item in ordered if item.timeframe))
             confirmations = len(timeframes)
+            available_timeframes = max(1, len(bundle.candles or {}))
+            required_confirmations = 1
+            if settings.scanner.hard_filters_enabled:
+                required_confirmations = min(
+                    available_timeframes,
+                    max(1, int(settings.scanner.min_mtf_confirmations)),
+                )
+            if confirmations < required_confirmations:
+                base.quality.setdefault("hard_filters", {})["mtf_rejected"] = True
+                base.quality["mtf_confirmations_required"] = required_confirmations
+                continue
             avg_score = sum(item.score for item in ordered) / max(1, len(ordered))
             bonus = max(0.0, confirmations - 1) * float(settings.scanner.mtf_confirmation_bonus)
             bonus = min(18.0, self._weighted("mtf_confirmation", bonus))
@@ -423,15 +672,18 @@ class MarketScannerService:
                 base.reasons.append(f"multi-timeframe confirmation: {', '.join(timeframes)}")
             if conflict_penalty:
                 base.reasons.append(f"opposite timeframe pressure penalized ({conflict_score:.1f})")
+            threshold = self._min_score_for(base.exchange_symbol, base.timeframe, base.direction)
             base.fused_timeframes = timeframes
             base.fusion_summary = {
                 "enabled": True,
                 "timeframes": timeframes,
                 "confirmations": confirmations,
+                "required_confirmations": required_confirmations,
                 "avg_score": round(avg_score, 2),
                 "bonus": round(bonus, 2),
                 "conflict_penalty": round(conflict_penalty, 2),
                 "opposite_best_score": round(conflict_score, 2),
+                "min_score_threshold": threshold,
                 "candidates": [
                     {
                         "timeframe": item.timeframe,
@@ -454,7 +706,9 @@ class MarketScannerService:
                 price_zone=base.price_zone,
                 reference_price=base.entry_reference,
             )
-            if base.score >= float(settings.scanner.min_score):
+            base.quality["min_score_threshold"] = threshold
+            base.quality["mtf_confirmations_required"] = required_confirmations
+            if base.score >= threshold:
                 fused.append(base)
 
         if not fused:
@@ -516,6 +770,87 @@ class MarketScannerService:
                 )
         return kept, dropped_count
 
+    def _portfolio_bucket(self, symbol: str) -> str:
+        text = str(symbol or "").upper().strip()
+        base = text
+        for suffix in ("USDT", "USDC", "BUSD", "USD", "/USDT", "/USDC", "/BUSD", "/USD", ":USDT", ":USD", ".P"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+        base = base.replace("/", "").replace(":", "")
+        for bucket, symbols in (settings.scanner.correlation_buckets or {}).items():
+            normalized = {str(item).upper().strip() for item in symbols or []}
+            if base in normalized or text in normalized:
+                return str(bucket or base).lower()
+        return base.lower() or text.lower()
+
+    async def _open_portfolio_exposure_counts(self) -> dict[tuple[str, str], int]:
+        counts: dict[tuple[str, str], int] = {}
+        if db_manager.async_session_factory is None:
+            return counts
+        try:
+            async with db_manager.async_session_factory() as session:
+                result = await session.execute(
+                    select(PositionModel).where(PositionModel.status.in_(["open", "pending"]))
+                )
+                for position in result.scalars().all():
+                    direction = str(position.direction or "").lower()
+                    if direction not in {"long", "short"}:
+                        continue
+                    key = (self._portfolio_bucket(position.ticker), direction)
+                    counts[key] = counts.get(key, 0) + 1
+        except Exception as exc:
+            logger.warning(f"[Scanner] Portfolio exposure check failed: {exc}")
+        return counts
+
+    async def _apply_portfolio_risk_filters(
+        self,
+        run_id: str,
+        candidates: list[tuple[ScannerCandidate, OHLCVBundle]],
+    ) -> tuple[list[tuple[ScannerCandidate, OHLCVBundle]], int]:
+        if not settings.scanner.portfolio_risk_enabled or not candidates:
+            return candidates, 0
+
+        existing_counts = await self._open_portfolio_exposure_counts()
+        in_run_counts: dict[tuple[str, str], int] = {}
+        kept: list[tuple[ScannerCandidate, OHLCVBundle]] = []
+        dropped = 0
+        max_exposure = max(1, int(settings.scanner.max_same_direction_exposure))
+        max_in_run = max(1, int(settings.scanner.max_correlated_signals_per_run))
+
+        for candidate, bundle in sorted(candidates, key=lambda item: item[0].score, reverse=True):
+            key = (self._portfolio_bucket(candidate.exchange_symbol), candidate.direction)
+            existing = existing_counts.get(key, 0)
+            pending = in_run_counts.get(key, 0)
+            reason = ""
+            if existing + pending >= max_exposure:
+                reason = "portfolio_risk:max_same_direction_exposure"
+            elif pending >= max_in_run:
+                reason = "portfolio_risk:max_correlated_signals_per_run"
+            if reason:
+                dropped += 1
+                await self._audit(
+                    run_id,
+                    "portfolio_risk",
+                    watch_symbol=candidate.watch_symbol,
+                    exchange_symbol=candidate.exchange_symbol,
+                    direction=candidate.direction,
+                    score=candidate.score,
+                    setup_hash=candidate.setup_hash,
+                    reason=reason,
+                    payload={
+                        "bucket": key[0],
+                        "direction": key[1],
+                        "existing_exposure": existing,
+                        "pending_this_run": pending,
+                        "max_same_direction_exposure": max_exposure,
+                        "max_correlated_signals_per_run": max_in_run,
+                    },
+                )
+                continue
+            in_run_counts[key] = pending + 1
+            kept.append((candidate, bundle))
+        return kept, dropped
+
     def _build_run_funnel(
         self,
         *,
@@ -552,6 +887,69 @@ class MarketScannerService:
         except (TypeError, ValueError):
             factor = 1.0
         return value * factor
+
+    def _threshold_key(self, symbol: str, timeframe: str, direction: str) -> list[str]:
+        symbol_key = str(symbol or "*").upper().strip() or "*"
+        tf_key = str(timeframe or "*").lower().strip() or "*"
+        direction_key = str(direction or "*").lower().strip() or "*"
+        return [
+            f"{symbol_key}|{tf_key}|{direction_key}",
+            f"{symbol_key}|{tf_key}|*",
+            f"*|{tf_key}|{direction_key}",
+            "*|*|*",
+        ]
+
+    def _min_score_for(self, symbol: str, timeframe: str, direction: str) -> float:
+        base = float(self._adaptive_min_score or settings.scanner.min_score)
+        if not settings.scanner.walk_forward_enabled:
+            return base
+        for key in self._threshold_key(symbol, timeframe, direction):
+            item = self._threshold_overrides.get(key)
+            if not item:
+                continue
+            threshold = _safe_float(item.get("threshold"), 0.0)
+            if threshold > 0:
+                return max(float(settings.scanner.adaptive_min_score_floor), min(float(settings.scanner.adaptive_min_score_ceiling), threshold))
+        return base
+
+    async def _refresh_learning(self, run_id: str) -> dict[str, Any]:
+        if not settings.scanner.learning_enabled or db_manager.async_session_factory is None:
+            self._threshold_overrides = {}
+            return {"enabled": False}
+        try:
+            async with db_manager.async_session_factory() as session:
+                sync_result = await sync_scanner_outcomes(
+                    session,
+                    scope=self.scope,
+                    run_id=run_id,
+                    days=settings.scanner.outcome_lookback_days,
+                    max_positions=settings.scanner.outcome_max_sync_positions,
+                )
+                outcome_summary = await compute_outcome_summary(
+                    session,
+                    scope=self.scope,
+                    days=settings.scanner.outcome_lookback_days,
+                    include_recent=False,
+                )
+                threshold_summary = await compute_walk_forward_thresholds(
+                    session,
+                    scope=self.scope,
+                    days=settings.scanner.outcome_lookback_days,
+                ) if settings.scanner.walk_forward_enabled else {"thresholds": {}}
+                self._threshold_overrides = dict(threshold_summary.get("thresholds") or {})
+                await session.commit()
+                return {
+                    "enabled": True,
+                    "synced_outcomes": int(sync_result.get("synced") or 0),
+                    "outcome_labels": int(outcome_summary.get("total") or 0),
+                    "win_rate": outcome_summary.get("win_rate"),
+                    "expectancy_pct": outcome_summary.get("expectancy_pct"),
+                    "walk_forward_thresholds": len(self._threshold_overrides),
+                }
+        except Exception as exc:
+            logger.warning(f"[ScannerLearning] Refresh failed: {exc}")
+            self._threshold_overrides = {}
+            return {"enabled": True, "error": str(exc)}
 
     async def _fetch_bundle_with_retry(self, watch_symbol: str) -> OHLCVBundle:
         last_error: Exception | None = None
@@ -613,18 +1011,19 @@ class MarketScannerService:
                 logger.debug(f"[Scanner] SMC failed for {bundle.mapping.watch_symbol} {timeframe}: {exc}")
         return contexts
 
-    def _score_smc_candidate(
+    def _build_scoring_context(
         self,
         bundle: OHLCVBundle,
         ctx: Any,
-        timeframe: str,
         direction: str,
         primary_indicators: dict[str, Any],
+        timeframe: str | None = None,
         htf_trend: str | None = None,
-    ) -> ScannerCandidate | None:
-        mapping = bundle.mapping
+    ) -> ScoringContext:
+        """Build ScoringContext from bundle and SMC context for rule engine."""
         current = float(bundle.current_price or 0.0)
         atr_pct = _safe_float(primary_indicators.get("atr_pct"))
+        atr_price = max(current * max(atr_pct, 0.05) / 100.0, current * 0.001)
         rsi = _safe_float(primary_indicators.get("rsi"), 50.0)
         ema_fast = _safe_float(primary_indicators.get("ema_fast"))
         ema_slow = _safe_float(primary_indicators.get("ema_slow"))
@@ -638,156 +1037,282 @@ class MarketScannerService:
         poc = _safe_float(primary_indicators.get("volume_profile_poc"))
         regime = str(primary_indicators.get("market_regime") or "unknown").lower()
         oi_change = bundle.oi_change_pct
-        atr_price = max(current * max(atr_pct, 0.05) / 100.0, current * 0.001)
 
         support = self._best_support_zone(ctx, direction, current, atr_price)
         structure = getattr(ctx, "structure", None)
-        trend = str(getattr(structure, "trend", "ranging") or "ranging").lower()
+        smc_trend = str(getattr(structure, "trend", "ranging") or "ranging").lower()
         premium = _safe_float(getattr(ctx, "premium_zone", 0.0))
         discount = _safe_float(getattr(ctx, "discount_zone", 0.0))
         equilibrium = _safe_float(getattr(ctx, "equilibrium", 0.0))
-
-        score = 0.0
-        reasons: list[str] = []
+        risk_score = _safe_float(getattr(ctx, "risk_score", 0.5), 0.5)
+        timing_score = _safe_float(getattr(ctx, "entry_timing_score", 0.5), 0.5)
 
         if direction == "long":
-            if ema_fast > ema_slow > 0:
-                score += self._weighted("ema_alignment", 16)
-                reasons.append("EMA bullish alignment")
-            if rsi <= float(settings.scanner.rsi_lower):
-                score += self._weighted("rsi_extreme", 12)
-                reasons.append("RSI oversold")
-            if trend == "bullish":
-                score += self._weighted("smc_trend", 18)
-                reasons.append("SMC trend bullish")
-            elif trend == "ranging":
-                score += self._weighted("smc_ranging", 8)
             if discount and current <= discount:
-                score += self._weighted("price_zone", 22)
                 price_zone = "discount"
-                reasons.append("price in discount zone")
             elif equilibrium and current <= equilibrium:
-                score += self._weighted("price_zone", 12)
                 price_zone = "below_equilibrium"
             else:
                 price_zone = "premium_or_neutral"
         else:
-            if ema_fast < ema_slow and ema_fast > 0 and ema_slow > 0:
-                score += self._weighted("ema_alignment", 16)
-                reasons.append("EMA bearish alignment")
-            if rsi >= float(settings.scanner.rsi_upper):
-                score += self._weighted("rsi_extreme", 12)
-                reasons.append("RSI overbought")
-            if trend == "bearish":
-                score += self._weighted("smc_trend", 18)
-                reasons.append("SMC trend bearish")
-            elif trend == "ranging":
-                score += self._weighted("smc_ranging", 8)
             if premium and current >= premium:
-                score += self._weighted("price_zone", 22)
                 price_zone = "premium"
-                reasons.append("price in premium zone")
             elif equilibrium and current >= equilibrium:
-                score += self._weighted("price_zone", 12)
                 price_zone = "above_equilibrium"
             else:
                 price_zone = "discount_or_neutral"
 
-        if atr_pct >= float(settings.scanner.min_atr_pct):
-            score += self._weighted("atr", 12)
-            reasons.append("ATR volatility acceptable")
-        if bundle.bid_ask_spread_pct <= float(settings.scanner.max_spread_pct):
-            score += self._weighted("spread", 6)
-        if (direction == "long" and macd_hist > 0) or (direction == "short" and macd_hist < 0):
-            score += self._weighted("macd_confirmation", 6)
-            reasons.append("MACD confirms direction")
-        elif macd_hist:
-            score -= abs(self._weighted("macd_confirmation", 4))
-        if adx >= 18:
-            score += self._weighted("adx_confirmation", 4)
-            reasons.append("ADX trend strength acceptable")
-        if volume_ratio_raw is not None and volume_ratio >= 1.0:
-            score += self._weighted("volume_confirmation", 4)
-            reasons.append("volume confirms participation")
-        elif volume_ratio_raw is not None and volume_ratio < float(settings.scanner.min_volume_ratio):
-            score -= abs(self._weighted("volume_confirmation", 6))
-        if support:
-            score += self._weighted("support_zone", 24)
-            reasons.append(f"near {support['type']} support zone")
+        return ScoringContext(
+            direction=direction,
+            current_price=current,
+            atr_pct=atr_pct,
+            atr_price=atr_price,
+            rsi=rsi,
+            ema_fast=ema_fast,
+            ema_slow=ema_slow,
+            ema200=ema200,
+            macd_hist=macd_hist,
+            adx=adx,
+            volume_ratio=volume_ratio,
+            vwap=vwap,
+            vwap_distance_pct=vwap_dist,
+            poc=poc,
+            regime=regime,
+            oi_change_pct=oi_change,
+            htf_trend=htf_trend,
+            smc_trend=smc_trend,
+            smc_risk_score=risk_score,
+            smc_timing_score=timing_score,
+            price_zone=price_zone,
+            support_zone=support,
+            premium_zone=premium,
+            discount_zone=discount,
+            equilibrium=equilibrium,
+            spread_pct=bundle.bid_ask_spread_pct,
+            bid_ask_spread_pct=bundle.bid_ask_spread_pct,
+            bundle_quality_passed=bundle.quality_passed,
+            bundle_quality_reasons=list(bundle.quality_reasons or []),
+            timeframe=str(timeframe or bundle.primary_timeframe),
+            market_type=bundle.mapping.market_type or settings.exchange.market_type,
+        )
+
+    def _estimate_risk_reward(self, ctx: ScoringContext) -> float:
+        support = ctx.support_zone or {}
+        current = float(ctx.current_price or 0.0)
+        atr = max(float(ctx.atr_price or 0.0), current * 0.001)
+        if current <= 0 or not support:
+            return 0.0
+        low = _safe_float(support.get("low"))
+        high = _safe_float(support.get("high"))
+        if low <= 0 or high <= 0:
+            return 0.0
+
+        if ctx.direction == "short":
+            stop = max(low, high) + atr * 0.25
+            targets = [value for value in (ctx.equilibrium, ctx.discount_zone) if value > 0 and value < current]
+            if not targets or stop <= current:
+                return 0.0
+            target = max(targets)
+            risk = stop - current
+            reward = current - target
         else:
-            score -= 10
+            stop = min(low, high) - atr * 0.25
+            targets = [value for value in (ctx.equilibrium, ctx.premium_zone) if value > 0 and value > current]
+            if not targets or stop >= current:
+                return 0.0
+            target = min(targets)
+            risk = current - stop
+            reward = target - current
+        if risk <= 0 or reward <= 0:
+            return 0.0
+        return round(reward / risk, 4)
 
-        risk_score = _safe_float(getattr(ctx, "risk_score", 0.5), 0.5)
-        timing_score = _safe_float(getattr(ctx, "entry_timing_score", 0.5), 0.5)
-        score += self._weighted("risk", max(0.0, (1.0 - risk_score) * 8.0))
-        score += self._weighted("timing", max(0.0, timing_score * 8.0))
+    def _minutes_to_next_funding_boundary(self) -> int:
+        now = utcnow()
+        current_minutes = now.hour * 60 + now.minute
+        boundaries = [0, 8 * 60, 16 * 60, 24 * 60]
+        distances = [abs(current_minutes - item) for item in boundaries]
+        distances.append(abs((24 * 60 + current_minutes) - boundaries[-2]))
+        return int(min(distances))
 
-        if settings.scanner.ema200_enabled and ema200 > 0:
-            if direction == "long" and current > ema200:
-                score += self._weighted("ema200_alignment", 10)
-                reasons.append("EMA200 bullish alignment")
-            elif direction == "short" and current < ema200:
-                score += self._weighted("ema200_alignment", 10)
-                reasons.append("EMA200 bearish alignment")
-            else:
-                penalty = self._weighted("ema200_conflict", 15)
-                score -= penalty
-                reasons.append(f"EMA200 conflict penalized ({-penalty:.0f})")
+    def _in_utc_window(self, window: str) -> bool:
+        text = str(window or "").strip().lower()
+        if "-" not in text:
+            return False
+        start_text, _, end_text = text.partition("-")
 
-        if htf_trend and settings.scanner.htf_conflict_enabled:
-            htf_bullish = htf_trend == "bullish"
-            htf_bearish = htf_trend == "bearish"
-            conflicting = (direction == "long" and htf_bearish) or (direction == "short" and htf_bullish)
-            if conflicting:
-                penalty = self._weighted("htf_conflict", 20)
-                score -= penalty
-                reasons.append(f"HTF structure conflict ({htf_trend}) penalized ({-penalty:.0f})")
+        def minutes(value: str) -> int | None:
+            try:
+                hour_text, _, minute_text = value.strip().partition(":")
+                hour = int(hour_text)
+                minute = int(minute_text or "0")
+            except ValueError:
+                return None
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return None
+            return hour * 60 + minute
 
-        if vwap > 0:
-            if direction == "long" and current > vwap:
-                score += self._weighted("vwap", 6)
-                reasons.append("price above VWAP")
-            elif direction == "short" and current < vwap:
-                score += self._weighted("vwap", 6)
-                reasons.append("price below VWAP")
-            elif vwap_dist is not None:
-                score -= abs(self._weighted("vwap", 4))
+        start = minutes(start_text)
+        end = minutes(end_text)
+        if start is None or end is None:
+            return False
+        now = utcnow()
+        current = now.hour * 60 + now.minute
+        if start <= end:
+            return start <= current <= end
+        return current >= start or current <= end
 
-        if poc > 0:
-            if (direction == "long" and current > poc) or (direction == "short" and current < poc):
-                score += self._weighted("poc", 5)
-                reasons.append("price favorable to POC")
+    def _event_session_filter(self, bundle: OHLCVBundle) -> tuple[bool, str, dict[str, Any]]:
+        diagnostics = {
+            "enabled": bool(settings.scanner.event_filter_enabled),
+            "funding_rate": bundle.funding_rate,
+            "utc_hour": utcnow().hour,
+            "low_liquidity_utc_hours": list(settings.scanner.low_liquidity_utc_hours or []),
+            "event_blackout_utc_windows": list(settings.scanner.event_blackout_utc_windows or []),
+        }
+        if not settings.scanner.event_filter_enabled:
+            return True, "", diagnostics
+        if utcnow().hour in {int(item) for item in settings.scanner.low_liquidity_utc_hours or []}:
+            return False, "event_filter:low_liquidity_utc_hour", diagnostics
+        for window in settings.scanner.event_blackout_utc_windows or []:
+            if self._in_utc_window(str(window)):
+                diagnostics["matched_window"] = window
+                return False, "event_filter:configured_blackout_window", diagnostics
+        funding = bundle.funding_rate
+        if funding is not None and abs(float(funding)) > float(settings.scanner.max_abs_funding_rate):
+            return False, "event_filter:funding_rate_extreme", diagnostics
+        blackout = int(settings.scanner.funding_blackout_minutes)
+        if (
+            blackout > 0
+            and bundle.funding_rate is not None
+            and str(bundle.mapping.market_type or settings.exchange.market_type).lower() in {"contract", "swap", "future"}
+        ):
+            minutes = self._minutes_to_next_funding_boundary()
+            diagnostics["minutes_to_funding_boundary"] = minutes
+            if minutes <= blackout:
+                return False, "event_filter:funding_settlement_blackout", diagnostics
+        return True, "", diagnostics
 
-        if oi_change is not None:
-            oi_bullish = oi_change > 3.0
-            oi_bearish = oi_change < -3.0
-            if direction == "long" and oi_bullish:
-                score += self._weighted("oi_confirmation", 6)
-                reasons.append(f"OI rising {oi_change:+.1f}% confirms long")
-            elif direction == "short" and oi_bearish:
-                score += self._weighted("oi_confirmation", 6)
-                reasons.append(f"OI falling {oi_change:+.1f}% confirms short")
-            elif direction == "long" and oi_bearish:
-                score -= self._weighted("oi_divergence", 5)
-                reasons.append(f"OI divergence: OI {oi_change:+.1f}% vs long signal")
+    def _estimated_liquidity_slippage_pct(self, side_depth: float, order_size: float, volume_24h: float, spread_pct: float) -> float:
+        if order_size <= 0:
+            return spread_pct
+        depth_component = (order_size / max(side_depth, 1.0)) * 100.0 if side_depth > 0 else 0.0
+        volume_component = (order_size / max(volume_24h, 1.0)) * 100.0 if volume_24h > 0 else 0.0
+        return round(max(0.0, spread_pct + depth_component * 0.10 + volume_component * 5.0), 4)
 
-        if settings.scanner.regime_filter_enabled:
-            if regime == "trending":
-                score += self._weighted("regime_trending", 4)
-                reasons.append("trending market regime")
-            elif regime == "ranging":
-                score -= self._weighted("regime_ranging", 6)
-                reasons.append("ranging market regime penalized")
+    def _liquidity_filter(self, bundle: OHLCVBundle, direction: str) -> tuple[bool, str, dict[str, Any]]:
+        dq = bundle.data_quality or {}
+        volume_24h = _safe_float(bundle.volume_24h)
+        bid_depth = _safe_float(dq.get("orderbook_bid_depth_usdt"))
+        ask_depth = _safe_float(dq.get("orderbook_ask_depth_usdt"))
+        side_depth = ask_depth if direction == "long" else bid_depth
+        order_size = float(settings.scanner.liquidity_order_size_usdt)
+        spread = bundle.bid_ask_spread_pct
+        slippage = self._estimated_liquidity_slippage_pct(side_depth, order_size, volume_24h, spread)
+        imbalance = bundle.orderbook_imbalance
+        diagnostics = {
+            "enabled": bool(settings.scanner.liquidity_filter_enabled),
+            "direction": direction,
+            "order_size_usdt": order_size,
+            "volume_24h": volume_24h,
+            "bid_depth_usdt": bid_depth,
+            "ask_depth_usdt": ask_depth,
+            "side_depth_usdt": side_depth,
+            "spread_pct": spread,
+            "estimated_slippage_pct": slippage,
+            "orderbook_imbalance": imbalance,
+        }
+        if not settings.scanner.liquidity_filter_enabled:
+            return True, "", diagnostics
+        if volume_24h > 0 and volume_24h < float(settings.scanner.min_quote_volume_24h):
+            return False, "liquidity_filter:quote_volume_too_low", diagnostics
+        if side_depth > 0 and side_depth < float(settings.scanner.min_orderbook_depth_usdt):
+            return False, "liquidity_filter:orderbook_depth_too_low", diagnostics
+        if slippage > float(settings.scanner.max_estimated_slippage_pct):
+            return False, "liquidity_filter:estimated_slippage_too_high", diagnostics
+        if imbalance is not None:
+            if direction == "long" and float(imbalance) < float(settings.scanner.min_orderbook_imbalance_long):
+                return False, "liquidity_filter:orderbook_against_long", diagnostics
+            if direction == "short" and float(imbalance) > float(settings.scanner.max_orderbook_imbalance_short):
+                return False, "liquidity_filter:orderbook_against_short", diagnostics
+        return True, "", diagnostics
 
-        score = max(0.0, min(100.0, score))
+    def _hard_filter_scoring_context(
+        self,
+        bundle: OHLCVBundle,
+        ctx: ScoringContext,
+        primary_indicators: dict[str, Any],
+    ) -> tuple[bool, str, dict[str, Any]]:
+        rr = self._estimate_risk_reward(ctx)
+        liquidity_ok, liquidity_reason, liquidity = self._liquidity_filter(bundle, ctx.direction)
+        diagnostics = {
+            "enabled": bool(settings.scanner.hard_filters_enabled),
+            "estimated_rr": rr,
+            "liquidity": liquidity,
+            "support_zone": bool(ctx.support_zone),
+            "smc_trend": ctx.smc_trend,
+            "htf_trend": ctx.htf_trend or "",
+        }
+        if not settings.scanner.hard_filters_enabled:
+            return True, "", diagnostics
+        if settings.scanner.require_support_zone and not ctx.support_zone:
+            return False, "hard_filter:no_support_zone", diagnostics
+        if settings.scanner.require_structure_alignment and ctx.smc_trend not in {ctx.expected_trend, "ranging"}:
+            return False, f"hard_filter:smc_structure_{ctx.smc_trend}_vs_{ctx.direction}", diagnostics
+        if ctx.htf_conflicts:
+            return False, f"hard_filter:htf_conflict_{ctx.htf_trend}", diagnostics
+        if ctx.atr_pct > 0 and ctx.atr_pct < float(settings.scanner.min_atr_pct):
+            return False, "hard_filter:atr_too_low", diagnostics
+        if ctx.spread_pct > float(settings.scanner.max_spread_pct):
+            return False, "hard_filter:spread_too_wide", diagnostics
+        if primary_indicators.get("volume_ratio") is not None and ctx.volume_ratio < float(settings.scanner.min_volume_ratio):
+            return False, "hard_filter:volume_too_low", diagnostics
+        if float(settings.scanner.min_rr_ratio) > 0 and rr < float(settings.scanner.min_rr_ratio):
+            return False, "hard_filter:risk_reward_too_low", diagnostics
+        if not liquidity_ok:
+            return False, liquidity_reason, diagnostics
+        return True, "", diagnostics
 
-        fusion_floor = max(0.0, float(settings.scanner.min_score) - max(12.0, float(settings.scanner.mtf_confirmation_bonus) * 2.0))
+    def _score_smc_candidate(
+        self,
+        bundle: OHLCVBundle,
+        ctx: Any,
+        timeframe: str,
+        direction: str,
+        primary_indicators: dict[str, Any],
+        htf_trend: str | None = None,
+    ) -> ScannerCandidate | None:
+        mapping = bundle.mapping
+        current = float(bundle.current_price or 0.0)
+
+        scoring_ctx = self._build_scoring_context(
+            bundle,
+            ctx,
+            direction,
+            primary_indicators,
+            timeframe=timeframe,
+            htf_trend=htf_trend,
+        )
+
+        hard_ok, hard_reason, hard_diagnostics = self._hard_filter_scoring_context(bundle, scoring_ctx, primary_indicators)
+        if not hard_ok:
+            logger.debug(
+                f"[Scanner] Hard filter rejected {mapping.exchange_symbol} {timeframe} "
+                f"{direction}: {hard_reason}"
+            )
+            return None
+
+        score, reasons, breakdown = DEFAULT_ENGINE.evaluate(scoring_ctx)
+
+        threshold = self._min_score_for(mapping.exchange_symbol, timeframe, direction)
+        fusion_floor = max(0.0, threshold - max(12.0, float(settings.scanner.mtf_confirmation_bonus) * 2.0))
         if score < fusion_floor:
             return None
 
+        support = scoring_ctx.support_zone
         support_mid = _safe_float((support or {}).get("midpoint"), current)
         setup_type = str((support or {}).get("type") or "indicator_smc")
-        price_zone_key = f"{price_zone}:{round(support_mid, 2)}"
+        price_zone_key = f"{scoring_ctx.price_zone}:{round(support_mid, 2)}"
         setup_hash = _setup_hash(
             ticker=mapping.exchange_symbol,
             direction=direction,
@@ -799,14 +1324,14 @@ class MarketScannerService:
 
         smc_summary = {
             "timeframe": timeframe,
-            "trend": trend,
-            "risk_score": round(risk_score, 4),
-            "entry_timing_score": round(timing_score, 4),
+            "trend": scoring_ctx.smc_trend,
+            "risk_score": round(scoring_ctx.smc_risk_score, 4),
+            "entry_timing_score": round(scoring_ctx.smc_timing_score, 4),
             "timing_recommendation": getattr(ctx, "timing_recommendation", ""),
-            "premium_zone": premium,
-            "discount_zone": discount,
-            "equilibrium": equilibrium,
-            "zone": price_zone,
+            "premium_zone": scoring_ctx.premium_zone,
+            "discount_zone": scoring_ctx.discount_zone,
+            "equilibrium": scoring_ctx.equilibrium,
+            "zone": scoring_ctx.price_zone,
             "support_type": setup_type,
             "support_midpoint": support_mid,
             "support": support or {},
@@ -823,30 +1348,36 @@ class MarketScannerService:
             timeframe=timeframe,
             current_price=current,
             entry_reference=support_mid,
-            score=round(score, 2),
+            score=score,
             setup_type=setup_type,
             price_zone=price_zone_key,
             setup_hash=setup_hash,
             reasons=reasons,
             indicator_summary={
-                "rsi": rsi,
-                "atr_pct": atr_pct,
-                "ema_fast": ema_fast,
-                "ema_slow": ema_slow,
-                "ema200": ema200,
-                "macd_hist": macd_hist,
-                "adx": adx,
-                "volume_ratio": volume_ratio,
-                "spread_pct": bundle.bid_ask_spread_pct,
-                "vwap": vwap,
-                "vwap_distance_pct": vwap_dist,
-                "poc": poc,
-                "regime": regime,
-                "oi_change_pct": oi_change,
+                "rsi": scoring_ctx.rsi,
+                "atr_pct": scoring_ctx.atr_pct,
+                "ema_fast": scoring_ctx.ema_fast,
+                "ema_slow": scoring_ctx.ema_slow,
+                "ema200": scoring_ctx.ema200,
+                "macd_hist": scoring_ctx.macd_hist,
+                "adx": scoring_ctx.adx,
+                "volume_ratio": scoring_ctx.volume_ratio,
+                "spread_pct": scoring_ctx.spread_pct,
+                "vwap": scoring_ctx.vwap,
+                "vwap_distance_pct": scoring_ctx.vwap_distance_pct,
+                "poc": scoring_ctx.poc,
+                "regime": scoring_ctx.regime,
+                "oi_change_pct": scoring_ctx.oi_change_pct,
                 "htf_trend": htf_trend or "",
             },
             smc_summary=smc_summary,
-            quality={"reasons": bundle.quality_reasons, "passed": bundle.quality_passed},
+            quality={
+                "reasons": list(bundle.quality_reasons or []),
+                "passed": bundle.quality_passed,
+                "hard_filters": hard_diagnostics,
+                "min_score_threshold": threshold,
+            },
+            score_breakdown=breakdown,
         )
 
     def _best_support_zone(self, ctx: Any, direction: str, current: float, atr_price: float) -> dict[str, Any] | None:
@@ -915,13 +1446,12 @@ class MarketScannerService:
                 return False, ""
             async with db_manager.async_session_factory() as session:
                 stmt = select(PositionModel).where(
-                    PositionModel.status.in_(["open", "pending"])
+                    PositionModel.status.in_(["open", "pending"]),
+                    PositionModel.ticker == exchange_symbol,
                 )
                 result = await session.execute(stmt)
                 positions = result.scalars().all()
             for pos in positions:
-                if position_symbol_key(pos.ticker) != target_key:
-                    continue
                 pos_dir = (pos.direction or "").lower()
                 if pos_dir == direction.lower():
                     return True, (
@@ -1088,7 +1618,8 @@ class MarketScannerService:
             if ai_used:
                 await update_scanner_state_counts(session, self.scope, ai_call_delta=1, signal_delta=1)
 
-            cooldown_ttl = self._symbol_cooldown_ttl_for_result(result)
+            cooldown_level = await self._get_symbol_cooldown_level(candidate.exchange_symbol)
+            cooldown_ttl = self._symbol_cooldown_ttl_for_result(result, candidate.score, cooldown_level)
             if cooldown_ttl > 0:
                 await set_scanner_symbol_cooldown(
                     session,
@@ -1110,6 +1641,7 @@ class MarketScannerService:
                 reason=str(result.get("reason", "")),
                 payload={"result": result, "ai_used": ai_used, "cooldown_ttl_secs": cooldown_ttl},
             )
+            await self._update_win_rate(session, str(result.get("status", "")), str(result.get("reason", "")))
             await session.commit()
             return {
                 "status": result.get("status", "unknown"),
@@ -1122,18 +1654,78 @@ class MarketScannerService:
                 "cooldown_ttl_secs": cooldown_ttl,
             }
 
-    def _symbol_cooldown_ttl_for_result(self, result: dict[str, Any]) -> int:
+    def _symbol_cooldown_ttl_for_result(self, result: dict[str, Any], candidate_score: float = 0.0, cooldown_level: int = 0) -> int:
+        """Compute symbol cooldown TTL with progressive scaling.
+
+        Args:
+            result: Processing result dict
+            candidate_score: Score of the candidate (affects cooldown duration)
+            cooldown_level: Current cooldown level (progressive multiplier)
+
+        Returns:
+            Cooldown TTL in seconds
+        """
         status = str(result.get("status") or "").lower().strip()
         reason = str(result.get("reason") or "").lower()
         analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
         recommendation = str(analysis.get("recommendation") or "").lower().strip()
+
+        base_cooldown = max(0, int(settings.scanner.symbol_cooldown_secs))
+        rejected_cooldown = max(0, int(settings.scanner.rejected_symbol_cooldown_secs))
+        blocked_cooldown = max(0, int(settings.scanner.blocked_symbol_cooldown_secs))
+
+        if settings.scanner.adaptive_threshold_enabled:
+            max_levels = int(settings.scanner.adaptive_cooldown_levels)
+            multiplier = float(settings.scanner.adaptive_cooldown_multiplier)
+            base_cooldown = int(settings.scanner.adaptive_cooldown_base_secs)
+
+            level_penalty = min(cooldown_level, max_levels)
+            progressive_multiplier = multiplier ** level_penalty
+
+            score_bonus = max(0.0, (candidate_score - 80.0) / 20.0)
+            score_reduction = 1.0 - min(0.5, score_bonus * 0.25)
+
+            base_cooldown = int(base_cooldown * progressive_multiplier * score_reduction)
+
         if status in {"duplicate", "blocked", "error"}:
-            return max(0, int(settings.scanner.blocked_symbol_cooldown_secs))
+            return blocked_cooldown if blocked_cooldown > 0 else base_cooldown * 3
         if status == "rejected" or recommendation in {"reject", "hold"} or "rejected" in reason:
-            return max(0, int(settings.scanner.rejected_symbol_cooldown_secs))
+            ttl = rejected_cooldown if rejected_cooldown > 0 else base_cooldown * 2
+            if cooldown_level > 0:
+                ttl = int(ttl * (1.5 ** min(cooldown_level, 5)))
+            return ttl
         if status == "observed" and not bool(result.get("would_execute")):
-            return max(0, int(settings.scanner.rejected_symbol_cooldown_secs))
-        return max(0, int(settings.scanner.symbol_cooldown_secs))
+            ttl = rejected_cooldown if rejected_cooldown > 0 else base_cooldown * 2
+            return ttl
+
+        if status in {"executed", "paper_executed"}:
+            if candidate_score >= 85.0:
+                return max(60, int(base_cooldown * 0.5))
+
+        return base_cooldown
+
+    async def _get_symbol_cooldown_level(self, exchange_symbol: str) -> int:
+        """Get current cooldown level for a symbol from recent audit history."""
+        try:
+            async with db_manager.async_session_factory() as session:
+                stmt = select(ScannerAuditModel).where(
+                    ScannerAuditModel.exchange_symbol == exchange_symbol,
+                    ScannerAuditModel.event_type == "result",
+                ).order_by(desc(ScannerAuditModel.created_at)).limit(10)
+                result = await session.execute(stmt)
+                recent = result.scalars().all()
+
+                level = 0
+                for audit in recent:
+                    payload = json.loads(audit.payload_json or "{}")
+                    res_status = str(payload.get("result", {}).get("status", "") or "").lower()
+                    if res_status in {"rejected", "blocked", "error"}:
+                        level += 1
+                    elif res_status in {"executed", "paper_executed"}:
+                        level = max(0, level - 1)
+                return level
+        except Exception:
+            return 0
 
     async def _validate_live_market(self, candidate: ScannerCandidate) -> tuple[bool, str, dict[str, Any]]:
         """Fail closed before AI calls if a live scanner symbol is not tradable."""
@@ -1184,21 +1776,129 @@ class MarketScannerService:
         reason: str = "",
         payload: dict[str, Any] | None = None,
     ) -> None:
+        async with self._audit_buffer_lock:
+            self._audit_buffer.append({
+                "scope": self.scope,
+                "run_id": run_id,
+                "event_type": event_type,
+                "watch_symbol": watch_symbol,
+                "exchange_symbol": exchange_symbol,
+                "direction": direction,
+                "score": score,
+                "setup_hash": setup_hash,
+                "reason": reason,
+                "payload": payload,
+            })
+
+    async def _flush_audit_buffer(self) -> None:
+        async with self._audit_buffer_lock:
+            if not self._audit_buffer:
+                return
+            buffer = self._audit_buffer[:]
+            self._audit_buffer.clear()
         async with db_manager.async_session_factory() as session:
-            await record_scanner_audit(
-                session,
-                scope=self.scope,
-                run_id=run_id,
-                event_type=event_type,
-                watch_symbol=watch_symbol,
-                exchange_symbol=exchange_symbol,
-                direction=direction,
-                score=score,
-                setup_hash=setup_hash,
-                reason=reason,
-                payload=payload,
-            )
+            for item in buffer:
+                await record_scanner_audit(session, **item)
             await session.commit()
+
+    async def _update_win_rate(
+        self,
+        session: Any,
+        result_status: str,
+        result_reason: str,
+    ) -> None:
+        """Update win rate tracking after signal processing."""
+        if not settings.scanner.adaptive_threshold_enabled:
+            return
+        if settings.scanner.learning_enabled:
+            return
+        state = await get_or_create_scanner_state(session, scope=self.scope)
+        wins = int(state.signal_wins or 0)
+        losses = int(state.signal_losses or 0)
+
+        is_win = result_status in {"executed", "paper_executed", "observed_would_execute"}
+        is_loss = result_status in {"rejected", "blocked", "error"} or "rejected" in result_reason.lower()
+
+        if is_win:
+            wins += 1
+        elif is_loss:
+            losses += 1
+
+        total = wins + losses
+        win_rate = (wins / total * 100.0) if total > 0 else 0.0
+
+        state.signal_wins = wins
+        state.signal_losses = losses
+        state.signal_win_rate = round(win_rate, 2)
+        state.last_win_rate_update_at = utcnow()
+
+        try:
+            history = json.loads(state.win_rate_history_json or "[]")
+        except (json.JSONDecodeError, TypeError):
+            history = []
+
+        history.append({
+            "timestamp": utcnow().isoformat(),
+            "win_rate": round(win_rate, 2),
+            "wins": wins,
+            "losses": losses,
+            "result_status": result_status,
+        })
+        history = history[-100:]
+        state.win_rate_history_json = json.dumps(history)
+
+        adaptive_score = self._compute_adaptive_min_score(win_rate, total)
+        state.adaptive_min_score = round(adaptive_score, 2)
+
+    def _compute_adaptive_min_score(self, win_rate: float, total_signals: int) -> float:
+        """Compute adaptive min_score based on recent win rate."""
+        if not settings.scanner.adaptive_threshold_enabled:
+            return float(settings.scanner.min_score)
+
+        if total_signals < 5:
+            return float(settings.scanner.min_score)
+
+        floor = float(settings.scanner.adaptive_min_score_floor)
+        ceiling = float(settings.scanner.adaptive_min_score_ceiling)
+        target = float(settings.scanner.adaptive_win_rate_target)
+        step = float(settings.scanner.adaptive_adjustment_step)
+        base_min = float(settings.scanner.min_score)
+
+        deviation = win_rate - target
+
+        adjustment = 0.0
+        if deviation > 10.0:
+            adjustment = -step * 2
+        elif deviation > 5.0:
+            adjustment = -step
+        elif deviation < -10.0:
+            adjustment = step * 2
+        elif deviation < -5.0:
+            adjustment = step
+
+        adaptive = base_min + adjustment
+        return max(floor, min(ceiling, adaptive))
+
+    async def _get_effective_min_score(self) -> float:
+        """Get effective min_score (static or adaptive from DB)."""
+        if not settings.scanner.adaptive_threshold_enabled:
+            return float(settings.scanner.min_score)
+        async with db_manager.async_session_factory() as session:
+            if settings.scanner.learning_enabled:
+                summary = await compute_outcome_summary(
+                    session,
+                    scope=self.scope,
+                    days=settings.scanner.outcome_lookback_days,
+                    include_recent=False,
+                )
+                total = int(summary.get("total") or 0)
+                if total >= max(5, int(settings.scanner.walk_forward_min_samples)):
+                    return self._compute_adaptive_min_score(float(summary.get("win_rate") or 0.0), total)
+            state = await get_or_create_scanner_state(session, scope=self.scope)
+            adaptive = float(state.adaptive_min_score or 0.0)
+            if adaptive > 0:
+                return adaptive
+            return float(settings.scanner.min_score)
 
 
 _SCANNER_SERVICE: MarketScannerService | None = None

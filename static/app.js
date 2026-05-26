@@ -441,6 +441,25 @@ function connectSystemSocket() {
             if (page === 'positions') { loadPositions(); loadPendingOrders(); }
             if (page === 'dashboard') loadRecentSignals();
         }
+        if (message?.type === 'scanner_event') {
+            const ev = message.event || '';
+            if (ev === 'scan_start') {
+                setServerStatus('Scanner running', 'online');
+            } else if (ev === 'scan_complete') {
+                setServerStatus('Scan complete', 'online');
+                const page = document.querySelector('.page.active')?.id?.replace('page-', '');
+                if (page === 'scanner') loadScanner();
+            } else if (ev === 'candidate_found') {
+                const page = document.querySelector('.page.active')?.id?.replace('page-', '');
+                if (page === 'scanner') {
+                    // Flash a subtle toast for real-time candidate discovery
+                    const sym = message.symbol || '';
+                    const dir = message.direction || '';
+                    const score = Number(message.score || 0).toFixed(1);
+                    // Only show if user is actively viewing scanner
+                }
+            }
+        }
     };
 
     socket.onerror = () => {
@@ -5427,6 +5446,34 @@ function renderScannerStatus(status) {
     const ema200Enabled = (status.scoring || {}).ema200_enabled ?? true;
     const htfConflictEnabled = (status.scoring || {}).htf_conflict_enabled ?? true;
     const regimeFilterEnabled = (status.scoring || {}).regime_filter_enabled ?? true;
+    const learning = status.learning || {};
+    const learningEnabled = learning.learning_enabled ?? true;
+    const walkForwardEnabled = learning.walk_forward_enabled ?? true;
+    const hardFiltersEnabled = learning.hard_filters_enabled ?? true;
+    const requireSupportZone = learning.require_support_zone ?? true;
+    const requireStructureAlignment = learning.require_structure_alignment ?? true;
+    const minMtfConfirmations = learning.min_mtf_confirmations ?? 2;
+    const minRrRatio = learning.min_rr_ratio ?? 1.4;
+    const mtfConsensusEnabled = learning.mtf_consensus_enabled ?? true;
+    const mtfConsensusMinMargin = learning.mtf_consensus_min_margin ?? 8;
+    const mtfConsensusHtfWeight = learning.mtf_consensus_htf_weight ?? 1.4;
+    const mtfConsensusLtfWeight = learning.mtf_consensus_ltf_weight ?? 0.8;
+    const liquidityFilterEnabled = learning.liquidity_filter_enabled ?? true;
+    const liquidityOrderSize = learning.liquidity_order_size_usdt ?? 1000;
+    const minQuoteVolume = learning.min_quote_volume_24h ?? 5000000;
+    const minOrderbookDepth = learning.min_orderbook_depth_usdt ?? 50000;
+    const maxEstimatedSlippage = learning.max_estimated_slippage_pct ?? 0.25;
+    const minObImbalanceLong = learning.min_orderbook_imbalance_long ?? 0.6;
+    const maxObImbalanceShort = learning.max_orderbook_imbalance_short ?? 1.8;
+    const eventFilterEnabled = learning.event_filter_enabled ?? true;
+    const fundingBlackoutMinutes = learning.funding_blackout_minutes ?? 10;
+    const maxAbsFundingRate = learning.max_abs_funding_rate ?? 0.0015;
+    const lowLiquidityHours = (learning.low_liquidity_utc_hours || []).join(', ');
+    const eventBlackoutWindows = (learning.event_blackout_utc_windows || []).join(', ');
+    const portfolioRiskEnabled = learning.portfolio_risk_enabled ?? true;
+    const maxSameDirectionExposure = learning.max_same_direction_exposure ?? 3;
+    const maxCorrelatedSignalsPerRun = learning.max_correlated_signals_per_run ?? 2;
+    const correlationBuckets = learning.correlation_buckets || {};
     const shutdownTimeout = status.shutdown_timeout_secs ?? 30;
 
     const st = status.state || {};
@@ -5642,6 +5689,185 @@ function renderScannerStatus(status) {
 
             <div class="form-row three-col">
                 <div class="form-group">
+                    <label for="scanner-mtf-consensus-enabled">MTF Consensus</label>
+                    <select id="scanner-mtf-consensus-enabled" class="text-input">
+                        <option value="true" ${mtfConsensusEnabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!mtfConsensusEnabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">One final long/short/neutral decision per symbol</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-mtf-margin">Consensus Margin</label>
+                    <input type="number" id="scanner-mtf-margin" class="text-input" value="${mtfConsensusMinMargin}" min="0" max="100" step="0.5">
+                    <p class="hint">Long vs short score gap required</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-min-mtf-confirmations">Min MTF Confirmations</label>
+                    <input type="number" id="scanner-min-mtf-confirmations" class="text-input" value="${minMtfConfirmations}" min="1" max="10" step="1">
+                    <p class="hint">Minimum aligned timeframes before AI</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-mtf-htf-weight">HTF Weight</label>
+                    <input type="number" id="scanner-mtf-htf-weight" class="text-input" value="${mtfConsensusHtfWeight}" min="0.1" max="10" step="0.1">
+                    <p class="hint">Higher timeframe influence</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-mtf-ltf-weight">LTF Weight</label>
+                    <input type="number" id="scanner-mtf-ltf-weight" class="text-input" value="${mtfConsensusLtfWeight}" min="0.1" max="10" step="0.1">
+                    <p class="hint">Lower timeframe entry influence</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-min-rr-ratio">Min R/R Ratio</label>
+                    <input type="number" id="scanner-min-rr-ratio" class="text-input" value="${minRrRatio}" min="0" max="10" step="0.05">
+                    <p class="hint">Execution gate before AI</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-hard-filters-enabled">Hard Filters</label>
+                    <select id="scanner-hard-filters-enabled" class="text-input">
+                        <option value="true" ${hardFiltersEnabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!hardFiltersEnabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">Structure, execution and R/R gates</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-require-support-zone">Require FVG/OB Zone</label>
+                    <select id="scanner-require-support-zone" class="text-input">
+                        <option value="true" ${requireSupportZone ? 'selected' : ''}>Yes</option>
+                        <option value="false" ${!requireSupportZone ? 'selected' : ''}>No</option>
+                    </select>
+                    <p class="hint">Block signals without tradable structure</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-require-structure-alignment">Require SMC Alignment</label>
+                    <select id="scanner-require-structure-alignment" class="text-input">
+                        <option value="true" ${requireStructureAlignment ? 'selected' : ''}>Yes</option>
+                        <option value="false" ${!requireStructureAlignment ? 'selected' : ''}>No</option>
+                    </select>
+                    <p class="hint">Block structure opposing the signal</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-liquidity-filter-enabled">Liquidity Filter</label>
+                    <select id="scanner-liquidity-filter-enabled" class="text-input">
+                        <option value="true" ${liquidityFilterEnabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!liquidityFilterEnabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">Reject signals that are hard to enter/exit</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-liquidity-order-size">Model Order Size USDT</label>
+                    <input type="number" id="scanner-liquidity-order-size" class="text-input" value="${liquidityOrderSize}" min="0" step="100">
+                    <p class="hint">Size used for slippage estimate</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-max-estimated-slippage">Max Est. Slippage%</label>
+                    <input type="number" id="scanner-max-estimated-slippage" class="text-input" value="${maxEstimatedSlippage}" min="0" step="0.01">
+                    <p class="hint">Block if impact + spread is too high</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-min-quote-volume">Min 24h Quote Volume</label>
+                    <input type="number" id="scanner-min-quote-volume" class="text-input" value="${minQuoteVolume}" min="0" step="100000">
+                    <p class="hint">Volume gate in quote currency</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-min-orderbook-depth">Min Orderbook Depth USDT</label>
+                    <input type="number" id="scanner-min-orderbook-depth" class="text-input" value="${minOrderbookDepth}" min="0" step="1000">
+                    <p class="hint">Side-specific top depth gate</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-ob-imbalance">OB Imbalance Long / Short</label>
+                    <div style="display:flex;gap:8px">
+                        <input type="number" id="scanner-min-ob-long" class="text-input" value="${minObImbalanceLong}" min="0" step="0.05" title="min long bid/ask">
+                        <input type="number" id="scanner-max-ob-short" class="text-input" value="${maxObImbalanceShort}" min="0" step="0.05" title="max short bid/ask">
+                    </div>
+                    <p class="hint">Bid/ask pressure boundaries</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-event-filter-enabled">Event/Session Filter</label>
+                    <select id="scanner-event-filter-enabled" class="text-input">
+                        <option value="true" ${eventFilterEnabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!eventFilterEnabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">Funding, macro blackout, low-liquidity hours</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-funding-blackout">Funding Blackout Min</label>
+                    <input type="number" id="scanner-funding-blackout" class="text-input" value="${fundingBlackoutMinutes}" min="0" max="240" step="1">
+                    <p class="hint">Avoid funding settlement windows</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-max-funding-rate">Max Abs Funding Rate</label>
+                    <input type="number" id="scanner-max-funding-rate" class="text-input" value="${maxAbsFundingRate}" min="0" max="1" step="0.0001">
+                    <p class="hint">Block extreme funding regimes</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-low-liq-hours">Low Liquidity UTC Hours</label>
+                    <input type="text" id="scanner-low-liq-hours" class="text-input" value="${escapeHtml(lowLiquidityHours)}" placeholder="0,1,2">
+                    <p class="hint">Comma-separated UTC hours to avoid</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-event-windows">Event Blackout UTC Windows</label>
+                    <input type="text" id="scanner-event-windows" class="text-input" value="${escapeHtml(eventBlackoutWindows)}" placeholder="13:25-13:45,19:55-20:10">
+                    <p class="hint">Manual macro/news blackout windows</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-learning-enabled">Learning / Walk-forward</label>
+                    <div style="display:flex;gap:8px">
+                        <select id="scanner-learning-enabled" class="text-input"><option value="true" ${learningEnabled ? 'selected' : ''}>Learning</option><option value="false" ${!learningEnabled ? 'selected' : ''}>Off</option></select>
+                        <select id="scanner-walk-forward-enabled" class="text-input"><option value="true" ${walkForwardEnabled ? 'selected' : ''}>WF On</option><option value="false" ${!walkForwardEnabled ? 'selected' : ''}>WF Off</option></select>
+                    </div>
+                    <p class="hint">Use closed-trade labels to tune thresholds</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-portfolio-risk-enabled">Portfolio Risk</label>
+                    <select id="scanner-portfolio-risk-enabled" class="text-input">
+                        <option value="true" ${portfolioRiskEnabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!portfolioRiskEnabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">Limit same-direction correlated exposure</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-max-same-dir">Max Same Direction Exposure</label>
+                    <input type="number" id="scanner-max-same-dir" class="text-input" value="${maxSameDirectionExposure}" min="1" max="100" step="1">
+                    <p class="hint">Open + pending signals per bucket</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-max-correlated-run">Max Correlated / Run</label>
+                    <input type="number" id="scanner-max-correlated-run" class="text-input" value="${maxCorrelatedSignalsPerRun}" min="1" max="100" step="1">
+                    <p class="hint">Same bucket and direction per scan</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group" style="grid-column:1 / -1">
+                    <label for="scanner-correlation-buckets">Correlation Buckets (JSON)</label>
+                    <textarea id="scanner-correlation-buckets" class="text-input" rows="3" placeholder='{"crypto_majors":["BTC","ETH","SOL"]}'>${escapeHtml(JSON.stringify(correlationBuckets, null, 2))}</textarea>
+                    <p class="hint">Assets in the same bucket are capped together</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
                     <label for="scanner-shutdown-timeout">Shutdown Timeout (sec)</label>
                     <input type="number" id="scanner-shutdown-timeout" class="text-input" value="${shutdownTimeout}" min="1" step="1">
                     <p class="hint">Graceful shutdown wait time</p>
@@ -5652,9 +5878,17 @@ function renderScannerStatus(status) {
                     <p class="hint">Symbols allowed for live auto-trading</p>
                 </div>
                 <div class="form-group">
-                    <label>Symbol Map</label>
-                    <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;min-height:20px">${symMapStr}</div>
-                    <p class="hint">Configured via .env SCANNER_SYMBOL_MAP</p>
+                    <label for="scanner-symbol-map">Symbol Map (JSON)</label>
+                    <textarea id="scanner-symbol-map" class="text-input" rows="3" placeholder='{"XAUUSD":{"exchange_symbol":"PAXGUSDT","exchange_name":"binance"}}'>${escapeHtml(JSON.stringify(symMap, null, 2))}</textarea>
+                    <p class="hint">Map watch symbols to exchange symbols. Use valid JSON.</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group" style="grid-column:1 / -1">
+                    <label for="scanner-score-weights">Score Weights (JSON)</label>
+                    <textarea id="scanner-score-weights" class="text-input" rows="3" placeholder='{"ema_alignment":1.0,"price_zone":1.0}'>${escapeHtml(JSON.stringify((status.scoring || {}).score_weights || {}, null, 2))}</textarea>
+                    <p class="hint">Per-factor weight multipliers. 1.0 = default weight. Use valid JSON.</p>
                 </div>
             </div>
 
@@ -5714,9 +5948,56 @@ async function saveScannerSettings() {
         ema200_enabled: document.getElementById('scanner-ema200-enabled').value === 'true',
         htf_conflict_enabled: document.getElementById('scanner-htf-conflict').value === 'true',
         regime_filter_enabled: document.getElementById('scanner-regime-filter').value === 'true',
+        mtf_consensus_enabled: document.getElementById('scanner-mtf-consensus-enabled').value === 'true',
+        mtf_consensus_min_margin: scannerNumberValue('scanner-mtf-margin', 8),
+        mtf_consensus_htf_weight: scannerNumberValue('scanner-mtf-htf-weight', 1.4),
+        mtf_consensus_ltf_weight: scannerNumberValue('scanner-mtf-ltf-weight', 0.8),
+        min_mtf_confirmations: scannerNumberValue('scanner-min-mtf-confirmations', 2, true),
+        min_rr_ratio: scannerNumberValue('scanner-min-rr-ratio', 1.4),
+        hard_filters_enabled: document.getElementById('scanner-hard-filters-enabled').value === 'true',
+        require_support_zone: document.getElementById('scanner-require-support-zone').value === 'true',
+        require_structure_alignment: document.getElementById('scanner-require-structure-alignment').value === 'true',
+        liquidity_filter_enabled: document.getElementById('scanner-liquidity-filter-enabled').value === 'true',
+        liquidity_order_size_usdt: scannerNumberValue('scanner-liquidity-order-size', 1000),
+        min_quote_volume_24h: scannerNumberValue('scanner-min-quote-volume', 5000000),
+        min_orderbook_depth_usdt: scannerNumberValue('scanner-min-orderbook-depth', 50000),
+        max_estimated_slippage_pct: scannerNumberValue('scanner-max-estimated-slippage', 0.25),
+        min_orderbook_imbalance_long: scannerNumberValue('scanner-min-ob-long', 0.6),
+        max_orderbook_imbalance_short: scannerNumberValue('scanner-max-ob-short', 1.8),
+        event_filter_enabled: document.getElementById('scanner-event-filter-enabled').value === 'true',
+        funding_blackout_minutes: scannerNumberValue('scanner-funding-blackout', 10, true),
+        max_abs_funding_rate: scannerNumberValue('scanner-max-funding-rate', 0.0015),
+        low_liquidity_utc_hours: document.getElementById('scanner-low-liq-hours').value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n)),
+        event_blackout_utc_windows: document.getElementById('scanner-event-windows').value.split(',').map(s => s.trim()).filter(Boolean),
+        learning_enabled: document.getElementById('scanner-learning-enabled').value === 'true',
+        walk_forward_enabled: document.getElementById('scanner-walk-forward-enabled').value === 'true',
+        portfolio_risk_enabled: document.getElementById('scanner-portfolio-risk-enabled').value === 'true',
+        max_same_direction_exposure: scannerNumberValue('scanner-max-same-dir', 3, true),
+        max_correlated_signals_per_run: scannerNumberValue('scanner-max-correlated-run', 2, true),
         shutdown_timeout_secs: scannerNumberValue('scanner-shutdown-timeout', 30, true),
         live_symbol_whitelist: document.getElementById('scanner-live-wl').value.split(',').map(s => s.trim()).filter(Boolean),
     };
+    try {
+        const rawWeights = document.getElementById('scanner-score-weights').value.trim();
+        if (rawWeights) data.score_weights = JSON.parse(rawWeights);
+    } catch (e) {
+        showToast('Score weights JSON is invalid: ' + e.message, 'error');
+        return;
+    }
+    try {
+        const rawMap = document.getElementById('scanner-symbol-map').value.trim();
+        if (rawMap) data.symbol_map = JSON.parse(rawMap);
+    } catch (e) {
+        showToast('Symbol map JSON is invalid: ' + e.message, 'error');
+        return;
+    }
+    try {
+        const rawBuckets = document.getElementById('scanner-correlation-buckets').value.trim();
+        if (rawBuckets) data.correlation_buckets = JSON.parse(rawBuckets);
+    } catch (e) {
+        showToast('Correlation buckets JSON is invalid: ' + e.message, 'error');
+        return;
+    }
     await saveSettings('/api/scanner/settings', data, 'btn-scanner-save');
     setTimeout(() => loadScanner(), 1500);
 }

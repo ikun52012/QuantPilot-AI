@@ -774,6 +774,10 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             total_bids = sum(b[1] for b in orderbook["bids"][:10])
             total_asks = sum(a[1] for a in orderbook["asks"][:10])
             ob_imbalance = (total_bids / total_asks) if total_asks > 0 else 1.0
+            bid_depth_usdt = sum(float(price) * float(amount) for price, amount in orderbook["bids"][:20])
+            ask_depth_usdt = sum(float(price) * float(amount) for price, amount in orderbook["asks"][:20])
+            top_bid_depth_usdt = sum(float(price) * float(amount) for price, amount in orderbook["bids"][:5])
+            top_ask_depth_usdt = sum(float(price) * float(amount) for price, amount in orderbook["asks"][:5])
 
             best_bid = orderbook["bids"][0][0] if orderbook["bids"] else current_price
             best_ask = orderbook["asks"][0][0] if orderbook["asks"] else current_price
@@ -824,6 +828,10 @@ async def _fetch_market_context_live(ticker: str) -> MarketContext:
             context_any._ohlcv_1h = ohlcv_1h
             context_any._ohlcv_4h = ohlcv_4h
             context_any._market_data_source = exchange_id
+            context_any._orderbook_bid_depth_usdt = round(bid_depth_usdt, 2)
+            context_any._orderbook_ask_depth_usdt = round(ask_depth_usdt, 2)
+            context_any._orderbook_top_bid_depth_usdt = round(top_bid_depth_usdt, 2)
+            context_any._orderbook_top_ask_depth_usdt = round(top_ask_depth_usdt, 2)
             context_any._entry_exit_indicators = build_entry_exit_indicator_context(
                 ohlcv_1h=ohlcv_1h,
                 ohlcv_15m=ohlcv_15m,

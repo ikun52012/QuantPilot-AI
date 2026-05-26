@@ -177,6 +177,32 @@ def _normalize_float_dict(value: Any, default: dict[str, Any] | None = None) -> 
     return normalized
 
 
+def _normalize_int_list(value: Any, default: list[int] | None = None, *, min_value: int = 0, max_value: int = 23) -> list[int]:
+    items = _to_string_list(value, [str(item) for item in (default or [])], lowercase=False)
+    normalized: list[int] = []
+    for item in items:
+        try:
+            parsed = int(item)
+        except (TypeError, ValueError):
+            continue
+        if min_value <= parsed <= max_value:
+            normalized.append(parsed)
+    return list(dict.fromkeys(normalized))
+
+
+def _normalize_correlation_buckets(value: Any, default: dict[str, Any] | None = None) -> dict[str, list[str]]:
+    raw = _to_dict(value, default)
+    normalized: dict[str, list[str]] = {}
+    for key, item in raw.items():
+        name = str(key or "").strip().lower()
+        if not name:
+            continue
+        symbols = _to_string_list(item, [])
+        if symbols:
+            normalized[name] = symbols
+    return normalized
+
+
 async def _load_encrypted_dict(session: AsyncSession, key: str) -> dict[str, Any]:
     raw = await get_admin_setting(session, key, "")
     if not raw:
@@ -414,6 +440,93 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.scanner.ema200_enabled = _to_bool(scanner.get("ema200_enabled"), settings.scanner.ema200_enabled)
         settings.scanner.htf_conflict_enabled = _to_bool(scanner.get("htf_conflict_enabled"), settings.scanner.htf_conflict_enabled)
         settings.scanner.regime_filter_enabled = _to_bool(scanner.get("regime_filter_enabled"), settings.scanner.regime_filter_enabled)
+        settings.scanner.learning_enabled = _to_bool(scanner.get("learning_enabled"), settings.scanner.learning_enabled)
+        settings.scanner.outcome_lookback_days = _to_int(
+            scanner.get("outcome_lookback_days"), settings.scanner.outcome_lookback_days, 1, 365
+        )
+        settings.scanner.outcome_max_sync_positions = _to_int(
+            scanner.get("outcome_max_sync_positions"), settings.scanner.outcome_max_sync_positions, 1, 1000
+        )
+        settings.scanner.outcome_path_metrics_enabled = _to_bool(
+            scanner.get("outcome_path_metrics_enabled"), settings.scanner.outcome_path_metrics_enabled
+        )
+        settings.scanner.walk_forward_enabled = _to_bool(scanner.get("walk_forward_enabled"), settings.scanner.walk_forward_enabled)
+        settings.scanner.walk_forward_min_samples = _to_int(
+            scanner.get("walk_forward_min_samples"), settings.scanner.walk_forward_min_samples, 3, 1000
+        )
+        settings.scanner.walk_forward_validation_ratio = _to_float(
+            scanner.get("walk_forward_validation_ratio"), settings.scanner.walk_forward_validation_ratio, 0.1, 0.5
+        )
+        settings.scanner.walk_forward_threshold_step = _to_float(
+            scanner.get("walk_forward_threshold_step"), settings.scanner.walk_forward_threshold_step, 0.5, 10
+        )
+        settings.scanner.hard_filters_enabled = _to_bool(scanner.get("hard_filters_enabled"), settings.scanner.hard_filters_enabled)
+        settings.scanner.require_support_zone = _to_bool(scanner.get("require_support_zone"), settings.scanner.require_support_zone)
+        settings.scanner.require_structure_alignment = _to_bool(
+            scanner.get("require_structure_alignment"), settings.scanner.require_structure_alignment
+        )
+        settings.scanner.min_mtf_confirmations = _to_int(
+            scanner.get("min_mtf_confirmations"), settings.scanner.min_mtf_confirmations, 1, 10
+        )
+        settings.scanner.min_rr_ratio = _to_float(scanner.get("min_rr_ratio"), settings.scanner.min_rr_ratio, 0, 10)
+        settings.scanner.mtf_consensus_enabled = _to_bool(
+            scanner.get("mtf_consensus_enabled"), settings.scanner.mtf_consensus_enabled
+        )
+        settings.scanner.mtf_consensus_min_margin = _to_float(
+            scanner.get("mtf_consensus_min_margin"), settings.scanner.mtf_consensus_min_margin, 0, 100
+        )
+        settings.scanner.mtf_consensus_htf_weight = _to_float(
+            scanner.get("mtf_consensus_htf_weight"), settings.scanner.mtf_consensus_htf_weight, 0.1, 10
+        )
+        settings.scanner.mtf_consensus_ltf_weight = _to_float(
+            scanner.get("mtf_consensus_ltf_weight"), settings.scanner.mtf_consensus_ltf_weight, 0.1, 10
+        )
+        settings.scanner.liquidity_filter_enabled = _to_bool(
+            scanner.get("liquidity_filter_enabled"), settings.scanner.liquidity_filter_enabled
+        )
+        settings.scanner.liquidity_order_size_usdt = _to_float(
+            scanner.get("liquidity_order_size_usdt"), settings.scanner.liquidity_order_size_usdt, 0, 10_000_000
+        )
+        settings.scanner.min_quote_volume_24h = _to_float(
+            scanner.get("min_quote_volume_24h"), settings.scanner.min_quote_volume_24h, 0, 1_000_000_000_000
+        )
+        settings.scanner.min_orderbook_depth_usdt = _to_float(
+            scanner.get("min_orderbook_depth_usdt"), settings.scanner.min_orderbook_depth_usdt, 0, 1_000_000_000_000
+        )
+        settings.scanner.max_estimated_slippage_pct = _to_float(
+            scanner.get("max_estimated_slippage_pct"), settings.scanner.max_estimated_slippage_pct, 0, 100
+        )
+        settings.scanner.min_orderbook_imbalance_long = _to_float(
+            scanner.get("min_orderbook_imbalance_long"), settings.scanner.min_orderbook_imbalance_long, 0, 100
+        )
+        settings.scanner.max_orderbook_imbalance_short = _to_float(
+            scanner.get("max_orderbook_imbalance_short"), settings.scanner.max_orderbook_imbalance_short, 0, 100
+        )
+        settings.scanner.event_filter_enabled = _to_bool(scanner.get("event_filter_enabled"), settings.scanner.event_filter_enabled)
+        settings.scanner.funding_blackout_minutes = _to_int(
+            scanner.get("funding_blackout_minutes"), settings.scanner.funding_blackout_minutes, 0, 240
+        )
+        settings.scanner.max_abs_funding_rate = _to_float(
+            scanner.get("max_abs_funding_rate"), settings.scanner.max_abs_funding_rate, 0, 1
+        )
+        settings.scanner.low_liquidity_utc_hours = _normalize_int_list(
+            scanner.get("low_liquidity_utc_hours"), settings.scanner.low_liquidity_utc_hours, min_value=0, max_value=23
+        )
+        settings.scanner.event_blackout_utc_windows = _to_string_list(
+            scanner.get("event_blackout_utc_windows"), settings.scanner.event_blackout_utc_windows, lowercase=True
+        )
+        settings.scanner.portfolio_risk_enabled = _to_bool(
+            scanner.get("portfolio_risk_enabled"), settings.scanner.portfolio_risk_enabled
+        )
+        settings.scanner.max_same_direction_exposure = _to_int(
+            scanner.get("max_same_direction_exposure"), settings.scanner.max_same_direction_exposure, 1, 100
+        )
+        settings.scanner.max_correlated_signals_per_run = _to_int(
+            scanner.get("max_correlated_signals_per_run"), settings.scanner.max_correlated_signals_per_run, 1, 100
+        )
+        settings.scanner.correlation_buckets = _normalize_correlation_buckets(
+            scanner.get("correlation_buckets"), settings.scanner.correlation_buckets
+        )
 
 
 async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dict[str, Any]]:
@@ -871,6 +984,167 @@ async def save_scanner_settings(session: AsyncSession, data: dict[str, Any]) -> 
         "ema200_enabled": _to_bool(pick("ema200_enabled", settings.scanner.ema200_enabled), settings.scanner.ema200_enabled),
         "htf_conflict_enabled": _to_bool(pick("htf_conflict_enabled", settings.scanner.htf_conflict_enabled), settings.scanner.htf_conflict_enabled),
         "regime_filter_enabled": _to_bool(pick("regime_filter_enabled", settings.scanner.regime_filter_enabled), settings.scanner.regime_filter_enabled),
+        "learning_enabled": _to_bool(pick("learning_enabled", settings.scanner.learning_enabled), settings.scanner.learning_enabled),
+        "outcome_lookback_days": _to_int(
+            pick("outcome_lookback_days", settings.scanner.outcome_lookback_days),
+            settings.scanner.outcome_lookback_days,
+            1,
+            365,
+        ),
+        "outcome_max_sync_positions": _to_int(
+            pick("outcome_max_sync_positions", settings.scanner.outcome_max_sync_positions),
+            settings.scanner.outcome_max_sync_positions,
+            1,
+            1000,
+        ),
+        "outcome_path_metrics_enabled": _to_bool(
+            pick("outcome_path_metrics_enabled", settings.scanner.outcome_path_metrics_enabled),
+            settings.scanner.outcome_path_metrics_enabled,
+        ),
+        "walk_forward_enabled": _to_bool(
+            pick("walk_forward_enabled", settings.scanner.walk_forward_enabled), settings.scanner.walk_forward_enabled
+        ),
+        "walk_forward_min_samples": _to_int(
+            pick("walk_forward_min_samples", settings.scanner.walk_forward_min_samples),
+            settings.scanner.walk_forward_min_samples,
+            3,
+            1000,
+        ),
+        "walk_forward_validation_ratio": _to_float(
+            pick("walk_forward_validation_ratio", settings.scanner.walk_forward_validation_ratio),
+            settings.scanner.walk_forward_validation_ratio,
+            0.1,
+            0.5,
+        ),
+        "walk_forward_threshold_step": _to_float(
+            pick("walk_forward_threshold_step", settings.scanner.walk_forward_threshold_step),
+            settings.scanner.walk_forward_threshold_step,
+            0.5,
+            10,
+        ),
+        "hard_filters_enabled": _to_bool(
+            pick("hard_filters_enabled", settings.scanner.hard_filters_enabled), settings.scanner.hard_filters_enabled
+        ),
+        "require_support_zone": _to_bool(
+            pick("require_support_zone", settings.scanner.require_support_zone), settings.scanner.require_support_zone
+        ),
+        "require_structure_alignment": _to_bool(
+            pick("require_structure_alignment", settings.scanner.require_structure_alignment),
+            settings.scanner.require_structure_alignment,
+        ),
+        "min_mtf_confirmations": _to_int(
+            pick("min_mtf_confirmations", settings.scanner.min_mtf_confirmations),
+            settings.scanner.min_mtf_confirmations,
+            1,
+            10,
+        ),
+        "min_rr_ratio": _to_float(pick("min_rr_ratio", settings.scanner.min_rr_ratio), settings.scanner.min_rr_ratio, 0, 10),
+        "mtf_consensus_enabled": _to_bool(
+            pick("mtf_consensus_enabled", settings.scanner.mtf_consensus_enabled), settings.scanner.mtf_consensus_enabled
+        ),
+        "mtf_consensus_min_margin": _to_float(
+            pick("mtf_consensus_min_margin", settings.scanner.mtf_consensus_min_margin),
+            settings.scanner.mtf_consensus_min_margin,
+            0,
+            100,
+        ),
+        "mtf_consensus_htf_weight": _to_float(
+            pick("mtf_consensus_htf_weight", settings.scanner.mtf_consensus_htf_weight),
+            settings.scanner.mtf_consensus_htf_weight,
+            0.1,
+            10,
+        ),
+        "mtf_consensus_ltf_weight": _to_float(
+            pick("mtf_consensus_ltf_weight", settings.scanner.mtf_consensus_ltf_weight),
+            settings.scanner.mtf_consensus_ltf_weight,
+            0.1,
+            10,
+        ),
+        "liquidity_filter_enabled": _to_bool(
+            pick("liquidity_filter_enabled", settings.scanner.liquidity_filter_enabled),
+            settings.scanner.liquidity_filter_enabled,
+        ),
+        "liquidity_order_size_usdt": _to_float(
+            pick("liquidity_order_size_usdt", settings.scanner.liquidity_order_size_usdt),
+            settings.scanner.liquidity_order_size_usdt,
+            0,
+            10_000_000,
+        ),
+        "min_quote_volume_24h": _to_float(
+            pick("min_quote_volume_24h", settings.scanner.min_quote_volume_24h),
+            settings.scanner.min_quote_volume_24h,
+            0,
+            1_000_000_000_000,
+        ),
+        "min_orderbook_depth_usdt": _to_float(
+            pick("min_orderbook_depth_usdt", settings.scanner.min_orderbook_depth_usdt),
+            settings.scanner.min_orderbook_depth_usdt,
+            0,
+            1_000_000_000_000,
+        ),
+        "max_estimated_slippage_pct": _to_float(
+            pick("max_estimated_slippage_pct", settings.scanner.max_estimated_slippage_pct),
+            settings.scanner.max_estimated_slippage_pct,
+            0,
+            100,
+        ),
+        "min_orderbook_imbalance_long": _to_float(
+            pick("min_orderbook_imbalance_long", settings.scanner.min_orderbook_imbalance_long),
+            settings.scanner.min_orderbook_imbalance_long,
+            0,
+            100,
+        ),
+        "max_orderbook_imbalance_short": _to_float(
+            pick("max_orderbook_imbalance_short", settings.scanner.max_orderbook_imbalance_short),
+            settings.scanner.max_orderbook_imbalance_short,
+            0,
+            100,
+        ),
+        "event_filter_enabled": _to_bool(
+            pick("event_filter_enabled", settings.scanner.event_filter_enabled), settings.scanner.event_filter_enabled
+        ),
+        "funding_blackout_minutes": _to_int(
+            pick("funding_blackout_minutes", settings.scanner.funding_blackout_minutes),
+            settings.scanner.funding_blackout_minutes,
+            0,
+            240,
+        ),
+        "max_abs_funding_rate": _to_float(
+            pick("max_abs_funding_rate", settings.scanner.max_abs_funding_rate),
+            settings.scanner.max_abs_funding_rate,
+            0,
+            1,
+        ),
+        "low_liquidity_utc_hours": _normalize_int_list(
+            pick("low_liquidity_utc_hours", settings.scanner.low_liquidity_utc_hours),
+            settings.scanner.low_liquidity_utc_hours,
+            min_value=0,
+            max_value=23,
+        ),
+        "event_blackout_utc_windows": _to_string_list(
+            pick("event_blackout_utc_windows", settings.scanner.event_blackout_utc_windows),
+            settings.scanner.event_blackout_utc_windows,
+            lowercase=True,
+        ),
+        "portfolio_risk_enabled": _to_bool(
+            pick("portfolio_risk_enabled", settings.scanner.portfolio_risk_enabled),
+            settings.scanner.portfolio_risk_enabled,
+        ),
+        "max_same_direction_exposure": _to_int(
+            pick("max_same_direction_exposure", settings.scanner.max_same_direction_exposure),
+            settings.scanner.max_same_direction_exposure,
+            1,
+            100,
+        ),
+        "max_correlated_signals_per_run": _to_int(
+            pick("max_correlated_signals_per_run", settings.scanner.max_correlated_signals_per_run),
+            settings.scanner.max_correlated_signals_per_run,
+            1,
+            100,
+        ),
+        "correlation_buckets": _normalize_correlation_buckets(
+            pick("correlation_buckets", settings.scanner.correlation_buckets), settings.scanner.correlation_buckets
+        ),
     }
     await _save_encrypted_dict(session, SCANNER_KEY, updated)
     apply_runtime_settings({"scanner": updated})

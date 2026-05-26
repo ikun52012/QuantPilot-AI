@@ -499,6 +499,52 @@ class ScannerConfig(BaseModel):
     ema200_enabled: bool = True
     htf_conflict_enabled: bool = True
     regime_filter_enabled: bool = True
+    adaptive_threshold_enabled: bool = False
+    adaptive_min_score_floor: float = 50.0
+    adaptive_min_score_ceiling: float = 85.0
+    adaptive_win_rate_target: float = 55.0
+    adaptive_lookback_days: int = 7
+    adaptive_adjustment_step: float = 2.5
+    adaptive_cooldown_levels: int = 5
+    adaptive_cooldown_base_secs: int = 300
+    adaptive_cooldown_multiplier: float = 2.0
+    learning_enabled: bool = True
+    outcome_lookback_days: int = 30
+    outcome_max_sync_positions: int = 50
+    outcome_path_metrics_enabled: bool = True
+    walk_forward_enabled: bool = True
+    walk_forward_min_samples: int = 12
+    walk_forward_validation_ratio: float = 0.30
+    walk_forward_threshold_step: float = 2.5
+    hard_filters_enabled: bool = True
+    require_support_zone: bool = True
+    require_structure_alignment: bool = True
+    min_mtf_confirmations: int = 2
+    min_rr_ratio: float = 1.40
+    mtf_consensus_enabled: bool = True
+    mtf_consensus_min_margin: float = 8.0
+    mtf_consensus_htf_weight: float = 1.40
+    mtf_consensus_ltf_weight: float = 0.80
+    liquidity_filter_enabled: bool = True
+    liquidity_order_size_usdt: float = 1000.0
+    min_quote_volume_24h: float = 5_000_000.0
+    min_orderbook_depth_usdt: float = 50_000.0
+    max_estimated_slippage_pct: float = 0.25
+    min_orderbook_imbalance_long: float = 0.60
+    max_orderbook_imbalance_short: float = 1.80
+    event_filter_enabled: bool = True
+    funding_blackout_minutes: int = 10
+    max_abs_funding_rate: float = 0.0015
+    low_liquidity_utc_hours: list[int] = Field(default_factory=list)
+    event_blackout_utc_windows: list[str] = Field(default_factory=list)
+    portfolio_risk_enabled: bool = True
+    max_same_direction_exposure: int = 3
+    max_correlated_signals_per_run: int = 2
+    correlation_buckets: dict[str, list[str]] = Field(default_factory=lambda: {
+        "crypto_majors": ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC"],
+        "metals": ["XAU", "XAG", "PAXG"],
+        "oil": ["WTI", "BRENT", "USOIL", "UKOIL"],
+    })
 
 
     @field_validator("mode")
@@ -565,6 +611,55 @@ class ScannerConfig(BaseModel):
             ema200_enabled=os.getenv("SCANNER_EMA200_ENABLED", "true").lower() == "true",
             htf_conflict_enabled=os.getenv("SCANNER_HTF_CONFLICT_ENABLED", "true").lower() == "true",
             regime_filter_enabled=os.getenv("SCANNER_REGIME_FILTER_ENABLED", "true").lower() == "true",
+            adaptive_threshold_enabled=os.getenv("SCANNER_ADAPTIVE_THRESHOLD_ENABLED", "false").lower() == "true",
+            adaptive_min_score_floor=float(os.getenv("SCANNER_ADAPTIVE_MIN_SCORE_FLOOR", "50")),
+            adaptive_min_score_ceiling=float(os.getenv("SCANNER_ADAPTIVE_MIN_SCORE_CEILING", "85")),
+            adaptive_win_rate_target=float(os.getenv("SCANNER_ADAPTIVE_WIN_RATE_TARGET", "55")),
+            adaptive_lookback_days=max(1, int(os.getenv("SCANNER_ADAPTIVE_LOOKBACK_DAYS", "7"))),
+            adaptive_adjustment_step=max(0.0, float(os.getenv("SCANNER_ADAPTIVE_ADJUSTMENT_STEP", "2.5"))),
+            adaptive_cooldown_levels=max(0, int(os.getenv("SCANNER_ADAPTIVE_COOLDOWN_LEVELS", "5"))),
+            adaptive_cooldown_base_secs=max(0, int(os.getenv("SCANNER_ADAPTIVE_COOLDOWN_BASE_SECS", "300"))),
+            adaptive_cooldown_multiplier=max(1.0, float(os.getenv("SCANNER_ADAPTIVE_COOLDOWN_MULTIPLIER", "2"))),
+            learning_enabled=os.getenv("SCANNER_LEARNING_ENABLED", "true").lower() == "true",
+            outcome_lookback_days=max(1, int(os.getenv("SCANNER_OUTCOME_LOOKBACK_DAYS", "30"))),
+            outcome_max_sync_positions=max(1, int(os.getenv("SCANNER_OUTCOME_MAX_SYNC_POSITIONS", "50"))),
+            outcome_path_metrics_enabled=os.getenv("SCANNER_OUTCOME_PATH_METRICS_ENABLED", "true").lower() == "true",
+            walk_forward_enabled=os.getenv("SCANNER_WALK_FORWARD_ENABLED", "true").lower() == "true",
+            walk_forward_min_samples=max(3, int(os.getenv("SCANNER_WALK_FORWARD_MIN_SAMPLES", "12"))),
+            walk_forward_validation_ratio=max(0.1, min(0.5, float(os.getenv("SCANNER_WALK_FORWARD_VALIDATION_RATIO", "0.30")))),
+            walk_forward_threshold_step=max(0.5, float(os.getenv("SCANNER_WALK_FORWARD_THRESHOLD_STEP", "2.5"))),
+            hard_filters_enabled=os.getenv("SCANNER_HARD_FILTERS_ENABLED", "true").lower() == "true",
+            require_support_zone=os.getenv("SCANNER_REQUIRE_SUPPORT_ZONE", "true").lower() == "true",
+            require_structure_alignment=os.getenv("SCANNER_REQUIRE_STRUCTURE_ALIGNMENT", "true").lower() == "true",
+            min_mtf_confirmations=max(1, int(os.getenv("SCANNER_MIN_MTF_CONFIRMATIONS", "2"))),
+            min_rr_ratio=max(0.0, float(os.getenv("SCANNER_MIN_RR_RATIO", "1.40"))),
+            mtf_consensus_enabled=os.getenv("SCANNER_MTF_CONSENSUS_ENABLED", "true").lower() == "true",
+            mtf_consensus_min_margin=max(0.0, float(os.getenv("SCANNER_MTF_CONSENSUS_MIN_MARGIN", "8"))),
+            mtf_consensus_htf_weight=max(0.1, float(os.getenv("SCANNER_MTF_CONSENSUS_HTF_WEIGHT", "1.40"))),
+            mtf_consensus_ltf_weight=max(0.1, float(os.getenv("SCANNER_MTF_CONSENSUS_LTF_WEIGHT", "0.80"))),
+            liquidity_filter_enabled=os.getenv("SCANNER_LIQUIDITY_FILTER_ENABLED", "true").lower() == "true",
+            liquidity_order_size_usdt=max(0.0, float(os.getenv("SCANNER_LIQUIDITY_ORDER_SIZE_USDT", "1000"))),
+            min_quote_volume_24h=max(0.0, float(os.getenv("SCANNER_MIN_QUOTE_VOLUME_24H", "5000000"))),
+            min_orderbook_depth_usdt=max(0.0, float(os.getenv("SCANNER_MIN_ORDERBOOK_DEPTH_USDT", "50000"))),
+            max_estimated_slippage_pct=max(0.0, float(os.getenv("SCANNER_MAX_ESTIMATED_SLIPPAGE_PCT", "0.25"))),
+            min_orderbook_imbalance_long=max(0.0, float(os.getenv("SCANNER_MIN_ORDERBOOK_IMBALANCE_LONG", "0.60"))),
+            max_orderbook_imbalance_short=max(0.0, float(os.getenv("SCANNER_MAX_ORDERBOOK_IMBALANCE_SHORT", "1.80"))),
+            event_filter_enabled=os.getenv("SCANNER_EVENT_FILTER_ENABLED", "true").lower() == "true",
+            funding_blackout_minutes=max(0, int(os.getenv("SCANNER_FUNDING_BLACKOUT_MINUTES", "10"))),
+            max_abs_funding_rate=max(0.0, float(os.getenv("SCANNER_MAX_ABS_FUNDING_RATE", "0.0015"))),
+            low_liquidity_utc_hours=[
+                int(item) for item in _json_env("SCANNER_LOW_LIQUIDITY_UTC_HOURS", [])
+                if str(item).isdigit() and 0 <= int(item) <= 23
+            ],
+            event_blackout_utc_windows=_json_env("SCANNER_EVENT_BLACKOUT_UTC_WINDOWS", []),
+            portfolio_risk_enabled=os.getenv("SCANNER_PORTFOLIO_RISK_ENABLED", "true").lower() == "true",
+            max_same_direction_exposure=max(1, int(os.getenv("SCANNER_MAX_SAME_DIRECTION_EXPOSURE", "3"))),
+            max_correlated_signals_per_run=max(1, int(os.getenv("SCANNER_MAX_CORRELATED_SIGNALS_PER_RUN", "2"))),
+            correlation_buckets=_json_env("SCANNER_CORRELATION_BUCKETS", {
+                "crypto_majors": ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC"],
+                "metals": ["XAU", "XAG", "PAXG"],
+                "oil": ["WTI", "BRENT", "USOIL", "UKOIL"],
+            }),
         )
 
 
@@ -572,7 +667,7 @@ class ScannerConfig(BaseModel):
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
     app_name: str = "QuantPilot AI"
-    app_version: str = "5.2.0"
+    app_version: str = "5.3.0"
     debug: bool = False
     json_logs: bool = False
 

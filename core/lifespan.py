@@ -166,6 +166,27 @@ async def _init_scheduler():
         except Exception as e:
             logger.error(f"[Scheduler] Database cleanup failed: {e}")
 
+    async def _cleanup_scanner_audits_job():
+        try:
+            from datetime import timedelta
+
+            from sqlalchemy import delete
+
+            from core.database import ScannerAuditModel, db_manager
+            from core.utils.datetime import utcnow
+
+            cutoff = utcnow() - timedelta(days=30)
+            async with db_manager.async_session_factory() as session:
+                result = await session.execute(
+                    delete(ScannerAuditModel).where(ScannerAuditModel.created_at < cutoff)
+                )
+                await session.commit()
+                deleted = result.rowcount
+                if deleted:
+                    logger.info(f"[Scheduler] Scanner audit cleanup: deleted {deleted} old records")
+        except Exception as e:
+            logger.error(f"[Scheduler] Scanner audit cleanup failed: {e}")
+
     async def _cleanup_old_backups_job():
         try:
             from backups import cleanup_old_backups
@@ -213,6 +234,12 @@ async def _init_scheduler():
         CronTrigger(hour=3, minute=30, second=0, timezone="UTC"),
         id="cleanup_old_backups",
         name="Daily backup cleanup",
+    )
+    scheduler.add_job(
+        _cleanup_scanner_audits_job,
+        CronTrigger(hour=4, minute=0, second=0, timezone="UTC"),
+        id="cleanup_scanner_audits",
+        name="Daily scanner audit cleanup",
     )
     scheduler.add_job(
         _position_monitor_job,

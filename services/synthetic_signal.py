@@ -75,6 +75,7 @@ def build_synthetic_signal(candidate: Any, *, secret: str | None = None) -> tupl
         "quality": _get(candidate, "quality", {}) or {},
         "fused_timeframes": list(_get(candidate, "fused_timeframes", []) or []),
         "fusion": _get(candidate, "fusion_summary", {}) or {},
+        "score_breakdown": _get(candidate, "score_breakdown", {}) or {},
     }
     message = _compact_json(scanner_payload)
 
