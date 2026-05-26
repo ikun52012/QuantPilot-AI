@@ -10,8 +10,35 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import TradeModel
+from core.database import TradeModel, UserModel
 from core.utils.datetime import utcnow
+
+
+async def _get_account_equity(session: AsyncSession, user_id: str | None = None) -> float:
+    """Fetch account equity for accurate percentage calculations.
+
+    Uses user balance if available, otherwise falls back to global settings.
+    """
+    if user_id:
+        user = await session.get(UserModel, user_id)
+        if user and getattr(user, "balance_usdt", 0):
+            return float(user.balance_usdt)
+    from core.config import settings
+    return float(getattr(settings.risk, "account_equity_usdt", 10000.0))
+
+
+def _trade_account_pnl_pct(trade: Any, equity: float) -> float:
+    """Return the trade's PnL as a percentage of total account equity.
+
+    Prefer pnl_usdt (actual dollar PnL) over pnl_pct (position-level %,
+    which is distorted by leverage).  Falls back to pnl_pct only when
+    pnl_usdt is missing (legacy data).
+    """
+    pnl_usdt = float(getattr(trade, "pnl_usdt", 0.0) or 0.0)
+    if pnl_usdt != 0.0 and equity > 0:
+        return pnl_usdt / equity * 100.0
+    # Legacy fallback for trades recorded before pnl_usdt was populated
+    return float(getattr(trade, "pnl_pct", 0.0) or 0.0)
 
 
 async def calculate_performance(
@@ -20,13 +47,16 @@ async def calculate_performance(
     user_id: str | None = None,
 ) -> dict[str, Any]:
     """
-    Calculate comprehensive performance metrics.
+    Calculate comprehensive performance metrics relative to account equity.
 
     Uses mainstream quantitative finance methodology:
     - Sharpe/Sortino: Annualized based on actual trades-per-day frequency
     - Max Drawdown: Peak-to-trough percentage decline from equity high
     - Profit Factor: Gross profit / gross loss
     - Win Rate: Winning trades / total closed trades
+
+    FIX: All percentages are now computed against account equity (balance)
+    rather than position-level leveraged pnl_pct, which overstated returns.
     """
     cutoff = utcnow() - timedelta(days=days)
 
@@ -49,8 +79,11 @@ async def calculate_performance(
     open_trades = len(filled_or_closed) - len(closed_trades)
     total_trades = len(filled_or_closed)
 
-    # PnL calculations
-    pnls = [float(getattr(t, "pnl_pct", 0.0)) for t in closed_trades if getattr(t, "pnl_pct", None) is not None]
+    # Resolve account equity once for consistent % scaling
+    account_equity = await _get_account_equity(session, user_id)
+
+    # PnL calculations — translate to account-level % so leverage does not distort stats
+    pnls = [_trade_account_pnl_pct(t, account_equity) for t in closed_trades]
     total_pnl = sum(pnls) if pnls else 0
 
     # Win/Loss
@@ -147,7 +180,7 @@ async def get_daily_pnl(
     days: int = 30,
     user_id: str | None = None,
 ) -> list[dict[str, float | str]]:
-    """Get daily PnL breakdown."""
+    """Get daily PnL breakdown relative to account equity."""
     cutoff = utcnow() - timedelta(days=days)
 
     query = select(TradeModel).where(TradeModel.timestamp >= cutoff)
@@ -157,14 +190,15 @@ async def get_daily_pnl(
     result = await session.execute(query)
     trades: list[Any] = list(result.scalars().all())
 
+    account_equity = await _get_account_equity(session, user_id)
+
     # Group by day
     daily_pnl: dict[str, float] = defaultdict(float)
     for trade in trades:
-        pnl_pct = getattr(trade, "pnl_pct", None)
         timestamp = getattr(trade, "timestamp", None)
-        if pnl_pct is not None and timestamp is not None and _is_closed_trade(trade):
+        if timestamp is not None and _is_closed_trade(trade):
             day = timestamp.strftime("%Y-%m-%d")
-            daily_pnl[day] += float(pnl_pct)
+            daily_pnl[day] += _trade_account_pnl_pct(trade, account_equity)
 
     # Fill missing days
     all_days = []
@@ -182,13 +216,15 @@ async def get_trade_distribution(
     session: AsyncSession,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Get trade distribution by ticker and direction."""
+    """Get trade distribution by ticker and direction relative to account equity."""
     query = select(TradeModel)
     if user_id:
         query = query.where(TradeModel.user_id == user_id)
 
     result = await session.execute(query)
     trades: list[Any] = list(result.scalars().all())
+
+    account_equity = await _get_account_equity(session, user_id)
 
     by_ticker: dict[str, dict[str, float | int]] = {}
     by_direction: dict[str, int] = {"long": 0, "short": 0}
@@ -202,9 +238,8 @@ async def get_trade_distribution(
             by_ticker.setdefault(ticker_key, {"long": 0, "short": 0, "pnl": 0.0})
             by_ticker[ticker_key][direction] += 1
             by_direction[direction] += 1
-            pnl_pct = getattr(trade, "pnl_pct", None)
-            if pnl_pct and _is_closed_trade(trade):
-                by_ticker[ticker_key]["pnl"] += float(pnl_pct)
+            if _is_closed_trade(trade):
+                by_ticker[ticker_key]["pnl"] += _trade_account_pnl_pct(trade, account_equity)
 
     return {
         "by_ticker": dict(by_ticker),

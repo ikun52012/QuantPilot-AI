@@ -1434,7 +1434,7 @@ async def close_position_async(
         logger.warning(f"[Database] Failed to record account risk PnL for position {locked_position.id}")
 
     await session.flush()
-    return pnl_pct
+    return pnl_pct, pnl_usdt
 
 
 async def update_user_balance(session: AsyncSession, user_id: str, delta_usdt: float) -> float:
@@ -1479,7 +1479,7 @@ async def record_position_close_trade_async(
     """Create a synthetic close trade for TP/SL fills detected by the monitor."""
     trade_id = str(uuid.uuid4())
     now = utcnow()
-    pnl_pct = await close_position_async(
+    pnl_pct, pnl_usdt = await close_position_async(
         session=session,
         position=position,
         exit_price=exit_price,
@@ -1500,6 +1500,7 @@ async def record_position_close_trade_async(
         "original_quantity": position.quantity,
         "remaining_quantity": position.remaining_quantity,
         "pnl_pct": pnl_pct,
+        "pnl_usdt": pnl_usdt,
         "close_reason": close_reason,
         "order_details": order_details or {},
     }
@@ -1512,6 +1513,7 @@ async def record_position_close_trade_async(
         execute=True,
         order_status=order_status,
         pnl_pct=pnl_pct,
+        pnl_usdt=pnl_usdt,
         payload_json=json.dumps(payload, ensure_ascii=False, default=str),
     )
     session.add(trade)
@@ -1700,13 +1702,15 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
     entry["position_id"] = position.id
     entry["position_event"] = "closed"
     entry["close_reason"] = "manual_close"
-    entry["pnl_pct"] = await close_position_async(
+    pnl_pct, pnl_usdt = await close_position_async(
         session=session,
         position=position,
         exit_price=exit_price,
         close_reason="manual_close",
         close_trade_id=entry.get("id"),
     )
+    entry["pnl_pct"] = pnl_pct
+    entry["pnl_usdt"] = pnl_usdt
     entry["order_status"] = "closed"
     await session.flush()
 

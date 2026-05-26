@@ -620,7 +620,7 @@ async def close_position(
             "partial": True,
         }
 
-    pnl_pct = await close_position_async(
+    pnl_pct, pnl_usdt = await close_position_async(
         session=db,
         position=position,
         exit_price=exit_price,
@@ -628,7 +628,7 @@ async def close_position(
     )
 
     await db.commit()
-    return {"status": "success", "position_id": position_id, "pnl_pct": pnl_pct, "close_qty": final_close_qty, "partial": close_pct is not None and close_pct < 100}
+    return {"status": "success", "position_id": position_id, "pnl_pct": pnl_pct, "pnl_usdt": pnl_usdt, "close_qty": final_close_qty, "partial": close_pct is not None and close_pct < 100}
 
 
 @router.post("/positions/close-all")

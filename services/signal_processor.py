@@ -2098,26 +2098,34 @@ class SignalProcessor:
 
             for pos in positions:
                 pos_dir = str(pos.direction or "long").lower()
-                entry = safe_float(pos.entry_price)
-                qty = safe_float(pos.remaining_quantity or pos.quantity)
-                # Get contract_size from position's trailing_stop_config
-                try:
-                    pos_ts_config = json.loads(pos.trailing_stop_config_json or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    pos_ts_config = {}
-                pos_contract_size = safe_float(pos_ts_config.get("_contract_size"), 1.0)
-
-                notional = entry * qty * pos_contract_size if entry > 0 and qty > 0 else 0
+                # FIX: Use actual margin (user capital at risk) instead of notional value.
+                # Notional includes leverage and makes the exposure look far larger
+                # than the real capital committed.
+                stored_margin = safe_float(pos.margin, 0.0)
+                if stored_margin > 0:
+                    margin = stored_margin
+                else:
+                    # Fallback for legacy positions without margin recorded
+                    entry = safe_float(pos.entry_price)
+                    qty = safe_float(pos.remaining_quantity or pos.quantity)
+                    try:
+                        pos_ts_config = json.loads(pos.trailing_stop_config_json or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        pos_ts_config = {}
+                    pos_contract_size = safe_float(pos_ts_config.get("_contract_size"), 1.0)
+                    leverage = max(1.0, safe_float(pos.leverage, 1.0))
+                    notional = entry * qty * pos_contract_size if entry > 0 and qty > 0 else 0
+                    margin = notional / leverage
 
                 if pos_dir == "long":
-                    long_positions.append({"ticker": pos.ticker, "notional": notional})
+                    long_positions.append({"ticker": pos.ticker, "margin": margin})
                 elif pos_dir == "short":
-                    short_positions.append({"ticker": pos.ticker, "notional": notional})
+                    short_positions.append({"ticker": pos.ticker, "margin": margin})
 
             result["current_exposure"]["long_positions"] = len(long_positions)
             result["current_exposure"]["short_positions"] = len(short_positions)
-            result["current_exposure"]["long_notional_usdt"] = sum(p["notional"] for p in long_positions)
-            result["current_exposure"]["short_notional_usdt"] = sum(p["notional"] for p in short_positions)
+            result["current_exposure"]["long_margin_usdt"] = sum(p["margin"] for p in long_positions)
+            result["current_exposure"]["short_margin_usdt"] = sum(p["margin"] for p in short_positions)
 
             # Get correlation limits from settings
             risk_cfg = (user_settings or {}).get("risk") or {}
@@ -2134,10 +2142,10 @@ class SignalProcessor:
             new_direction = str(decision.direction.value or "long").lower()
             if new_direction == "long":
                 current_count = len(long_positions)
-                current_notional = sum(p["notional"] for p in long_positions)
+                current_margin = sum(p["margin"] for p in long_positions)
             else:
                 current_count = len(short_positions)
-                current_notional = sum(p["notional"] for p in short_positions)
+                current_margin = sum(p["margin"] for p in short_positions)
 
             # Position count limit
             if current_count >= max_same_direction_positions:
@@ -2149,20 +2157,14 @@ class SignalProcessor:
                 logger.warning(f"[Signal] Correlation risk exceeded: {result['reason']}")
                 return result
 
-            # Notional exposure limit
+            # Margin exposure limit (actual user capital, not notional)
             risk_settings = self._resolved_risk_settings(user_settings)
             equity = float(risk_settings.get("account_equity_usdt") or 1000)
             if risk_settings.get("position_sizing_mode") == "fixed":
-                max_leverage = 125
-                if user_id:
-                    user = await get_user_by_id(self.session, user_id)
-                    max_leverage = int(getattr(user, "max_leverage", None) or max_leverage) if user else max_leverage
-                new_notional = float(risk_settings.get("fixed_position_size_usdt") or 100.0) * self._effective_leverage(
-                    decision.ai_analysis,
-                    max_leverage,
-                )
+                # In fixed mode the configured amount IS the margin
+                new_margin = float(risk_settings.get("fixed_position_size_usdt") or 100.0)
             else:
-                # Get contract_size for new position notional calculation
+                # Derive margin from notional / leverage for percentage / risk_ratio modes
                 new_contract_size = 1.0
                 try:
                     from exchange import get_market_limits
@@ -2175,15 +2177,21 @@ class SignalProcessor:
                 except Exception:
                     pass
                 new_notional = decision.entry_price * decision.quantity * new_contract_size if decision.entry_price and decision.quantity else 0
-            total_notional_after = current_notional + new_notional
-            exposure_pct = total_notional_after / equity * 100 if equity > 0 else 0
+                max_leverage = 125
+                if user_id:
+                    user = await get_user_by_id(self.session, user_id)
+                    max_leverage = int(getattr(user, "max_leverage", None) or max_leverage) if user else max_leverage
+                leverage = max(1.0, self._effective_leverage(decision.ai_analysis, max_leverage))
+                new_margin = new_notional / leverage
+            total_margin_after = current_margin + new_margin
+            exposure_pct = total_margin_after / equity * 100 if equity > 0 else 0
 
             if exposure_pct > max_correlated_pct:
                 result["exceeded"] = True
                 result["reason"] = (
                     f"Correlation risk: {new_direction} exposure would be {exposure_pct:.1f}% "
                     f"of equity (max={max_correlated_pct}%). "
-                    f"Current={current_notional:.2f}USDT, New={new_notional:.2f}USDT, Equity={equity:.2f}USDT"
+                    f"Current={current_margin:.2f}USDT, New={new_margin:.2f}USDT, Equity={equity:.2f}USDT"
                 )
                 logger.warning(f"[Signal] Correlation risk exceeded: {result['reason']}")
                 return result
@@ -2191,7 +2199,7 @@ class SignalProcessor:
             # Log correlation status
             logger.info(
                 f"[Signal] Correlation check passed: {current_count + 1} {new_direction} positions "
-                f"(exposure={exposure_pct:.1f}%, max={max_correlated_pct}%)"
+                f"(margin_exposure={exposure_pct:.1f}%, max={max_correlated_pct}%)"
             )
 
         except Exception as e:
