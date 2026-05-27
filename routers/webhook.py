@@ -141,7 +141,7 @@ async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> 
     if abs(now - timestamp) > _WEBHOOK_REPLAY_WINDOW_SECS:
         raise HTTPException(401, "Webhook timestamp expired — possible replay attack")
 
-    nonce_key = hashlib.sha256(f"{scope}:{nonce}".encode("utf-8")).hexdigest()
+    nonce_key = hashlib.sha256(f"{scope}:{nonce}".encode()).hexdigest()
 
     # Try Redis first for multi-process safety
     redis_client = await _get_redis_nonce_client()
