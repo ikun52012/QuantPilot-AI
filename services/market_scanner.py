@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import math
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -50,6 +51,39 @@ def _broadcast_scanner(event: dict) -> None:
 
 
 @dataclass
+class ScannerUniverseItem:
+    watch_symbol: str
+    exchange_symbol: str
+    target_exchange: str
+    target_market_type: str
+    source_exchange: str
+    source_market_type: str
+    source_symbol: str
+    universe_source: str
+    tradable: bool = True
+    tradability_reason: str = ""
+    quote_volume: float = 0.0
+    liquidity_tier: str = "unknown"
+    market_limits: dict[str, Any] = field(default_factory=dict)
+
+    def mapping_overrides(self) -> dict[str, Any]:
+        return {
+            "exchange_symbol": self.exchange_symbol,
+            "target_exchange": self.target_exchange,
+            "target_market_type": self.target_market_type,
+            "source_exchange": self.source_exchange,
+            "source_market_type": self.source_market_type,
+            "source_symbol": self.source_symbol,
+            "data_source_policy": settings.scanner.data_source_policy,
+            "tradable": self.tradable,
+            "tradability_reason": self.tradability_reason,
+            "universe_source": self.universe_source,
+            "liquidity_tier": self.liquidity_tier,
+            "quote_volume": self.quote_volume,
+        }
+
+
+@dataclass
 class ScannerCandidate:
     watch_symbol: str
     exchange_symbol: str
@@ -72,6 +106,16 @@ class ScannerCandidate:
     fused_timeframes: list[str] = field(default_factory=list)
     fusion_summary: dict[str, Any] = field(default_factory=dict)
     score_breakdown: dict[str, float] = field(default_factory=dict)
+    target_exchange: str = ""
+    target_market_type: str = ""
+    source_exchange: str = ""
+    source_market_type: str = ""
+    actual_data_source: str = ""
+    data_source_policy: str = "fallback"
+    tradable: bool = True
+    tradability_reason: str = ""
+    universe_source: str = "manual"
+    liquidity_tier: str = "unknown"
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -141,7 +185,13 @@ class MarketScannerService:
             "last_finished_at": None,
             "last_error": "",
             "last_summary": {},
+            "last_universe": {},
+            "source_health": {},
+            "live_universe_snapshot": {},
         }
+        self._universe_cache: dict[Any, tuple[float, list[ScannerUniverseItem]]] = {}
+        self._source_health: dict[str, dict[str, Any]] = {}
+        self._live_universe_snapshot: dict[str, Any] = {}
         self._audit_buffer: list[dict[str, Any]] = []
         self._audit_buffer_lock = asyncio.Lock()
         self._adaptive_min_score: float = float(settings.scanner.min_score)
@@ -171,8 +221,6 @@ class MarketScannerService:
     async def scan_once(self) -> dict[str, Any]:
         if not settings.scanner.enabled:
             return {"status": "disabled", "reason": "SCANNER_ENABLED=false"}
-        if not settings.scanner.watchlist:
-            return {"status": "skipped", "reason": "SCANNER_WATCHLIST is empty"}
         if db_manager.async_session_factory is None:
             return {"status": "error", "reason": "Database not initialized (session_factory is None)"}
         if self._scan_lock.locked():
@@ -213,7 +261,7 @@ class MarketScannerService:
     async def _scan_once_locked(self, run_id: str) -> dict[str, Any]:
         self._learning_summary = await self._refresh_learning(run_id)
         self._adaptive_min_score = await self._get_effective_min_score()
-        self._adaptive_min_score_cached_at = __import__("time").time()
+        self._adaptive_min_score_cached_at = time.time()
 
         async with db_manager.async_session_factory() as session:
             _ = await update_scanner_state_counts(
@@ -231,16 +279,24 @@ class MarketScannerService:
         scanned = 0
         data_failures = 0
         filtered = 0
+        filter_reasons: dict[str, int] = {}
         for item in scan_results:
             scanned += int(item.get("scanned") or 0)
             data_failures += int(item.get("data_failures") or 0)
             filtered += int(item.get("filtered") or 0)
+            for reason, count in (item.get("filter_reasons") or {}).items():
+                key = str(reason or "unknown")
+                filter_reasons[key] = filter_reasons.get(key, 0) + int(count or 0)
             candidates.extend(item.get("candidates") or [])
 
         candidates, direction_conflicts = await self._resolve_direction_conflicts(run_id, candidates)
         filtered += direction_conflicts
+        if direction_conflicts:
+            filter_reasons["direction_conflict"] = filter_reasons.get("direction_conflict", 0) + direction_conflicts
         candidates, portfolio_filtered = await self._apply_portfolio_risk_filters(run_id, candidates)
         filtered += portfolio_filtered
+        if portfolio_filtered:
+            filter_reasons["portfolio_risk"] = filter_reasons.get("portfolio_risk", 0) + portfolio_filtered
         candidates.sort(key=lambda item: item[0].score, reverse=True)
         selected = candidates[: max(1, int(settings.scanner.max_candidates_per_run))]
         processed: list[dict[str, Any]] = []
@@ -290,6 +346,7 @@ class MarketScannerService:
             candidates=len(candidates),
             selected=len(selected),
             processed=processed,
+            filter_reasons=filter_reasons,
         )
         await self._audit(run_id, "run_summary", reason="scanner run summary", payload=funnel)
         await self._flush_audit_buffer()
@@ -313,36 +370,510 @@ class MarketScannerService:
         })
         return summary
 
+    @staticmethod
+    def _scanner_market_type(value: str | None, default: str | None = None) -> str:
+        normalized = str(value or default or settings.exchange.market_type or "contract").lower().strip()
+        if normalized == "spot":
+            return "spot"
+        return "contract"
+
+    @staticmethod
+    def _compact_market_symbol(symbol: str, market: dict[str, Any] | None = None) -> str:
+        if isinstance(market, dict):
+            base = str(market.get("base") or "").upper().strip()
+            quote = str(market.get("quote") or "").upper().strip()
+            if base and quote:
+                return f"{base}{quote}"
+        text = str(symbol or "").upper().strip()
+        if ":" in text:
+            text = text.split(":", 1)[0]
+        return text.replace("/", "").replace("-", "").replace("_", "")
+
+    @staticmethod
+    def _quote_volume_from_ticker(ticker: Any) -> float:
+        if not isinstance(ticker, dict):
+            return 0.0
+        for key in ("quoteVolume", "quote_volume", "baseVolume"):
+            try:
+                value = float(ticker.get(key) or 0.0)
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                continue
+        info = ticker.get("info") if isinstance(ticker.get("info"), dict) else {}
+        for key in ("quoteVolume", "quote_volume", "turnover24h", "volCcy24h", "volume24h"):
+            try:
+                value = float(info.get(key) or 0.0)
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    @staticmethod
+    def _liquidity_tier(symbol: str, quote_volume: float) -> str:
+        text = str(symbol or "").upper().replace("/", "").replace(":USDT", "")
+        base = text
+        for suffix in ("USDT", "USDC", "BUSD", "USD"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        if base in {"BTC", "ETH"}:
+            return "major"
+        if quote_volume >= 500_000_000:
+            return "major"
+        if quote_volume >= 100_000_000:
+            return "high_volume_alt"
+        if quote_volume >= 10_000_000:
+            return "mid_volume_alt"
+        if quote_volume > 0:
+            return "long_tail"
+        return "unknown"
+
+    @staticmethod
+    def _liquidity_tier_threshold_bump(tier: str, universe_source: str) -> float:
+        if str(universe_source or "manual").lower().strip() == "manual":
+            return 0.0
+        return {
+            "mid_volume_alt": 2.5,
+            "long_tail": 5.0,
+        }.get(str(tier or "").lower(), 0.0)
+
+    @staticmethod
+    def _clone_universe(universe: list[ScannerUniverseItem]) -> list[ScannerUniverseItem]:
+        return [ScannerUniverseItem(**asdict(item)) for item in universe]
+
+    @staticmethod
+    def _market_limits_from_market(exchange_id: str, market_symbol: str, market: dict[str, Any]) -> dict[str, Any]:
+        limits = market.get("limits", {}) if isinstance(market.get("limits"), dict) else {}
+        precision = market.get("precision", {}) if isinstance(market.get("precision"), dict) else {}
+        return {
+            "symbol": market.get("symbol") or market_symbol,
+            "exchange": exchange_id,
+            "min_amount": _safe_float((limits.get("amount") or {}).get("min")),
+            "min_cost": _safe_float((limits.get("cost") or {}).get("min")),
+            "amount_precision": precision.get("amount"),
+            "price_precision": precision.get("price"),
+            "contract_size": _safe_float(market.get("contractSize"), 1.0),
+        }
+
+    def _source_health_key(self, exchange_id: str, market_type: str) -> str:
+        return f"{str(exchange_id or '').lower().strip()}:{self._scanner_market_type(market_type)}"
+
+    def _record_source_health(
+        self,
+        exchange_id: str,
+        market_type: str,
+        *,
+        ok: bool,
+        latency_ms: float = 0.0,
+        reason: str = "",
+        items: int = 0,
+        cached: bool = False,
+    ) -> None:
+        key = self._source_health_key(exchange_id, market_type)
+        entry = dict(self._source_health.get(key) or {})
+        entry.setdefault("success_count", 0)
+        entry.setdefault("failure_count", 0)
+        entry.update({
+            "exchange": str(exchange_id or "").lower().strip(),
+            "market_type": self._scanner_market_type(market_type),
+            "last_latency_ms": round(float(latency_ms or 0.0), 2),
+            "last_reason": reason,
+            "last_items": int(items or 0),
+            "last_cached": bool(cached),
+            "updated_at": utcnow().isoformat(),
+        })
+        if ok:
+            entry["success_count"] = int(entry.get("success_count") or 0) + 1
+            entry["last_success_at"] = entry["updated_at"]
+            entry["status"] = "cached" if cached else "ok"
+            entry["last_error"] = ""
+        else:
+            entry["failure_count"] = int(entry.get("failure_count") or 0) + 1
+            entry["last_failure_at"] = entry["updated_at"]
+            entry["last_error"] = reason
+            entry["status"] = "rate_limited" if any(token in reason.lower() for token in ("rate", "429")) else "degraded"
+        self._source_health[key] = entry
+        self._last_status["source_health"] = self.source_health
+
+    @property
+    def source_health(self) -> dict[str, Any]:
+        return {key: dict(value) for key, value in self._source_health.items()}
+
+    def clear_universe_cache(self) -> None:
+        self._universe_cache.clear()
+
+    async def preview_universe(self, *, force_refresh: bool = False, limit: int = 200) -> dict[str, Any]:
+        universe = await self._build_effective_universe(force_refresh=force_refresh, include_untradable=True)
+        tradable = [item for item in universe if item.tradable]
+        skipped = [item for item in universe if not item.tradable]
+        summary = self._universe_summary(tradable)
+        summary["preview_count"] = len(universe)
+        summary["skipped_count"] = len(skipped)
+        summary["source_health"] = self.source_health
+        return {
+            "summary": summary,
+            "items": [asdict(item) for item in tradable[: max(1, int(limit))]],
+            "skipped": [asdict(item) for item in skipped[: max(1, int(limit))]],
+        }
+
+    def _set_live_universe_snapshot(self, universe: list[ScannerUniverseItem]) -> None:
+        symbols = sorted({item.exchange_symbol.upper().strip() for item in universe if item.tradable})
+        watch_symbols = sorted({item.watch_symbol.upper().strip() for item in universe if item.tradable})
+        snapshot = {
+            "created_at": utcnow().isoformat(),
+            "count": len(symbols),
+            "symbols": symbols,
+            "watch_symbols": watch_symbols,
+            "target_exchange": str(settings.exchange.name or "").lower().strip(),
+            "target_market_type": self._scanner_market_type(settings.exchange.market_type),
+        }
+        self._live_universe_snapshot = snapshot
+        self._last_status["live_universe_snapshot"] = snapshot
+
+    def _coerce_universe_item(self, symbol: str | ScannerUniverseItem) -> ScannerUniverseItem:
+        if isinstance(symbol, ScannerUniverseItem):
+            return symbol
+        watch = str(symbol or "").upper().strip()
+        target_exchange = str(settings.exchange.name or "").lower().strip()
+        target_market_type = self._scanner_market_type(settings.exchange.market_type)
+        source_exchange = str(settings.scanner.source_exchange or target_exchange).lower().strip()
+        source_market_type = self._scanner_market_type(settings.scanner.source_market_type, target_market_type)
+        return ScannerUniverseItem(
+            watch_symbol=watch,
+            exchange_symbol=watch,
+            target_exchange=target_exchange,
+            target_market_type=target_market_type,
+            source_exchange=source_exchange,
+            source_market_type=source_market_type,
+            source_symbol=watch,
+            universe_source="manual",
+        )
+
+    def _manual_universe_item(self, symbol: str, universe_source: str = "manual") -> ScannerUniverseItem:
+        item = self._coerce_universe_item(symbol)
+        item.universe_source = universe_source
+        return item
+
+    def _universe_summary(self, universe: list[ScannerUniverseItem]) -> dict[str, Any]:
+        target_exchange = str(settings.exchange.name or "").lower().strip()
+        target_market_type = self._scanner_market_type(settings.exchange.market_type)
+        source_exchange = str(settings.scanner.source_exchange or target_exchange).lower().strip()
+        source_market_type = self._scanner_market_type(settings.scanner.source_market_type, target_market_type)
+        return {
+            "source_mode": settings.scanner.source_mode,
+            "data_source_policy": settings.scanner.data_source_policy,
+            "target_exchange": target_exchange,
+            "target_market_type": target_market_type,
+            "source_exchange": source_exchange,
+            "source_market_type": source_market_type,
+            "universe_top_n": settings.scanner.universe_top_n,
+            "universe_min_quote_volume": settings.scanner.universe_min_quote_volume,
+            "universe_cache_ttl_secs": settings.scanner.universe_cache_ttl_secs,
+            "watchlist_empty_means_all_tradable": True,
+            "live_whitelist_empty_means_all_tradable": True,
+            "include_symbols": list(settings.scanner.include_symbols or []),
+            "exclude_symbols": list(settings.scanner.exclude_symbols or []),
+            "count": len(universe),
+            "tradable_count": sum(1 for item in universe if item.tradable),
+            "source_health": self.source_health,
+            "symbols": [item.watch_symbol for item in universe[:50]],
+        }
+
+    async def _build_effective_universe(
+        self,
+        run_id: str = "",
+        *,
+        force_refresh: bool = False,
+        include_untradable: bool = False,
+    ) -> list[ScannerUniverseItem]:
+        mode = str(settings.scanner.source_mode or "manual").lower().strip()
+        target_exchange = str(settings.exchange.name or "").lower().strip()
+        target_market_type = self._scanner_market_type(settings.exchange.market_type)
+        source_exchange = str(settings.scanner.source_exchange or target_exchange).lower().strip()
+        source_market_type = self._scanner_market_type(settings.scanner.source_market_type, target_market_type)
+        universe: list[ScannerUniverseItem] = []
+
+        if mode == "manual" and settings.scanner.watchlist:
+            universe = [self._manual_universe_item(symbol, "manual") for symbol in settings.scanner.watchlist]
+        else:
+            auto_source_exchange = target_exchange if mode in {"manual", "follow_exchange"} else source_exchange
+            auto_source_market_type = target_market_type if mode in {"manual", "follow_exchange"} else source_market_type
+            universe_source = "manual_all_tradable" if mode == "manual" else mode
+            try:
+                universe = await self._fetch_exchange_universe(
+                    source_exchange=auto_source_exchange,
+                    source_market_type=auto_source_market_type,
+                    target_exchange=target_exchange,
+                    target_market_type=target_market_type,
+                    universe_source=universe_source,
+                    force_refresh=force_refresh,
+                    include_untradable=include_untradable,
+                )
+            except Exception as exc:
+                logger.warning(f"[Scanner] Universe build failed for {auto_source_exchange}/{auto_source_market_type}: {exc}")
+                if run_id:
+                    await self._audit(
+                        run_id,
+                        "universe_error",
+                        reason=str(exc),
+                        payload={
+                            "source_mode": mode,
+                            "source_exchange": auto_source_exchange,
+                            "source_market_type": auto_source_market_type,
+                            "target_exchange": target_exchange,
+                            "target_market_type": target_market_type,
+                        },
+                    )
+                universe = []
+            if mode == "hybrid":
+                manual_symbols = [*list(settings.scanner.watchlist or []), *list(settings.scanner.include_symbols or [])]
+                universe.extend(self._manual_universe_item(symbol, "hybrid_manual") for symbol in manual_symbols)
+
+        excludes = {str(symbol or "").upper().strip() for symbol in settings.scanner.exclude_symbols or []}
+        deduped: dict[str, ScannerUniverseItem] = {}
+        for item in universe:
+            key = item.watch_symbol.upper().strip()
+            if not key or key in excludes or item.exchange_symbol.upper().strip() in excludes:
+                continue
+            if not include_untradable and not item.tradable:
+                continue
+            deduped.setdefault(key, item)
+        result = list(deduped.values())
+        if run_id:
+            await self._audit(run_id, "universe", reason="effective scanner universe", payload=self._universe_summary(result))
+        return result
+
+    async def _fetch_exchange_universe(
+        self,
+        *,
+        source_exchange: str,
+        source_market_type: str,
+        target_exchange: str,
+        target_market_type: str,
+        universe_source: str,
+        force_refresh: bool = False,
+        include_untradable: bool = False,
+    ) -> list[ScannerUniverseItem]:
+        source_type = self._scanner_market_type(source_market_type)
+        target_type = self._scanner_market_type(target_market_type)
+        cache_key = (
+            str(source_exchange or "").lower().strip(),
+            source_type,
+            str(target_exchange or "").lower().strip(),
+            target_type,
+            universe_source,
+            int(settings.scanner.universe_top_n or 1),
+            float(settings.scanner.universe_min_quote_volume or 0.0),
+            bool(include_untradable),
+        )
+        ttl = max(0, int(settings.scanner.universe_cache_ttl_secs or 0))
+        now = time.monotonic()
+        cached = self._universe_cache.get(cache_key)
+        if not force_refresh and ttl > 0 and cached and now - cached[0] <= ttl:
+            universe = self._clone_universe(cached[1])
+            self._record_source_health(
+                source_exchange,
+                source_type,
+                ok=True,
+                items=len(universe),
+                cached=True,
+            )
+            return universe
+
+        started = time.monotonic()
+        try:
+            universe = await asyncio.to_thread(
+                self._fetch_exchange_universe_sync,
+                source_exchange,
+                source_type,
+                target_exchange,
+                target_type,
+                universe_source,
+                include_untradable,
+            )
+            latency_ms = (time.monotonic() - started) * 1000.0
+            self._record_source_health(source_exchange, source_type, ok=True, latency_ms=latency_ms, items=len(universe))
+            if ttl > 0:
+                self._universe_cache[cache_key] = (time.monotonic(), self._clone_universe(universe))
+            return universe
+        except Exception as exc:
+            latency_ms = (time.monotonic() - started) * 1000.0
+            self._record_source_health(source_exchange, source_type, ok=False, latency_ms=latency_ms, reason=str(exc))
+            raise
+
+    def _fetch_exchange_universe_sync(
+        self,
+        source_exchange: str,
+        source_market_type: str,
+        target_exchange: str,
+        target_market_type: str,
+        universe_source: str,
+        include_untradable: bool = False,
+    ) -> list[ScannerUniverseItem]:
+        from exchange import _get_or_create_exchange, _market_matches_type, _market_type_key, _symbol_candidates
+
+        source_exchange = str(source_exchange or settings.exchange.name).lower().strip()
+        target_exchange = str(target_exchange or settings.exchange.name).lower().strip()
+        source_type = self._scanner_market_type(source_market_type)
+        target_type = self._scanner_market_type(target_market_type)
+        source_family = _market_type_key(source_type)
+        target_family = _market_type_key(target_type)
+        exchange = _get_or_create_exchange(exchange_id=source_exchange, live=False, sandbox=False, market_type=source_type)
+        source_markets = exchange.load_markets()
+        target_markets = source_markets
+        if source_exchange != target_exchange or source_type != target_type:
+            target = _get_or_create_exchange(exchange_id=target_exchange, live=False, sandbox=False, market_type=target_type)
+            target_markets = target.load_markets()
+
+        tickers: dict[str, Any] = {}
+        try:
+            fetch_tickers = getattr(exchange, "fetch_tickers", None)
+            if callable(fetch_tickers):
+                tickers = fetch_tickers() or {}
+        except Exception as exc:
+            logger.debug(f"[Scanner] fetch_tickers unavailable for universe on {source_exchange}: {exc}")
+
+        min_quote_volume = float(settings.scanner.universe_min_quote_volume or 0.0)
+        rows: list[tuple[float, ScannerUniverseItem]] = []
+        for market_symbol, market in source_markets.items():
+            if not isinstance(market, dict):
+                continue
+            if market.get("active") is False:
+                continue
+            if not _market_matches_type(market, source_family):
+                continue
+            quote = str(market.get("quote") or "").upper().strip()
+            if quote and quote not in {"USDT", "USDC", "USD", "BUSD"}:
+                continue
+            watch_symbol = self._compact_market_symbol(str(market_symbol), market)
+            ticker = tickers.get(str(market_symbol)) or tickers.get(str(market.get("symbol") or "")) or {}
+            quote_volume = self._quote_volume_from_ticker(ticker)
+            if quote_volume > 0 and quote_volume < min_quote_volume:
+                if include_untradable:
+                    rows.append((
+                        quote_volume,
+                        ScannerUniverseItem(
+                            watch_symbol=watch_symbol,
+                            exchange_symbol=watch_symbol,
+                            target_exchange=target_exchange,
+                            target_market_type=target_type,
+                            source_exchange=source_exchange,
+                            source_market_type=source_type,
+                            source_symbol=watch_symbol,
+                            universe_source=universe_source,
+                            tradable=False,
+                            tradability_reason="quote_volume_below_universe_minimum",
+                            quote_volume=quote_volume,
+                            liquidity_tier=self._liquidity_tier(watch_symbol, quote_volume),
+                            market_limits=self._market_limits_from_market(source_exchange, str(market_symbol), market),
+                        ),
+                    ))
+                continue
+
+            target_symbol = watch_symbol
+            tradable = False
+            tradability_reason = "not_found_on_target"
+            target_limits: dict[str, Any] = {}
+            for candidate in _symbol_candidates(watch_symbol, target_family):
+                target_market = target_markets.get(candidate)
+                if isinstance(target_market, dict) and _market_matches_type(target_market, target_family):
+                    target_symbol = self._compact_market_symbol(candidate, target_market)
+                    tradable = True
+                    tradability_reason = "available_on_target"
+                    target_limits = self._market_limits_from_market(target_exchange, candidate, target_market)
+                    break
+            if not tradable and source_exchange == target_exchange and source_type == target_type:
+                target_symbol = watch_symbol
+                tradable = True
+                tradability_reason = "available_on_target"
+                target_limits = self._market_limits_from_market(target_exchange, str(market_symbol), market)
+            if not tradable:
+                if not include_untradable:
+                    continue
+                target_limits = {}
+
+            rows.append((
+                quote_volume,
+                ScannerUniverseItem(
+                    watch_symbol=watch_symbol,
+                    exchange_symbol=target_symbol,
+                    target_exchange=target_exchange,
+                    target_market_type=target_type,
+                    source_exchange=source_exchange,
+                    source_market_type=source_type,
+                    source_symbol=watch_symbol,
+                    universe_source=universe_source,
+                    tradable=tradable,
+                    tradability_reason=tradability_reason,
+                    quote_volume=quote_volume,
+                    liquidity_tier=self._liquidity_tier(watch_symbol, quote_volume),
+                    market_limits=target_limits,
+                ),
+            ))
+
+        rows.sort(key=lambda item: item[0], reverse=True)
+        top_n = max(1, int(settings.scanner.universe_top_n or 1))
+        return [item for _, item in rows[:top_n]]
+
     async def _scan_watchlist_concurrently(self, run_id: str) -> list[dict[str, Any]]:
         semaphore = asyncio.Semaphore(max(1, int(settings.scanner.max_concurrent_fetches)))
+        universe = await self._build_effective_universe(run_id)
+        self._last_status["last_universe"] = self._universe_summary(universe)
+        if str(settings.scanner.mode).lower().strip() == "live":
+            self._set_live_universe_snapshot(universe)
+        if not universe:
+            await self._audit(
+                run_id,
+                "universe_empty",
+                reason="scanner effective universe is empty",
+                payload=self._last_status["last_universe"],
+            )
+            return [{"scanned": 0, "data_failures": 0, "filtered": 0, "filter_reasons": {"universe_empty": 1}, "candidates": []}]
 
-        async def worker(watch_symbol: str) -> dict[str, Any]:
+        async def worker(item: ScannerUniverseItem) -> dict[str, Any]:
             async with semaphore:
                 if self._shutdown_event.is_set():
-                    return {"scanned": 0, "data_failures": 0, "filtered": 0, "candidates": []}
-                return await self._scan_watch_symbol(run_id, watch_symbol)
+                    return {"scanned": 0, "data_failures": 0, "filtered": 0, "filter_reasons": {"shutdown": 1}, "candidates": []}
+                return await self._scan_watch_symbol(run_id, item)
 
-        tasks = [asyncio.create_task(worker(symbol)) for symbol in settings.scanner.watchlist]
+        tasks = [asyncio.create_task(worker(item)) for item in universe]
         if not tasks:
             return []
         results = await asyncio.gather(*tasks, return_exceptions=True)
         normalized: list[dict[str, Any]] = []
-        for symbol, result in zip(settings.scanner.watchlist, results, strict=False):
+        for item, result in zip(universe, results, strict=False):
             if isinstance(result, Exception):
-                logger.warning(f"[Scanner] Symbol scan failed for {symbol}: {result}")
-                await self._audit(run_id, "data_error", watch_symbol=symbol, reason=str(result))
-                normalized.append({"scanned": 1, "data_failures": 1, "filtered": 0, "candidates": []})
+                logger.warning(f"[Scanner] Symbol scan failed for {item.watch_symbol}: {result}")
+                await self._audit(
+                    run_id,
+                    "data_error",
+                    watch_symbol=item.watch_symbol,
+                    exchange_symbol=item.exchange_symbol,
+                    reason=str(result),
+                    payload={"universe": asdict(item)},
+                )
+                normalized.append({"scanned": 1, "data_failures": 1, "filtered": 0, "filter_reasons": {"data_error": 1}, "candidates": []})
             else:
                 normalized.append(result)
         return normalized
 
-    async def _scan_watch_symbol(self, run_id: str, watch_symbol: str) -> dict[str, Any]:
+    async def _scan_watch_symbol(self, run_id: str, watch_symbol: str | ScannerUniverseItem) -> dict[str, Any]:
+        item = self._coerce_universe_item(watch_symbol)
         try:
-            bundle = await self._fetch_bundle_with_retry(watch_symbol)
+            bundle = await self._fetch_bundle_with_retry(item)
         except Exception as exc:
-            await self._audit(run_id, "data_error", watch_symbol=watch_symbol, reason=str(exc))
-            logger.warning(f"[Scanner] Data fetch failed for {watch_symbol}: {exc}")
-            return {"scanned": 1, "data_failures": 1, "filtered": 0, "candidates": []}
+            await self._audit(
+                run_id,
+                "data_error",
+                watch_symbol=item.watch_symbol,
+                exchange_symbol=item.exchange_symbol,
+                reason=str(exc),
+                payload={"universe": asdict(item)},
+            )
+            logger.warning(f"[Scanner] Data fetch failed for {item.watch_symbol}: {exc}")
+            return {"scanned": 1, "data_failures": 1, "filtered": 0, "filter_reasons": {"data_error": 1}, "candidates": []}
 
         mapping = bundle.mapping
         await self._audit(
@@ -351,11 +882,27 @@ class MarketScannerService:
             watch_symbol=mapping.watch_symbol,
             exchange_symbol=mapping.exchange_symbol,
             reason="quality_ok" if bundle.quality_passed else ";".join(bundle.quality_reasons),
-            payload={"quality": bundle.data_quality, "data_source": mapping.data_source},
+            payload={
+                "quality": bundle.data_quality,
+                "data_source": mapping.data_source,
+                "target_exchange": mapping.target_exchange or mapping.exchange_name,
+                "source_exchange": mapping.source_exchange,
+                "actual_data_source": mapping.actual_data_source or bundle.data_quality.get("actual_data_source"),
+                "tradable": mapping.tradable,
+                "tradability_reason": mapping.tradability_reason,
+                "universe_source": mapping.universe_source,
+            },
         )
 
         if not bundle.quality_passed:
-            return {"scanned": 1, "data_failures": 1, "filtered": 1, "candidates": []}
+            reasons = list(bundle.quality_reasons or ["quality_failed"])
+            return {
+                "scanned": 1,
+                "data_failures": 1,
+                "filtered": 1,
+                "filter_reasons": {str(reason): 1 for reason in reasons},
+                "candidates": [],
+            }
 
         symbol_lock = await self._symbol_cooldown(mapping.exchange_symbol)
         if symbol_lock:
@@ -367,7 +914,7 @@ class MarketScannerService:
                 reason="symbol cooldown active",
                 payload={"expires_at": getattr(symbol_lock, "expires_at", None)},
             )
-            return {"scanned": 1, "data_failures": 0, "filtered": 1, "candidates": []}
+            return {"scanned": 1, "data_failures": 0, "filtered": 1, "filter_reasons": {"symbol_cooldown": 1}, "candidates": []}
 
         event_ok, event_reason, event_payload = self._event_session_filter(bundle)
         if not event_ok:
@@ -379,7 +926,7 @@ class MarketScannerService:
                 reason=event_reason,
                 payload=event_payload,
             )
-            return {"scanned": 1, "data_failures": 0, "filtered": 1, "candidates": []}
+            return {"scanned": 1, "data_failures": 0, "filtered": 1, "filter_reasons": {event_reason or "event_filter": 1}, "candidates": []}
 
         symbol_candidates = self._build_candidates(bundle)
         if not symbol_candidates:
@@ -390,7 +937,7 @@ class MarketScannerService:
                 exchange_symbol=mapping.exchange_symbol,
                 reason="no candidate reached pre-scan score",
             )
-            return {"scanned": 1, "data_failures": 0, "filtered": 1, "candidates": []}
+            return {"scanned": 1, "data_failures": 0, "filtered": 1, "filter_reasons": {"no_candidate": 1}, "candidates": []}
 
         accepted: list[tuple[ScannerCandidate, OHLCVBundle]] = []
         for candidate in symbol_candidates:
@@ -414,7 +961,7 @@ class MarketScannerService:
                 "timeframe": candidate.timeframe,
             })
             accepted.append((candidate, bundle))
-        return {"scanned": 1, "data_failures": 0, "filtered": 0, "candidates": accepted}
+        return {"scanned": 1, "data_failures": 0, "filtered": 0, "filter_reasons": {}, "candidates": accepted}
 
     def _build_candidates(self, bundle: OHLCVBundle) -> list[ScannerCandidate]:
         if settings.scanner.mtf_consensus_enabled:
@@ -578,7 +1125,8 @@ class MarketScannerService:
         base = ordered[0]
         summary = direction_scores[direction]
         consensus_score = float(summary.get("score") or base.score)
-        threshold = self._min_score_for(base.exchange_symbol, "mtf", direction)
+        tier_bump = self._liquidity_tier_threshold_bump(base.liquidity_tier, base.universe_source)
+        threshold = self._min_score_for(base.exchange_symbol, "mtf", direction) + tier_bump
         if consensus_score < threshold:
             return []
 
@@ -600,6 +1148,7 @@ class MarketScannerService:
             "available_timeframes": tf_list,
             "direction_scores": direction_scores,
             "min_score_threshold": threshold,
+            "liquidity_tier_threshold_bump": tier_bump,
             "candidates": [
                 {
                     "timeframe": item.timeframe,
@@ -613,6 +1162,7 @@ class MarketScannerService:
         base.smc_summary["multi_timeframe"] = base.fusion_summary
         base.indicator_summary["multi_timeframe"] = {tf: bundle.indicators.get(tf, {}) for tf in base.fused_timeframes}
         base.quality["min_score_threshold"] = threshold
+        base.quality["liquidity_tier_threshold_bump"] = tier_bump
         base.quality["mtf_confirmations_required"] = required_confirmations
         base.quality["mtf_consensus_margin"] = round(margin, 2)
         base.setup_hash = _setup_hash(
@@ -672,7 +1222,8 @@ class MarketScannerService:
                 base.reasons.append(f"multi-timeframe confirmation: {', '.join(timeframes)}")
             if conflict_penalty:
                 base.reasons.append(f"opposite timeframe pressure penalized ({conflict_score:.1f})")
-            threshold = self._min_score_for(base.exchange_symbol, base.timeframe, base.direction)
+            tier_bump = self._liquidity_tier_threshold_bump(base.liquidity_tier, base.universe_source)
+            threshold = self._min_score_for(base.exchange_symbol, base.timeframe, base.direction) + tier_bump
             base.fused_timeframes = timeframes
             base.fusion_summary = {
                 "enabled": True,
@@ -684,6 +1235,7 @@ class MarketScannerService:
                 "conflict_penalty": round(conflict_penalty, 2),
                 "opposite_best_score": round(conflict_score, 2),
                 "min_score_threshold": threshold,
+                "liquidity_tier_threshold_bump": tier_bump,
                 "candidates": [
                     {
                         "timeframe": item.timeframe,
@@ -707,6 +1259,7 @@ class MarketScannerService:
                 reference_price=base.entry_reference,
             )
             base.quality["min_score_threshold"] = threshold
+            base.quality["liquidity_tier_threshold_bump"] = tier_bump
             base.quality["mtf_confirmations_required"] = required_confirmations
             if base.score >= threshold:
                 fused.append(base)
@@ -861,6 +1414,7 @@ class MarketScannerService:
         candidates: int,
         selected: int,
         processed: list[dict[str, Any]],
+        filter_reasons: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         statuses: dict[str, int] = {}
         ai_used = 0
@@ -879,6 +1433,8 @@ class MarketScannerService:
             "processed": len(processed),
             "ai_used": ai_used,
             "statuses": statuses,
+            "filter_reasons": dict(sorted((filter_reasons or {}).items(), key=lambda item: item[1], reverse=True)),
+            "universe": self._last_status.get("last_universe") or {},
         }
 
     def _weighted(self, name: str, value: float) -> float:
@@ -951,11 +1507,21 @@ class MarketScannerService:
             self._threshold_overrides = {}
             return {"enabled": True, "error": str(exc)}
 
-    async def _fetch_bundle_with_retry(self, watch_symbol: str) -> OHLCVBundle:
+    async def _fetch_bundle_with_retry(self, watch_symbol: str | ScannerUniverseItem) -> OHLCVBundle:
+        item = self._coerce_universe_item(watch_symbol)
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                return await self.provider.get_bundle(watch_symbol, settings.scanner.timeframes)
+                try:
+                    return await self.provider.get_bundle(
+                        item.watch_symbol,
+                        settings.scanner.timeframes,
+                        **item.mapping_overrides(),
+                    )
+                except TypeError as exc:
+                    if "unexpected" not in str(exc).lower() and "keyword" not in str(exc).lower():
+                        raise
+                    return await self.provider.get_bundle(item.watch_symbol, settings.scanner.timeframes)
             except Exception as exc:
                 last_error = exc
                 text = str(exc).lower()
@@ -964,11 +1530,11 @@ class MarketScannerService:
                 if attempt >= 2:
                     break
                 logger.warning(
-                    f"[Scanner] Data fetch retry {attempt + 1}/2 for {watch_symbol} "
+                    f"[Scanner] Data fetch retry {attempt + 1}/2 for {item.watch_symbol} "
                     f"in {delay:.1f}s: {exc}"
                 )
                 await asyncio.sleep(delay)
-        raise last_error or RuntimeError(f"Failed to fetch scanner bundle for {watch_symbol}")
+        raise last_error or RuntimeError(f"Failed to fetch scanner bundle for {item.watch_symbol}")
 
     def _candidate_directions(self, indicators: dict[str, Any], current: float) -> list[str]:
         directions: list[str] = []
@@ -1304,7 +1870,9 @@ class MarketScannerService:
 
         score, reasons, breakdown = DEFAULT_ENGINE.evaluate(scoring_ctx)
 
-        threshold = self._min_score_for(mapping.exchange_symbol, timeframe, direction)
+        liquidity_tier = mapping.liquidity_tier or self._liquidity_tier(mapping.exchange_symbol, float(bundle.volume_24h or 0.0))
+        tier_threshold_bump = self._liquidity_tier_threshold_bump(liquidity_tier, mapping.universe_source)
+        threshold = self._min_score_for(mapping.exchange_symbol, timeframe, direction) + tier_threshold_bump
         fusion_floor = max(0.0, threshold - max(12.0, float(settings.scanner.mtf_confirmation_bonus) * 2.0))
         if score < fusion_floor:
             return None
@@ -1376,8 +1944,27 @@ class MarketScannerService:
                 "passed": bundle.quality_passed,
                 "hard_filters": hard_diagnostics,
                 "min_score_threshold": threshold,
+                "data_source_policy": mapping.data_source_policy,
+                "target_exchange": mapping.target_exchange or mapping.exchange_name,
+                "source_exchange": mapping.source_exchange,
+                "actual_data_source": mapping.actual_data_source or bundle.data_quality.get("actual_data_source"),
+                "tradable": mapping.tradable,
+                "tradability_reason": mapping.tradability_reason,
+                "universe_source": mapping.universe_source,
+                "liquidity_tier": liquidity_tier,
+                "liquidity_tier_threshold_bump": tier_threshold_bump,
             },
             score_breakdown=breakdown,
+            target_exchange=mapping.target_exchange or mapping.exchange_name or settings.exchange.name,
+            target_market_type=mapping.target_market_type or mapping.market_type or settings.exchange.market_type,
+            source_exchange=mapping.source_exchange or "",
+            source_market_type=mapping.source_market_type or "",
+            actual_data_source=mapping.actual_data_source or bundle.data_quality.get("actual_data_source", ""),
+            data_source_policy=mapping.data_source_policy,
+            tradable=mapping.tradable,
+            tradability_reason=mapping.tradability_reason,
+            universe_source=mapping.universe_source,
+            liquidity_tier=liquidity_tier,
         )
 
     def _best_support_zone(self, ctx: Any, direction: str, current: float, atr_price: float) -> dict[str, Any] | None:
@@ -1531,6 +2118,10 @@ class MarketScannerService:
                     payload={
                         "exchange": candidate.exchange_name,
                         "market_type": candidate.market_type,
+                        "target_exchange": candidate.target_exchange or candidate.exchange_name,
+                        "target_market_type": candidate.target_market_type or candidate.market_type,
+                        "source_exchange": candidate.source_exchange,
+                        "actual_data_source": candidate.actual_data_source,
                         "limits": market_limits,
                     },
                 )
@@ -1639,7 +2230,16 @@ class MarketScannerService:
                 score=candidate.score,
                 setup_hash=candidate.setup_hash,
                 reason=str(result.get("reason", "")),
-                payload={"result": result, "ai_used": ai_used, "cooldown_ttl_secs": cooldown_ttl},
+                payload={
+                    "result": result,
+                    "ai_used": ai_used,
+                    "cooldown_ttl_secs": cooldown_ttl,
+                    "target_exchange": candidate.target_exchange or candidate.exchange_name,
+                    "source_exchange": candidate.source_exchange,
+                    "actual_data_source": candidate.actual_data_source,
+                    "tradable": candidate.tradable,
+                    "tradability_reason": candidate.tradability_reason,
+                },
             )
             await self._update_win_rate(session, str(result.get("status", "")), str(result.get("reason", "")))
             await session.commit()
@@ -1652,6 +2252,10 @@ class MarketScannerService:
                 "setup_hash": candidate.setup_hash,
                 "ai_used": ai_used,
                 "cooldown_ttl_secs": cooldown_ttl,
+                "target_exchange": candidate.target_exchange or candidate.exchange_name,
+                "source_exchange": candidate.source_exchange,
+                "actual_data_source": candidate.actual_data_source,
+                "tradable": candidate.tradable,
             }
 
     def _symbol_cooldown_ttl_for_result(self, result: dict[str, Any], candidate_score: float = 0.0, cooldown_level: int = 0) -> int:
@@ -1731,13 +2335,18 @@ class MarketScannerService:
         """Fail closed before AI calls if a live scanner symbol is not tradable."""
         if str(settings.scanner.mode).lower().strip() != "live":
             return True, "", {}
+        if not candidate.tradable:
+            return False, candidate.tradability_reason or "Scanner live mode blocked: symbol is not tradable", {}
         if not settings.exchange.live_trading:
             return False, "Scanner live mode requires global LIVE_TRADING=true", {}
+        snapshot_symbols = {str(item).upper().strip() for item in self._live_universe_snapshot.get("symbols") or []}
+        if snapshot_symbols and candidate.exchange_symbol.upper().strip() not in snapshot_symbols:
+            return False, "Scanner live mode blocked: symbol is outside the current live universe snapshot", {}
         whitelist = {str(item).upper().strip() for item in settings.scanner.live_symbol_whitelist}
-        if candidate.exchange_symbol.upper().strip() not in whitelist:
+        if whitelist and candidate.exchange_symbol.upper().strip() not in whitelist:
             return False, "Scanner live mode blocked: symbol is not in SCANNER_LIVE_SYMBOL_WHITELIST", {}
-        exchange_name = str(candidate.exchange_name or settings.exchange.name).lower().strip()
-        market_type = str(candidate.market_type or settings.exchange.market_type).lower().strip()
+        exchange_name = str(candidate.target_exchange or candidate.exchange_name or settings.exchange.name).lower().strip()
+        market_type = str(candidate.target_market_type or candidate.market_type or settings.exchange.market_type).lower().strip()
         try:
             from exchange import get_market_limits
 

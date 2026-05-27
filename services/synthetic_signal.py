@@ -61,6 +61,16 @@ def build_synthetic_signal(candidate: Any, *, secret: str | None = None) -> tupl
         "exchange_symbol": ticker,
         "exchange_name": str(_get(candidate, "exchange_name") or settings.exchange.name).lower(),
         "market_type": str(_get(candidate, "market_type") or settings.exchange.market_type).lower(),
+        "target_exchange": str(_get(candidate, "target_exchange") or _get(candidate, "exchange_name") or settings.exchange.name).lower(),
+        "target_market_type": str(_get(candidate, "target_market_type") or _get(candidate, "market_type") or settings.exchange.market_type).lower(),
+        "source_exchange": str(_get(candidate, "source_exchange") or "").lower(),
+        "source_market_type": str(_get(candidate, "source_market_type") or "").lower(),
+        "actual_data_source": _get(candidate, "actual_data_source") or _get(candidate, "data_source"),
+        "data_source_policy": _get(candidate, "data_source_policy") or settings.scanner.data_source_policy,
+        "tradable": bool(_get(candidate, "tradable", True)),
+        "tradability_reason": _get(candidate, "tradability_reason") or "",
+        "universe_source": _get(candidate, "universe_source") or settings.scanner.source_mode,
+        "liquidity_tier": _get(candidate, "liquidity_tier") or "unknown",
         "mapped_asset": bool(_get(candidate, "mapped_asset", False)),
         "data_source": _get(candidate, "data_source"),
         "direction": direction.value,
@@ -199,7 +209,8 @@ def market_context_from_bundle(bundle: Any, *, ticker: str | None = None) -> Mar
     context_any = context
     for tf, tf_candles in candles_by_tf.items():
         setattr(context_any, _tf_attr_name(str(tf)), [_candle_to_ohlcv(c) for c in list(tf_candles or [])])
-    context_any._market_data_source = getattr(getattr(bundle, "mapping", None), "data_source", "scanner_bundle")
+    mapping = getattr(bundle, "mapping", None)
+    context_any._market_data_source = getattr(mapping, "actual_data_source", "") or getattr(mapping, "data_source", "scanner_bundle")
     context_any._scanner_data_quality = getattr(bundle, "data_quality", {}) or {}
     context_any._scanner_indicators = indicators
     context_any._scanner_primary_timeframe = primary_tf

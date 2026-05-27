@@ -86,6 +86,24 @@ def _normalize_ai_provider(provider: Any, default: str | None = None) -> str:
     return value if value in allowed else settings.ai.provider
 
 
+def _normalize_scanner_source_mode(value: Any, default: str | None = None) -> str:
+    normalized = str(value or default or settings.scanner.source_mode).lower().strip()
+    allowed = {"manual", "follow_exchange", "custom_exchange", "hybrid"}
+    return normalized if normalized in allowed else "manual"
+
+
+def _normalize_scanner_data_policy(value: Any, default: str | None = None) -> str:
+    normalized = str(value or default or settings.scanner.data_source_policy).lower().strip()
+    return normalized if normalized in {"strict", "fallback", "confirm"} else "fallback"
+
+
+def _normalize_scanner_market_type(value: Any, default: str | None = None) -> str:
+    normalized = str(value or default or settings.scanner.source_market_type).lower().strip()
+    if normalized in {"future", "futures", "swap", "linear", "inverse"}:
+        return "contract"
+    return normalized if normalized in {"", "spot", "contract"} else ""
+
+
 def _coalesce_str(*values: Any, default: str = "") -> str:
     value = first_valid(*values)
     if value is None:
@@ -378,6 +396,26 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         settings.scanner.mode = mode if mode in {"observe", "paper", "live"} else "observe"
         settings.scanner.interval_secs = _to_int(scanner.get("interval_secs"), settings.scanner.interval_secs, 60)
         settings.scanner.watchlist = _to_string_list(scanner.get("watchlist"), settings.scanner.watchlist)
+        settings.scanner.source_mode = _normalize_scanner_source_mode(scanner.get("source_mode"), settings.scanner.source_mode)
+        settings.scanner.source_exchange = str(scanner.get("source_exchange") or settings.scanner.source_exchange or "").lower().strip()
+        settings.scanner.source_market_type = _normalize_scanner_market_type(
+            scanner.get("source_market_type"), settings.scanner.source_market_type
+        )
+        settings.scanner.data_source_policy = _normalize_scanner_data_policy(
+            scanner.get("data_source_policy"), settings.scanner.data_source_policy
+        )
+        settings.scanner.universe_top_n = _to_int(scanner.get("universe_top_n"), settings.scanner.universe_top_n, 1, 1000)
+        settings.scanner.universe_min_quote_volume = _to_float(
+            scanner.get("universe_min_quote_volume"), settings.scanner.universe_min_quote_volume, 0, 1_000_000_000_000
+        )
+        settings.scanner.universe_cache_ttl_secs = _to_int(
+            scanner.get("universe_cache_ttl_secs"), settings.scanner.universe_cache_ttl_secs, 0, 86400
+        )
+        settings.scanner.confirm_max_volume_deviation_pct = _to_float(
+            scanner.get("confirm_max_volume_deviation_pct"), settings.scanner.confirm_max_volume_deviation_pct, 0, 10000
+        )
+        settings.scanner.include_symbols = _to_string_list(scanner.get("include_symbols"), settings.scanner.include_symbols)
+        settings.scanner.exclude_symbols = _to_string_list(scanner.get("exclude_symbols"), settings.scanner.exclude_symbols)
         settings.scanner.timeframes = _to_string_list(scanner.get("timeframes"), settings.scanner.timeframes, lowercase=True)
         settings.scanner.min_score = _to_float(scanner.get("min_score"), settings.scanner.min_score, 0, 100)
         settings.scanner.max_candidates_per_run = _to_int(
@@ -868,11 +906,45 @@ async def save_scanner_settings(session: AsyncSession, data: dict[str, Any]) -> 
     if mode not in {"observe", "paper", "live"}:
         mode = "observe"
 
+    source_mode = _normalize_scanner_source_mode(pick("source_mode", settings.scanner.source_mode), settings.scanner.source_mode)
+    source_exchange = str(pick("source_exchange", settings.scanner.source_exchange) or "").lower().strip()
+    source_market_type = _normalize_scanner_market_type(
+        pick("source_market_type", settings.scanner.source_market_type), settings.scanner.source_market_type
+    )
+    data_source_policy = _normalize_scanner_data_policy(
+        pick("data_source_policy", settings.scanner.data_source_policy), settings.scanner.data_source_policy
+    )
+
     updated = {
         "enabled": _to_bool(pick("enabled", settings.scanner.enabled), settings.scanner.enabled),
         "mode": mode,
         "interval_secs": _to_int(pick("interval_secs", settings.scanner.interval_secs), settings.scanner.interval_secs, 60),
         "watchlist": _to_string_list(pick("watchlist", settings.scanner.watchlist), settings.scanner.watchlist),
+        "source_mode": source_mode,
+        "source_exchange": source_exchange,
+        "source_market_type": source_market_type,
+        "data_source_policy": data_source_policy,
+        "universe_top_n": _to_int(pick("universe_top_n", settings.scanner.universe_top_n), settings.scanner.universe_top_n, 1, 1000),
+        "universe_min_quote_volume": _to_float(
+            pick("universe_min_quote_volume", settings.scanner.universe_min_quote_volume),
+            settings.scanner.universe_min_quote_volume,
+            0,
+            1_000_000_000_000,
+        ),
+        "universe_cache_ttl_secs": _to_int(
+            pick("universe_cache_ttl_secs", settings.scanner.universe_cache_ttl_secs),
+            settings.scanner.universe_cache_ttl_secs,
+            0,
+            86400,
+        ),
+        "confirm_max_volume_deviation_pct": _to_float(
+            pick("confirm_max_volume_deviation_pct", settings.scanner.confirm_max_volume_deviation_pct),
+            settings.scanner.confirm_max_volume_deviation_pct,
+            0,
+            10000,
+        ),
+        "include_symbols": _to_string_list(pick("include_symbols", settings.scanner.include_symbols), settings.scanner.include_symbols),
+        "exclude_symbols": _to_string_list(pick("exclude_symbols", settings.scanner.exclude_symbols), settings.scanner.exclude_symbols),
         "timeframes": _to_string_list(pick("timeframes", settings.scanner.timeframes), settings.scanner.timeframes, lowercase=True),
         "min_score": _to_float(pick("min_score", settings.scanner.min_score), settings.scanner.min_score, 0, 100),
         "max_candidates_per_run": _to_int(
@@ -1248,6 +1320,16 @@ def runtime_status() -> dict[str, Any]:
             "mode": settings.scanner.mode,
             "interval_secs": settings.scanner.interval_secs,
             "watchlist": settings.scanner.watchlist,
+            "source_mode": settings.scanner.source_mode,
+            "source_exchange": settings.scanner.source_exchange,
+            "source_market_type": settings.scanner.source_market_type,
+            "data_source_policy": settings.scanner.data_source_policy,
+            "universe_top_n": settings.scanner.universe_top_n,
+            "universe_min_quote_volume": settings.scanner.universe_min_quote_volume,
+            "universe_cache_ttl_secs": settings.scanner.universe_cache_ttl_secs,
+            "confirm_max_volume_deviation_pct": settings.scanner.confirm_max_volume_deviation_pct,
+            "include_symbols": settings.scanner.include_symbols,
+            "exclude_symbols": settings.scanner.exclude_symbols,
             "timeframes": settings.scanner.timeframes,
             "min_score": settings.scanner.min_score,
             "max_candidates_per_run": settings.scanner.max_candidates_per_run,

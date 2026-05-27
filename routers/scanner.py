@@ -35,6 +35,16 @@ class ScannerSettingsUpdate(BaseModel):
     mode: str | None = Field(default=None, description="observe, paper, or live")
     interval_secs: int | None = Field(default=None, ge=60)
     watchlist: list[str] | str | None = None
+    source_mode: str | None = Field(default=None, description="manual, follow_exchange, custom_exchange, or hybrid")
+    source_exchange: str | None = None
+    source_market_type: str | None = Field(default=None, description="spot or contract")
+    data_source_policy: str | None = Field(default=None, description="strict, fallback, or confirm")
+    universe_top_n: int | None = Field(default=None, ge=1, le=1000)
+    universe_min_quote_volume: float | None = Field(default=None, ge=0)
+    universe_cache_ttl_secs: int | None = Field(default=None, ge=0, le=86400)
+    confirm_max_volume_deviation_pct: float | None = Field(default=None, ge=0)
+    include_symbols: list[str] | str | None = None
+    exclude_symbols: list[str] | str | None = None
     timeframes: list[str] | str | None = None
     min_score: float | None = Field(default=None, ge=0, le=100)
     max_candidates_per_run: int | None = Field(default=None, ge=1, le=50)
@@ -121,6 +131,7 @@ def _audit_payload(row: Any) -> dict[str, Any]:
         payload = json.loads(row.payload_json or "{}")
     except (TypeError, json.JSONDecodeError):
         payload = {}
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
     return {
         "id": row.id,
         "scope": row.scope,
@@ -132,9 +143,41 @@ def _audit_payload(row: Any) -> dict[str, Any]:
         "score": row.score,
         "setup_hash": row.setup_hash,
         "reason": row.reason,
+        "target_exchange": payload.get("target_exchange") or quality.get("target_exchange"),
+        "source_exchange": payload.get("source_exchange") or quality.get("source_exchange"),
+        "actual_data_source": payload.get("actual_data_source") or quality.get("actual_data_source"),
+        "tradable": payload.get("tradable") if "tradable" in payload else quality.get("tradable"),
+        "tradability_reason": payload.get("tradability_reason") or quality.get("tradability_reason"),
         "payload": payload,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+async def _source_performance_payload(db: AsyncSession) -> dict[str, Any]:
+    stmt = (
+        select(ScannerAuditModel)
+        .where(ScannerAuditModel.event_type == "result")
+        .order_by(desc(ScannerAuditModel.created_at))
+        .limit(200)
+    )
+    result = await db.execute(stmt)
+    stats: dict[str, dict[str, Any]] = {}
+    for row in result.scalars().all():
+        try:
+            payload = json.loads(row.payload_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        source = str(payload.get("actual_data_source") or payload.get("source_exchange") or "unknown").lower().strip()
+        target = str(payload.get("target_exchange") or "unknown").lower().strip()
+        key = f"{source}->{target}"
+        item = stats.setdefault(key, {"source": source, "target": target, "total": 0, "statuses": {}, "ai_used": 0})
+        item["total"] += 1
+        res = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        status = str(res.get("status") or "unknown").lower().strip()
+        item["statuses"][status] = int(item["statuses"].get(status, 0)) + 1
+        if payload.get("ai_used"):
+            item["ai_used"] += 1
+    return dict(sorted(stats.items(), key=lambda item: item[1]["total"], reverse=True))
 
 
 @router.get("/status")
@@ -144,11 +187,22 @@ async def scanner_status(
 ):
     state = await get_or_create_scanner_state(db, scope="admin")
     service = get_market_scanner_service()
+    source_performance = await _source_performance_payload(db)
     return {
         "enabled": settings.scanner.enabled,
         "mode": settings.scanner.mode,
         "interval_secs": settings.scanner.interval_secs,
         "watchlist": settings.scanner.watchlist,
+        "source_mode": settings.scanner.source_mode,
+        "source_exchange": settings.scanner.source_exchange,
+        "source_market_type": settings.scanner.source_market_type,
+        "data_source_policy": settings.scanner.data_source_policy,
+        "universe_top_n": settings.scanner.universe_top_n,
+        "universe_min_quote_volume": settings.scanner.universe_min_quote_volume,
+        "universe_cache_ttl_secs": settings.scanner.universe_cache_ttl_secs,
+        "confirm_max_volume_deviation_pct": settings.scanner.confirm_max_volume_deviation_pct,
+        "include_symbols": settings.scanner.include_symbols,
+        "exclude_symbols": settings.scanner.exclude_symbols,
         "timeframes": settings.scanner.timeframes,
         "min_score": settings.scanner.min_score,
         "max_candidates_per_run": settings.scanner.max_candidates_per_run,
@@ -178,6 +232,24 @@ async def scanner_status(
         "performance": {
             "max_concurrent_fetches": settings.scanner.max_concurrent_fetches,
             "bundle_cache_ttl_secs": settings.scanner.bundle_cache_ttl_secs,
+        },
+        "source": {
+            "mode": settings.scanner.source_mode,
+            "target_exchange": settings.exchange.name,
+            "target_market_type": settings.exchange.market_type,
+            "source_exchange": settings.scanner.source_exchange or settings.exchange.name,
+            "source_market_type": settings.scanner.source_market_type or settings.exchange.market_type,
+            "data_source_policy": settings.scanner.data_source_policy,
+            "universe_top_n": settings.scanner.universe_top_n,
+            "universe_min_quote_volume": settings.scanner.universe_min_quote_volume,
+            "universe_cache_ttl_secs": settings.scanner.universe_cache_ttl_secs,
+            "confirm_max_volume_deviation_pct": settings.scanner.confirm_max_volume_deviation_pct,
+            "include_symbols": settings.scanner.include_symbols,
+            "exclude_symbols": settings.scanner.exclude_symbols,
+            "last_universe": service.last_status.get("last_universe", {}),
+            "source_health": service.source_health,
+            "source_performance": source_performance,
+            "live_universe_snapshot": service.last_status.get("live_universe_snapshot", {}),
         },
         "scoring": {
             "mtf_confirmation_bonus": settings.scanner.mtf_confirmation_bonus,
@@ -246,6 +318,16 @@ async def scanner_update_settings(
         "scheduler": scheduler,
         "state": _state_payload(state),
     }
+
+
+@router.get("/universe-preview")
+async def scanner_universe_preview(
+    refresh: bool = Query(default=False),
+    limit: int = Query(default=200, ge=1, le=1000),
+    admin: dict = Depends(require_admin),
+):
+    service = get_market_scanner_service()
+    return await service.preview_universe(force_refresh=refresh, limit=limit)
 
 
 @router.get("/audits")

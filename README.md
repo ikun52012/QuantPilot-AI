@@ -8,7 +8,7 @@
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
 
-**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration and execution platform. It seamlessly combines TradingView's Webhook alert mechanism, a highly institutional **v5.3 scanner and pre-filter stack**, and **Smart Money Concepts (SMC/FVG) market structure analysis** with advanced AI voting pipelines (supporting OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral, and **OpenRouter 100+ models**) to perform secondary risk assessment and entry timing optimization. It then automates order execution on mainstream global crypto exchanges (e.g., Binance, OKX, Bybit).
+**QuantPilot AI** is a production-grade cryptocurrency quantitative trading integration and execution platform. It seamlessly combines TradingView's Webhook alert mechanism, a highly institutional **v5.4 exchange-aware scanner and pre-filter stack**, and **Smart Money Concepts (SMC/FVG) market structure analysis** with advanced AI voting pipelines (supporting OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral, and **OpenRouter 100+ models**) to perform secondary risk assessment and entry timing optimization. It then automates order execution on mainstream global crypto exchanges (e.g., Binance, OKX, Bybit).
 
 [English](./README.md) | [中文说明文档](./README_ZH.md)
 
@@ -17,6 +17,11 @@
 ---
 
 ## 🚀 What's New
+
+### 🆕 v5.4 Exchange-Aware Scanner Universe
+- **All-Tradable Defaults**: Empty watchlists scan all tradable target-exchange symbols; empty live whitelists allow all symbols in the live universe snapshot.
+- **Source Policies and Preview**: Manual, follow-exchange, custom-exchange, and hybrid modes support strict/fallback/confirm data policies with a dry-run universe preview.
+- **Source Health and Filter Funnel**: Cached exchange universes, source health, liquidity tiers, and per-reason scanner funnel diagnostics make scanner behavior auditable.
 
 ### 🆕 v5.3 Institutional Scanner Precision
 - **MTF Consensus Signals**: The scanner now emits one final long/short/neutral decision per symbol using higher-timeframe weighted consensus and confirmation gates.

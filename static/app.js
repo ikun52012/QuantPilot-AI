@@ -5447,6 +5447,17 @@ function renderScannerStatus(status) {
     const mode = status.mode || 'observe';
     const interval = status.interval_secs || 600;
     const watchlist = (status.watchlist || []).join(', ');
+    const source = status.source || {};
+    const sourceMode = status.source_mode || source.mode || 'manual';
+    const sourceExchange = status.source_exchange || source.source_exchange || '';
+    const sourceMarketType = status.source_market_type || source.source_market_type || '';
+    const dataSourcePolicy = status.data_source_policy || source.data_source_policy || 'fallback';
+    const universeTopN = status.universe_top_n || source.universe_top_n || 50;
+    const universeMinQuoteVolume = status.universe_min_quote_volume ?? source.universe_min_quote_volume ?? 5000000;
+    const universeCacheTtl = status.universe_cache_ttl_secs ?? source.universe_cache_ttl_secs ?? 300;
+    const confirmMaxVolumeDev = status.confirm_max_volume_deviation_pct ?? source.confirm_max_volume_deviation_pct ?? 80;
+    const includeSymbols = (status.include_symbols || source.include_symbols || []).join(', ');
+    const excludeSymbols = (status.exclude_symbols || source.exclude_symbols || []).join(', ');
     const timeframes = (status.timeframes || []).join(', ');
     const minScore = status.min_score ?? 65;
     const maxCandidates = status.max_candidates_per_run ?? 3;
@@ -5512,8 +5523,16 @@ function renderScannerStatus(status) {
     const lastScan = st.last_scan_at || '--';
     const rt = status.runtime || {};
     const lastFunnel = ((rt.last_summary || {}).funnel) || {};
+    const lastUniverse = source.last_universe || lastFunnel.universe || {};
+    const sourceHealth = source.source_health || lastUniverse.source_health || {};
+    const sourceHealthText = Object.values(sourceHealth).slice(0, 3).map(h => `${h.exchange}/${h.market_type}:${h.status}`).join(', ') || '--';
+    const sourcePerformance = source.source_performance || {};
+    const sourcePerformanceText = Object.values(sourcePerformance).slice(0, 2).map(p => `${p.source}->${p.target}:${p.total}`).join(', ') || '--';
 
     const modeOptions = ['observe', 'paper', 'live'].map(m => `<option value="${m}" ${m === mode ? 'selected' : ''}>${m.charAt(0).toUpperCase() + m.slice(1)}</option>`).join('');
+    const sourceModeOptions = ['manual', 'follow_exchange', 'custom_exchange', 'hybrid'].map(m => `<option value="${m}" ${m === sourceMode ? 'selected' : ''}>${m.replace('_', ' ')}</option>`).join('');
+    const sourceMarketOptions = ['', 'contract', 'spot'].map(m => `<option value="${m}" ${m === sourceMarketType ? 'selected' : ''}>${m || 'Use target'}</option>`).join('');
+    const dataPolicyOptions = ['strict', 'fallback', 'confirm'].map(m => `<option value="${m}" ${m === dataSourcePolicy ? 'selected' : ''}>${m}</option>`).join('');
 
     const modeClass = mode === 'live' ? 'badge-error' : mode === 'paper' ? 'badge-pending' : 'badge-active';
 
@@ -5535,6 +5554,10 @@ function renderScannerStatus(status) {
                     ${degradedMode ? `<div class="metric-item"><span class="metric-label">Degraded</span><span class="metric-value badge badge-warning">${escapeHtml(degradedMode)}</span></div>` : ''}
                     <div class="metric-item"><span class="metric-label">Running</span><span class="metric-value">${rt.running ? 'Yes' : 'No'}</span></div>
                     <div class="metric-item"><span class="metric-label">Last Funnel</span><span class="metric-value">${lastFunnel.scanned ?? 0}/${lastFunnel.candidates ?? 0}/${lastFunnel.ai_used ?? 0}</span></div>
+                    <div class="metric-item"><span class="metric-label">Source</span><span class="metric-value">${escapeHtml(sourceMode)} / ${escapeHtml(dataSourcePolicy)}</span></div>
+                    <div class="metric-item"><span class="metric-label">Universe</span><span class="metric-value">${lastUniverse.count ?? 0} (${lastUniverse.tradable_count ?? 0} tradable)</span></div>
+                    <div class="metric-item"><span class="metric-label">Source Health</span><span class="metric-value">${escapeHtml(sourceHealthText)}</span></div>
+                    <div class="metric-item"><span class="metric-label">Source Perf</span><span class="metric-value">${escapeHtml(sourcePerformanceText)}</span></div>
                 </div>
             </div>
 
@@ -5561,9 +5584,81 @@ function renderScannerStatus(status) {
 
             <div class="form-row three-col">
                 <div class="form-group">
+                    <label for="scanner-universe-cache-ttl">Universe Cache TTL (sec)</label>
+                    <input type="number" id="scanner-universe-cache-ttl" class="text-input" value="${universeCacheTtl}" min="0" max="86400" step="30">
+                    <p class="hint">Caches exchange market/ticker universe to reduce rate limits</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-confirm-volume-dev">Confirm Max Volume Deviation%</label>
+                    <input type="number" id="scanner-confirm-volume-dev" class="text-input" value="${confirmMaxVolumeDev}" min="0" step="1">
+                    <p class="hint">Confirm policy rejects large cross-source volume divergence</p>
+                </div>
+                <div class="form-group">
+                    <label>Universe Preview</label>
+                    <button type="button" class="btn btn-secondary" onclick="previewScannerUniverse(false)" id="btn-scanner-preview"><i class="ri-eye-line"></i> Preview Universe</button>
+                    <p class="hint">Dry run only: no AI calls, no orders</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-source-mode">Source Mode</label>
+                    <select id="scanner-source-mode" class="text-input">${sourceModeOptions}</select>
+                    <p class="hint">manual watchlist, follow target exchange, custom source, or hybrid</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-data-policy">Data Policy</label>
+                    <select id="scanner-data-policy" class="text-input">${dataPolicyOptions}</select>
+                    <p class="hint">strict=no fallback, fallback=try public sources, confirm=cross-check source</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-source-exchange">Source Exchange</label>
+                    <input type="text" id="scanner-source-exchange" class="text-input" value="${escapeHtml(sourceExchange)}" placeholder="binance, okx, bybit">
+                    <p class="hint">Leave blank to use the target exchange</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-source-market-type">Source Market Type</label>
+                    <select id="scanner-source-market-type" class="text-input">${sourceMarketOptions}</select>
+                    <p class="hint">Use target, contract, or spot data markets</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-universe-top-n">Universe Top N</label>
+                    <input type="number" id="scanner-universe-top-n" class="text-input" value="${universeTopN}" min="1" max="1000" step="1">
+                    <p class="hint">Max auto symbols from exchange markets</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-universe-min-volume">Universe Min Quote Volume</label>
+                    <input type="number" id="scanner-universe-min-volume" class="text-input" value="${universeMinQuoteVolume}" min="0" step="100000">
+                    <p class="hint">Applied when exchange ticker volume is available</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-include-symbols">Include Symbols</label>
+                    <input type="text" id="scanner-include-symbols" class="text-input" value="${escapeHtml(includeSymbols)}" placeholder="BTCUSDT,SOLUSDT">
+                    <p class="hint">Hybrid mode manual additions</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-exclude-symbols">Exclude Symbols</label>
+                    <input type="text" id="scanner-exclude-symbols" class="text-input" value="${escapeHtml(excludeSymbols)}" placeholder="DOGEUSDT">
+                    <p class="hint">Always removed from the effective universe</p>
+                </div>
+                <div class="form-group">
+                    <label>Last Universe Sample</label>
+                    <div class="text-input" style="min-height:40px;white-space:normal">${escapeHtml((lastUniverse.symbols || []).slice(0, 12).join(', ') || '--')}</div>
+                    <p class="hint">Target ${escapeHtml(source.target_exchange || '--')}/${escapeHtml(source.target_market_type || '--')}</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
                     <label for="scanner-watchlist">Watchlist</label>
                     <input type="text" id="scanner-watchlist" class="text-input" value="${escapeHtml(watchlist)}" placeholder="BTCUSDT,ETHUSDT,XAUUSD">
-                    <p class="hint">Comma-separated symbols to scan</p>
+                    <p class="hint">Comma-separated symbols. Empty = all tradable symbols on target exchange</p>
                 </div>
                 <div class="form-group">
                     <label for="scanner-timeframes">Timeframes</label>
@@ -5903,7 +5998,7 @@ function renderScannerStatus(status) {
                 <div class="form-group">
                     <label for="scanner-live-wl">Live Whitelist</label>
                     <input type="text" id="scanner-live-wl" class="text-input" value="${escapeHtml(liveWl)}" placeholder="BTCUSDT,ETHUSDT">
-                    <p class="hint">Symbols allowed for live auto-trading</p>
+                    <p class="hint">Leave empty to allow all symbols in the live universe snapshot</p>
                 </div>
                 <div class="form-group">
                     <label for="scanner-symbol-map">Symbol Map (JSON)</label>
@@ -5931,9 +6026,11 @@ function renderScannerStatus(status) {
                 <p style="font-size:12px;color:var(--text-secondary);margin:0">
                     <i class="ri-information-line" style="color:#fbbf24"></i>
                     <strong>AI Confidence Gate:</strong> Scanner signals require confidence &ge; ${(aiMinConf * 100).toFixed(0)}% (vs 60% for manual). Observe mode never creates orders.<br>
-                    <strong>Filters:</strong> EMA200 ${ema200Enabled ? 'enabled' : 'disabled'} | HTF Conflict ${htfConflictEnabled ? 'enabled' : 'disabled'} | Regime ${regimeFilterEnabled ? 'enabled' : 'disabled'}
+                    <strong>Filters:</strong> EMA200 ${ema200Enabled ? 'enabled' : 'disabled'} | HTF Conflict ${htfConflictEnabled ? 'enabled' : 'disabled'} | Regime ${regimeFilterEnabled ? 'enabled' : 'disabled'}<br>
+                    <strong>Empty Lists:</strong> Empty Watchlist scans all target-exchange tradable symbols. Empty Live Whitelist allows all symbols in the live universe snapshot.
                 </p>
             </div>
+            <div id="admin-scanner-universe-preview" class="mt-4"></div>
         </div>`;
 
     setTimeout(() => loadScannerAudits().catch(() => {}), 700);
@@ -5952,6 +6049,16 @@ async function saveScannerSettings() {
         mode: document.getElementById('scanner-mode').value,
         interval_secs: scannerNumberValue('scanner-interval', 600, true),
         watchlist: document.getElementById('scanner-watchlist').value.split(',').map(s => s.trim()).filter(Boolean),
+        source_mode: document.getElementById('scanner-source-mode').value,
+        source_exchange: document.getElementById('scanner-source-exchange').value.trim(),
+        source_market_type: document.getElementById('scanner-source-market-type').value,
+        data_source_policy: document.getElementById('scanner-data-policy').value,
+        universe_top_n: scannerNumberValue('scanner-universe-top-n', 50, true),
+        universe_min_quote_volume: scannerNumberValue('scanner-universe-min-volume', 5000000),
+        universe_cache_ttl_secs: scannerNumberValue('scanner-universe-cache-ttl', 300, true),
+        confirm_max_volume_deviation_pct: scannerNumberValue('scanner-confirm-volume-dev', 80),
+        include_symbols: document.getElementById('scanner-include-symbols').value.split(',').map(s => s.trim()).filter(Boolean),
+        exclude_symbols: document.getElementById('scanner-exclude-symbols').value.split(',').map(s => s.trim()).filter(Boolean),
         timeframes: document.getElementById('scanner-timeframes').value.split(',').map(s => s.trim()).filter(Boolean),
         min_score: scannerNumberValue('scanner-min-score', 65),
         max_candidates_per_run: scannerNumberValue('scanner-max-candidates', 3, true),
@@ -6048,6 +6155,48 @@ async function runScannerOnce() {
     }
 }
 
+async function previewScannerUniverse(refresh = false) {
+    const btn = document.getElementById('btn-scanner-preview');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="ri-loader-4-line"></i> Previewing...';
+    }
+    try {
+        const data = await fetchAPI(`/api/scanner/universe-preview?limit=100&refresh=${refresh ? 'true' : 'false'}`);
+        renderScannerUniversePreview(data);
+    } catch (err) {
+        showToast(err.message, 'error', 'Universe Preview Failed');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="ri-eye-line"></i> Preview Universe';
+        }
+    }
+}
+
+function renderScannerUniversePreview(data) {
+    const el = document.getElementById('admin-scanner-universe-preview');
+    if (!el) return;
+    const summary = data.summary || {};
+    const items = data.items || [];
+    const skipped = data.skipped || [];
+    const sourceHealth = summary.source_health || {};
+    const healthRows = Object.entries(sourceHealth).map(([key, h]) => `<tr><td>${escapeHtml(key)}</td><td><span class="badge ${h.status === 'ok' || h.status === 'cached' ? 'badge-success' : h.status === 'rate_limited' ? 'badge-warning' : 'badge-error'}">${escapeHtml(h.status || '--')}</span></td><td>${escapeHtml(String(h.last_items ?? 0))}</td><td>${escapeHtml(String(h.last_latency_ms ?? 0))}ms</td><td>${escapeHtml(h.last_error || h.last_reason || '')}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No source health yet</td></tr>';
+    const rows = items.slice(0, 30).map(item => `<tr><td>${escapeHtml(item.watch_symbol || '--')}</td><td>${escapeHtml(item.exchange_symbol || '--')}</td><td>${escapeHtml(item.target_exchange || '--')}/${escapeHtml(item.target_market_type || '--')}</td><td>${escapeHtml(item.source_exchange || '--')}/${escapeHtml(item.source_market_type || '--')}</td><td>${escapeHtml(item.liquidity_tier || '--')}</td><td>${escapeHtml(String(item.quote_volume || 0))}</td><td>${escapeHtml(item.tradability_reason || '--')}</td></tr>`).join('') || '<tr><td colspan="7" class="empty-state">No tradable symbols in preview</td></tr>';
+    const skippedRows = skipped.slice(0, 20).map(item => `<tr><td>${escapeHtml(item.watch_symbol || '--')}</td><td>${escapeHtml(item.source_exchange || '--')}/${escapeHtml(item.source_market_type || '--')}</td><td>${escapeHtml(item.tradability_reason || '--')}</td><td>${escapeHtml(String(item.quote_volume || 0))}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No skipped symbols in preview</td></tr>';
+    el.innerHTML = `<div style="padding:12px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-secondary)">
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+            <strong>Universe Preview</strong>
+            <span class="badge badge-active">${escapeHtml(summary.source_mode || '--')}</span>
+            <span class="hint">tradable ${summary.count || 0}, skipped ${summary.skipped_count || 0}</span>
+            <button class="btn btn-secondary btn-sm" onclick="previewScannerUniverse(true)"><i class="ri-refresh-line"></i> Refresh Preview</button>
+        </div>
+        <div class="table-wrapper"><table class="data-table"><thead><tr><th>Watch</th><th>Exec</th><th>Target</th><th>Source</th><th>Tier</th><th>Quote Vol</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <details class="mt-4"><summary>Skipped / Excluded (${skipped.length})</summary><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Symbol</th><th>Source</th><th>Reason</th><th>Quote Vol</th></tr></thead><tbody>${skippedRows}</tbody></table></div></details>
+        <details class="mt-4"><summary>Source Health</summary><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Source</th><th>Status</th><th>Items</th><th>Latency</th><th>Reason</th></tr></thead><tbody>${healthRows}</tbody></table></div></details>
+    </div>`;
+}
+
 async function sendScannerRejectionSummary() {
     try {
         const result = await fetchAPI('/api/scanner/rejection-summary/send', { method: 'POST' });
@@ -6100,26 +6249,31 @@ function renderScannerAudits(items) {
         const aiRec = analysis.recommendation || '';
         const aiConf = analysis.confidence ? ((analysis.confidence || 0) * 100).toFixed(0) + '%' : '';
         const score = Number(a.score);
+        const sourceText = a.actual_data_source || a.source_exchange || payload.actual_data_source || payload.source_exchange || ((payload.quality || {}).actual_data_source) || '--';
+        const tradable = a.tradable ?? payload.tradable ?? ((payload.quality || {}).tradable);
+        const tradableText = tradable === false ? 'not tradable' : (tradable === true ? 'tradable' : '--');
+        const topFilterReasons = Object.entries(payload.filter_reasons || {}).slice(0, 3).map(([k, v]) => `${k}:${v}`).join(', ');
         const summaryDetail = a.event_type === 'run_summary'
-            ? `scanned ${payload.scanned || 0}, candidates ${payload.candidates || 0}, conflicts ${payload.direction_conflicts || 0}, ai ${payload.ai_used || 0}`
+            ? `scanned ${payload.scanned || 0}, candidates ${payload.candidates || 0}, conflicts ${payload.direction_conflicts || 0}, ai ${payload.ai_used || 0}${topFilterReasons ? ` | ${topFilterReasons}` : ''}`
             : '';
         const detail = summaryDetail || (aiRec ? `<span class="badge badge-${aiRec === 'execute' ? 'success' : aiRec === 'reject' ? 'error' : 'pending'}">${escapeHtml(aiRec)}</span> ${aiConf}` : escapeHtml(a.reason || '').substring(0, 80));
         return `<tr>
             <td style="font-size:11px;white-space:nowrap">${ts}</td>
             <td><span class="badge ${eventBadge(a.event_type)}">${escapeHtml(a.event_type)}</span></td>
             <td>${escapeHtml(a.watch_symbol || a.exchange_symbol || '--')}</td>
+            <td style="font-size:11px">${escapeHtml(sourceText)}<br><span class="hint">${escapeHtml(tradableText)}</span></td>
             <td>${a.direction ? escapeHtml(a.direction) : '--'}</td>
             <td>${Number.isFinite(score) ? score.toFixed(1) : '--'}</td>
             <td style="font-size:11px">${detail}</td>
         </tr>`;
-    }).join('') : '<tr><td colspan="6" class="empty-state">No scanner audit events yet</td></tr>';
+    }).join('') : '<tr><td colspan="7" class="empty-state">No scanner audit events yet</td></tr>';
 
     const page = Math.floor(_scannerAuditOffset / SCANNER_AUDIT_PAGE_SIZE) + 1;
     const hasPrevious = _scannerAuditOffset > 0;
     const hasNext = items.length === SCANNER_AUDIT_PAGE_SIZE;
 
     el.innerHTML = `<div class="table-wrapper"><table class="data-table">
-        <thead><tr><th>Time</th><th>Event</th><th>Symbol</th><th>Dir</th><th>Score</th><th>Detail</th></tr></thead>
+        <thead><tr><th>Time</th><th>Event</th><th>Symbol</th><th>Source</th><th>Dir</th><th>Score</th><th>Detail</th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>
     <div class="form-row mt-4" style="justify-content:flex-end;gap:8px">

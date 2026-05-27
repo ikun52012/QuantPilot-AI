@@ -471,6 +471,16 @@ class ScannerConfig(BaseModel):
     mode: str = "observe"
     interval_secs: int = 600
     watchlist: list[str] = Field(default_factory=list)
+    source_mode: str = "manual"
+    source_exchange: str = ""
+    source_market_type: str = ""
+    data_source_policy: str = "fallback"
+    universe_top_n: int = 50
+    universe_min_quote_volume: float = 5_000_000.0
+    universe_cache_ttl_secs: int = 300
+    confirm_max_volume_deviation_pct: float = 80.0
+    include_symbols: list[str] = Field(default_factory=list)
+    exclude_symbols: list[str] = Field(default_factory=list)
     timeframes: list[str] = Field(default_factory=lambda: ["15m", "1h", "4h"])
     min_score: float = 65.0
     max_candidates_per_run: int = 3
@@ -555,7 +565,39 @@ class ScannerConfig(BaseModel):
             raise ValueError("SCANNER_MODE must be one of: observe, paper, live")
         return normalized
 
-    @field_validator("watchlist", "live_symbol_whitelist")
+    @field_validator("source_mode")
+    @classmethod
+    def validate_source_mode(cls, v: str) -> str:
+        normalized = str(v or "manual").lower().strip()
+        allowed = {"manual", "follow_exchange", "custom_exchange", "hybrid"}
+        if normalized not in allowed:
+            raise ValueError("SCANNER_SOURCE_MODE must be one of: manual, follow_exchange, custom_exchange, hybrid")
+        return normalized
+
+    @field_validator("data_source_policy")
+    @classmethod
+    def validate_data_source_policy(cls, v: str) -> str:
+        normalized = str(v or "fallback").lower().strip()
+        if normalized not in {"strict", "fallback", "confirm"}:
+            raise ValueError("SCANNER_DATA_SOURCE_POLICY must be one of: strict, fallback, confirm")
+        return normalized
+
+    @field_validator("source_market_type")
+    @classmethod
+    def validate_source_market_type(cls, v: str) -> str:
+        normalized = str(v or "").lower().strip()
+        if normalized in {"future", "futures", "swap", "linear", "inverse"}:
+            return "contract"
+        if normalized not in {"", "spot", "contract"}:
+            raise ValueError("SCANNER_SOURCE_MARKET_TYPE must be one of: spot, contract")
+        return normalized
+
+    @field_validator("source_exchange")
+    @classmethod
+    def validate_source_exchange(cls, v: str) -> str:
+        return str(v or "").lower().strip()
+
+    @field_validator("watchlist", "live_symbol_whitelist", "include_symbols", "exclude_symbols")
     @classmethod
     def validate_string_list(cls, v: list[str]) -> list[str]:
         normalized: list[str] = []
@@ -583,6 +625,16 @@ class ScannerConfig(BaseModel):
             mode=os.getenv("SCANNER_MODE", "observe"),
             interval_secs=max(60, int(os.getenv("SCANNER_INTERVAL_SECS", "600"))),
             watchlist=_json_env("SCANNER_WATCHLIST", []),
+            source_mode=os.getenv("SCANNER_SOURCE_MODE", "manual"),
+            source_exchange=os.getenv("SCANNER_SOURCE_EXCHANGE", ""),
+            source_market_type=os.getenv("SCANNER_SOURCE_MARKET_TYPE", ""),
+            data_source_policy=os.getenv("SCANNER_DATA_SOURCE_POLICY", "fallback"),
+            universe_top_n=max(1, int(os.getenv("SCANNER_UNIVERSE_TOP_N", "50"))),
+            universe_min_quote_volume=max(0.0, float(os.getenv("SCANNER_UNIVERSE_MIN_QUOTE_VOLUME", "5000000"))),
+            universe_cache_ttl_secs=max(0, int(os.getenv("SCANNER_UNIVERSE_CACHE_TTL_SECS", "300"))),
+            confirm_max_volume_deviation_pct=max(0.0, float(os.getenv("SCANNER_CONFIRM_MAX_VOLUME_DEVIATION_PCT", "80"))),
+            include_symbols=_json_env("SCANNER_INCLUDE_SYMBOLS", []),
+            exclude_symbols=_json_env("SCANNER_EXCLUDE_SYMBOLS", []),
             timeframes=_json_env("SCANNER_TIMEFRAMES", ["15m", "1h", "4h"]),
             min_score=float(os.getenv("SCANNER_MIN_SCORE", "65")),
             max_candidates_per_run=max(1, int(os.getenv("SCANNER_MAX_CANDIDATES_PER_RUN", "3"))),
@@ -667,7 +719,7 @@ class ScannerConfig(BaseModel):
 class Settings(BaseModel):
     """Application settings - loaded entirely from environment variables."""
     app_name: str = "QuantPilot AI"
-    app_version: str = "5.3.1"
+    app_version: str = "5.4.0"
     debug: bool = False
     json_logs: bool = False
 

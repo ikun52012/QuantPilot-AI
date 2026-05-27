@@ -537,7 +537,7 @@ def _to_optional_float(value: object) -> float | None:
     return None
 
 
-def _get_exchange() -> ccxt.Exchange:
+def _get_exchange(market_type: str | None = None) -> ccxt.Exchange:
     """Create a ccxt exchange instance (uses connection pool when available)."""
     if not _CCXT_AVAILABLE:
         raise RuntimeError("ccxt is not installed; market data fetch is unavailable")
@@ -548,10 +548,11 @@ def _get_exchange() -> ccxt.Exchange:
         password=settings.exchange.password,
         live=False,
         sandbox=settings.exchange.sandbox_mode,
+        market_type=market_type,
     )
 
 
-def _get_public_market_exchange(exchange_id: str) -> ccxt.Exchange:
+def _get_public_market_exchange(exchange_id: str, market_type: str | None = None) -> ccxt.Exchange:
     """Create a public-only market-data exchange without user credentials.
 
     For exchanges supporting perpetual contracts (funding_rate, open_interest),
@@ -561,7 +562,12 @@ def _get_public_market_exchange(exchange_id: str) -> ccxt.Exchange:
     exchange = exchange_cls({"enableRateLimit": True, "timeout": 12000})
     exchange.options["adjustForTimeDifference"] = True
 
-    if exchange_id in {"binance", "okx", "bybit"}:
+    requested_type = str(market_type or "").lower().strip()
+    if requested_type == "spot":
+        exchange.options["defaultType"] = "spot"
+    elif requested_type in {"contract", "swap", "future", "futures"}:
+        exchange.options["defaultType"] = "swap"
+    elif exchange_id in {"binance", "okx", "bybit"}:
         exchange.options["defaultType"] = "swap"
     elif exchange_id in {"bitget", "gate"}:
         exchange.options["defaultType"] = "spot"
@@ -569,7 +575,7 @@ def _get_public_market_exchange(exchange_id: str) -> ccxt.Exchange:
     return exchange
 
 
-def _market_data_exchange_ids() -> list[str]:
+def _market_data_exchange_ids(primary_exchange: str | None = None, include_fallbacks: bool = True) -> list[str]:
     """Use the configured exchange first, then public fallbacks for market data.
 
     Priority order:
@@ -582,9 +588,12 @@ def _market_data_exchange_ids() -> list[str]:
     Note: If primary exchange is sandbox/demo mode, skip its public API fallback
     to avoid duplicate failures (sandbox often has fewer trading pairs).
     """
-    primary = settings.exchange.name
+    primary = str(primary_exchange or settings.exchange.name).lower().strip()
 
-    if settings.exchange.sandbox_mode:
+    if not include_fallbacks:
+        return [primary]
+
+    if primary == settings.exchange.name and settings.exchange.sandbox_mode:
         sandbox_exchanges = {"okx", "binance", "bybit"}
         if primary in sandbox_exchanges:
             filtered_fallbacks = [e for e in _PUBLIC_MARKET_DATA_FALLBACKS if e != primary]
@@ -593,10 +602,10 @@ def _market_data_exchange_ids() -> list[str]:
     return list(dict.fromkeys([primary, *_PUBLIC_MARKET_DATA_FALLBACKS]))
 
 
-def _get_market_data_exchange(exchange_id: str) -> ccxt.Exchange:
+def _get_market_data_exchange(exchange_id: str, market_type: str | None = None) -> ccxt.Exchange:
     if exchange_id == settings.exchange.name:
-        return _get_exchange()
-    return _get_public_market_exchange(exchange_id)
+        return _get_exchange(market_type=market_type)
+    return _get_public_market_exchange(exchange_id, market_type=market_type)
 
 
 def _candles_to_ohlcv_dicts(candles: list[list[float]]) -> list[dict[str, float | str]]:
@@ -645,7 +654,12 @@ async def _get_cache_lock(ticker: str) -> asyncio.Lock:
         return lock
 
 
-async def fetch_market_context(ticker: str) -> MarketContext:
+async def fetch_market_context(
+    ticker: str,
+    exchange_ids: list[str] | None = None,
+    market_type: str | None = None,
+    cache_scope: str | None = None,
+) -> MarketContext:
     """
     Fetch comprehensive market context for AI analysis.
 
@@ -657,31 +671,36 @@ async def fetch_market_context(ticker: str) -> MarketContext:
     Results are cached per ticker for up to 60 s.
     """
     now = time.monotonic()
+    scoped_fetch = bool(exchange_ids or market_type or cache_scope)
+    if scoped_fetch and not cache_scope:
+        cache_scope = f"scoped:{','.join(exchange_ids or [])}:{market_type or ''}"
+    cache_key = f"{cache_scope}:{ticker}" if cache_scope else ticker
 
     # Optimization 6: Check WebSocket data first
-    ws_data = _ws_manager.get_latest_data(ticker)
+    ws_data = None if scoped_fetch else _ws_manager.get_latest_data(ticker)
     if ws_data and ws_data.get("price", 0) > 0:
         logger.debug(f"[MarketData] Using WebSocket data for {ticker}")
         # WebSocket data is already updating cache, return from cache
-        entry = _market_cache.get(ticker)
+        entry = _market_cache.get(cache_key)
         if entry:
             return entry[1]
 
-    lock = await _get_cache_lock(ticker)
+    lock = await _get_cache_lock(cache_key)
     async with lock:
-        entry = _market_cache.get(ticker)
+        entry = _market_cache.get(cache_key)
         if entry and (now - entry[0]) < _MARKET_CACHE_TTL:
-            _market_cache.move_to_end(ticker)
+            _market_cache.move_to_end(cache_key)
             logger.debug(f"[MarketData] Cache hit for {ticker}")
             return entry[1]
 
         # Try WebSocket subscription for future updates
-        await _ws_manager.subscribe_ticker(ticker)
+        if not scoped_fetch:
+            await _ws_manager.subscribe_ticker(ticker)
 
-        context = await _fetch_market_context_live(ticker)
+        context = await _fetch_market_context_live(ticker, exchange_ids=exchange_ids, market_type=market_type)
 
-        _market_cache[ticker] = (time.monotonic(), context)
-        _market_cache.move_to_end(ticker)
+        _market_cache[cache_key] = (time.monotonic(), context)
+        _market_cache.move_to_end(cache_key)
         while len(_market_cache) > _MARKET_CACHE_MAX_SIZE:
             _market_cache.popitem(last=False)
 
@@ -693,16 +712,21 @@ async def fetch_market_context(ticker: str) -> MarketContext:
     return context
 
 
-async def _fetch_market_context_live(ticker: str) -> MarketContext:
+async def _fetch_market_context_live(
+    ticker: str,
+    exchange_ids: list[str] | None = None,
+    market_type: str | None = None,
+) -> MarketContext:
     if not _CCXT_AVAILABLE:
         logger.warning("[MarketData] ccxt is not installed; returning empty market context")
         return _empty_market_context(ticker)
 
     last_error = None
-    for exchange_id in _market_data_exchange_ids():
+    source_ids = exchange_ids or _market_data_exchange_ids()
+    for exchange_id in source_ids:
         try:
-            exchange = _get_market_data_exchange(exchange_id)
-            symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
+            exchange = _get_market_data_exchange(exchange_id, market_type=market_type)
+            symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker, market_type)
 
             fetch_results = cast(
                 tuple[object, object, object, object, object, object],
@@ -1385,6 +1409,8 @@ async def fetch_ohlcv_history(
     timeframe: str = "1h",
     days: int = 30,
     exchange_config: dict | None = None,
+    exchange_ids: list[str] | None = None,
+    market_type: str | None = None,
 ) -> list[dict]:
     """
     Fetch historical OHLCV data for backtesting.
@@ -1418,10 +1444,11 @@ async def fetch_ohlcv_history(
     limit = min(bars_needed, 1000)
     last_error = None
 
-    for exchange_id in _market_data_exchange_ids():
+    source_ids = exchange_ids or _market_data_exchange_ids()
+    for exchange_id in source_ids:
         try:
-            exchange = _get_market_data_exchange(exchange_id)
-            symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker)
+            exchange = _get_market_data_exchange(exchange_id, market_type=market_type)
+            symbol = await asyncio.to_thread(_resolve_symbol, exchange, ticker, market_type)
             candles = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
             if not candles:
                 logger.warning(f"[MarketData] {exchange_id} returned no OHLCV candles for {ticker}")

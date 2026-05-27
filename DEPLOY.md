@@ -1,7 +1,7 @@
 # QuantPilot AI - Deployment Guide
 
 
-> Version: v5.3.1 | Last Updated: 2026-05
+> Version: v5.4.0 | Last Updated: 2026-05
 
 ---
 
@@ -14,7 +14,7 @@
 5. [Environment Variables Configuration](#5-environment-variables-configuration)
 6. [Troubleshooting](#6-troubleshooting)
 7. [Security Checklist](#7-security-checklist)
-8. [New Features in v5.3.1](#8-new-features-in-v531)
+8. [New Features in v5.4.0](#8-new-features-in-v540)
 
 ---
 
@@ -101,7 +101,7 @@ PYTHONIOENCODING=utf-8 uvicorn app:app --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://localhost:8000/health
-# Expected: {"status":"healthy","version":"5.3.1","database":"ok","cache":"ok"}
+# Expected: {"status":"healthy","version":"5.4.0","database":"ok","cache":"ok"}
 ```
 
 Open browser at `http://localhost:8000`, login with default account:
@@ -140,7 +140,7 @@ docker compose up -d
 The production compose file uses the published GHCR image by default:
 
 ```bash
-SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v5.3.1
+SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v5.4.0
 ```
 
 If you want the admin panel one-click update button to work, explicitly opt in with
@@ -462,7 +462,17 @@ Verify each item before production deployment:
 
 ---
 
-## 8. New Features in v5.3.1
+## 8. New Features in v5.4.0
+
+### Exchange-Aware Scanner Universe
+- Empty watchlists now scan all tradable symbols on the target exchange, while empty live whitelists allow all symbols in the live universe snapshot
+- Manual, follow-exchange, custom-exchange, and hybrid source modes support strict, fallback, and confirm data-source policies
+- Universe preview, source health, live snapshots, and per-filter funnel diagnostics make scanner behavior auditable before AI review
+
+### Scanner Data Quality and Operations
+- Exchange market/ticker universe data is cached to reduce rate-limit pressure
+- Confirm mode validates cross-source price, volume, and spread divergence
+- Auto-generated symbols are tiered by liquidity so lower-liquidity markets require stronger scanner scores
 
 ### Institutional Scanner Consensus
 - One final long, short, or neutral decision per symbol using weighted multi-timeframe consensus
@@ -475,7 +485,7 @@ Verify each item before production deployment:
 - Adaptive score and cooldown state are persisted in `scanner_states` for safe upgrades
 
 ### Release and Operations
-- Docker Compose defaults now point to the versioned `v5.3.1` GHCR images
+- Docker Compose defaults now point to the versioned `v5.4.0` GHCR images
 - Database startup migration adds scanner learning columns to existing deployments automatically
 - Scanner audits are cleaned daily to bound database growth
 

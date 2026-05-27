@@ -16,7 +16,7 @@ from core.database import (
 )
 from core.utils.datetime import utcnow
 from models import MarketContext
-from services.market_scanner import MarketScannerService, ScannerCandidate
+from services.market_scanner import MarketScannerService, ScannerCandidate, ScannerUniverseItem
 from services.scanner_learning import (
     compute_factor_performance,
     compute_outcome_summary,
@@ -152,6 +152,170 @@ async def test_ohlcv_bundle_marks_missing_market_context_degraded(monkeypatch):
     assert bundle.quality_passed is False
     assert "market_context_unavailable" in bundle.quality_reasons
     assert bundle.data_quality["market_context_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_ohlcv_provider_strict_policy_uses_configured_source(monkeypatch):
+    calls = []
+    monkeypatch.setattr(settings.scanner, "bundle_cache_ttl_secs", 0)
+    monkeypatch.setattr(settings.scanner, "timeframes", ["1h"])
+    monkeypatch.setattr(settings.scanner, "data_source_policy", "strict")
+
+    async def fake_fetch_ohlcv_history(ticker, **kwargs):
+        calls.append(("ohlcv", ticker, kwargs))
+        return [candle.model_dump() for candle in _candles(80)]
+
+    async def fake_fetch_market_context(symbol, **kwargs):
+        calls.append(("context", symbol, kwargs))
+        context = MarketContext(ticker=symbol, current_price=_candles(80)[-1].close, volume_24h=20_000_000.0)
+        context._market_data_source = "okx"
+        return context
+
+    monkeypatch.setattr("services.unified_ohlcv.fetch_ohlcv_history", fake_fetch_ohlcv_history)
+    monkeypatch.setattr("services.unified_ohlcv.fetch_market_context", fake_fetch_market_context)
+
+    bundle = await UnifiedOHLCVProvider().get_bundle(
+        "BTCUSDT",
+        ["1h"],
+        source_exchange="okx",
+        source_market_type="contract",
+        data_source_policy="strict",
+    )
+
+    assert bundle.mapping.source_exchange == "okx"
+    assert bundle.mapping.actual_data_source == "okx"
+    assert bundle.data_quality["data_source_policy"] == "strict"
+    assert any(call[2].get("exchange_ids") == ["okx"] for call in calls if call[0] == "ohlcv")
+    assert any(call[2].get("exchange_ids") == ["okx"] for call in calls if call[0] == "context")
+
+
+@pytest.mark.asyncio
+async def test_hybrid_universe_uses_exchange_markets_with_include_exclude(monkeypatch):
+    class FakeExchange:
+        def load_markets(self):
+            return {
+                "BTC/USDT:USDT": {"base": "BTC", "quote": "USDT", "contract": True, "swap": True, "active": True},
+                "ETH/USDT:USDT": {"base": "ETH", "quote": "USDT", "contract": True, "swap": True, "active": True},
+                "DOGE/USDT:USDT": {"base": "DOGE", "quote": "USDT", "contract": True, "swap": True, "active": True},
+            }
+
+        def fetch_tickers(self):
+            return {
+                "BTC/USDT:USDT": {"quoteVolume": 100_000_000},
+                "ETH/USDT:USDT": {"quoteVolume": 80_000_000},
+                "DOGE/USDT:USDT": {"quoteVolume": 1_000_000},
+            }
+
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: FakeExchange())
+    monkeypatch.setattr(settings.scanner, "source_mode", "hybrid")
+    monkeypatch.setattr(settings.scanner, "source_exchange", "binance")
+    monkeypatch.setattr(settings.scanner, "source_market_type", "contract")
+    monkeypatch.setattr(settings.scanner, "universe_top_n", 2)
+    monkeypatch.setattr(settings.scanner, "universe_min_quote_volume", 5_000_000.0)
+    monkeypatch.setattr(settings.scanner, "watchlist", ["XRPUSDT"])
+    monkeypatch.setattr(settings.scanner, "include_symbols", ["SOLUSDT"])
+    monkeypatch.setattr(settings.scanner, "exclude_symbols", ["ETHUSDT"])
+    monkeypatch.setattr(settings.exchange, "name", "binance")
+    monkeypatch.setattr(settings.exchange, "market_type", "contract")
+
+    universe = await MarketScannerService()._build_effective_universe()
+    symbols = [item.watch_symbol for item in universe]
+
+    assert "BTCUSDT" in symbols
+    assert "ETHUSDT" not in symbols
+    assert "DOGEUSDT" not in symbols
+    assert "XRPUSDT" in symbols
+    assert "SOLUSDT" in symbols
+    assert all(item.tradable for item in universe)
+
+
+@pytest.mark.asyncio
+async def test_empty_manual_watchlist_defaults_to_all_tradable(monkeypatch):
+    class FakeExchange:
+        def load_markets(self):
+            return {
+                "BTC/USDT:USDT": {"base": "BTC", "quote": "USDT", "contract": True, "swap": True, "active": True},
+                "ETH/USDT:USDT": {"base": "ETH", "quote": "USDT", "contract": True, "swap": True, "active": True},
+            }
+
+        def fetch_tickers(self):
+            return {
+                "BTC/USDT:USDT": {"quoteVolume": 100_000_000},
+                "ETH/USDT:USDT": {"quoteVolume": 80_000_000},
+            }
+
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: FakeExchange())
+    monkeypatch.setattr(settings.scanner, "source_mode", "manual")
+    monkeypatch.setattr(settings.scanner, "watchlist", [])
+    monkeypatch.setattr(settings.scanner, "universe_top_n", 50)
+    monkeypatch.setattr(settings.scanner, "universe_min_quote_volume", 0.0)
+    monkeypatch.setattr(settings.exchange, "name", "binance")
+    monkeypatch.setattr(settings.exchange, "market_type", "contract")
+
+    universe = await MarketScannerService()._build_effective_universe()
+
+    assert [item.watch_symbol for item in universe] == ["BTCUSDT", "ETHUSDT"]
+    assert all(item.universe_source == "manual_all_tradable" for item in universe)
+
+
+@pytest.mark.asyncio
+async def test_universe_preview_reports_skipped_and_source_health(monkeypatch):
+    class FakeExchange:
+        def load_markets(self):
+            return {
+                "BTC/USDT:USDT": {"base": "BTC", "quote": "USDT", "contract": True, "swap": True, "active": True},
+                "DOGE/USDT:USDT": {"base": "DOGE", "quote": "USDT", "contract": True, "swap": True, "active": True},
+            }
+
+        def fetch_tickers(self):
+            return {
+                "BTC/USDT:USDT": {"quoteVolume": 100_000_000},
+                "DOGE/USDT:USDT": {"quoteVolume": 100},
+            }
+
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: FakeExchange())
+    monkeypatch.setattr(settings.scanner, "source_mode", "follow_exchange")
+    monkeypatch.setattr(settings.scanner, "universe_min_quote_volume", 1_000_000.0)
+    monkeypatch.setattr(settings.scanner, "universe_top_n", 50)
+    monkeypatch.setattr(settings.exchange, "name", "binance")
+    monkeypatch.setattr(settings.exchange, "market_type", "contract")
+
+    preview = await MarketScannerService().preview_universe(force_refresh=True)
+
+    assert preview["summary"]["count"] == 1
+    assert preview["items"][0]["watch_symbol"] == "BTCUSDT"
+    assert preview["skipped"][0]["tradability_reason"] == "quote_volume_below_universe_minimum"
+    assert preview["summary"]["source_health"]
+
+
+@pytest.mark.asyncio
+async def test_live_validation_empty_whitelist_allows_snapshot_symbol(monkeypatch):
+    service = MarketScannerService()
+    item = ScannerUniverseItem(
+        watch_symbol="BTCUSDT",
+        exchange_symbol="BTCUSDT",
+        target_exchange="binance",
+        target_market_type="contract",
+        source_exchange="binance",
+        source_market_type="contract",
+        source_symbol="BTCUSDT",
+        universe_source="manual_all_tradable",
+    )
+    service._set_live_universe_snapshot([item])
+    candidate = _candidate("long")
+    candidate.target_exchange = "binance"
+    candidate.target_market_type = "contract"
+
+    monkeypatch.setattr(settings.scanner, "mode", "live")
+    monkeypatch.setattr(settings.scanner, "live_symbol_whitelist", [])
+    monkeypatch.setattr(settings.exchange, "live_trading", True)
+    monkeypatch.setattr("exchange.get_market_limits", lambda *args, **kwargs: {"symbol": "BTC/USDT:USDT"})
+
+    ok, reason, limits = await service._validate_live_market(candidate)
+
+    assert ok
+    assert reason == ""
+    assert limits["symbol"] == "BTC/USDT:USDT"
 
 
 def _candidate(direction: str = "long", score: float = 80.0, setup_hash: str = "candidate") -> ScannerCandidate:

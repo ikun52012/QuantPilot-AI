@@ -8,7 +8,7 @@
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
 
-**QuantPilot AI** 是一款工业级（Production-Grade）加密货币量化交易集成与决策执行平台。系统将 TradingView 的 Webhook 信号机制、极为苛刻的 **v5.3 机构级扫描器与前置过滤栈**、**智能资金概念 (SMC/FVG) 市场结构分析** 与先进的 AI 决策管道（支持 OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral 以及 **OpenRouter 100+ 种模型**）完美结合，进行二次智能风控决策与入场点优化，并在全球主流加密货币交易所（如 Binance, OKX, Bybit 等）实现全自动订单执行。
+**QuantPilot AI** 是一款工业级（Production-Grade）加密货币量化交易集成与决策执行平台。系统将 TradingView 的 Webhook 信号机制、极为苛刻的 **v5.4 交易所感知扫描器与前置过滤栈**、**智能资金概念 (SMC/FVG) 市场结构分析** 与先进的 AI 决策管道（支持 OpenAI GPT-4o, Anthropic Claude 3.5 Sonnet, DeepSeek, Mistral 以及 **OpenRouter 100+ 种模型**）完美结合，进行二次智能风控决策与入场点优化，并在全球主流加密货币交易所（如 Binance, OKX, Bybit 等）实现全自动订单执行。
 
 [English](./README.md) | [中文说明文档](./README_ZH.md)
 
@@ -17,6 +17,11 @@
 ---
 
 ## 🚀 最新特性
+
+### 🆕 v5.4 交易所感知扫描池
+- **全可交易默认值**：Watchlist 留空时扫描目标交易所全部可交易品种；Live Whitelist 留空时允许 live universe snapshot 内全部品种。
+- **来源策略与预览**：支持 manual、follow_exchange、custom_exchange、hybrid，并提供 strict/fallback/confirm 数据源策略与干跑预览。
+- **来源健康与过滤漏斗**：加入交易所 universe 缓存、source health、流动性分层和按原因聚合的扫描漏斗诊断。
 
 ### 🆕 v5.3 机构级扫描器精准化
 - **多周期共识信号**：扫描器现在按标的输出一个最终 long/short/neutral 决策，通过高周期加权共识和确认周期门槛减少互相冲突的候选信号。

@@ -22,6 +22,7 @@ from market_data import (
     _calculate_rsi,
     _calculate_volume_profile,
     _calculate_vwap,
+    _market_data_exchange_ids,
     fetch_market_context,
     fetch_ohlcv_history,
 )
@@ -44,6 +45,18 @@ class SymbolMapping(BaseModel):
     market_type: str | None = None
     mapped_asset: bool = False
     data_source: str = "ccxt"
+    data_source_policy: str = "fallback"
+    source_exchange: str | None = None
+    source_market_type: str | None = None
+    source_symbol: str | None = None
+    target_exchange: str | None = None
+    target_market_type: str | None = None
+    actual_data_source: str = ""
+    tradable: bool = True
+    tradability_reason: str = ""
+    universe_source: str = "manual"
+    liquidity_tier: str = "unknown"
+    quote_volume: float = 0.0
 
 
 class OHLCVBundle(BaseModel):
@@ -130,6 +143,20 @@ def _optional_float(value: Any) -> float | None:
         return parsed if parsed == parsed else None
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_market_type(value: Any, default: str = "contract") -> str:
+    normalized = str(value or default or "contract").lower().strip()
+    if normalized in {"future", "futures", "swap", "linear", "inverse"}:
+        return "contract"
+    if normalized == "spot":
+        return "spot"
+    return "contract"
+
+
+def _normalize_data_policy(value: Any) -> str:
+    normalized = str(value or settings.scanner.data_source_policy or "fallback").lower().strip()
+    return normalized if normalized in {"strict", "fallback", "confirm"} else "fallback"
 
 
 def _candles_from_history(rows: list[dict[str, Any]]) -> list[NormalizedCandle]:
@@ -307,37 +334,90 @@ class UnifiedOHLCVProvider:
     def __init__(self) -> None:
         self._bundle_cache = _BoundedTTLCache(maxsize=500, ttl=45.0)
 
-    def resolve_mapping(self, watch_symbol: str) -> SymbolMapping:
+    def resolve_mapping(
+        self,
+        watch_symbol: str,
+        *,
+        exchange_symbol: str | None = None,
+        target_exchange: str | None = None,
+        target_market_type: str | None = None,
+        source_exchange: str | None = None,
+        source_market_type: str | None = None,
+        source_symbol: str | None = None,
+        data_source_policy: str | None = None,
+        tradable: bool = True,
+        tradability_reason: str = "",
+        universe_source: str = "manual",
+        liquidity_tier: str = "unknown",
+        quote_volume: float = 0.0,
+    ) -> SymbolMapping:
         watch = str(watch_symbol or "").upper().strip()
         raw_map = settings.scanner.symbol_map.get(watch) or settings.scanner.symbol_map.get(watch.replace("/", ""))
         if isinstance(raw_map, dict):
-            exchange_symbol = str(raw_map.get("exchange_symbol") or watch).upper().strip()
+            mapped_exchange_symbol = str(raw_map.get("exchange_symbol") or watch).upper().strip()
             exchange_name = str(raw_map.get("exchange_name") or settings.exchange.name).lower().strip()
             market_type = str(
                 raw_map.get("type") or raw_map.get("market_type")
                 or settings.exchange.market_type
             ).lower().strip()
+            mapped_source_exchange = str(raw_map.get("source_exchange") or exchange_name).lower().strip()
+            mapped_source_market_type = str(raw_map.get("source_market_type") or market_type).lower().strip()
+            mapped_source_symbol = str(raw_map.get("source_symbol") or raw_map.get("data_symbol") or watch).upper().strip()
         else:
-            exchange_symbol = watch
+            mapped_exchange_symbol = watch
             exchange_name = settings.exchange.name
             market_type = settings.exchange.market_type
+            mapped_source_exchange = settings.scanner.source_exchange or exchange_name
+            mapped_source_market_type = settings.scanner.source_market_type or market_type
+            mapped_source_symbol = watch
+
+        resolved_exchange_symbol = str(exchange_symbol or mapped_exchange_symbol or watch).upper().strip()
+        resolved_target_exchange = str(target_exchange or exchange_name or settings.exchange.name).lower().strip()
+        resolved_target_market_type = _normalize_market_type(target_market_type or market_type, settings.exchange.market_type)
+        resolved_source_exchange = str(source_exchange or mapped_source_exchange or resolved_target_exchange).lower().strip()
+        resolved_source_market_type = _normalize_market_type(source_market_type or mapped_source_market_type, resolved_target_market_type)
+        resolved_source_symbol = str(source_symbol or mapped_source_symbol or resolved_exchange_symbol).upper().strip()
 
         commodity_type = is_special_commodity(watch)
         data_symbol = get_yfinance_symbol(watch) if commodity_type else watch
         return SymbolMapping(
             watch_symbol=watch,
             data_symbol=data_symbol,
-            exchange_symbol=exchange_symbol,
-            exchange_name=exchange_name,
-            market_type=market_type,
-            mapped_asset=exchange_symbol != watch,
+            exchange_symbol=resolved_exchange_symbol,
+            exchange_name=resolved_target_exchange,
+            market_type=resolved_target_market_type,
+            mapped_asset=resolved_exchange_symbol != watch,
             data_source="yfinance" if commodity_type else "ccxt",
+            data_source_policy=_normalize_data_policy(data_source_policy),
+            source_exchange=resolved_source_exchange,
+            source_market_type=resolved_source_market_type,
+            source_symbol=resolved_source_symbol,
+            target_exchange=resolved_target_exchange,
+            target_market_type=resolved_target_market_type,
+            actual_data_source="yfinance" if commodity_type else "",
+            tradable=bool(tradable),
+            tradability_reason=str(tradability_reason or ""),
+            universe_source=str(universe_source or settings.scanner.source_mode or "manual"),
+            liquidity_tier=str(liquidity_tier or "unknown"),
+            quote_volume=float(quote_volume or 0.0),
         )
 
-    async def get_bundle(self, watch_symbol: str, timeframes: list[str] | None = None) -> OHLCVBundle:
-        mapping = self.resolve_mapping(watch_symbol)
+    async def get_bundle(
+        self,
+        watch_symbol: str,
+        timeframes: list[str] | None = None,
+        **mapping_overrides: Any,
+    ) -> OHLCVBundle:
+        mapping = self.resolve_mapping(watch_symbol, **mapping_overrides)
         requested_tfs = timeframes or settings.scanner.timeframes
-        cache_key = (mapping.watch_symbol, tuple(requested_tfs))
+        cache_key = (
+            mapping.watch_symbol,
+            mapping.exchange_symbol,
+            mapping.source_exchange,
+            mapping.source_market_type,
+            mapping.data_source_policy,
+            tuple(requested_tfs),
+        )
         ttl = max(0, int(settings.scanner.bundle_cache_ttl_secs))
         if ttl > 0:
             cached = self._bundle_cache.get(cache_key)
@@ -377,11 +457,24 @@ class UnifiedOHLCVProvider:
         orderbook_top_bid_depth_usdt: float | None = None
         orderbook_top_ask_depth_usdt: float | None = None
         missing_microstructure: list[str] = []
+        confirmation: dict[str, Any] | None = None
         if mapping.data_source == "ccxt":
             try:
                 ohlcv_price = current_price
-                context = await fetch_market_context(mapping.exchange_symbol)
+                source_ids = self._exchange_ids_for_mapping(mapping)
+                cache_scope = self._cache_scope(mapping) if source_ids else None
+                context_symbol = mapping.source_symbol or mapping.exchange_symbol
+                if source_ids:
+                    context = await fetch_market_context(
+                        context_symbol,
+                        exchange_ids=source_ids,
+                        market_type=mapping.source_market_type,
+                        cache_scope=cache_scope,
+                    )
+                else:
+                    context = await fetch_market_context(context_symbol)
                 market_context_source = str(getattr(context, "_market_data_source", "") or "")
+                mapping.actual_data_source = market_context_source or (mapping.source_exchange or "")
                 market_context_available = bool(market_context_source and float(context.current_price or 0.0) > 0)
                 context_price = float(context.current_price or current_price)
                 if ohlcv_price > 0 and context_price > 0:
@@ -415,6 +508,8 @@ class UnifiedOHLCVProvider:
             except Exception as exc:
                 market_context_error = str(exc)
                 logger.debug(f"[Scanner/OHLCV] market context unavailable for {mapping.exchange_symbol}: {exc}")
+            if mapping.data_source_policy == "confirm":
+                confirmation = await self._confirm_market_context(mapping, current_price, volume_24h)
 
         bundle = OHLCVBundle(
             mapping=mapping,
@@ -440,6 +535,7 @@ class UnifiedOHLCVProvider:
             market_context_available=market_context_available,
             market_context_source=market_context_source,
             market_context_error=market_context_error,
+            confirmation=confirmation,
             missing_microstructure=missing_microstructure,
             orderbook_bid_depth_usdt=orderbook_bid_depth_usdt,
             orderbook_ask_depth_usdt=orderbook_ask_depth_usdt,
@@ -463,14 +559,104 @@ class UnifiedOHLCVProvider:
             bundles.append(result)
         return bundles
 
+    def _exchange_ids_for_mapping(self, mapping: SymbolMapping) -> list[str] | None:
+        if mapping.data_source != "ccxt":
+            return None
+        primary = str(mapping.source_exchange or settings.exchange.name).lower().strip()
+        policy = _normalize_data_policy(mapping.data_source_policy)
+        source_type = _normalize_market_type(mapping.source_market_type, settings.exchange.market_type)
+        default_type = _normalize_market_type(settings.exchange.market_type, "contract")
+        if policy == "fallback" and primary == settings.exchange.name and source_type == default_type:
+            return None
+        include_fallbacks = policy == "fallback"
+        return _market_data_exchange_ids(primary, include_fallbacks=include_fallbacks)
+
+    @staticmethod
+    def _cache_scope(mapping: SymbolMapping) -> str:
+        return ":".join([
+            "scanner",
+            str(mapping.data_source_policy or "fallback"),
+            str(mapping.source_exchange or settings.exchange.name),
+            str(mapping.source_market_type or settings.exchange.market_type),
+        ])
+
+    async def _confirm_market_context(
+        self,
+        mapping: SymbolMapping,
+        primary_price: float,
+        primary_volume_24h: float,
+    ) -> dict[str, Any]:
+        primary = str(mapping.source_exchange or settings.exchange.name).lower().strip()
+        candidates = [source for source in _market_data_exchange_ids(primary, include_fallbacks=True) if source != primary]
+        if not candidates:
+            return {"passed": False, "reason": "confirmation_unavailable", "source": ""}
+
+        for exchange_id in candidates[:3]:
+            try:
+                context = await fetch_market_context(
+                    mapping.source_symbol or mapping.exchange_symbol,
+                    exchange_ids=[exchange_id],
+                    market_type=mapping.source_market_type,
+                    cache_scope=f"scanner-confirm:{exchange_id}:{mapping.source_market_type}",
+                )
+                confirm_price = float(context.current_price or 0.0)
+                if confirm_price <= 0 or primary_price <= 0:
+                    continue
+                price_deviation_pct = abs(confirm_price - primary_price) / primary_price * 100.0
+                confirm_volume = float(context.volume_24h or 0.0)
+                volume_deviation_pct = 0.0
+                if primary_volume_24h > 0 and confirm_volume > 0:
+                    volume_deviation_pct = abs(confirm_volume - primary_volume_24h) / primary_volume_24h * 100.0
+                max_deviation = float(settings.scanner.max_price_deviation_pct)
+                max_volume_deviation = float(settings.scanner.confirm_max_volume_deviation_pct)
+                confirm_spread_pct = float(context.bid_ask_spread or 0.0)
+                spread_passed = confirm_spread_pct <= float(settings.scanner.max_spread_pct) if confirm_spread_pct > 0 else True
+                volume_passed = volume_deviation_pct <= max_volume_deviation if volume_deviation_pct > 0 else True
+                price_passed = price_deviation_pct <= max_deviation
+                passed = price_passed and volume_passed and spread_passed
+                reason = ""
+                if not price_passed:
+                    reason = "confirmation_price_deviation"
+                elif not volume_passed:
+                    reason = "confirmation_volume_deviation"
+                elif not spread_passed:
+                    reason = "confirmation_spread_too_wide"
+                return {
+                    "passed": passed,
+                    "reason": reason,
+                    "source": str(getattr(context, "_market_data_source", "") or exchange_id),
+                    "price": confirm_price,
+                    "price_deviation_pct": round(price_deviation_pct, 4),
+                    "volume_24h": confirm_volume,
+                    "volume_deviation_pct": round(volume_deviation_pct, 4),
+                    "max_price_deviation_pct": max_deviation,
+                    "max_volume_deviation_pct": max_volume_deviation,
+                    "spread_pct": confirm_spread_pct,
+                    "max_spread_pct": float(settings.scanner.max_spread_pct),
+                }
+            except Exception as exc:
+                logger.debug(f"[Scanner/OHLCV] confirmation source {exchange_id} failed for {mapping.exchange_symbol}: {exc}")
+        return {"passed": False, "reason": "confirmation_unavailable", "source": ""}
+
     async def _fetch_candles(self, mapping: SymbolMapping, timeframe: str) -> list[NormalizedCandle]:
         if mapping.data_source == "yfinance":
             return await self._fetch_yfinance_candles(mapping.data_symbol, timeframe)
-        rows = await fetch_ohlcv_history(
-            mapping.exchange_symbol,
-            timeframe=timeframe,
-            days=self._days_for_timeframe(timeframe),
-        )
+        source_ids = self._exchange_ids_for_mapping(mapping)
+        history_symbol = mapping.source_symbol or mapping.exchange_symbol
+        if source_ids:
+            rows = await fetch_ohlcv_history(
+                history_symbol,
+                timeframe=timeframe,
+                days=self._days_for_timeframe(timeframe),
+                exchange_ids=source_ids,
+                market_type=mapping.source_market_type,
+            )
+        else:
+            rows = await fetch_ohlcv_history(
+                history_symbol,
+                timeframe=timeframe,
+                days=self._days_for_timeframe(timeframe),
+            )
         return _candles_from_history(rows)
 
     @staticmethod
@@ -562,6 +748,7 @@ class UnifiedOHLCVProvider:
         market_context_available: bool = False,
         market_context_source: str = "",
         market_context_error: str = "",
+        confirmation: dict[str, Any] | None = None,
         missing_microstructure: list[str] | None = None,
         orderbook_bid_depth_usdt: float | None = None,
         orderbook_ask_depth_usdt: float | None = None,
@@ -614,10 +801,27 @@ class UnifiedOHLCVProvider:
             reasons.append("market_context_unavailable")
         if bundle.mapping.mapped_asset and bundle.mapping.exchange_symbol not in settings.scanner.live_symbol_whitelist:
             reasons.append("mapped_asset_live_disabled")
+        if not bundle.mapping.tradable:
+            reasons.append("not_tradable")
+        if bundle.mapping.data_source_policy == "confirm" and not bool((confirmation or {}).get("passed")):
+            reasons.append(str((confirmation or {}).get("reason") or "confirmation_unavailable"))
 
         return {
             "passed": len(reasons) == 0,
             "reasons": reasons,
+            "source_mode": settings.scanner.source_mode,
+            "data_source_policy": bundle.mapping.data_source_policy,
+            "target_exchange": bundle.mapping.target_exchange or bundle.mapping.exchange_name,
+            "target_market_type": bundle.mapping.target_market_type or bundle.mapping.market_type,
+            "source_exchange": bundle.mapping.source_exchange,
+            "source_market_type": bundle.mapping.source_market_type,
+            "actual_data_source": bundle.mapping.actual_data_source or market_context_source,
+            "tradable": bundle.mapping.tradable,
+            "tradability_reason": bundle.mapping.tradability_reason,
+            "universe_source": bundle.mapping.universe_source,
+            "liquidity_tier": bundle.mapping.liquidity_tier,
+            "quote_volume": bundle.mapping.quote_volume,
+            "confirmation": confirmation or {},
             "spread_pct": spread_pct,
             "price_deviation_pct": price_deviation_pct,
             "volume_ratio": volume_ratio,
