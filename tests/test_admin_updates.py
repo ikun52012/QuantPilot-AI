@@ -86,10 +86,10 @@ async def test_check_update_uses_versioned_docker_image(client: AsyncClient, db_
         return {
             "status": "success",
             "current_version": "5.1.0",
-            "latest_version": "5.3.0",
+            "latest_version": "5.3.1",
             "has_update": True,
-            "docker_image": "ghcr.io/ikun52012/quantpilot-ai:v5.3.0",
-            "updater_image": "ghcr.io/ikun52012/quantpilot-ai-updater:v5.3.0",
+            "docker_image": "ghcr.io/ikun52012/quantpilot-ai:v5.3.1",
+            "updater_image": "ghcr.io/ikun52012/quantpilot-ai-updater:v5.3.1",
         }
 
     monkeypatch.setattr("routers.admin._fetch_latest_release_data", fake_release_data)
@@ -97,7 +97,7 @@ async def test_check_update_uses_versioned_docker_image(client: AsyncClient, db_
     response = await client.get("/api/admin/check-update", headers=headers)
     assert response.status_code == 200
     data = response.json()
-    assert data["docker_image"].endswith(":v5.3.0")
+    assert data["docker_image"].endswith(":v5.3.1")
     assert not data["docker_image"].endswith(":latest")
 
 

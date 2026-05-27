@@ -25,10 +25,6 @@ EXPLORER_APIS = {
         "url": "https://api.arbiscan.io/api",
         "key_env": "ARBISCAN_API_KEY",
     },
-    "SOL": {
-        "url": "https://api.mainnet-beta.solana.com",
-        "method": "getTransaction",
-    },
     "APT": {
         "url": "",
         "manual": True,
@@ -68,7 +64,11 @@ async def verify_payment_tx(
         elif network in ("ERC20", "BEP20", "ARBITRUM"):
             return await _verify_evm(tx_hash, network, expected_amount, expected_address)
         elif network == "SOL":
-            return await _verify_solana(tx_hash, expected_amount, expected_address)
+            return {
+                "verified": False,
+                "status": "unsupported",
+                "reason": "Solana SPL USDT auto-verification is not supported",
+            }
         elif network == "APT":
             return {
                 "verified": False,

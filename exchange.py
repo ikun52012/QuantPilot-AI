@@ -531,14 +531,18 @@ def get_market_limits(exchange_id: str, symbol: str, market_type: str = "contrac
         candidates = _symbol_candidates(symbol, market_type)
         market = None
         resolved_symbol = None
+        target_market_type = _market_type_key(market_type)
         for candidate in candidates:
             market = markets.get(candidate)
-            if isinstance(market, dict):
+            if isinstance(market, dict) and _market_matches_type(market, target_market_type):
                 resolved_symbol = candidate
                 break
 
         if not isinstance(market, dict):
-            logger.warning(f"[Exchange] Market {symbol} not found in {exchange_id} (tried: {candidates})")
+            logger.warning(
+                f"[Exchange] Market {symbol} not found for requested type '{target_market_type}' "
+                f"in {exchange_id} (tried: {candidates})"
+            )
             return {}
 
         limits = market.get("limits", {})
@@ -1163,8 +1167,7 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str, market_type: str | Non
     try:
         markets = exchange.load_markets()
     except Exception as e:
-        logger.debug(f"[Exchange] Could not load markets for symbol resolution: {e}")
-        return candidates[0]
+        raise ValueError(f"Could not load markets for symbol resolution: {e}") from e
 
     for candidate in candidates:
         market = markets.get(candidate)
@@ -1192,21 +1195,17 @@ def _resolve_symbol(exchange: ccxt.Exchange, symbol: str, market_type: str | Non
             if not fallback_symbol:
                 fallback_symbol = market_symbol
 
-# ENHANCED: Only use fallback if it matches type, otherwise warn prominently
     if fallback_symbol:
         fallback_market = markets.get(fallback_symbol)
         if fallback_market and _market_matches_type(fallback_market, target_market_type):
             return fallback_symbol
-        # Fallback symbol has wrong market type — log prominent warning
-        logger.error(
+        raise ValueError(
             f"[Exchange] Symbol {symbol} not found with requested type '{target_market_type}'. "
             f"Found '{fallback_symbol}' but it is a {fallback_market.get('type', 'unknown') if fallback_market else 'unknown'} market. "
-            f"Using '{fallback_symbol}' as fallback — trade may execute on wrong market type!"
+            "Trade aborted to avoid executing on the wrong market type."
         )
-        return fallback_symbol
 
-    logger.error(f"[Exchange] Symbol {symbol} not found in loaded markets; using {candidates[0]} as last resort")
-    return candidates[0]
+    raise ValueError(f"[Exchange] Symbol {symbol} not found in loaded markets for requested type '{target_market_type}'")
 
 
 async def _fetch_market_max_leverage(exchange, symbol: str) -> float | None:

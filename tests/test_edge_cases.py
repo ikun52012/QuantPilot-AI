@@ -208,10 +208,8 @@ class TestSymbolNormalization:
                 }
 
         exchange = _FakeExchange()
-        result = _resolve_symbol(exchange, "ASTR.P", "contract")
-        assert result in ["ASTR/USDT:USDT", "ASTRUSDT", "ASTR.P", "ASTR/USDT"]
-        market = exchange.load_markets().get(result)
-        assert market is None or market.get("contract") is not True
+        with pytest.raises(ValueError, match="wrong market type|requested type"):
+            _resolve_symbol(exchange, "ASTR.P", "contract")
 
 
 class TestEnhancedMarketSymbolNormalization:

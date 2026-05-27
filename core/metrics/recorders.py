@@ -29,24 +29,54 @@ from .prometheus_metrics import (
 )
 
 
+def _ticker_label(ticker: str) -> str:
+    value = str(ticker or "unknown").upper().strip()
+    if not re.fullmatch(r"[A-Z0-9:/._-]{1,30}", value):
+        return "other"
+    return value
+
+
+def _user_scope_label(user_id: str | None) -> str:
+    return "user" if user_id else "admin"
+
+
+def _reason_label(reason: str) -> str:
+    text = str(reason or "unknown").lower()
+    if "daily" in text and "limit" in text:
+        return "daily_limit"
+    if "confidence" in text:
+        return "confidence"
+    if "correlation" in text:
+        return "correlation"
+    if "cooldown" in text or "duplicate" in text:
+        return "duplicate_or_cooldown"
+    if "volume" in text:
+        return "volume"
+    if "spread" in text:
+        return "spread"
+    if "volatility" in text or "atr" in text:
+        return "volatility"
+    return "other"
+
+
 def record_signal_received(ticker: str, direction: str, user_id: str | None = None):
     """Record a received signal."""
     SIGNALS_RECEIVED.labels(
-        ticker=ticker,
+        ticker=_ticker_label(ticker),
         direction=direction,
-        user_id=user_id or "admin",
+        user_id=_user_scope_label(user_id),
     ).inc()
 
 
 def record_prefilter_result(ticker: str, direction: str, passed: bool, reason: str = ""):
     """Record pre-filter result."""
     if passed:
-        SIGNALS_PASSED_PREFILTER.labels(ticker=ticker, direction=direction).inc()
+        SIGNALS_PASSED_PREFILTER.labels(ticker=_ticker_label(ticker), direction=direction).inc()
     else:
         SIGNALS_BLOCKED_PREFILTER.labels(
-            ticker=ticker,
+            ticker=_ticker_label(ticker),
             direction=direction,
-            reason=reason[:50] if reason else "unknown",
+            reason=_reason_label(reason),
         ).inc()
 
 
@@ -59,9 +89,10 @@ def record_ai_analysis(provider: str, recommendation: str, confidence: float, la
 
 def record_trade(ticker: str, direction: str, status: str, pnl: float | None = None):
     """Record a trade execution."""
-    TRADES_EXECUTED.labels(ticker=ticker, direction=direction, status=status).inc()
+    ticker_label = _ticker_label(ticker)
+    TRADES_EXECUTED.labels(ticker=ticker_label, direction=direction, status=status).inc()
     if pnl is not None:
-        TRADES_PNL.labels(ticker=ticker, direction=direction).observe(pnl)
+        TRADES_PNL.labels(ticker=ticker_label, direction=direction).observe(pnl)
 
 
 def record_exchange_request(exchange: str, endpoint: str, status: str, latency: float):

@@ -99,36 +99,38 @@ def _validate_ws_origin(websocket: WebSocket) -> bool:
     if not origin:
         return True
     allowed_origins = settings.server.cors_origins
-    if "*" in allowed_origins:
-        return True
 
     origin_lower = origin.lower().rstrip("/")
+    from urllib.parse import urlparse
+
+    try:
+        parsed_origin = urlparse(origin_lower)
+        origin_host = (parsed_origin.hostname or "").lower()
+        origin_netloc = parsed_origin.netloc.lower()
+        origin_scheme = parsed_origin.scheme.lower()
+    except Exception:
+        logger.warning(f"[WebSocket] Invalid Origin header: {origin}")
+        return False
 
     # Check explicit CORS origins
     for allowed in allowed_origins:
+        if allowed == "*":
+            continue
         allowed_lower = allowed.lower().rstrip("/")
-        if origin_lower == allowed_lower:
-            return True
-        # Also allow any subpath match for path-based origins
-        if origin_lower.startswith(allowed_lower + "/"):
+        parsed_allowed = urlparse(allowed_lower)
+        if parsed_allowed.scheme.lower() == origin_scheme and parsed_allowed.netloc.lower() == origin_netloc:
             return True
 
     # Check public_base_url if configured
     base_url = (settings.server.public_base_url or "").strip().rstrip("/")
-    if base_url and origin_lower == base_url.lower().rstrip("/"):
-        return True
-    if base_url and origin_lower.startswith(base_url.lower().rstrip("/") + "/"):
-        return True
+    if base_url:
+        parsed_base = urlparse(base_url.lower().rstrip("/"))
+        if parsed_base.scheme.lower() == origin_scheme and parsed_base.netloc.lower() == origin_netloc:
+            return True
 
     # Allow localhost variants in non-production for development convenience
-    from urllib.parse import urlparse
-    try:
-        parsed = urlparse(origin)
-        hostname = (parsed.hostname or "").lower()
-        if hostname in ("localhost", "127.0.0.1", "::1"):
-            return True
-    except Exception:
-        pass
+    if not settings.is_production and origin_host in ("localhost", "127.0.0.1", "::1"):
+        return True
 
     logger.warning(f"[WebSocket] Origin validation failed: {origin} (allowed: {allowed_origins}, base_url: {base_url})")
     return False

@@ -10,7 +10,6 @@ const USDT_PAYMENT_NETWORKS = [
     { id: 'BEP20', name: 'BSC (BEP20)' },
     { id: 'ARBITRUM', name: 'Arbitrum One' },
     { id: 'APT', name: 'Aptos (APT)' },
-    { id: 'SOL', name: 'Solana (SPL)' },
 ];
 
 let currentUserSettings = null;
@@ -2965,6 +2964,16 @@ function adminLogEndpoint(type, offset) {
     return `/api/admin/audit-logs?limit=${limit}&offset=${offset}`;
 }
 
+function adminLogTypeLabel(type) {
+    const labels = {
+        admin: t('pages.admin.logs.type_admin', 'admin audit'),
+        webhook: t('pages.admin.logs.type_webhook', 'webhook'),
+        scanner: t('pages.admin.logs.type_scanner', 'scanner'),
+        order: t('pages.admin.logs.type_order', 'order'),
+    };
+    return labels[type] || type;
+}
+
 function adminLogItems(data) {
     if (Array.isArray(data)) return data;
     if (Array.isArray(data?.items)) return data.items;
@@ -3042,8 +3051,27 @@ function changeAdminLogPage(direction) {
     loadAdminLogs();
 }
 
+async function clearAdminLogs() {
+    if (!isAdmin()) { showToast(t('errors.permission_denied', 'Admin access required'), 'error'); return; }
+    const label = adminLogTypeLabel(_adminLogType);
+    const message = t('pages.admin.logs.confirm_clear', `Clear ${label} logs? This cannot be undone.`).replace('{type}', label);
+    if (!confirm(message)) return;
+    try {
+        const result = await fetchAPI('/api/admin/logs/clear', {
+            method: 'POST',
+            body: JSON.stringify({ log_type: _adminLogType }),
+        });
+        const count = Number(result?.deleted?.[_adminLogType] || 0);
+        showToast(t('pages.admin.logs.clear_success', `Cleared ${count} log rows`).replace('{count}', String(count)), 'success');
+        _adminLogOffset = 0;
+        await loadAdminLogs(0);
+    } catch (err) {
+        showToast(`${t('pages.admin.logs.clear_failed', 'Failed to clear logs')}: ${err.message}`, 'error');
+    }
+}
+
 async function loadAdminLogs(offset = _adminLogOffset) {
-    if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+    if (!isAdmin()) { showToast(t('errors.permission_denied', 'Admin access required'), 'error'); return; }
     _adminLogOffset = Math.max(0, offset);
     updateAdminLogTabs();
     const tableEl = document.getElementById('admin-log-table');

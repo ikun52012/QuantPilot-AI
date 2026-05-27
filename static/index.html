@@ -2283,7 +2283,10 @@
             <div class="card">
                 <div class="card-header">
                     <h3><i class="ri-file-list-3-line"></i> Log Categories</h3>
-                    <button class="btn btn-secondary btn-sm" onclick="loadAdminLogs()"><i class="ri-refresh-line"></i></button>
+                    <div class="form-row" style="gap:8px;align-items:center">
+                        <button class="btn btn-danger btn-sm" onclick="clearAdminLogs()"><i class="ri-delete-bin-line"></i> <span data-i18n="pages.admin.logs.clear_current">Clear Current</span></button>
+                        <button class="btn btn-secondary btn-sm" onclick="loadAdminLogs()"><i class="ri-refresh-line"></i></button>
+                    </div>
                 </div>
                 <div style="padding:20px">
                     <div class="form-row" style="gap:8px;align-items:center">

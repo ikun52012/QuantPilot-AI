@@ -48,6 +48,10 @@ class Base(DeclarativeBase):
     pass
 
 
+ACTIVE_WEBHOOK_EVENT_STATUSES = ("received", "reserved", "retrying", "processing")
+_ACTIVE_WEBHOOK_EVENT_STATUS_SQL = "status IN ('received','reserved','retrying','processing')"
+
+
 # ─────────────────────────────────────────────
 # Models
 # ─────────────────────────────────────────────
@@ -174,6 +178,13 @@ class WebhookEventModel(Base):
     __tablename__ = "webhook_events"
     __table_args__ = (
         Index("idx_webhook_fingerprint_created", "fingerprint", "created_at", unique=False),
+        Index(
+            "uq_webhook_active_fingerprint",
+            "fingerprint",
+            unique=True,
+            sqlite_where=text(_ACTIVE_WEBHOOK_EVENT_STATUS_SQL),
+            postgresql_where=text(_ACTIVE_WEBHOOK_EVENT_STATUS_SQL),
+        ),
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -627,14 +638,20 @@ class DatabaseManager:
                     quoted_column = sync_conn.dialect.identifier_preparer.quote(name)
                     sync_conn.execute(text(f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {effective_ddl}"))
 
-        def create_index_if_missing(name: str, ddl: str) -> None:
+        def create_index_if_missing(name: str, ddl: str, *, ignore_errors: bool = False) -> None:
             existing_indexes = {
                 index["name"]
                 for table_name in tables
                 for index in inspector.get_indexes(table_name)
             }
             if name not in existing_indexes:
-                sync_conn.execute(text(ddl))
+                try:
+                    sync_conn.execute(text(ddl))
+                except Exception as exc:
+                    if ignore_errors:
+                        logger.warning(f"[Database] Could not create index {name}: {exc}")
+                        return
+                    raise
 
         add_missing_columns("users", {
             "balance_usdt": "FLOAT DEFAULT 0",
@@ -877,6 +894,13 @@ class DatabaseManager:
         create_index_if_missing("idx_users_webhook_secret_hash", "CREATE INDEX idx_users_webhook_secret_hash ON users(webhook_secret_hash)")
         create_index_if_missing("idx_trades_user_timestamp", "CREATE INDEX idx_trades_user_timestamp ON trades(user_id, timestamp)")
         create_index_if_missing("idx_webhook_fingerprint_created", "CREATE INDEX idx_webhook_fingerprint_created ON webhook_events(fingerprint, created_at)")
+        if dialect_name in {"sqlite", "postgresql"}:
+            create_index_if_missing(
+                "uq_webhook_active_fingerprint",
+                "CREATE UNIQUE INDEX uq_webhook_active_fingerprint ON webhook_events(fingerprint) "
+                f"WHERE {_ACTIVE_WEBHOOK_EVENT_STATUS_SQL}",
+                ignore_errors=True,
+            )
         create_index_if_missing("idx_positions_status", "CREATE INDEX idx_positions_status ON positions(status)")
         create_index_if_missing("idx_positions_user_status", "CREATE INDEX idx_positions_user_status ON positions(user_id, status)")
         create_index_if_missing("idx_order_events_status_retry", "CREATE INDEX idx_order_events_status_retry ON order_events(status, retry_state, next_retry_at)")
@@ -1807,6 +1831,21 @@ async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, wind
     result = await session.execute(
         select(WebhookEventModel)
         .where(WebhookEventModel.fingerprint == fingerprint, WebhookEventModel.created_at >= cutoff)
+        .order_by(WebhookEventModel.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_active_webhook_event(session: AsyncSession, fingerprint: str) -> WebhookEventModel | None:
+    """Return the newest active webhook reservation for this fingerprint."""
+    result = await session.execute(
+        select(WebhookEventModel)
+        .where(
+            WebhookEventModel.fingerprint == fingerprint,
+            WebhookEventModel.status.in_(ACTIVE_WEBHOOK_EVENT_STATUSES),
+        )
+        .order_by(WebhookEventModel.created_at.desc())
         .limit(1)
     )
     return result.scalar_one_or_none()
@@ -2353,7 +2392,7 @@ async def cleanup_old_records(
     now = utcnow()
     deleted = {}
 
-    def _bulk_delete(model, where_clause, table_name: str) -> int:
+    async def _bulk_delete(model, where_clause, table_name: str) -> int:
         """Delete rows in batches to avoid memory issues.
 
         Uses a subquery approach compatible with both SQLite and PostgreSQL.
@@ -2367,8 +2406,8 @@ async def cleanup_old_records(
                 .limit(batch_size)
             )
             stmt = delete(model).where(model.id.in_(subq))
-            result = session.execute(stmt)
-            session.flush()
+            result = await session.execute(stmt)
+            await session.flush()
             count = result.rowcount or 0
             total_deleted += count
             if count < batch_size:
@@ -2377,7 +2416,7 @@ async def cleanup_old_records(
 
     # 1. Closed positions older than retention period
     cutoff = now - timedelta(days=positions_retention_days)
-    count = _bulk_delete(
+    count = await _bulk_delete(
         PositionModel,
         (PositionModel.status == "closed") &
         (PositionModel.closed_at.isnot(None)) &
@@ -2389,7 +2428,7 @@ async def cleanup_old_records(
 
     # 2. Trade logs older than retention period
     cutoff = now - timedelta(days=trades_retention_days)
-    count = _bulk_delete(
+    count = await _bulk_delete(
         TradeModel,
         TradeModel.timestamp < cutoff,
         "trades"
@@ -2399,7 +2438,7 @@ async def cleanup_old_records(
 
     # 3. Order events older than retention period
     cutoff = now - timedelta(days=order_events_retention_days)
-    count = _bulk_delete(
+    count = await _bulk_delete(
         OrderEventModel,
         OrderEventModel.created_at < cutoff,
         "order_events"
@@ -2409,7 +2448,7 @@ async def cleanup_old_records(
 
     # 4. Signal decision audits older than retention period
     cutoff = now - timedelta(days=audit_logs_retention_days)
-    count = _bulk_delete(
+    count = await _bulk_delete(
         SignalDecisionAuditModel,
         SignalDecisionAuditModel.created_at < cutoff,
         "signal_decision_audits"
@@ -2419,7 +2458,7 @@ async def cleanup_old_records(
 
     # 5. Webhook events older than retention period
     cutoff = now - timedelta(days=webhook_events_retention_days)
-    count = _bulk_delete(
+    count = await _bulk_delete(
         WebhookEventModel,
         WebhookEventModel.created_at < cutoff,
         "webhook_events"
@@ -2429,7 +2468,7 @@ async def cleanup_old_records(
 
     # 6. Admin audit logs older than retention period
     cutoff = now - timedelta(days=admin_audit_logs_retention_days)
-    count = _bulk_delete(
+    count = await _bulk_delete(
         AdminAuditLogModel,
         AdminAuditLogModel.created_at < cutoff,
         "admin_audit_logs"

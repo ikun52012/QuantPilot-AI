@@ -2,7 +2,9 @@
 QuantPilot AI - Application Lifespan Management
 Handles startup and shutdown logic separately from app factory.
 """
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from loguru import logger
@@ -14,6 +16,77 @@ from core.database import db_manager, seed_defaults
 
 # Module-level scheduler reference for shutdown cleanup
 _scheduler = None
+_scheduler_lock_fd: int | None = None
+_scheduler_lock_path: Path | None = None
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _acquire_scheduler_lock() -> bool:
+    """Elect one local process to run APScheduler jobs."""
+    global _scheduler_lock_fd, _scheduler_lock_path
+    if _scheduler_lock_fd is not None:
+        return True
+
+    lock_dir = Path(__file__).resolve().parent.parent / "data"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "scheduler.lock"
+
+    for attempt in range(2):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+            _scheduler_lock_fd = fd
+            _scheduler_lock_path = lock_path
+            return True
+        except FileExistsError:
+            try:
+                raw_pid = lock_path.read_text(encoding="ascii").strip()
+                existing_pid = int(raw_pid or "0")
+            except (OSError, ValueError):
+                existing_pid = 0
+            if attempt == 0 and not _pid_is_running(existing_pid):
+                try:
+                    lock_path.unlink()
+                    continue
+                except OSError:
+                    pass
+            logger.warning(f"[Scheduler] Another process owns the scheduler lock (pid={existing_pid}); skipping jobs")
+            return False
+        except OSError as exc:
+            logger.warning(f"[Scheduler] Could not acquire scheduler lock: {exc}; skipping jobs")
+            return False
+    return False
+
+
+def _release_scheduler_lock() -> None:
+    global _scheduler_lock_fd, _scheduler_lock_path
+    if _scheduler_lock_fd is not None:
+        try:
+            os.close(_scheduler_lock_fd)
+        except OSError:
+            pass
+        _scheduler_lock_fd = None
+    if _scheduler_lock_path is not None:
+        try:
+            _scheduler_lock_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.debug(f"[Scheduler] Could not remove scheduler lock: {exc}")
+        _scheduler_lock_path = None
 
 
 async def _market_scanner_job():
@@ -136,6 +209,9 @@ async def _init_cache():
 
 async def _init_scheduler():
     """Initialize APScheduler with periodic jobs."""
+    if not _acquire_scheduler_lock():
+        return
+
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
 
@@ -328,6 +404,7 @@ async def _on_shutdown():
         _scheduler.shutdown(wait=True)
         _scheduler = None
         logger.info("[Scheduler] Shut down")
+    _release_scheduler_lock()
 
     try:
         from exchange import cleanup_idle_exchange_pool

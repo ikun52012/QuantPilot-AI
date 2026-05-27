@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_admin
@@ -24,8 +24,10 @@ from core.database import (
     AdminAuditLogModel,
     AdminSettingModel,
     InviteCodeModel,
+    OrderEventModel,
     PaymentModel,
     RedeemCodeModel,
+    ScannerAuditModel,
     SubscriptionModel,
     SubscriptionPlanModel,
     UserModel,
@@ -85,6 +87,11 @@ class CreatePlanRequest(BaseModel):
     features: list[str] = Field(default_factory=list)
     max_signals_per_day: int = Field(default=0)
     is_active: bool = Field(default=True)
+
+
+class ClearLogsRequest(BaseModel):
+    log_type: str = Field(pattern="^(admin|webhook|scanner|order|all)$")
+    older_than_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class CreateInviteCodeRequest(BaseModel):
@@ -805,6 +812,8 @@ async def get_webhook_config(
     base_url = public_base_url(request) if request else ""
     template = json.dumps({
         "secret": secret,
+        "timestamp": "{{timenow}}",
+        "nonce": "{{ticker}}-{{timenow}}-{{strategy.order.id}}",
         "ticker": "{{ticker}}",
         "exchange": "{{exchange}}",
         "direction": "long",
@@ -889,6 +898,46 @@ async def list_audit_logs(
         }
         for log_entry in logs
     ]
+
+
+@router.post("/logs/clear")
+async def clear_logs(
+    payload: ClearLogsRequest,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear admin-visible log tables for the selected category."""
+    models = {
+        "admin": AdminAuditLogModel,
+        "webhook": WebhookEventModel,
+        "scanner": ScannerAuditModel,
+        "order": OrderEventModel,
+    }
+    selected = list(models) if payload.log_type == "all" else [payload.log_type]
+    cutoff = utcnow() - timedelta(days=payload.older_than_days) if payload.older_than_days else None
+    deleted: dict[str, int] = {}
+
+    for log_type in selected:
+        model = models[log_type]
+        stmt = delete(model)
+        if cutoff is not None:
+            stmt = stmt.where(model.created_at < cutoff)
+        result = await db.execute(stmt)
+        deleted[log_type] = int(result.rowcount or 0)
+
+    summary = ", ".join(f"{key}={value}" for key, value in deleted.items())
+    await _add_audit_log(
+        db,
+        admin,
+        "clear_logs",
+        "logs",
+        payload.log_type,
+        f"Cleared logs: {summary}",
+        request,
+    )
+    await db.commit()
+    return {"status": "ok", "deleted": deleted}
 
 
 # ─────────────────────────────────────────────

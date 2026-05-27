@@ -4,6 +4,7 @@ Provides system health monitoring and diagnostics API.
 """
 import asyncio
 import os
+import secrets
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -34,6 +35,23 @@ class HealthCheckResponse(BaseModel):
 
 
 _START_TIME = time.time()
+
+
+def _health_token_ok(request: Request) -> bool:
+    token = request.headers.get("X-Health-Token") or request.query_params.get("token") or ""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+    return bool(_HEALTH_TOKEN and token and secrets.compare_digest(token, _HEALTH_TOKEN))
+
+
+def _require_detailed_health_access(request: Request) -> None:
+    if _HEALTH_TOKEN:
+        if not _health_token_ok(request):
+            raise HTTPException(401, "Health check token required")
+        return
+    if settings.is_production:
+        raise HTTPException(404, "Not found")
 
 
 async def check_database() -> HealthCheckResult:
@@ -111,7 +129,7 @@ async def check_exchange_api() -> HealthCheckResult:
             settings.exchange.name,
             settings.exchange.api_key,
             settings.exchange.api_secret,
-            sandbox_mode=settings.exchange.sandbox_mode,
+            sandbox=settings.exchange.sandbox_mode,
         )
         await asyncio.to_thread(exchange.load_markets)
 
@@ -250,10 +268,7 @@ async def health_check(request: Request):
 
     Optional: Set HEALTH_CHECK_TOKEN env var to require a token for access.
     """
-    if _HEALTH_TOKEN:
-        token = request.headers.get("X-Health-Token") or request.query_params.get("token")
-        if token != _HEALTH_TOKEN:
-            raise HTTPException(401, "Health check token required")
+    _require_detailed_health_access(request)
     checks = await asyncio.gather(
         check_database(),
         check_redis(),
@@ -288,7 +303,7 @@ async def health_check(request: Request):
         status=overall_status,
         timestamp=utcnow().isoformat(),
         checks=check_results,
-        version="1.0.0",
+        version=settings.app_version,
         uptime_seconds=time.time() - _START_TIME,
     )
 
@@ -302,8 +317,8 @@ async def quick_health_check():
     try:
         await check_database()
         return {"status": "healthy", "timestamp": utcnow().isoformat()}
-    except Exception as e:
-        return {"status": "unhealthy", "error": str(e), "timestamp": utcnow().isoformat()}
+    except Exception:
+        return {"status": "unhealthy", "timestamp": utcnow().isoformat()}
 
 
 @router.get("/live")
@@ -320,5 +335,5 @@ async def readiness_check():
         if db_check.status != "healthy":
             return {"status": "not_ready", "reason": "Database unavailable"}
         return {"status": "ready", "timestamp": utcnow().isoformat()}
-    except Exception as e:
-        return {"status": "not_ready", "error": str(e)}
+    except Exception:
+        return {"status": "not_ready", "reason": "Readiness check failed"}

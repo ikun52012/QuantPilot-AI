@@ -3,6 +3,8 @@ QuantPilot AI - Application Factory
 Creates and configures the FastAPI application instance.
 """
 import json
+import os
+import secrets
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,7 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.auth import require_admin
+from core.auth import AUTH_COOKIE_NAME, require_admin, verify_token
 from core.cache import cache
 from core.config import settings
 from core.database import db_manager
@@ -41,6 +43,17 @@ _NO_STORE_HEADERS = {
     "Expires": "0",
     "Vary": "Cookie",
 }
+
+
+def _request_token(request: Request, header_name: str) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return request.headers.get(header_name, "") or request.query_params.get("token", "")
+
+
+def _constant_time_token_ok(provided: str, expected: str) -> bool:
+    return bool(provided and expected and secrets.compare_digest(provided, expected))
 
 
 def _apply_no_store_headers(response):
@@ -225,7 +238,20 @@ def _setup_utility_routes(app: FastAPI):
         return JSONResponse(content=checks, status_code=status_code)
 
     @app.get("/metrics")
-    async def metrics():
+    async def metrics(request: Request):
+        metrics_token = os.getenv("METRICS_TOKEN", "") or os.getenv("PROMETHEUS_TOKEN", "")
+        if metrics_token:
+            provided = _request_token(request, "X-Metrics-Token")
+            if not _constant_time_token_ok(provided, metrics_token):
+                raise HTTPException(status_code=401, detail="Metrics token required")
+        else:
+            auth_payload = None
+            auth = request.headers.get("authorization", "")
+            token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else request.cookies.get(AUTH_COOKIE_NAME, "")
+            if token:
+                auth_payload = verify_token(token)
+            if not auth_payload or auth_payload.get("role") != "admin" or auth_payload.get("2fa_pending"):
+                raise HTTPException(status_code=403, detail="Admin access required")
         return await metrics_endpoint()
 
     @app.get("/stats")

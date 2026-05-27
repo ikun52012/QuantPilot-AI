@@ -1039,6 +1039,8 @@ async def get_user_settings(
             webhook.pop("secret", None)
         webhook.setdefault("template", json.dumps({
             "secret": secret if reveal else masked_secret,
+            "timestamp": "{{timenow}}",
+            "nonce": "{{ticker}}-{{timenow}}-{{strategy.order.id}}",
             "ticker": "{{ticker}}",
             "exchange": "{{exchange}}",
             "direction": "long",

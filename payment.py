@@ -15,7 +15,6 @@ SUPPORTED_NETWORKS = {
     "ERC20": {"name": "Ethereum (ERC20)", "currency": "USDT", "confirmations": 12},
     "BEP20": {"name": "BSC (BEP20)", "currency": "USDT", "confirmations": 12},
     "ARBITRUM": {"name": "Arbitrum One", "currency": "USDT", "confirmations": 12},
-    "SOL": {"name": "Solana (SPL)", "currency": "USDT", "confirmations": 32},
     "APT": {"name": "Aptos (APT)", "currency": "USDT", "confirmations": 1},
 }
 

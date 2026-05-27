@@ -14,13 +14,17 @@ from datetime import datetime, timezone
 import httpx
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai_analyzer import analyze_signal
 from core.config import settings
 from core.database import (
+    ACTIVE_WEBHOOK_EVENT_STATUSES,
     PositionModel,
+    WebhookEventModel,
     close_position_async,
+    get_active_webhook_event,
     get_user_active_subscription,
     get_user_by_id,
     has_recent_webhook_event,
@@ -72,6 +76,7 @@ _WEBHOOK_LOCKS_GUARD = asyncio.Lock()
 _WEBHOOK_LOCK_MAX_SIZE = 5000
 _WEBHOOK_LOCK_TTL = 600
 _WEBHOOK_LOCK_CREATED: dict[str, float] = {}
+_WEBHOOK_ACTIVE_STALE_SECS = 900
 _SENSITIVE_EVENT_KEY_PARTS = ("secret", "token", "password", "api_key", "api_secret")
 
 # Per-ticker locks for concurrent signal handling
@@ -453,6 +458,7 @@ def compute_webhook_fingerprint(body: dict, user_id: str | None = None) -> str:
     """Compute a unique fingerprint for webhook deduplication."""
     scope = user_id or "admin"
     alert_id = str(body.get("alert_id") or body.get("order_id") or body.get("id") or "").strip()
+    nonce = str(body.get("nonce") or "").strip()
 
     fields = {
         "scope": scope,
@@ -465,7 +471,9 @@ def compute_webhook_fingerprint(body: dict, user_id: str | None = None) -> str:
         "message": str(body.get("message", "")).strip(),
     }
 
-    if alert_id:
+    if nonce:
+        fields = {"scope": scope, "secret_hash": fields["secret_hash"], "nonce": nonce}
+    elif alert_id:
         fields = {"scope": scope, "secret_hash": fields["secret_hash"], "alert_id": alert_id}
 
     raw = json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
@@ -565,6 +573,7 @@ class SignalProcessor:
         user_id: str | None = None,
         client_ip: str = "",
         raw_body: dict | None = None,
+        reserved_event_id: str | None = None,
     ) -> dict:
         """
         Process a webhook signal through the complete pipeline.
@@ -589,9 +598,20 @@ class SignalProcessor:
         8. Wait dynamic interval
         9. Release semaphore and lock
         """
+        payload = raw_body or signal.model_dump()
+        fingerprint = compute_webhook_fingerprint(payload, user_id)
+
         # Optimization 4: Check batch signals (with user isolation)
         batched = await _check_batch_signals(signal.ticker, signal, raw_body, user_id)
         if batched:
+            await self._mark_reserved_event_by_id(
+                reserved_event_id,
+                fingerprint,
+                status="batched",
+                status_code=202,
+                reason="Signal added to batch queue",
+                payload=payload,
+            )
             await notify_signal_batched(
                 signal.ticker,
                 signal.direction.value,
@@ -602,14 +622,23 @@ class SignalProcessor:
 
         # Check queue limit first (fast rejection for extreme load)
         if not await _check_ticker_queue_limit(signal.ticker, user_id):
+            reason = f"Queue full for {signal.ticker} - too many pending signals"
+            await self._mark_reserved_event_by_id(
+                reserved_event_id,
+                fingerprint,
+                status="rejected",
+                status_code=429,
+                reason=reason,
+                payload=payload,
+            )
             await notify_signal_queued(
                 signal.ticker,
                 signal.direction.value,
-                f"Queue full for {signal.ticker} - too many pending signals",
+                reason,
             )
             return {
                 "status": "rejected",
-                "reason": f"Queue full for {signal.ticker} - too many pending signals",
+                "reason": reason,
                 "queue_limit": settings.ai.signal_queue_limit,
             }
 
@@ -628,7 +657,12 @@ class SignalProcessor:
                 async with ticker_lock:
                     # Process signal with prefetched market data
                     result = await self._process_signal_locked(
-                        signal, user_id, client_ip, raw_body, prefetched_market=prefetched_market
+                        signal,
+                        user_id,
+                        client_ip,
+                        raw_body,
+                        prefetched_market=prefetched_market,
+                        reserved_event_id=reserved_event_id,
                     )
 
                 # Optimization 2: Check confidence for interval skip
@@ -894,6 +928,7 @@ class SignalProcessor:
         client_ip: str = "",
         raw_body: dict | None = None,
         prefetched_market: MarketContext | None = None,
+        reserved_event_id: str | None = None,
     ) -> dict:
         """Internal signal processing with ticker lock already acquired.
 
@@ -904,18 +939,21 @@ class SignalProcessor:
         fingerprint = compute_webhook_fingerprint(raw_body or signal.model_dump(), user_id)
         user_settings = await self._load_user_settings(user_id)
 
-        # Reserve the webhook before slow AI/exchange calls so concurrent or
-        # retried TradingView deliveries cannot pass the dedupe check together.
-        reservation = await self._reserve_webhook_event(
-            fingerprint=fingerprint,
-            signal=signal,
-            user_id=user_id,
-            client_ip=client_ip,
-            payload=raw_body or signal.model_dump(),
-        )
+        if reserved_event_id:
+            reservation = await self._load_reserved_event(reserved_event_id, fingerprint)
+        else:
+            # Reserve the webhook before slow AI/exchange calls so concurrent or
+            # retried deliveries cannot pass the dedupe check together.
+            reservation = await self._reserve_webhook_event(
+                fingerprint=fingerprint,
+                signal=signal,
+                user_id=user_id,
+                client_ip=client_ip,
+                payload=raw_body or signal.model_dump(),
+            )
         if reservation is None:
             logger.warning(f"[Signal] Duplicate webhook: {fingerprint[:16]}")
-            return {"status": "duplicate", "reason": "Duplicate signal within 5 minutes"}
+            return {"status": "duplicate", "reason": "Duplicate signal within 30 minutes"}
 
         # Step 0: Check global trading control (emergency stop, paused, read_only)
         live_trading = self._live_trading_requested(user_settings)
@@ -1111,39 +1149,72 @@ class SignalProcessor:
         client_ip: str,
         payload: dict,
     ):
-        """Reserve a webhook fingerprint before slow processing starts.
-
-        C1-FIX: If an event exists with status 'received' or 'reserved',
-        return it instead of None to allow retries to proceed.
-        """
+        """Reserve a webhook fingerprint before slow processing starts."""
         lock = await _fingerprint_lock(fingerprint)
         try:
             async with lock:
-                # Extended to 30 minutes to cover TradingView's retry window
-                # (TradingView may retry webhooks for up to 30 minutes)
+                active = await get_active_webhook_event(self.session, fingerprint)
+                if active:
+                    age = (datetime.now(timezone.utc).replace(tzinfo=None) - active.created_at).total_seconds() if active.created_at else 0
+                    if age < _WEBHOOK_ACTIVE_STALE_SECS:
+                        return None
+                    active.status = "failed"
+                    active.status_code = 500
+                    active.reason = "Stale webhook reservation expired before processing completed"
+                    await self.session.flush()
+
                 existing = await has_recent_webhook_event(self.session, fingerprint, window_secs=1800)
                 if existing:
-                    if existing.status in {"received", "reserved", "retrying"}:
-                        existing.status = "retrying"
-                        return existing
                     return None
 
-                event = await record_webhook_event(
-                    session=self.session,
-                    user_id=user_id,
-                    fingerprint=fingerprint,
-                    ticker=signal.ticker,
-                    direction=signal.direction.value,
-                    status="received",
-                    status_code=202,
-                    reason="reserved",
-                    client_ip=client_ip,
-                    payload=_safe_event_payload(payload),
-                )
-                await self.session.flush()
-                return event
+                try:
+                    event = await record_webhook_event(
+                        session=self.session,
+                        user_id=user_id,
+                        fingerprint=fingerprint,
+                        ticker=signal.ticker,
+                        direction=signal.direction.value,
+                        status="received",
+                        status_code=202,
+                        reason="reserved",
+                        client_ip=client_ip,
+                        payload=_safe_event_payload(payload),
+                    )
+                    await self.session.flush()
+                    return event
+                except IntegrityError:
+                    await self.session.rollback()
+                    return None
         finally:
             await _release_fingerprint_lock(fingerprint, lock)
+
+    async def _load_reserved_event(self, reserved_event_id: str, fingerprint: str):
+        event = await self.session.get(WebhookEventModel, reserved_event_id)
+        if not event or event.fingerprint != fingerprint:
+            return None
+        if event.status not in ACTIVE_WEBHOOK_EVENT_STATUSES:
+            return None
+        event.status = "processing"
+        event.reason = "processing"
+        await self.session.flush()
+        return event
+
+    async def _mark_reserved_event_by_id(
+        self,
+        reserved_event_id: str | None,
+        fingerprint: str,
+        *,
+        status: str,
+        status_code: int,
+        reason: str,
+        payload: dict,
+    ) -> None:
+        if not reserved_event_id:
+            return
+        event = await self.session.get(WebhookEventModel, reserved_event_id)
+        if event and event.fingerprint == fingerprint:
+            self._update_reserved_event(event, status, status_code, reason, payload)
+            await self.session.flush()
 
     @staticmethod
     def _update_reserved_event(event, status: str, status_code: int, reason: str, payload: dict) -> None:

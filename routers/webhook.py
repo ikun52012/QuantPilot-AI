@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -30,7 +31,7 @@ from core.database import db_manager, get_admin_setting, get_db
 from core.request_utils import client_ip as get_client_ip
 from core.security import is_placeholder_webhook_secret
 from models import TradingViewSignal
-from services.signal_processor import SignalProcessor
+from services.signal_processor import SignalProcessor, compute_webhook_fingerprint
 
 router = APIRouter(prefix="", tags=["webhook"])
 
@@ -93,7 +94,44 @@ async def _get_redis_nonce_client():
     return None
 
 
-async def _check_replay_protection(nonce: str, timestamp: float) -> None:
+def _parse_webhook_timestamp(value: Any) -> float:
+    """Parse a required webhook timestamp into epoch seconds."""
+    if value is None or value == "":
+        raise HTTPException(401, "Webhook timestamp is required")
+    try:
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+        else:
+            text = str(value).strip()
+            if not text:
+                raise ValueError("empty timestamp")
+            try:
+                timestamp = float(text)
+            except ValueError:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                timestamp = dt.timestamp()
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000.0
+        if timestamp <= 0:
+            raise ValueError("timestamp must be positive")
+        return timestamp
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(400, "Webhook timestamp must be epoch seconds, epoch milliseconds, or ISO-8601") from exc
+
+
+def _parse_webhook_nonce(value: Any) -> str:
+    """Parse and validate a required webhook nonce."""
+    nonce = str(value or "").strip()
+    if not nonce:
+        raise HTTPException(401, "Webhook nonce is required")
+    if len(nonce) > 128 or any(ord(ch) < 32 or ord(ch) > 126 for ch in nonce):
+        raise HTTPException(400, "Webhook nonce must be 1-128 printable ASCII characters")
+    return nonce
+
+
+async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> None:
     """Check for replay attacks using timestamp and nonce.
 
     Uses Redis for multi-process safety when available, falls back to
@@ -103,8 +141,7 @@ async def _check_replay_protection(nonce: str, timestamp: float) -> None:
     if abs(now - timestamp) > _WEBHOOK_REPLAY_WINDOW_SECS:
         raise HTTPException(401, "Webhook timestamp expired — possible replay attack")
 
-    if not nonce:
-        return
+    nonce_key = hashlib.sha256(f"{scope}:{nonce}".encode("utf-8")).hexdigest()
 
     # Try Redis first for multi-process safety
     redis_client = await _get_redis_nonce_client()
@@ -112,7 +149,7 @@ async def _check_replay_protection(nonce: str, timestamp: float) -> None:
         try:
             client = await redis_client._get_client()
             if client:
-                redis_key = f"nonce:{nonce}"
+                redis_key = f"webhook:nonce:{nonce_key}"
                 existing = await client.get(redis_key)
                 if existing:
                     raise HTTPException(409, "Duplicate nonce — possible replay attack")
@@ -134,10 +171,10 @@ async def _check_replay_protection(nonce: str, timestamp: float) -> None:
                 _NONCE_CACHE.pop(k, None)
             _last_nonce_cleanup = now
 
-        if nonce in _NONCE_CACHE:
+        if nonce_key in _NONCE_CACHE:
             raise HTTPException(409, "Duplicate nonce — possible replay attack")
 
-        _NONCE_CACHE[nonce] = now
+        _NONCE_CACHE[nonce_key] = now
         if len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
             cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
             expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
@@ -214,11 +251,6 @@ async def webhook(
         logger.warning("[Webhook] Missing webhook secret in payload")
         raise HTTPException(401, "Missing webhook secret in payload")
 
-    timestamp = float(body.get("timestamp", 0) or 0)
-    nonce = str(body.get("nonce", "") or "").strip()
-    if timestamp > 0 or nonce:
-        await _check_replay_protection(nonce, timestamp)
-
     client_ip = get_client_ip(request)
 
     # P2-9: IP-based rate limiting
@@ -253,12 +285,35 @@ async def webhook(
             logger.warning(f"[Webhook] Invalid secret from {client_ip}")
             raise HTTPException(401, "Invalid webhook secret")
 
+    timestamp = _parse_webhook_timestamp(body.get("timestamp"))
+    nonce = _parse_webhook_nonce(body.get("nonce"))
+    replay_scope = user_id or "admin"
+    await _check_replay_protection(nonce, timestamp, replay_scope)
+
+    processor = SignalProcessor(db)
+    fingerprint = compute_webhook_fingerprint(body, user_id)
+    reservation = await processor._reserve_webhook_event(
+        fingerprint=fingerprint,
+        signal=signal,
+        user_id=user_id,
+        client_ip=client_ip,
+        payload=body,
+    )
+    if reservation is None:
+        await db.commit()
+        return JSONResponse(
+            status_code=202,
+            content={"status": "duplicate", "message": "Signal already received"},
+        )
+    await db.commit()
+
     background_tasks.add_task(
         _process_webhook_background,
         signal=signal,
         user_id=user_id,
         client_ip=client_ip,
         raw_body=body,
+        reserved_event_id=reservation.id,
     )
 
     return JSONResponse(
@@ -272,6 +327,7 @@ async def _process_webhook_background(
     user_id: str | None,
     client_ip: str,
     raw_body: dict,
+    reserved_event_id: str | None = None,
 ):
     """Process webhook signal in background to avoid TradingView timeout.
 
@@ -289,6 +345,7 @@ async def _process_webhook_background(
                     user_id=user_id,
                     client_ip=client_ip,
                     raw_body=raw_body,
+                    reserved_event_id=reserved_event_id,
                 )
                 await session.commit()
                 logger.info(f"[Webhook] Background processing complete: {result.get('status')}")

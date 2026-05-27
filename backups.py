@@ -6,6 +6,7 @@ Supports both SQLite (file copy) and PostgreSQL (pg_dump).
 import asyncio
 import json
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -19,6 +20,26 @@ from core.utils.datetime import utcnow
 # Backup directory
 backup_path = Path(__file__).parent / "data" / "backups"
 backup_path.mkdir(parents=True, exist_ok=True)
+
+
+def _backup_file_for_name(backup_name: str) -> Path:
+    name = str(backup_name or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError("Invalid backup name")
+    path = (backup_path / f"{name}.zip").resolve()
+    root = backup_path.resolve()
+    if root != path.parent and root not in path.parents:
+        raise ValueError("Invalid backup path")
+    return path
+
+
+def _safe_extract_zip(zf: zipfile.ZipFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in zf.infolist():
+        target = (destination / member.filename).resolve()
+        if target != destination and destination not in target.parents:
+            raise ValueError(f"Unsafe path in backup archive: {member.filename}")
+    zf.extractall(destination)
 
 
 def _is_postgresql() -> bool:
@@ -255,7 +276,10 @@ async def cleanup_old_backups(max_backups: int = 7) -> dict:
 
 async def delete_backup(backup_name: str) -> bool:
     """Delete a backup."""
-    backup_file = backup_path / f"{backup_name}.zip"
+    try:
+        backup_file = _backup_file_for_name(backup_name)
+    except ValueError:
+        return False
 
     if not backup_file.exists():
         return False
@@ -273,7 +297,10 @@ async def restore_postgresql(backup_name: str) -> dict:
     if not _is_postgresql():
         return {"status": "error", "reason": "Not a PostgreSQL database"}
 
-    backup_file = backup_path / f"{backup_name}.zip"
+    try:
+        backup_file = _backup_file_for_name(backup_name)
+    except ValueError as exc:
+        return {"status": "error", "reason": str(exc)}
     if not backup_file.exists():
         return {"status": "error", "reason": "Backup not found"}
 
@@ -283,7 +310,7 @@ async def restore_postgresql(backup_name: str) -> dict:
 
     # Extract
     with zipfile.ZipFile(backup_file, 'r') as zf:
-        zf.extractall(staging_dir)
+        _safe_extract_zip(zf, staging_dir)
 
     dump_file = staging_dir / "database.dump"
     if not dump_file.exists():
@@ -343,7 +370,10 @@ def stage_restore(backup_name: str) -> dict:
     Stage a backup for restore (SQLite).
     Returns paths to restore without actually performing the restore.
     """
-    backup_file = backup_path / f"{backup_name}.zip"
+    try:
+        backup_file = _backup_file_for_name(backup_name)
+    except ValueError as exc:
+        return {"status": "error", "reason": str(exc)}
 
     if not backup_file.exists():
         return {"status": "error", "reason": "Backup not found"}
@@ -354,7 +384,7 @@ def stage_restore(backup_name: str) -> dict:
 
     # Extract to staging
     with zipfile.ZipFile(backup_file, 'r') as zf:
-        zf.extractall(staging_dir)
+        _safe_extract_zip(zf, staging_dir)
 
     # Read metadata
     metadata_file = staging_dir / "metadata.json"

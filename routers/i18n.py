@@ -39,6 +39,9 @@ _TRANSLATIONS = {
             "subscription": "Subscription",
             "settings": "Settings",
             "admin": "Admin",
+            "prefilter": "Filters",
+            "scanner": "Scanner",
+            "logs": "Logs",
         },
         "common": {
             "ticker": "Ticker",
@@ -198,6 +201,16 @@ _TRANSLATIONS = {
                 "scanner_refresh": "Refresh",
                 "scanner_run_once": "Run Scan Once",
                 "scanner_send_summary": "Send Rejection Summary",
+                "logs": {
+                    "type_admin": "admin audit",
+                    "type_webhook": "webhook",
+                    "type_scanner": "scanner",
+                    "type_order": "order",
+                    "clear_current": "Clear Current",
+                    "confirm_clear": "Clear {type} logs? This cannot be undone.",
+                    "clear_success": "Cleared {count} log rows",
+                    "clear_failed": "Failed to clear logs",
+                },
             },
             "charts": {
                 "kicker": "Market Workspace",
@@ -384,6 +397,9 @@ _TRANSLATIONS = {
             "subscription": "订阅",
             "settings": "设置",
             "admin": "管理",
+            "prefilter": "过滤器",
+            "scanner": "扫描器",
+            "logs": "日志",
         },
         "common": {
             "ticker": "交易对",
@@ -537,6 +553,16 @@ _TRANSLATIONS = {
             "admin": {
                 "kicker": "运营控制台",
                 "description": "控制交易模式、对账订单事件、管理用户、监控过滤器和审查系统健康。",
+                "logs": {
+                    "type_admin": "管理审计",
+                    "type_webhook": "Webhook",
+                    "type_scanner": "扫描器",
+                    "type_order": "订单",
+                    "clear_current": "清理当前",
+                    "confirm_clear": "清理 {type} 日志？此操作无法撤销。",
+                    "clear_success": "已清理 {count} 条日志",
+                    "clear_failed": "清理日志失败",
+                },
             },
             "charts": {
                 "kicker": "市场工作台",
@@ -723,6 +749,9 @@ _TRANSLATIONS = {
             "subscription": "サブスクリプション",
             "settings": "設定",
             "admin": "管理",
+            "prefilter": "フィルター",
+            "scanner": "スキャナー",
+            "logs": "ログ",
         },
         "common": {
             "ticker": "銘柄",
@@ -876,6 +905,16 @@ _TRANSLATIONS = {
             "admin": {
                 "kicker": "運用コンソール",
                 "description": "取引モード制御、注文照合、ユーザー管理、フィルター監視、システム健全性確認。",
+                "logs": {
+                    "type_admin": "管理監査",
+                    "type_webhook": "Webhook",
+                    "type_scanner": "スキャナー",
+                    "type_order": "注文",
+                    "clear_current": "現在のログを削除",
+                    "confirm_clear": "{type}ログを削除しますか？この操作は元に戻せません。",
+                    "clear_success": "{count}件のログを削除しました",
+                    "clear_failed": "ログの削除に失敗しました",
+                },
             },
             "charts": {
                 "kicker": "マーケットワークスペース",
@@ -1013,6 +1052,9 @@ _TRANSLATIONS = {
             "subscription": "구독",
             "settings": "설정",
             "admin": "관리",
+            "prefilter": "필터",
+            "scanner": "스캐너",
+            "logs": "로그",
         },
         "common": {
             "ticker": "티커",
@@ -1166,6 +1208,16 @@ _TRANSLATIONS = {
             "admin": {
                 "kicker": "운영 콘솔",
                 "description": "거래 모드 제어, 주문 대사, 사용자 관리, 필터 모니터링, 시스템 상태 확인.",
+                "logs": {
+                    "type_admin": "관리 감사",
+                    "type_webhook": "Webhook",
+                    "type_scanner": "스캐너",
+                    "type_order": "주문",
+                    "clear_current": "현재 로그 삭제",
+                    "confirm_clear": "{type} 로그를 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
+                    "clear_success": "로그 {count}개를 삭제했습니다",
+                    "clear_failed": "로그 삭제 실패",
+                },
             },
             "charts": {
                 "kicker": "마켓 워크스페이스",
@@ -1303,6 +1355,9 @@ _TRANSLATIONS = {
             "subscription": "Suscripción",
             "settings": "Configuración",
             "admin": "Admin",
+            "prefilter": "Filtros",
+            "scanner": "Escáner",
+            "logs": "Registros",
         },
         "common": {
             "ticker": "Ticker",
@@ -1456,6 +1511,16 @@ _TRANSLATIONS = {
             "admin": {
                 "kicker": "Consola de Operaciones",
                 "description": "Controlar modos de trading, reconciliar eventos de órdenes, gestionar usuarios y revisar salud del sistema.",
+                "logs": {
+                    "type_admin": "auditoría admin",
+                    "type_webhook": "webhook",
+                    "type_scanner": "escáner",
+                    "type_order": "órdenes",
+                    "clear_current": "Borrar Actual",
+                    "confirm_clear": "¿Borrar registros de {type}? Esta acción no se puede deshacer.",
+                    "clear_success": "Se borraron {count} registros",
+                    "clear_failed": "No se pudieron borrar los registros",
+                },
             },
             "charts": {
                 "kicker": "Espacio de mercado",
