@@ -42,6 +42,7 @@ jobs:
 
       - name: Build and push
         uses: docker/build-push-action@v7
+        timeout-minutes: 45
         with:
           context: .
           file: ./Dockerfile
@@ -84,6 +85,7 @@ jobs:
 
       - name: Build and push updater
         uses: docker/build-push-action@v7
+        timeout-minutes: 30
         with:
           context: .
           file: ./Dockerfile.updater
