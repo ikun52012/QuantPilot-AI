@@ -758,6 +758,49 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
         from pre_filter import get_thresholds
 
         get_thresholds().reload_from_dict(prefilter_thresholds)
+
+        # Load webhook HMAC settings
+        hmac_enabled_raw = await get_admin_setting(session, "webhook_hmac_header_enabled", "")
+        if hmac_enabled_raw:
+            try:
+                val = json.loads(hmac_enabled_raw) if hmac_enabled_raw.startswith("{") or hmac_enabled_raw.startswith("[") else hmac_enabled_raw
+                settings.server.webhook_hmac_header_enabled = _to_bool(val)
+            except Exception:
+                pass
+        hmac_secret_raw = await get_admin_setting(session, "webhook_hmac_secret", "")
+        if hmac_secret_raw:
+            settings.server.webhook_hmac_secret = hmac_secret_raw
+        hmac_name_raw = await get_admin_setting(session, "webhook_hmac_header_name", "")
+        if hmac_name_raw:
+            settings.server.webhook_hmac_header_name = hmac_name_raw
+
+        # Load server network/proxy settings
+        trust_proxy_raw = await get_admin_setting(session, "trust_proxy_headers", "")
+        if trust_proxy_raw:
+            try:
+                val = json.loads(trust_proxy_raw) if trust_proxy_raw.startswith("{") or trust_proxy_raw.startswith("[") else trust_proxy_raw
+                settings.server.trust_proxy_headers = _to_bool(val)
+            except Exception:
+                pass
+        cors_raw = await get_admin_setting(session, "cors_origins", "")
+        if cors_raw:
+            try:
+                origins = json.loads(cors_raw)
+                if isinstance(origins, list):
+                    settings.server.cors_origins = origins
+            except Exception:
+                pass
+        trusted_raw = await get_admin_setting(session, "trusted_hosts", "")
+        if trusted_raw:
+            try:
+                hosts = json.loads(trusted_raw)
+                if isinstance(hosts, list):
+                    settings.server.trusted_hosts = hosts
+            except Exception:
+                pass
+        public_url_raw = await get_admin_setting(session, "public_base_url", "")
+        if public_url_raw:
+            settings.server.public_base_url = public_url_raw
     except Exception as e:
         logger.debug(f"[RuntimeSettings] Failed to apply persisted admin settings: {e}")
 
@@ -815,6 +858,31 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
         "voting_models": list(data.get("voting_models") if "voting_models" in data else current.get("voting_models", settings.ai.voting_models)),
         "voting_weights": dict(data.get("voting_weights") if "voting_weights" in data else current.get("voting_weights", settings.ai.voting_weights)),
         "voting_strategy": _coalesce_str(data.get("voting_strategy"), current.get("voting_strategy"), settings.ai.voting_strategy),
+        "connect_timeout_secs": _to_float(data.get("connect_timeout_secs"), _to_float(current.get("connect_timeout_secs"), settings.ai.connect_timeout_secs), 1, 120),
+        "read_timeout_secs": _to_float(data.get("read_timeout_secs"), _to_float(current.get("read_timeout_secs"), settings.ai.read_timeout_secs), 5, 300),
+        "write_timeout_secs": _to_float(data.get("write_timeout_secs"), _to_float(current.get("write_timeout_secs"), settings.ai.write_timeout_secs), 5, 120),
+        "pool_timeout_secs": _to_float(data.get("pool_timeout_secs"), _to_float(current.get("pool_timeout_secs"), settings.ai.pool_timeout_secs), 1, 60),
+        "max_concurrent_calls": _to_int(data.get("max_concurrent_calls"), _to_int(current.get("max_concurrent_calls"), settings.ai.max_concurrent_calls), 1, 50),
+        "signal_queue_limit": _to_int(data.get("signal_queue_limit"), _to_int(current.get("signal_queue_limit"), settings.ai.signal_queue_limit), 1, 500),
+        "global_processing_semaphore": _to_int(data.get("global_processing_semaphore"), _to_int(current.get("global_processing_semaphore"), settings.ai.global_processing_semaphore), 1, 50),
+        "signal_processing_interval_secs": _to_float(data.get("signal_processing_interval_secs"), _to_float(current.get("signal_processing_interval_secs"), settings.ai.signal_processing_interval_secs), 0, 30),
+        "dynamic_interval_enabled": _to_bool(data.get("dynamic_interval_enabled"), _to_bool(current.get("dynamic_interval_enabled"), settings.ai.dynamic_interval_enabled)),
+        "dynamic_interval_high_load_threshold": _to_float(data.get("dynamic_interval_high_load_threshold"), _to_float(current.get("dynamic_interval_high_load_threshold"), settings.ai.dynamic_interval_high_load_threshold), 1, 100),
+        "dynamic_interval_high_load_multiplier": _to_float(data.get("dynamic_interval_high_load_multiplier"), _to_float(current.get("dynamic_interval_high_load_multiplier"), settings.ai.dynamic_interval_high_load_multiplier), 0.5, 10),
+        "dynamic_cache_ttl_enabled": _to_bool(data.get("dynamic_cache_ttl_enabled"), _to_bool(current.get("dynamic_cache_ttl_enabled"), settings.ai.dynamic_cache_ttl_enabled)),
+        "dynamic_cache_ttl_base": _to_int(data.get("dynamic_cache_ttl_base"), _to_int(current.get("dynamic_cache_ttl_base"), settings.ai.dynamic_cache_ttl_base), 10, 600),
+        "dynamic_cache_ttl_high_volatility_multiplier": _to_float(data.get("dynamic_cache_ttl_high_volatility_multiplier"), _to_float(current.get("dynamic_cache_ttl_high_volatility_multiplier"), settings.ai.dynamic_cache_ttl_high_volatility_multiplier), 0.1, 5),
+        "dynamic_cache_ttl_low_volatility_multiplier": _to_float(data.get("dynamic_cache_ttl_low_volatility_multiplier"), _to_float(current.get("dynamic_cache_ttl_low_volatility_multiplier"), settings.ai.dynamic_cache_ttl_low_volatility_multiplier), 0.1, 10),
+        "smc_cache_ttl_enabled": _to_bool(data.get("smc_cache_ttl_enabled"), _to_bool(current.get("smc_cache_ttl_enabled"), settings.ai.smc_cache_ttl_enabled)),
+        "smc_cache_ttl_base": _to_int(data.get("smc_cache_ttl_base"), _to_int(current.get("smc_cache_ttl_base"), settings.ai.smc_cache_ttl_base), 10, 600),
+        "smc_cache_ttl_high_vol": _to_int(data.get("smc_cache_ttl_high_vol"), _to_int(current.get("smc_cache_ttl_high_vol"), settings.ai.smc_cache_ttl_high_vol), 10, 600),
+        "smc_cache_ttl_low_vol": _to_int(data.get("smc_cache_ttl_low_vol"), _to_int(current.get("smc_cache_ttl_low_vol"), settings.ai.smc_cache_ttl_low_vol), 10, 600),
+        "prefilter_enhanced_timeout_secs": _to_float(data.get("prefilter_enhanced_timeout_secs"), _to_float(current.get("prefilter_enhanced_timeout_secs"), settings.ai.prefilter_enhanced_timeout_secs), 5, 120),
+        "batch_signals_enabled": _to_bool(data.get("batch_signals_enabled"), _to_bool(current.get("batch_signals_enabled"), settings.ai.batch_signals_enabled)),
+        "batch_signals_window_secs": _to_float(data.get("batch_signals_window_secs"), _to_float(current.get("batch_signals_window_secs"), settings.ai.batch_signals_window_secs), 0, 60),
+        "batch_signals_max_count": _to_int(data.get("batch_signals_max_count"), _to_int(current.get("batch_signals_max_count"), settings.ai.batch_signals_max_count), 1, 20),
+        "prefetch_market_data": _to_bool(data.get("prefetch_market_data"), _to_bool(current.get("prefetch_market_data"), settings.ai.prefetch_market_data)),
+        "websocket_market_data_enabled": _to_bool(data.get("websocket_market_data_enabled"), _to_bool(current.get("websocket_market_data_enabled"), settings.ai.websocket_market_data_enabled)),
     }
     await _save_encrypted_dict(session, AI_KEY, updated)
     apply_runtime_settings({"ai": updated})
@@ -1222,6 +1290,64 @@ async def save_scanner_settings(session: AsyncSession, data: dict[str, Any]) -> 
         "correlation_buckets": _normalize_correlation_buckets(
             pick("correlation_buckets", settings.scanner.correlation_buckets), settings.scanner.correlation_buckets
         ),
+        "scan_timeout_secs": _to_int(
+            pick("scan_timeout_secs", settings.scanner.scan_timeout_secs),
+            settings.scanner.scan_timeout_secs,
+            60,
+            1800,
+        ),
+        "adaptive_threshold_enabled": _to_bool(
+            pick("adaptive_threshold_enabled", settings.scanner.adaptive_threshold_enabled),
+            settings.scanner.adaptive_threshold_enabled,
+        ),
+        "adaptive_min_score_floor": _to_float(
+            pick("adaptive_min_score_floor", settings.scanner.adaptive_min_score_floor),
+            settings.scanner.adaptive_min_score_floor,
+            0,
+            100,
+        ),
+        "adaptive_min_score_ceiling": _to_float(
+            pick("adaptive_min_score_ceiling", settings.scanner.adaptive_min_score_ceiling),
+            settings.scanner.adaptive_min_score_ceiling,
+            0,
+            100,
+        ),
+        "adaptive_win_rate_target": _to_float(
+            pick("adaptive_win_rate_target", settings.scanner.adaptive_win_rate_target),
+            settings.scanner.adaptive_win_rate_target,
+            0,
+            100,
+        ),
+        "adaptive_lookback_days": _to_int(
+            pick("adaptive_lookback_days", settings.scanner.adaptive_lookback_days),
+            settings.scanner.adaptive_lookback_days,
+            1,
+            365,
+        ),
+        "adaptive_adjustment_step": _to_float(
+            pick("adaptive_adjustment_step", settings.scanner.adaptive_adjustment_step),
+            settings.scanner.adaptive_adjustment_step,
+            0.1,
+            20,
+        ),
+        "adaptive_cooldown_levels": _to_int(
+            pick("adaptive_cooldown_levels", settings.scanner.adaptive_cooldown_levels),
+            settings.scanner.adaptive_cooldown_levels,
+            1,
+            20,
+        ),
+        "adaptive_cooldown_base_secs": _to_int(
+            pick("adaptive_cooldown_base_secs", settings.scanner.adaptive_cooldown_base_secs),
+            settings.scanner.adaptive_cooldown_base_secs,
+            30,
+            86400,
+        ),
+        "adaptive_cooldown_multiplier": _to_float(
+            pick("adaptive_cooldown_multiplier", settings.scanner.adaptive_cooldown_multiplier),
+            settings.scanner.adaptive_cooldown_multiplier,
+            1.0,
+            10,
+        ),
     }
     await _save_encrypted_dict(session, SCANNER_KEY, updated)
     apply_runtime_settings({"scanner": updated})
@@ -1277,6 +1403,37 @@ def runtime_status() -> dict[str, Any]:
         "openai_model": settings.ai.openai_model,
         "anthropic_model": settings.ai.anthropic_model,
         "deepseek_model": settings.ai.deepseek_model,
+        "ai_connect_timeout_secs": settings.ai.connect_timeout_secs,
+        "ai_read_timeout_secs": settings.ai.read_timeout_secs,
+        "ai_write_timeout_secs": settings.ai.write_timeout_secs,
+        "ai_pool_timeout_secs": settings.ai.pool_timeout_secs,
+        "ai_max_concurrent_calls": settings.ai.max_concurrent_calls,
+        "ai_signal_queue_limit": settings.ai.signal_queue_limit,
+        "ai_global_processing_semaphore": settings.ai.global_processing_semaphore,
+        "ai_signal_processing_interval_secs": settings.ai.signal_processing_interval_secs,
+        "ai_dynamic_interval_enabled": settings.ai.dynamic_interval_enabled,
+        "ai_dynamic_interval_high_load_threshold": settings.ai.dynamic_interval_high_load_threshold,
+        "ai_dynamic_interval_high_load_multiplier": settings.ai.dynamic_interval_high_load_multiplier,
+        "ai_dynamic_cache_ttl_enabled": settings.ai.dynamic_cache_ttl_enabled,
+        "ai_dynamic_cache_ttl_base": settings.ai.dynamic_cache_ttl_base,
+        "ai_dynamic_cache_ttl_high_volatility_multiplier": settings.ai.dynamic_cache_ttl_high_volatility_multiplier,
+        "ai_dynamic_cache_ttl_low_volatility_multiplier": settings.ai.dynamic_cache_ttl_low_volatility_multiplier,
+        "ai_smc_cache_ttl_enabled": settings.ai.smc_cache_ttl_enabled,
+        "ai_smc_cache_ttl_base": settings.ai.smc_cache_ttl_base,
+        "ai_smc_cache_ttl_high_vol": settings.ai.smc_cache_ttl_high_vol,
+        "ai_smc_cache_ttl_low_vol": settings.ai.smc_cache_ttl_low_vol,
+        "ai_prefilter_enhanced_timeout_secs": settings.ai.prefilter_enhanced_timeout_secs,
+        "ai_batch_signals_enabled": settings.ai.batch_signals_enabled,
+        "ai_batch_signals_window_secs": settings.ai.batch_signals_window_secs,
+        "ai_batch_signals_max_count": settings.ai.batch_signals_max_count,
+        "ai_prefetch_market_data": settings.ai.prefetch_market_data,
+        "ai_websocket_market_data_enabled": settings.ai.websocket_market_data_enabled,
+        "webhook_hmac_header_enabled": settings.server.webhook_hmac_header_enabled,
+        "webhook_hmac_header_name": settings.server.webhook_hmac_header_name,
+        "server_trust_proxy_headers": settings.server.trust_proxy_headers,
+        "server_cors_origins": settings.server.cors_origins,
+        "server_trusted_hosts": settings.server.trusted_hosts,
+        "server_public_base_url": settings.server.public_base_url,
         "telegram": {
             "configured": bool(settings.telegram.bot_token and settings.telegram.chat_id),
             "bot_configured": _public_secret_configured(settings.telegram.bot_token),
@@ -1349,6 +1506,22 @@ def runtime_status() -> dict[str, Any]:
             "live_symbol_whitelist": settings.scanner.live_symbol_whitelist,
             "shutdown_timeout_secs": settings.scanner.shutdown_timeout_secs,
             "symbol_map": settings.scanner.symbol_map,
+            "scan_timeout_secs": settings.scanner.scan_timeout_secs,
+            "adaptive_threshold_enabled": settings.scanner.adaptive_threshold_enabled,
+            "adaptive_min_score_floor": settings.scanner.adaptive_min_score_floor,
+            "adaptive_min_score_ceiling": settings.scanner.adaptive_min_score_ceiling,
+            "adaptive_win_rate_target": settings.scanner.adaptive_win_rate_target,
+            "adaptive_lookback_days": settings.scanner.adaptive_lookback_days,
+            "adaptive_adjustment_step": settings.scanner.adaptive_adjustment_step,
+            "adaptive_cooldown_levels": settings.scanner.adaptive_cooldown_levels,
+            "adaptive_cooldown_base_secs": settings.scanner.adaptive_cooldown_base_secs,
+            "adaptive_cooldown_multiplier": settings.scanner.adaptive_cooldown_multiplier,
+            "outcome_lookback_days": settings.scanner.outcome_lookback_days,
+            "outcome_max_sync_positions": settings.scanner.outcome_max_sync_positions,
+            "outcome_path_metrics_enabled": settings.scanner.outcome_path_metrics_enabled,
+            "walk_forward_min_samples": settings.scanner.walk_forward_min_samples,
+            "walk_forward_validation_ratio": settings.scanner.walk_forward_validation_ratio,
+            "walk_forward_threshold_step": settings.scanner.walk_forward_threshold_step,
         },
     }
 

@@ -137,6 +137,31 @@ class AISettingsRequest(BaseModel):
     voting_models: list[str] = Field(default_factory=list)
     voting_weights: dict[str, float] = Field(default_factory=dict)
     voting_strategy: str = Field(default="weighted", max_length=40)
+    connect_timeout_secs: float = Field(default=10.0, ge=1, le=120)
+    read_timeout_secs: float = Field(default=60.0, ge=5, le=300)
+    write_timeout_secs: float = Field(default=30.0, ge=5, le=120)
+    pool_timeout_secs: float = Field(default=10.0, ge=1, le=60)
+    max_concurrent_calls: int = Field(default=5, ge=1, le=50)
+    signal_queue_limit: int = Field(default=50, ge=1, le=500)
+    global_processing_semaphore: int = Field(default=5, ge=1, le=50)
+    signal_processing_interval_secs: float = Field(default=1.0, ge=0, le=30)
+    dynamic_interval_enabled: bool = True
+    dynamic_interval_high_load_threshold: float = Field(default=30.0, ge=1, le=100)
+    dynamic_interval_high_load_multiplier: float = Field(default=2.0, ge=0.5, le=10)
+    dynamic_cache_ttl_enabled: bool = True
+    dynamic_cache_ttl_base: int = Field(default=60, ge=10, le=600)
+    dynamic_cache_ttl_high_volatility_multiplier: float = Field(default=0.5, ge=0.1, le=5)
+    dynamic_cache_ttl_low_volatility_multiplier: float = Field(default=2.0, ge=0.1, le=10)
+    smc_cache_ttl_enabled: bool = True
+    smc_cache_ttl_base: int = Field(default=120, ge=10, le=600)
+    smc_cache_ttl_high_vol: int = Field(default=60, ge=10, le=600)
+    smc_cache_ttl_low_vol: int = Field(default=180, ge=10, le=600)
+    prefilter_enhanced_timeout_secs: float = Field(default=30.0, ge=5, le=120)
+    batch_signals_enabled: bool = False
+    batch_signals_window_secs: float = Field(default=5.0, ge=0, le=60)
+    batch_signals_max_count: int = Field(default=3, ge=1, le=20)
+    prefetch_market_data: bool = True
+    websocket_market_data_enabled: bool = False
 
     @field_validator("voting_strategy")
     @classmethod

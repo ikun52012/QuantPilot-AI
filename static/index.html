@@ -792,6 +792,278 @@
                 </div>
             </div>
 
+            <!-- AI Timeout & Connection -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-timer-line"></i> AI Timeout &amp; Connection</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-row four-col">
+                        <div class="form-group">
+                            <label for="ai-connect-timeout">Connect Timeout (s)</label>
+                            <input type="number" id="ai-connect-timeout" class="text-input" value="10" min="1" max="120" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-read-timeout">Read Timeout (s)</label>
+                            <input type="number" id="ai-read-timeout" class="text-input" value="60" min="5" max="300" step="5">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-write-timeout">Write Timeout (s)</label>
+                            <input type="number" id="ai-write-timeout" class="text-input" value="30" min="5" max="120" step="5">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-pool-timeout">Pool Timeout (s)</label>
+                            <input type="number" id="ai-pool-timeout" class="text-input" value="10" min="1" max="60" step="1">
+                        </div>
+                    </div>
+                    <div class="form-row three-col">
+                        <div class="form-group">
+                            <label for="ai-max-concurrent">Max Concurrent Calls</label>
+                            <input type="number" id="ai-max-concurrent" class="text-input" value="5" min="1" max="50" step="1">
+                        </div>
+                        <div class="form-group"></div>
+                        <div class="form-group"></div>
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-secondary" onclick="saveAITimeoutSettings()" id="btn-save-ai-timeout">
+                            <i class="ri-save-line"></i> Save Timeout Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Signal Processing -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-cpu-line"></i> AI Signal Processing</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-row three-col">
+                        <div class="form-group">
+                            <label for="ai-signal-queue-limit">Signal Queue Limit</label>
+                            <input type="number" id="ai-signal-queue-limit" class="text-input" value="50" min="1" max="500" step="5">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-processing-semaphore">Processing Semaphore</label>
+                            <input type="number" id="ai-processing-semaphore" class="text-input" value="5" min="1" max="50" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-processing-interval">Processing Interval (s)</label>
+                            <input type="number" id="ai-processing-interval" class="text-input" value="1" min="0" max="30" step="0.5">
+                        </div>
+                    </div>
+                    <div class="form-row three-col">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="ai-dynamic-interval">
+                                <span>Dynamic Interval Under Load</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-dynamic-threshold">High Load Threshold</label>
+                            <input type="number" id="ai-dynamic-threshold" class="text-input" value="30" min="1" max="100" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-dynamic-multiplier">High Load Multiplier</label>
+                            <input type="number" id="ai-dynamic-multiplier" class="text-input" value="2" min="0.5" max="10" step="0.5">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-secondary" onclick="saveAIProcessingSettings()" id="btn-save-ai-processing">
+                            <i class="ri-save-line"></i> Save Processing Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Cache TTL -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-database-2-line"></i> AI Cache TTL</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="ai-dynamic-cache-ttl">
+                            <span>Enable Dynamic Cache TTL</span>
+                        </label>
+                    </div>
+                    <div class="form-row four-col">
+                        <div class="form-group">
+                            <label for="ai-cache-ttl-base">Base TTL (s)</label>
+                            <input type="number" id="ai-cache-ttl-base" class="text-input" value="60" min="10" max="600" step="10">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-cache-ttl-high-vol">High Vol Multiplier</label>
+                            <input type="number" id="ai-cache-ttl-high-vol" class="text-input" value="0.5" min="0.1" max="5" step="0.1">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-cache-ttl-low-vol">Low Vol Multiplier</label>
+                            <input type="number" id="ai-cache-ttl-low-vol" class="text-input" value="2" min="0.1" max="10" step="0.1">
+                        </div>
+                        <div class="form-group"></div>
+                    </div>
+                    <div class="form-group" style="margin-top:12px">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="ai-smc-cache-ttl">
+                            <span>Enable SMC Cache TTL</span>
+                        </label>
+                    </div>
+                    <div class="form-row four-col">
+                        <div class="form-group">
+                            <label for="ai-smc-cache-base">SMC Base TTL (s)</label>
+                            <input type="number" id="ai-smc-cache-base" class="text-input" value="120" min="10" max="600" step="10">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-smc-cache-high-vol">SMC High Vol TTL (s)</label>
+                            <input type="number" id="ai-smc-cache-high-vol" class="text-input" value="60" min="10" max="600" step="10">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-smc-cache-low-vol">SMC Low Vol TTL (s)</label>
+                            <input type="number" id="ai-smc-cache-low-vol" class="text-input" value="180" min="10" max="600" step="10">
+                        </div>
+                        <div class="form-group"></div>
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-secondary" onclick="saveAICacheSettings()" id="btn-save-ai-cache">
+                            <i class="ri-save-line"></i> Save Cache Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Batching & WebSocket -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-stack-line"></i> AI Batching &amp; WebSocket</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-row three-col">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="ai-batch-enabled">
+                                <span>Enable Signal Batching</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-batch-window">Batch Window (s)</label>
+                            <input type="number" id="ai-batch-window" class="text-input" value="5" min="0" max="60" step="0.5">
+                        </div>
+                        <div class="form-group">
+                            <label for="ai-batch-max-count">Max Batch Size</label>
+                            <input type="number" id="ai-batch-max-count" class="text-input" value="3" min="1" max="20" step="1">
+                        </div>
+                    </div>
+                    <div class="form-row three-col">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="ai-prefetch-market">
+                                <span>Prefetch Market Data</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="ai-websocket-market">
+                                <span>WebSocket Market Data</span>
+                            </label>
+                        </div>
+                        <div class="form-group"></div>
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-secondary" onclick="saveAIBatchSettings()" id="btn-save-ai-batch">
+                            <i class="ri-save-line"></i> Save Batching Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Webhook HMAC Verification -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-shield-keyhole-line"></i> Webhook HMAC Verification <span class="badge badge-experimental">Optional</span></h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="webhook-hmac-enabled">
+                            <span>Enable HMAC Header Verification</span>
+                        </label>
+                        <p class="hint">TradingView does NOT support HMAC headers. Only enable for custom webhook senders.</p>
+                    </div>
+                    <div class="form-row two-col">
+                        <div class="form-group">
+                            <label for="webhook-hmac-secret">HMAC Secret</label>
+                            <input type="password" id="webhook-hmac-secret" class="text-input" placeholder="Enter HMAC secret key">
+                        </div>
+                        <div class="form-group">
+                            <label for="webhook-hmac-header-name">Header Name</label>
+                            <input type="text" id="webhook-hmac-header-name" class="text-input" value="X-Webhook-Signature" placeholder="X-Webhook-Signature">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-secondary" onclick="saveWebhookHMACSettings()" id="btn-save-hmac">
+                            <i class="ri-save-line"></i> Save HMAC Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Server Network / Proxy -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-server-line"></i> Server Network &amp; Proxy</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="server-trust-proxy">
+                            <span>Trust Proxy Headers (X-Forwarded-For / X-Real-IP)</span>
+                        </label>
+                        <p class="hint">Enable when running behind a reverse proxy (nginx, Cloudflare, etc.)</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="server-public-url">Public Base URL</label>
+                        <input type="text" id="server-public-url" class="text-input" placeholder="https://your-domain.com">
+                        <p class="hint">Used for webhook URLs and notification links</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="server-cors-origins">CORS Origins (JSON array)</label>
+                        <input type="text" id="server-cors-origins" class="text-input" placeholder='["https://example.com"]'>
+                    </div>
+                    <div class="form-group">
+                        <label for="server-trusted-hosts">Trusted Hosts (JSON array)</label>
+                        <input type="text" id="server-trusted-hosts" class="text-input" placeholder='["*"]'>
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-secondary" onclick="saveServerNetworkSettings()" id="btn-save-server-network">
+                            <i class="ri-save-line"></i> Save Network Settings
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pre-filter Enhanced Timeout -->
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3><i class="ri-speed-line"></i> Pre-filter Enhanced Timeout</h3>
+                </div>
+                <div class="settings-form">
+                    <div class="form-row two-col">
+                        <div class="form-group">
+                            <label for="ai-prefilter-timeout">Enhanced Checks Timeout (s)</label>
+                            <input type="number" id="ai-prefilter-timeout" class="text-input" value="30" min="5" max="120" step="5">
+                            <p class="hint">Global timeout for whale/correlated/OI enhanced checks</p>
+                        </div>
+                        <div class="form-group"></div>
+                    </div>
+                    <div class="form-row">
+                        <button class="btn btn-secondary" onclick="savePrefilterTimeoutSettings()" id="btn-save-prefilter-timeout">
+                            <i class="ri-save-line"></i> Save Timeout
+                        </button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Take-Profit Settings -->
             <div class="card mt-4">
                 <div class="card-header">

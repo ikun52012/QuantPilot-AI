@@ -1216,6 +1216,9 @@ async function loadSettings() {
         if (isAdmin()) {
             loadAdminWebhookConfig();
             loadVotingConfig();
+            loadAIAdvancedSettings(status);
+            loadWebhookHMACSettings(status);
+            loadServerNetworkSettings(status);
         }
         // Load 2FA status
         load2FAStatus();
@@ -1348,6 +1351,137 @@ async function saveRiskSettings() {
         fixed_position_size_usdt: readNumberInput('set-fixed-size', 100),
         risk_per_trade_pct: readNumberInput('set-risk-per-trade', 1),
     });
+}
+
+// ─── AI Advanced Settings ───
+function loadAIAdvancedSettings(status) {
+    setFieldValue('ai-connect-timeout', status.ai_connect_timeout_secs ?? 10);
+    setFieldValue('ai-read-timeout', status.ai_read_timeout_secs ?? 60);
+    setFieldValue('ai-write-timeout', status.ai_write_timeout_secs ?? 30);
+    setFieldValue('ai-pool-timeout', status.ai_pool_timeout_secs ?? 10);
+    setFieldValue('ai-max-concurrent', status.ai_max_concurrent_calls ?? 5);
+    setFieldValue('ai-signal-queue-limit', status.ai_signal_queue_limit ?? 50);
+    setFieldValue('ai-processing-semaphore', status.ai_global_processing_semaphore ?? 5);
+    setFieldValue('ai-processing-interval', status.ai_signal_processing_interval_secs ?? 1);
+    const dynInterval = document.getElementById('ai-dynamic-interval');
+    if (dynInterval) dynInterval.checked = Boolean(status.ai_dynamic_interval_enabled);
+    setFieldValue('ai-dynamic-threshold', status.ai_dynamic_interval_high_load_threshold ?? 30);
+    setFieldValue('ai-dynamic-multiplier', status.ai_dynamic_interval_high_load_multiplier ?? 2);
+    const dynCache = document.getElementById('ai-dynamic-cache-ttl');
+    if (dynCache) dynCache.checked = Boolean(status.ai_dynamic_cache_ttl_enabled);
+    setFieldValue('ai-cache-ttl-base', status.ai_dynamic_cache_ttl_base ?? 60);
+    setFieldValue('ai-cache-ttl-high-vol', status.ai_dynamic_cache_ttl_high_volatility_multiplier ?? 0.5);
+    setFieldValue('ai-cache-ttl-low-vol', status.ai_dynamic_cache_ttl_low_volatility_multiplier ?? 2);
+    const smcCache = document.getElementById('ai-smc-cache-ttl');
+    if (smcCache) smcCache.checked = Boolean(status.ai_smc_cache_ttl_enabled);
+    setFieldValue('ai-smc-cache-base', status.ai_smc_cache_ttl_base ?? 120);
+    setFieldValue('ai-smc-cache-high-vol', status.ai_smc_cache_ttl_high_vol ?? 60);
+    setFieldValue('ai-smc-cache-low-vol', status.ai_smc_cache_ttl_low_vol ?? 180);
+    const batchEnabled = document.getElementById('ai-batch-enabled');
+    if (batchEnabled) batchEnabled.checked = Boolean(status.ai_batch_signals_enabled);
+    setFieldValue('ai-batch-window', status.ai_batch_signals_window_secs ?? 5);
+    setFieldValue('ai-batch-max-count', status.ai_batch_signals_max_count ?? 3);
+    const prefetch = document.getElementById('ai-prefetch-market');
+    if (prefetch) prefetch.checked = Boolean(status.ai_prefetch_market_data);
+    const websocket = document.getElementById('ai-websocket-market');
+    if (websocket) websocket.checked = Boolean(status.ai_websocket_market_data_enabled);
+    setFieldValue('ai-prefilter-timeout', status.ai_prefilter_enhanced_timeout_secs ?? 30);
+}
+
+async function saveAITimeoutSettings() {
+    await saveSettings('/api/settings/ai', {
+        connect_timeout_secs: readNumberInput('ai-connect-timeout', 10),
+        read_timeout_secs: readNumberInput('ai-read-timeout', 60),
+        write_timeout_secs: readNumberInput('ai-write-timeout', 30),
+        pool_timeout_secs: readNumberInput('ai-pool-timeout', 10),
+        max_concurrent_calls: readNumberInput('ai-max-concurrent', 5, v => parseInt(v, 10)),
+    }, 'btn-save-ai-timeout');
+}
+
+async function saveAIProcessingSettings() {
+    await saveSettings('/api/settings/ai', {
+        signal_queue_limit: readNumberInput('ai-signal-queue-limit', 50, v => parseInt(v, 10)),
+        global_processing_semaphore: readNumberInput('ai-processing-semaphore', 5, v => parseInt(v, 10)),
+        signal_processing_interval_secs: readNumberInput('ai-processing-interval', 1),
+        dynamic_interval_enabled: document.getElementById('ai-dynamic-interval')?.checked || false,
+        dynamic_interval_high_load_threshold: readNumberInput('ai-dynamic-threshold', 30),
+        dynamic_interval_high_load_multiplier: readNumberInput('ai-dynamic-multiplier', 2),
+    }, 'btn-save-ai-processing');
+}
+
+async function saveAICacheSettings() {
+    await saveSettings('/api/settings/ai', {
+        dynamic_cache_ttl_enabled: document.getElementById('ai-dynamic-cache-ttl')?.checked || false,
+        dynamic_cache_ttl_base: readNumberInput('ai-cache-ttl-base', 60, v => parseInt(v, 10)),
+        dynamic_cache_ttl_high_volatility_multiplier: readNumberInput('ai-cache-ttl-high-vol', 0.5),
+        dynamic_cache_ttl_low_volatility_multiplier: readNumberInput('ai-cache-ttl-low-vol', 2),
+        smc_cache_ttl_enabled: document.getElementById('ai-smc-cache-ttl')?.checked || false,
+        smc_cache_ttl_base: readNumberInput('ai-smc-cache-base', 120, v => parseInt(v, 10)),
+        smc_cache_ttl_high_vol: readNumberInput('ai-smc-cache-high-vol', 60, v => parseInt(v, 10)),
+        smc_cache_ttl_low_vol: readNumberInput('ai-smc-cache-low-vol', 180, v => parseInt(v, 10)),
+    }, 'btn-save-ai-cache');
+}
+
+async function saveAIBatchSettings() {
+    await saveSettings('/api/settings/ai', {
+        batch_signals_enabled: document.getElementById('ai-batch-enabled')?.checked || false,
+        batch_signals_window_secs: readNumberInput('ai-batch-window', 5),
+        batch_signals_max_count: readNumberInput('ai-batch-max-count', 3, v => parseInt(v, 10)),
+        prefetch_market_data: document.getElementById('ai-prefetch-market')?.checked || false,
+        websocket_market_data_enabled: document.getElementById('ai-websocket-market')?.checked || false,
+    }, 'btn-save-ai-batch');
+}
+
+async function savePrefilterTimeoutSettings() {
+    await saveSettings('/api/settings/ai', {
+        prefilter_enhanced_timeout_secs: readNumberInput('ai-prefilter-timeout', 30),
+    }, 'btn-save-prefilter-timeout');
+}
+
+// ─── Webhook HMAC Settings ───
+function loadWebhookHMACSettings(status) {
+    const hmacEnabled = document.getElementById('webhook-hmac-enabled');
+    if (hmacEnabled) hmacEnabled.checked = Boolean(status.webhook_hmac_header_enabled);
+    setFieldValue('webhook-hmac-header-name', status.webhook_hmac_header_name || 'X-Webhook-Signature');
+    const hmacSecret = document.getElementById('webhook-hmac-secret');
+    if (hmacSecret) hmacSecret.value = '';
+}
+
+async function saveWebhookHMACSettings() {
+    const data = {
+        webhook_hmac_header_enabled: document.getElementById('webhook-hmac-enabled')?.checked || false,
+        webhook_hmac_header_name: document.getElementById('webhook-hmac-header-name')?.value || 'X-Webhook-Signature',
+    };
+    const hmacSecret = document.getElementById('webhook-hmac-secret')?.value;
+    if (hmacSecret && hmacSecret.trim()) {
+        data.webhook_hmac_secret = hmacSecret.trim();
+    }
+    await saveSettings('/api/settings', data, 'btn-save-hmac');
+}
+
+// ─── Server Network Settings ───
+function loadServerNetworkSettings(status) {
+    const trustProxy = document.getElementById('server-trust-proxy');
+    if (trustProxy) trustProxy.checked = Boolean(status.server_trust_proxy_headers);
+    setFieldValue('server-public-url', status.server_public_base_url || '');
+    setFieldValue('server-cors-origins', JSON.stringify(status.server_cors_origins || ['*']));
+    setFieldValue('server-trusted-hosts', JSON.stringify(status.server_trusted_hosts || ['*']));
+}
+
+async function saveServerNetworkSettings() {
+    let corsOrigins, trustedHosts;
+    try {
+        corsOrigins = JSON.parse(document.getElementById('server-cors-origins')?.value || '["*"]');
+    } catch { corsOrigins = ['*']; }
+    try {
+        trustedHosts = JSON.parse(document.getElementById('server-trusted-hosts')?.value || '["*"]');
+    } catch { trustedHosts = ['*']; }
+    await saveSettings('/api/settings', {
+        trust_proxy_headers: document.getElementById('server-trust-proxy')?.checked || false,
+        public_base_url: document.getElementById('server-public-url')?.value || '',
+        cors_origins: corsOrigins,
+        trusted_hosts: trustedHosts,
+    }, 'btn-save-server-network');
 }
 
 // ─── Take-Profit ───
@@ -5536,6 +5670,22 @@ function renderScannerStatus(status) {
     const maxCorrelatedSignalsPerRun = learning.max_correlated_signals_per_run ?? 2;
     const correlationBuckets = learning.correlation_buckets || {};
     const shutdownTimeout = status.shutdown_timeout_secs ?? 30;
+    const scanTimeout = status.scan_timeout_secs ?? 300;
+    const adaptiveEnabled = status.adaptive_threshold_enabled ?? false;
+    const adaptiveFloor = status.adaptive_min_score_floor ?? 50;
+    const adaptiveCeiling = status.adaptive_min_score_ceiling ?? 85;
+    const adaptiveWinTarget = status.adaptive_win_rate_target ?? 55;
+    const adaptiveLookback = status.adaptive_lookback_days ?? 7;
+    const adaptiveStep = status.adaptive_adjustment_step ?? 2.5;
+    const adaptiveCooldownLevels = status.adaptive_cooldown_levels ?? 5;
+    const adaptiveCooldownBase = status.adaptive_cooldown_base_secs ?? 300;
+    const adaptiveCooldownMulti = status.adaptive_cooldown_multiplier ?? 2;
+    const outcomeLookback = status.outcome_lookback_days ?? 30;
+    const outcomeMaxSync = status.outcome_max_sync_positions ?? 50;
+    const outcomePathMetrics = status.outcome_path_metrics_enabled ?? true;
+    const wfMinSamples = status.walk_forward_min_samples ?? 12;
+    const wfValRatio = status.walk_forward_validation_ratio ?? 0.30;
+    const wfThresholdStep = status.walk_forward_threshold_step ?? 2.5;
 
     const st = status.state || {};
     const scanCount = st.scan_count ?? 0;
@@ -6037,6 +6187,97 @@ function renderScannerStatus(status) {
                 </div>
             </div>
 
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-scan-timeout">Scan Timeout (sec)</label>
+                    <input type="number" id="scanner-scan-timeout" class="text-input" value="${scanTimeout}" min="60" max="1800" step="30">
+                    <p class="hint">Max time for a single scanner run</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-adaptive-enabled">Adaptive Thresholds</label>
+                    <select id="scanner-adaptive-enabled" class="text-input">
+                        <option value="true" ${adaptiveEnabled ? 'selected' : ''}>Enabled</option>
+                        <option value="false" ${!adaptiveEnabled ? 'selected' : ''}>Disabled</option>
+                    </select>
+                    <p class="hint">Auto-adjust min_score based on win rate</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-adaptive-floor">Adaptive Floor / Ceiling</label>
+                    <div style="display:flex;gap:8px">
+                        <input type="number" id="scanner-adaptive-floor" class="text-input" value="${adaptiveFloor}" min="0" max="100" step="1" title="min score floor">
+                        <input type="number" id="scanner-adaptive-ceiling" class="text-input" value="${adaptiveCeiling}" min="0" max="100" step="1" title="min score ceiling">
+                    </div>
+                    <p class="hint">Score boundaries for adaptive adjustment</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-adaptive-win-target">Win Rate Target%</label>
+                    <input type="number" id="scanner-adaptive-win-target" class="text-input" value="${adaptiveWinTarget}" min="0" max="100" step="1">
+                </div>
+                <div class="form-group">
+                    <label for="scanner-adaptive-lookback">Lookback Days</label>
+                    <input type="number" id="scanner-adaptive-lookback" class="text-input" value="${adaptiveLookback}" min="1" max="365" step="1">
+                </div>
+                <div class="form-group">
+                    <label for="scanner-adaptive-step">Adjustment Step</label>
+                    <input type="number" id="scanner-adaptive-step" class="text-input" value="${adaptiveStep}" min="0.1" max="20" step="0.1">
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-adaptive-cooldown-levels">Cooldown Levels</label>
+                    <input type="number" id="scanner-adaptive-cooldown-levels" class="text-input" value="${adaptiveCooldownLevels}" min="1" max="20" step="1">
+                </div>
+                <div class="form-group">
+                    <label for="scanner-adaptive-cooldown-base">Cooldown Base (sec)</label>
+                    <input type="number" id="scanner-adaptive-cooldown-base" class="text-input" value="${adaptiveCooldownBase}" min="30" max="86400" step="30">
+                </div>
+                <div class="form-group">
+                    <label for="scanner-adaptive-cooldown-multi">Cooldown Multiplier</label>
+                    <input type="number" id="scanner-adaptive-cooldown-multi" class="text-input" value="${adaptiveCooldownMulti}" min="1" max="10" step="0.5">
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-outcome-lookback">Outcome Lookback Days</label>
+                    <input type="number" id="scanner-outcome-lookback" class="text-input" value="${outcomeLookback}" min="1" max="365" step="1">
+                    <p class="hint">Days of closed trades for learning</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-outcome-max-sync">Max Sync Positions</label>
+                    <input type="number" id="scanner-outcome-max-sync" class="text-input" value="${outcomeMaxSync}" min="1" max="1000" step="1">
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="scanner-outcome-path-metrics" ${outcomePathMetrics ? 'checked' : ''}>
+                        <span>Path Metrics Enabled</span>
+                    </label>
+                    <p class="hint">Track path-based metrics for learning</p>
+                </div>
+            </div>
+
+            <div class="form-row three-col">
+                <div class="form-group">
+                    <label for="scanner-wf-min-samples">WF Min Samples</label>
+                    <input type="number" id="scanner-wf-min-samples" class="text-input" value="${wfMinSamples}" min="3" max="1000" step="1">
+                    <p class="hint">Min samples before walk-forward adjustment</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-wf-val-ratio">WF Validation Ratio</label>
+                    <input type="number" id="scanner-wf-val-ratio" class="text-input" value="${wfValRatio}" min="0.1" max="0.5" step="0.05">
+                    <p class="hint">Data ratio for validation</p>
+                </div>
+                <div class="form-group">
+                    <label for="scanner-wf-threshold-step">WF Threshold Step</label>
+                    <input type="number" id="scanner-wf-threshold-step" class="text-input" value="${wfThresholdStep}" min="0.5" max="10" step="0.5">
+                    <p class="hint">Step size for threshold adjustment</p>
+                </div>
+            </div>
+
             <div class="form-row" style="margin-top:16px">
                 <button class="btn btn-primary" id="btn-scanner-save" onclick="saveScannerSettings()"><i class="ri-save-line"></i> Save Scanner Settings</button>
                 <button class="btn btn-secondary" onclick="loadScanner()"><i class="ri-refresh-line"></i> Refresh</button>
@@ -6155,6 +6396,24 @@ async function saveScannerSettings() {
         showToast('Correlation buckets JSON is invalid: ' + e.message, 'error');
         return;
     }
+
+    data.scan_timeout_secs = scannerNumberValue('scanner-scan-timeout', 300, true);
+    data.adaptive_threshold_enabled = document.getElementById('scanner-adaptive-enabled').value === 'true';
+    data.adaptive_min_score_floor = scannerNumberValue('scanner-adaptive-floor', 50);
+    data.adaptive_min_score_ceiling = scannerNumberValue('scanner-adaptive-ceiling', 85);
+    data.adaptive_win_rate_target = scannerNumberValue('scanner-adaptive-win-target', 55);
+    data.adaptive_lookback_days = scannerNumberValue('scanner-adaptive-lookback', 7, true);
+    data.adaptive_adjustment_step = scannerNumberValue('scanner-adaptive-step', 2.5);
+    data.adaptive_cooldown_levels = scannerNumberValue('scanner-adaptive-cooldown-levels', 5, true);
+    data.adaptive_cooldown_base_secs = scannerNumberValue('scanner-adaptive-cooldown-base', 300, true);
+    data.adaptive_cooldown_multiplier = scannerNumberValue('scanner-adaptive-cooldown-multi', 2);
+    data.outcome_lookback_days = scannerNumberValue('scanner-outcome-lookback', 30, true);
+    data.outcome_max_sync_positions = scannerNumberValue('scanner-outcome-max-sync', 50, true);
+    data.outcome_path_metrics_enabled = document.getElementById('scanner-outcome-path-metrics')?.checked ?? true;
+    data.walk_forward_min_samples = scannerNumberValue('scanner-wf-min-samples', 12, true);
+    data.walk_forward_validation_ratio = scannerNumberValue('scanner-wf-val-ratio', 0.30);
+    data.walk_forward_threshold_step = scannerNumberValue('scanner-wf-threshold-step', 2.5);
+
     await saveSettings('/api/scanner/settings', data, 'btn-scanner-save');
     setTimeout(() => loadScanner(), 1500);
 }
