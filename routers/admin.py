@@ -30,6 +30,7 @@ from core.database import (
     ScannerAuditModel,
     SubscriptionModel,
     SubscriptionPlanModel,
+    TradeModel,
     UserModel,
     WebhookEventModel,
     deactivate_user_subscriptions,
@@ -91,6 +92,11 @@ class CreatePlanRequest(BaseModel):
 
 class ClearLogsRequest(BaseModel):
     log_type: str = Field(pattern="^(admin|webhook|scanner|order|all)$")
+    older_than_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class ClearTradeHistoryRequest(BaseModel):
+    confirm: bool = Field(default=False)
     older_than_days: int | None = Field(default=None, ge=1, le=3650)
 
 
@@ -938,6 +944,38 @@ async def clear_logs(
     )
     await db.commit()
     return {"status": "ok", "deleted": deleted}
+
+
+@router.post("/trades/clear")
+async def clear_trade_history(
+    payload: ClearTradeHistoryRequest,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear stored trade history rows used by history/analytics views."""
+    if not payload.confirm:
+        raise HTTPException(400, "Confirmation required")
+
+    cutoff = utcnow() - timedelta(days=payload.older_than_days) if payload.older_than_days else None
+    stmt = delete(TradeModel)
+    if cutoff is not None:
+        stmt = stmt.where(TradeModel.timestamp < cutoff)
+    result = await db.execute(stmt)
+    deleted = max(0, int(result.rowcount or 0))
+
+    scope = f"older_than_{payload.older_than_days}d" if payload.older_than_days else "all"
+    await _add_audit_log(
+        db,
+        admin,
+        "clear_trade_history",
+        "trades",
+        scope,
+        f"Cleared {deleted} trade history records ({scope})",
+        request,
+    )
+    await db.commit()
+    return {"status": "ok", "deleted": {"trades": deleted}, "older_than_days": payload.older_than_days}
 
 
 # ─────────────────────────────────────────────

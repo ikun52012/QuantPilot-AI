@@ -925,6 +925,28 @@ async function loadHistory() {
     } catch (err) { showToast(err.message, 'error', 'History Load Failed'); }
 }
 
+async function clearTradeHistory() {
+    if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
+    if (!confirm('Delete ALL stored trade history records? This cannot be undone. Open positions are not closed or modified.')) return;
+    const typed = prompt('Type DELETE to confirm clearing trade history.');
+    if (typed !== 'DELETE') {
+        showToast('Trade history cleanup cancelled', 'warning');
+        return;
+    }
+    try {
+        const result = await fetchAPI('/api/admin/trades/clear', {
+            method: 'POST',
+            body: JSON.stringify({ confirm: true }),
+        });
+        const count = Number(result?.deleted?.trades || 0);
+        showToast(`Cleared ${count} trade history records`, 'success', 'History Cleared');
+        await loadHistory();
+        if (isActivePage('analytics')) await loadAnalytics();
+    } catch (err) {
+        showToast(err.message, 'error', 'Clear History Failed');
+    }
+}
+
 function renderHistoryPage() {
     const trades = _historyAllTrades;
     const tbody = document.getElementById('history-body');

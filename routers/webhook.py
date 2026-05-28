@@ -36,6 +36,44 @@ from services.signal_processor import SignalProcessor, compute_webhook_fingerpri
 router = APIRouter(prefix="", tags=["webhook"])
 
 _WEBHOOK_REPLAY_WINDOW_SECS = 300
+
+
+async def _verify_hmac_signature(request: Request, raw_body: bytes) -> None:
+    """Verify HMAC signature from request header if enabled.
+
+    This provides an additional layer of security beyond the payload secret.
+    TradingView does NOT support HMAC headers, so this is optional.
+    For custom integrations, enable WEBHOOK_HMAC_HEADER_ENABLED=true.
+    """
+    if not settings.server.webhook_hmac_header_enabled:
+        return
+
+    hmac_secret = settings.server.webhook_hmac_secret
+    if not hmac_secret:
+        logger.warning("[Webhook] HMAC header enabled but WEBHOOK_HMAC_SECRET not set")
+        raise HTTPException(500, "HMAC verification misconfigured")
+
+    header_name = settings.server.webhook_hmac_header_name
+    signature = request.headers.get(header_name, "")
+
+    if not signature:
+        raise HTTPException(401, f"Missing HMAC signature header: {header_name}")
+
+    try:
+        expected = hmac.new(
+            hmac_secret.encode("utf-8"),
+            raw_body,
+            hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            logger.warning(f"[Webhook] Invalid HMAC signature from {get_client_ip(request)}")
+            raise HTTPException(401, "Invalid HMAC signature")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Webhook] HMAC verification error: {e}")
+        raise HTTPException(500, "HMAC verification failed") from e
+
 _NONCE_CACHE: dict[str, float] = {}
 _NONCE_CACHE_MAX_SIZE = 10000
 _NONCE_CACHE_CLEANUP_INTERVAL = 3600
@@ -245,6 +283,9 @@ async def webhook(
     except json.JSONDecodeError as err:
         logger.error(f"[Webhook] Invalid JSON: {err}")
         raise HTTPException(400, "Invalid JSON payload") from err
+
+    # Verify HMAC signature if enabled (optional security layer)
+    await _verify_hmac_signature(request, raw_body)
 
     secret = body.get("secret", "").strip()
     if not secret:

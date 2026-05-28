@@ -475,6 +475,11 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
             scanner.get("max_price_deviation_pct"), settings.scanner.max_price_deviation_pct, 0, 100
         )
         settings.scanner.score_weights = _normalize_float_dict(scanner.get("score_weights"), settings.scanner.score_weights)
+        try:
+            from services.scanner_rules import DEFAULT_ENGINE
+            DEFAULT_ENGINE.set_weights(dict(settings.scanner.score_weights or {}))
+        except Exception as e:
+            logger.debug(f"[RuntimeSettings] Failed to sync scanner score weights: {e}")
         settings.scanner.ema200_enabled = _to_bool(scanner.get("ema200_enabled"), settings.scanner.ema200_enabled)
         settings.scanner.htf_conflict_enabled = _to_bool(scanner.get("htf_conflict_enabled"), settings.scanner.htf_conflict_enabled)
         settings.scanner.regime_filter_enabled = _to_bool(scanner.get("regime_filter_enabled"), settings.scanner.regime_filter_enabled)

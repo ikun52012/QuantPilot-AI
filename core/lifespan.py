@@ -170,6 +170,11 @@ async def _on_startup():
     logger.info("=" * 50)
 
     await _init_database()
+    try:
+        from services.scanner_rules import load_rules_config
+        load_rules_config()
+    except Exception as e:
+        logger.warning(f"[Startup] Failed to load scanner rules config: {e}")
 
     logger.info(f"   AI Provider: {settings.ai.provider}")
     logger.info(f"   Exchange: {settings.exchange.name}")
@@ -219,7 +224,7 @@ async def _init_scheduler():
 
     async def _daily_reset_job():
         from pre_filter import _state_lock, reset_daily_counters
-        with _state_lock:
+        async with _state_lock:
             reset_daily_counters()
         logger.info("[Scheduler] Daily trade counters reset")
 

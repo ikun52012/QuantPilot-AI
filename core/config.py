@@ -384,6 +384,9 @@ class TrailingStopSettings(BaseModel):
 class ServerConfig(BaseModel):
     """Server configuration."""
     webhook_secret: str = ""
+    webhook_hmac_header_enabled: bool = False
+    webhook_hmac_secret: str = ""
+    webhook_hmac_header_name: str = "X-Webhook-Signature"
     public_base_url: str = ""
     host: str = "0.0.0.0"
     port: int = 8000
@@ -399,6 +402,9 @@ class ServerConfig(BaseModel):
         trusted_hosts = [s.strip() for s in trusted_raw.split(",") if s.strip()] if trusted_raw else ["*"]
         return cls(
             webhook_secret=os.getenv("WEBHOOK_SECRET", ""),
+            webhook_hmac_header_enabled=os.getenv("WEBHOOK_HMAC_HEADER_ENABLED", "false").lower() == "true",
+            webhook_hmac_secret=os.getenv("WEBHOOK_HMAC_SECRET", ""),
+            webhook_hmac_header_name=os.getenv("WEBHOOK_HMAC_HEADER_NAME", "X-Webhook-Signature"),
             public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
             host=os.getenv("HOST", "0.0.0.0"),
             port=int(os.getenv("PORT", "8000")),
@@ -555,6 +561,7 @@ class ScannerConfig(BaseModel):
         "metals": ["XAU", "XAG", "PAXG"],
         "oil": ["WTI", "BRENT", "USOIL", "UKOIL"],
     })
+    scan_timeout_secs: int = 300
 
 
     @field_validator("mode")

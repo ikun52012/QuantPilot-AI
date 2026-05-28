@@ -67,16 +67,21 @@ def set_secure_api_key(key_name: str, key_value: str) -> None:
         _secure_keys[key_name] = key_value
 
 
-def get_secure_api_key(key_name: str) -> str | None:
+def get_secure_api_key(key_name: str, *, allow_env_fallback: bool = True) -> str | None:
     """
     Retrieve an API key from secure in-memory storage.
 
-    Falls back to environment variable if not in memory,
-    but logs a warning about the security risk.
+    Args:
+        key_name: Name of the API key to retrieve
+        allow_env_fallback: If True, falls back to environment variable if not in memory.
+                           Set to False in production for enhanced security.
     """
     with _secure_keys_lock:
         if key_name in _secure_keys:
             return _secure_keys[key_name]
+
+    if not allow_env_fallback:
+        return None
 
     # Fallback to env for backwards compatibility
     env_value = os.getenv(key_name.upper(), "")
@@ -120,6 +125,8 @@ def mask_secret(value: Any, *, front: int = 4, back: int = 4) -> str:
 def _derive_fernet_key(raw: str) -> bytes:
     """Derive a Fernet-compatible key from a raw string."""
     raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("Encryption key cannot be empty")
     try:
         Fernet(raw.encode())
         return raw.encode()
@@ -132,7 +139,13 @@ def _load_or_create_key() -> bytes:
     """Load or create the encryption key."""
     env_key = os.getenv("APP_ENCRYPTION_KEY", "").strip()
     if env_key:
-        return _derive_fernet_key(env_key)
+        try:
+            return _derive_fernet_key(env_key)
+        except ValueError as err:
+            raise RuntimeError(
+                "APP_ENCRYPTION_KEY environment variable is empty or invalid. "
+                "Set a valid Fernet key or remove it to auto-generate one."
+            ) from err
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 

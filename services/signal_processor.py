@@ -743,7 +743,7 @@ class SignalProcessor:
                     reason = "Scanner live mode requires global LIVE_TRADING=true"
                     self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
                     return {"status": "blocked", "reason": reason}
-                if signal.ticker.upper().strip() not in whitelist:
+                if whitelist and signal.ticker.upper().strip() not in whitelist:
                     reason = "Scanner live mode blocked: symbol is not in SCANNER_LIVE_SYMBOL_WHITELIST"
                     self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
                     return {"status": "blocked", "reason": reason}
@@ -800,6 +800,7 @@ class SignalProcessor:
                     reason=cb_reason,
                     payload={"circuit_breaker": True, "mode": mode},
                 )
+                self._update_reserved_event(reservation, "held", 200, cb_reason, raw_body)
                 return {"status": "held", "reason": cb_reason, "circuit_breaker": True}
 
             try:

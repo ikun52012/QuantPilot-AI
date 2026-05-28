@@ -1,7 +1,7 @@
 """Tests for signal processing pipeline."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -464,7 +464,7 @@ class TestSignalProcessorBuildDecision:
     async def test_live_prefilter_blocks_when_data_quality_missing(self, processor, monkeypatch):
         import enhanced_market_data as emd
 
-        pre_filter.clear_signal_memory()
+        await pre_filter.clear_signal_memory()
 
         # Direct setattr mocking (proven approach)
         emd.check_macro_event_risk = AsyncMock(return_value=(True, None))
@@ -525,7 +525,7 @@ class TestSignalProcessorBuildDecision:
         emd.calculate_funding_term_structure = AsyncMock(return_value={"is_steepening": False, "trend": "stable", "current_funding": 0.0001})
         emd.check_exchange_price_discrepancy = AsyncMock(return_value={"max_discrepancy_pct": 0.1, "is_concerning": False})
 
-        pre_filter.clear_signal_memory()
+        await pre_filter.clear_signal_memory()
         pre_filter._block_history.clear()
         pre_filter._CIRCUIT_BREAKERS.clear()
         before_stats = dict(pre_filter._filter_stats_buffer.get("daily_trade_limit", {}))
@@ -595,7 +595,7 @@ class TestSignalProcessorBuildDecision:
         emd.calculate_funding_term_structure = AsyncMock(return_value={"is_steepening": False, "trend": "stable", "current_funding": 0.0001})
         emd.check_exchange_price_discrepancy = AsyncMock(return_value={"max_discrepancy_pct": 0.1, "is_concerning": False})
 
-        pre_filter.clear_signal_memory()
+        await pre_filter.clear_signal_memory()
 
         pre_filter.count_today_executed_trades_async = AsyncMock(return_value=0)
         pre_filter.get_today_pnl_async = AsyncMock(return_value=0.0)
@@ -633,9 +633,10 @@ class TestSignalProcessorBuildDecision:
         assert second.passed is False
         assert "cooldown" in second.reason.lower()
 
-    def test_signal_saturation_is_scoped_by_ticker(self):
-        pre_filter.clear_signal_memory()
-        pre_filter._inject_signal("user-1", "BTCUSDT", SignalDirection.LONG, timestamp=utcnow())
+    @pytest.mark.asyncio
+    async def test_signal_saturation_is_scoped_by_ticker(self):
+        await pre_filter.clear_signal_memory()
+        await pre_filter._inject_signal("user-1", "BTCUSDT", SignalDirection.LONG, timestamp=utcnow())
 
         intc_signal = TradingViewSignal(
             secret="test",
@@ -658,8 +659,8 @@ class TestSignalProcessorBuildDecision:
             message="",
         )
 
-        assert pre_filter._count_recent_same_direction(intc_signal, user_id="user-1") == 0
-        assert pre_filter._count_recent_same_direction(btc_signal, user_id="user-1") == 1
+        assert await pre_filter._count_recent_same_direction(intc_signal, user_id="user-1") == 0
+        assert await pre_filter._count_recent_same_direction(btc_signal, user_id="user-1") == 1
 
     def test_modified_entry_within_range(self, processor, sample_signal, sample_market):
         """Should use AI modified entry when within 5% of signal price."""
@@ -1161,7 +1162,9 @@ class TestPositionConflictSafety:
 
     @pytest.mark.asyncio
     async def test_conflict_reason_without_position_rejects_before_execution(self, monkeypatch):
-        processor = SignalProcessor(session=AsyncMock())
+        session = AsyncMock()
+        session.add = MagicMock()
+        processor = SignalProcessor(session=session)
         signal = TradingViewSignal(
             secret="test",
             ticker="BTCUSDT",

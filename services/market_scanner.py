@@ -35,6 +35,7 @@ from services.unified_ohlcv import OHLCVBundle, UnifiedOHLCVProvider, timeframe_
 
 # Lazy import to avoid circular dependency
 _bcast_scanner = None
+_bcast_tasks: set[asyncio.Task] = set()
 
 def _broadcast_scanner(event: dict) -> None:
     global _bcast_scanner
@@ -45,9 +46,19 @@ def _broadcast_scanner(event: dict) -> None:
         except Exception:
             return
     try:
-        asyncio.create_task(_bcast_scanner(None, event))
+        task = asyncio.create_task(_bcast_safe_broadcast(_bcast_scanner, event))
+        _bcast_tasks.add(task)
+        task.add_done_callback(_bcast_tasks.discard)
     except Exception:
         pass
+
+
+async def _bcast_safe_broadcast(func, event: dict) -> None:
+    """Wrapper to handle exceptions in broadcast tasks."""
+    try:
+        await func(None, event)
+    except Exception as exc:
+        logger.debug(f"[Scanner] Broadcast failed: {exc}")
 
 
 @dataclass
@@ -177,6 +188,7 @@ class MarketScannerService:
         self.provider = provider or UnifiedOHLCVProvider()
         self.scope = scope
         self._scan_lock = asyncio.Lock()
+        self._dispatch_lock = asyncio.Lock()
         self._shutdown_event = asyncio.Event()
         self._last_status: dict[str, Any] = {
             "running": False,
@@ -223,10 +235,12 @@ class MarketScannerService:
             return {"status": "disabled", "reason": "SCANNER_ENABLED=false"}
         if db_manager.async_session_factory is None:
             return {"status": "error", "reason": "Database not initialized (session_factory is None)"}
+
         if self._scan_lock.locked():
             return {"status": "skipped", "reason": "Scanner already running"}
+        await self._scan_lock.acquire()
 
-        async with self._scan_lock:
+        try:
             run_id = uuid.uuid4().hex[:12]
             started_at = utcnow()
             self._last_status.update({
@@ -237,7 +251,23 @@ class MarketScannerService:
             })
             _broadcast_scanner({"event": "scan_start", "run_id": run_id, "started_at": started_at.isoformat()})
             try:
-                return await self._scan_once_locked(run_id)
+                scan_timeout = max(60, int(settings.scanner.scan_timeout_secs))
+                return await asyncio.wait_for(self._scan_once_locked(run_id), timeout=scan_timeout)
+            except asyncio.TimeoutError:
+                timeout_error = f"Scanner timed out after {scan_timeout}s"
+                self._last_status["last_error"] = timeout_error
+                logger.error(f"[Scanner] Run {run_id} timed out after {scan_timeout}s")
+                await self._audit(run_id, "timeout", reason=timeout_error)
+                await self._flush_audit_buffer()
+                async with db_manager.async_session_factory() as session:
+                    await update_scanner_state_counts(
+                        session,
+                        self.scope,
+                        degraded_mode="timeout",
+                        degraded_reason=timeout_error,
+                    )
+                    await session.commit()
+                return {"status": "timeout", "reason": timeout_error, "run_id": run_id}
             except Exception as exc:
                 self._last_status["last_error"] = str(exc)
                 logger.exception(f"[Scanner] Run {run_id} failed: {exc}")
@@ -257,6 +287,8 @@ class MarketScannerService:
                     "running": False,
                     "last_finished_at": utcnow(),
                 })
+        finally:
+            self._scan_lock.release()
 
     async def _scan_once_locked(self, run_id: str) -> dict[str, Any]:
         self._learning_summary = await self._refresh_learning(run_id)
@@ -323,9 +355,12 @@ class MarketScannerService:
         if data_failures and data_failures >= max(2, scanned // 2):
             degraded_mode = "observe_only"
             degraded_reason = f"{data_failures}/{scanned} symbols failed data quality"
+        elif data_failures > 0:
+            degraded_mode = "partial_data_failure"
+            degraded_reason = f"{data_failures}/{scanned} symbols failed data quality"
         else:
-            degraded_mode = "" if data_failures == 0 else None
-            degraded_reason = "" if data_failures == 0 else None
+            degraded_mode = ""
+            degraded_reason = ""
 
         async with db_manager.async_session_factory() as session:
             await update_scanner_state_counts(
@@ -857,6 +892,22 @@ class MarketScannerService:
                 normalized.append({"scanned": 1, "data_failures": 1, "filtered": 0, "filter_reasons": {"data_error": 1}, "candidates": []})
             else:
                 normalized.append(result)
+
+        # Retry transient failures
+        retry_candidates = [
+            (i, item) for i, (item, result) in enumerate(zip(universe, results, strict=False))
+            if isinstance(result, Exception) and self._is_transient_failure(result)
+        ]
+        if retry_candidates:
+            retry_tasks = [
+                asyncio.create_task(worker(item))
+                for _, item in retry_candidates
+            ]
+            retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
+            for (idx, _), retry_result in zip(retry_candidates, retry_results, strict=False):
+                if not isinstance(retry_result, Exception):
+                    normalized[idx] = retry_result
+
         return normalized
 
     async def _scan_watch_symbol(self, run_id: str, watch_symbol: str | ScannerUniverseItem) -> dict[str, Any]:
@@ -2034,11 +2085,12 @@ class MarketScannerService:
             async with db_manager.async_session_factory() as session:
                 stmt = select(PositionModel).where(
                     PositionModel.status.in_(["open", "pending"]),
-                    PositionModel.ticker == exchange_symbol,
                 )
                 result = await session.execute(stmt)
                 positions = result.scalars().all()
             for pos in positions:
+                if position_symbol_key(pos.ticker) != target_key:
+                    continue
                 pos_dir = (pos.direction or "").lower()
                 if pos_dir == direction.lower():
                     return True, (
@@ -2051,6 +2103,12 @@ class MarketScannerService:
             return False, ""
 
     async def _dispatch_candidate(
+        self, run_id: str, candidate: ScannerCandidate, bundle: OHLCVBundle
+    ) -> dict[str, Any]:
+        async with self._dispatch_lock:
+            return await self._dispatch_candidate_locked(run_id, candidate, bundle)
+
+    async def _dispatch_candidate_locked(
         self, run_id: str, candidate: ScannerCandidate, bundle: OHLCVBundle
     ) -> dict[str, Any]:
         async with db_manager.async_session_factory() as session:
@@ -2241,7 +2299,12 @@ class MarketScannerService:
                     "tradability_reason": candidate.tradability_reason,
                 },
             )
-            await self._update_win_rate(session, str(result.get("status", "")), str(result.get("reason", "")))
+            await self._update_win_rate(
+                session,
+                str(result.get("status", "")),
+                str(result.get("reason", "")),
+                would_execute=bool(result.get("would_execute")),
+            )
             await session.commit()
             return {
                 "status": result.get("status", "unknown"),
@@ -2415,6 +2478,7 @@ class MarketScannerService:
         session: Any,
         result_status: str,
         result_reason: str,
+        would_execute: bool = False,
     ) -> None:
         """Update win rate tracking after signal processing."""
         if not settings.scanner.adaptive_threshold_enabled:
@@ -2425,7 +2489,9 @@ class MarketScannerService:
         wins = int(state.signal_wins or 0)
         losses = int(state.signal_losses or 0)
 
-        is_win = result_status in {"executed", "paper_executed", "observed_would_execute"}
+        is_win = result_status in {"executed", "paper_executed", "observed_would_execute"} or (
+            result_status == "observed" and would_execute
+        )
         is_loss = result_status in {"rejected", "blocked", "error"} or "rejected" in result_reason.lower()
 
         if is_win:
@@ -2508,6 +2574,13 @@ class MarketScannerService:
             if adaptive > 0:
                 return adaptive
             return float(settings.scanner.min_score)
+
+    @staticmethod
+    def _is_transient_failure(exc: Exception) -> bool:
+        """Check if an exception is a transient failure that should be retried."""
+        text = str(exc).lower()
+        transient_keywords = ("rate limit", "429", "too many requests", "timeout", "connection error", "temporary")
+        return any(keyword in text for keyword in transient_keywords)
 
 
 _SCANNER_SERVICE: MarketScannerService | None = None

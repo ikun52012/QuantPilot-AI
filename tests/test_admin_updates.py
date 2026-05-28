@@ -1,10 +1,13 @@
 
+from datetime import timedelta
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 
-from core.database import AdminSettingModel, UserModel
+from core.database import AdminAuditLogModel, AdminSettingModel, TradeModel, UserModel
 from core.security import hash_password
+from core.utils.datetime import utcnow
 
 
 async def _login_admin(client: AsyncClient, db_session, test_admin_data):
@@ -88,8 +91,8 @@ async def test_check_update_uses_versioned_docker_image(client: AsyncClient, db_
             "current_version": "5.1.0",
             "latest_version": "5.4.0",
             "has_update": True,
-            "docker_image": "ghcr.io/ikun52012/quantpilot-ai:v5.4.0",
-            "updater_image": "ghcr.io/ikun52012/quantpilot-ai-updater:v5.4.0",
+            "docker_image": "ghcr.io/ikun52012/quantpilot-ai:v5.4.1",
+            "updater_image": "ghcr.io/ikun52012/quantpilot-ai-updater:v5.4.1",
         }
 
     monkeypatch.setattr("routers.admin._fetch_latest_release_data", fake_release_data)
@@ -97,7 +100,7 @@ async def test_check_update_uses_versioned_docker_image(client: AsyncClient, db_
     response = await client.get("/api/admin/check-update", headers=headers)
     assert response.status_code == 200
     data = response.json()
-    assert data["docker_image"].endswith(":v5.4.0")
+    assert data["docker_image"].endswith(":v5.4.1")
     assert not data["docker_image"].endswith(":latest")
 
 
@@ -120,3 +123,43 @@ async def test_update_filter_thresholds_merges_existing_values(client: AsyncClie
     assert '"atr_pct_max": 15.0' in stored.value
     assert '"min_pass_score": 60.0' in stored.value
     assert '"cooldown_seconds": 180' in stored.value
+
+
+@pytest.mark.asyncio
+async def test_clear_trade_history_requires_confirmation(client: AsyncClient, db_session, test_admin_data):
+    headers = await _login_admin(client, db_session, test_admin_data)
+    db_session.add(TradeModel(timestamp=utcnow(), ticker="BTCUSDT", payload_json="{}"))
+    await db_session.commit()
+
+    response = await client.post("/api/admin/trades/clear", json={"confirm": False}, headers=headers)
+
+    assert response.status_code == 400
+    trades = (await db_session.execute(select(TradeModel))).scalars().all()
+    assert len(trades) == 1
+
+
+@pytest.mark.asyncio
+async def test_clear_trade_history_deletes_only_matching_rows_and_audits(client: AsyncClient, db_session, test_admin_data):
+    headers = await _login_admin(client, db_session, test_admin_data)
+    old_trade = TradeModel(timestamp=utcnow() - timedelta(days=10), ticker="BTCUSDT", payload_json="{}")
+    recent_trade = TradeModel(timestamp=utcnow(), ticker="ETHUSDT", payload_json="{}")
+    db_session.add_all([old_trade, recent_trade])
+    await db_session.commit()
+
+    response = await client.post(
+        "/api/admin/trades/clear",
+        json={"confirm": True, "older_than_days": 7},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "deleted": {"trades": 1}, "older_than_days": 7}
+    trades = (await db_session.execute(select(TradeModel).order_by(TradeModel.ticker))).scalars().all()
+    assert [trade.ticker for trade in trades] == ["ETHUSDT"]
+
+    audit = await db_session.scalar(
+        select(AdminAuditLogModel).where(AdminAuditLogModel.action == "clear_trade_history")
+    )
+    assert audit is not None
+    assert audit.target_type == "trades"
+    assert audit.target_id == "older_than_7d"

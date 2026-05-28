@@ -541,7 +541,15 @@ async def scanner_funnel_analytics(
         "processed_results": results,
         "conversion_rate": round(candidates / max(1, scanned) * 100, 2),
         "ai_usage_rate": round(sent_to_ai / max(1, candidates) * 100, 2),
-        "success_rate": round(status_counts.get("executed", 0) + status_counts.get("paper_executed", 0) / max(1, results) * 100, 2),
+        "success_rate": round(
+            (
+                status_counts.get("executed", 0)
+                + status_counts.get("paper_executed", 0)
+                + status_counts.get("filled", 0)
+                + status_counts.get("simulated", 0)
+            ) / max(1, results) * 100,
+            2,
+        ),
     }
 
     return {
