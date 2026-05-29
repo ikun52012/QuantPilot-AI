@@ -11,18 +11,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import TradeModel, UserModel
+from core.security import decrypt_settings_payload
 from core.utils.datetime import utcnow
 
 
 async def _get_account_equity(session: AsyncSession, user_id: str | None = None) -> float:
-    """Fetch account equity for accurate percentage calculations.
-
-    Uses user balance if available, otherwise falls back to global settings.
-    """
+    """Fetch configured trading equity for accurate percentage calculations."""
     if user_id:
         user = await session.get(UserModel, user_id)
-        if user and getattr(user, "balance_usdt", 0):
-            return float(user.balance_usdt)
+        if user:
+            try:
+                raw = json.loads(user.settings_json or "{}")
+                user_settings = decrypt_settings_payload(raw)
+                equity = float((user_settings.get("risk") or {}).get("account_equity_usdt") or 0.0)
+                if equity > 0:
+                    return equity
+            except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+                pass
     from core.config import settings
     return float(getattr(settings.risk, "account_equity_usdt", 10000.0))
 
@@ -34,8 +39,18 @@ def _trade_account_pnl_pct(trade: Any, equity: float) -> float:
     which is distorted by leverage).  Falls back to pnl_pct only when
     pnl_usdt is missing (legacy data).
     """
-    pnl_usdt = float(getattr(trade, "pnl_usdt", 0.0) or 0.0)
-    if pnl_usdt != 0.0 and equity > 0:
+    pnl_usdt_value = getattr(trade, "pnl_usdt", None)
+    has_pnl_usdt = pnl_usdt_value is not None
+    pnl_usdt = float(pnl_usdt_value or 0.0) if has_pnl_usdt else 0.0
+    if not has_pnl_usdt or pnl_usdt == 0.0:
+        try:
+            payload = json.loads(getattr(trade, "payload_json", "") or "{}")
+            if isinstance(payload, dict) and "pnl_usdt" in payload:
+                pnl_usdt = float(payload.get("pnl_usdt") or 0.0)
+                has_pnl_usdt = True
+        except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+            pass
+    if has_pnl_usdt and equity > 0:
         return pnl_usdt / equity * 100.0
     # Legacy fallback for trades recorded before pnl_usdt was populated
     return float(getattr(trade, "pnl_pct", 0.0) or 0.0)
@@ -284,7 +299,7 @@ def _is_filled_or_closed(trade: Any) -> bool:
     # Valid statuses: filled (entered), simulated (paper entered), closed (exited)
     valid_statuses = {
         "filled", "simulated", "closed", "paper_closed", "exchange_closed",
-        "tp_hit", "sl_hit", "limit_filled"
+        "tp_hit", "sl_hit", "limit_filled", "partial_closed",
     }
     return status in valid_statuses
 
@@ -294,11 +309,11 @@ def _is_closed_trade(trade: Any) -> bool:
     direction = str(getattr(trade, "direction", "") or "").lower()
     if direction.startswith("close_"):
         return True
-    if status in {"closed", "paper_closed", "exchange_closed", "tp_hit", "sl_hit"}:
+    if status in {"closed", "paper_closed", "exchange_closed", "tp_hit", "sl_hit", "partial_closed"}:
         return True
     try:
         payload = json.loads(trade.payload_json) if trade.payload_json else {}
-        return payload.get("position_event") == "closed" or bool(payload.get("close_reason"))
+        return payload.get("position_event") in {"closed", "partial_closed"} or bool(payload.get("close_reason"))
     except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
         return False
     except Exception:

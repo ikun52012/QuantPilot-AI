@@ -100,6 +100,11 @@ class ClearTradeHistoryRequest(BaseModel):
     older_than_days: int | None = Field(default=None, ge=1, le=3650)
 
 
+class CleanupBackupsRequest(BaseModel):
+    confirm: bool = Field(default=False)
+    max_backups: int = Field(default=7, ge=1, le=3650)
+
+
 class CreateInviteCodeRequest(BaseModel):
     code: str = Field(default="", max_length=80)
     max_uses: int = Field(default=1, ge=1)
@@ -1528,6 +1533,32 @@ async def create_admin_backup(
     backup = await create_backup()
     await _add_audit_log(db, admin, "create_backup", "backup", backup.get("backup_name", ""), "Created backup", request)
     return {"filename": Path(backup.get("file", "")).name, **backup}
+
+
+@router.post("/backups/cleanup")
+async def cleanup_admin_backups(
+    payload: CleanupBackupsRequest,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete old backup archives while keeping the most recent backups."""
+    if not payload.confirm:
+        raise HTTPException(400, "Confirmation required")
+    from backups import cleanup_old_backups
+
+    result = await cleanup_old_backups(max_backups=payload.max_backups)
+    await _add_audit_log(
+        db,
+        admin,
+        "cleanup_backups",
+        "backup",
+        f"keep_{payload.max_backups}",
+        f"Deleted {result.get('deleted', 0)} old backups, kept {result.get('kept', 0)}",
+        request,
+    )
+    await db.commit()
+    return {"status": "ok", **result, "max_backups": payload.max_backups}
 
 
 @router.get("/backups/{filename}")

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core import runtime_settings
@@ -274,6 +274,11 @@ class OfflineTradeSyncRequest(BaseModel):
         return normalized
 
 
+class ClearHistoryRequest(BaseModel):
+    confirm: bool = Field(default=False)
+    older_than_days: int | None = Field(default=None, ge=1, le=3650)
+
+
 def _is_admin(user: dict) -> bool:
     """Check if user has admin role with proper validation."""
     return user.get("role") == "admin"
@@ -384,6 +389,89 @@ async def _exchange_config_for_user(db: AsyncSession, user: dict) -> dict:
             if "limit_timeout_overrides" in exchange
             else settings.exchange.limit_timeout_overrides
         ),
+    }
+
+
+async def _account_equity_for_user(db: AsyncSession, user: dict) -> float:
+    if _is_admin(user):
+        return float(getattr(settings.risk, "account_equity_usdt", 10000.0) or 10000.0)
+
+    db_user = await get_user_by_id(db, user["sub"])
+    if db_user:
+        risk = (_load_user_settings(db_user).get("risk") or {})
+        try:
+            equity = float(risk.get("account_equity_usdt") or 0.0)
+            if equity > 0:
+                return equity
+        except (TypeError, ValueError):
+            pass
+    return float(getattr(settings.risk, "account_equity_usdt", 10000.0) or 10000.0)
+
+
+def _payload_pnl_usdt(payload: dict) -> float | None:
+    if "pnl_usdt" not in payload:
+        return None
+    try:
+        return float(payload.get("pnl_usdt") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _position_margin_used(position: PositionModel) -> float:
+    remaining_qty = float(position.remaining_quantity or position.quantity or 0.0)
+    entry_price = float(position.entry_price or 0.0)
+    leverage = max(1.0, float(position.leverage or 1.0))
+    contract_size = 1.0
+    try:
+        ts_config = json.loads(position.trailing_stop_config_json or "{}")
+        contract_size = float(ts_config.get("_contract_size") or 1.0)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        contract_size = 1.0
+    return (entry_price * remaining_qty * contract_size) / leverage if entry_price > 0 and remaining_qty > 0 else 0.0
+
+
+async def _paper_balance_for_user(db: AsyncSession, user: dict) -> dict:
+    initial_equity = await _account_equity_for_user(db, user)
+    trade_filters = [TradeModel.execute.is_(True)]
+    position_filters = [PositionModel.status == "open", PositionModel.live_trading.is_(False)]
+    if not _is_admin(user):
+        trade_filters.append(TradeModel.user_id == user.get("sub"))
+        position_filters.append(PositionModel.user_id == user.get("sub"))
+
+    trade_result = await db.execute(select(TradeModel).where(*trade_filters))
+    realized_pnl = 0.0
+    for trade in trade_result.scalars().all():
+        pnl_usdt = float(trade.pnl_usdt or 0.0)
+        if pnl_usdt == 0.0:
+            try:
+                payload = json.loads(trade.payload_json or "{}")
+                if isinstance(payload, dict):
+                    payload_pnl = _payload_pnl_usdt(payload)
+                    if payload_pnl is not None:
+                        pnl_usdt = payload_pnl
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        realized_pnl += pnl_usdt
+
+    position_result = await db.execute(select(PositionModel).where(*position_filters))
+    open_positions = position_result.scalars().all()
+    unrealized_pnl = sum(float(position.unrealized_pnl_usdt or 0.0) for position in open_positions)
+    used_margin = sum(_position_margin_used(position) for position in open_positions)
+    total_equity = initial_equity + realized_pnl + unrealized_pnl
+    free_equity = total_equity - used_margin
+
+    return {
+        "mode": "paper",
+        "quote": "USDT",
+        "initial_equity_usdt": round(initial_equity, 8),
+        "realized_pnl_usdt": round(realized_pnl, 8),
+        "unrealized_pnl_usdt": round(unrealized_pnl, 8),
+        "total_quote": round(total_equity, 8),
+        "free_quote": round(free_equity, 8),
+        "used_quote": round(used_margin, 8),
+        "total": {"USDT": round(total_equity, 8)},
+        "free": {"USDT": round(free_equity, 8)},
+        "used": {"USDT": round(used_margin, 8)},
     }
 
 
@@ -633,15 +721,25 @@ async def close_position(
 
     final_close_qty = close_qty or float(position.remaining_quantity or position.quantity or 0)
     if close_pct is not None and close_pct < 100:
-        current_remaining = float(position.remaining_quantity or position.quantity or 0)
-        position.remaining_quantity = max(0.0, current_remaining - final_close_qty)
-        position.updated_at = utcnow()
+        from core.database import record_position_partial_close_trade_async
+
+        pnl_pct, pnl_usdt, remaining_qty = await record_position_partial_close_trade_async(
+            session=db,
+            position=position,
+            exit_price=exit_price,
+            close_quantity=final_close_qty,
+            close_reason="manual_partial_close",
+            order_status="partial_closed",
+            order_details={"close_pct": close_pct, "requested_close_qty": final_close_qty},
+        )
         await db.commit()
         return {
             "status": "success",
             "position_id": position_id,
+            "pnl_pct": pnl_pct,
+            "pnl_usdt": pnl_usdt,
             "close_qty": final_close_qty,
-            "remaining_quantity": position.remaining_quantity,
+            "remaining_quantity": remaining_qty,
             "partial": True,
         }
 
@@ -726,7 +824,11 @@ async def get_balance(
     """Get account balance from exchange."""
     from exchange import get_account_balance
 
-    balance = await get_account_balance(await _exchange_config_for_user(db, user))
+    exchange_config = await _exchange_config_for_user(db, user)
+    if not exchange_config.get("live_trading"):
+        return await _paper_balance_for_user(db, user)
+
+    balance = await get_account_balance(exchange_config)
     return balance
 
 
@@ -819,6 +921,7 @@ async def get_trades(
             "execute": t.execute,
             "order_status": t.order_status,
             "pnl_pct": t.pnl_pct,
+            "pnl_usdt": t.pnl_usdt,
         }
         for t in trades
     ]
@@ -843,6 +946,7 @@ async def get_history(
     )
     trades = result.scalars().all()
 
+    account_equity = float(getattr(settings.risk, "account_equity_usdt", 10000.0) or 10000.0)
     history = []
     for t in trades:
         payload = {}
@@ -855,6 +959,8 @@ async def get_history(
         analysis = payload.get("analysis", {})
         order_details = payload.get("order_details") or payload.get("result") or {}
 
+        pnl_usdt = float(t.pnl_usdt or payload.get("pnl_usdt") or 0.0)
+        account_pnl_pct = (pnl_usdt / account_equity * 100.0) if account_equity > 0 else 0.0
         history.append({
             "id": t.id,
             "timestamp": t.timestamp.isoformat() if t.timestamp else None,
@@ -890,9 +996,33 @@ async def get_history(
             },
             "order_status": t.order_status,
             "pnl_pct": t.pnl_pct,
+            "pnl_usdt": pnl_usdt,
+            "account_pnl_pct": round(account_pnl_pct, 4),
         })
 
     return history
+
+
+@router.post("/history/clear")
+async def clear_own_history(
+    payload: ClearHistoryRequest,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear the current user's trade history rows."""
+    if not payload.confirm:
+        raise HTTPException(400, "Confirmation required")
+    if _is_admin(user):
+        raise HTTPException(403, "Use the admin trade-history cleanup endpoint")
+
+    cutoff = utcnow() - timedelta(days=payload.older_than_days) if payload.older_than_days else None
+    stmt = delete(TradeModel).where(TradeModel.user_id == user.get("sub"))
+    if cutoff is not None:
+        stmt = stmt.where(TradeModel.timestamp < cutoff)
+    result = await db.execute(stmt)
+    deleted = max(0, int(result.rowcount or 0))
+    await db.commit()
+    return {"status": "ok", "deleted": {"trades": deleted}, "older_than_days": payload.older_than_days}
 
 
 @router.post("/user/trades/sync")

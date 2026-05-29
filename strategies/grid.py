@@ -711,18 +711,18 @@ class GridEngine:
                 await self.sync_position_state(position_id)
                 raise RuntimeError("Grid exchange close was not fully confirmed; keeping grid active")
 
-        open_fees = 0.0
+        closing_pnl = 0.0
         for level in position.grid_levels:
             if level.status != "filled":
                 continue
-            open_fees += level.fees_usdt
             if level.side == "buy":
                 level.pnl_usdt = (exit_price - level.filled_price) * level.quantity - level.fees_usdt
             else:
                 level.pnl_usdt = (level.filled_price - exit_price) * level.quantity - level.fees_usdt
+            closing_pnl += level.pnl_usdt
             level.status = "closed"
 
-        final_pnl = position.realized_pnl_usdt + position.unrealized_pnl_usdt - open_fees
+        final_pnl = position.realized_pnl_usdt + closing_pnl
 
         position.status = "closed"
         position.closed_at = utcnow()

@@ -422,7 +422,7 @@ async def close_dca_strategy(
             "status": "closed",
             "strategy_id": strategy_id,
             "close_price": round(current_price, 6),
-            "final_pnl_usdt": final_status.get("unrealized_pnl_usdt", 0),
+            "final_pnl_usdt": final_status.get("realized_pnl_usdt", 0),
             "entries_count": final_status.get("entries_count", 0),
         }
 

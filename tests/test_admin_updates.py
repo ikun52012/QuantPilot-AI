@@ -34,6 +34,30 @@ async def _login_admin(client: AsyncClient, db_session, test_admin_data):
     return {"X-CSRF-Token": csrf}
 
 
+async def _login_user(client: AsyncClient, db_session, test_user_data):
+    user = UserModel(
+        username=test_user_data["username"].lower(),
+        email=test_user_data["email"].lower(),
+        password_hash=hash_password(test_user_data["password"]),
+        role="user",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    response = await client.post(
+        "/api/auth/login",
+        json={
+            "username": test_user_data["username"],
+            "password": test_user_data["password"],
+        },
+    )
+    assert response.status_code == 200
+    csrf = response.cookies.get("tvss_csrf")
+    assert csrf
+    return {"X-CSRF-Token": csrf}, user.id
+
+
 @pytest.mark.asyncio
 async def test_update_status_exposes_manual_mode_by_default(client: AsyncClient, db_session, test_admin_data, monkeypatch):
     headers = await _login_admin(client, db_session, test_admin_data)
@@ -91,8 +115,8 @@ async def test_check_update_uses_versioned_docker_image(client: AsyncClient, db_
             "current_version": "5.1.0",
             "latest_version": "5.4.0",
             "has_update": True,
-            "docker_image": "ghcr.io/ikun52012/quantpilot-ai:v5.4.1",
-            "updater_image": "ghcr.io/ikun52012/quantpilot-ai-updater:v5.4.1",
+"docker_image": "ghcr.io/ikun52012/quantpilot-ai:v5.5.0",
+            "updater_image": "ghcr.io/ikun52012/quantpilot-ai-updater:v5.5.0",
         }
 
     monkeypatch.setattr("routers.admin._fetch_latest_release_data", fake_release_data)
@@ -100,7 +124,7 @@ async def test_check_update_uses_versioned_docker_image(client: AsyncClient, db_
     response = await client.get("/api/admin/check-update", headers=headers)
     assert response.status_code == 200
     data = response.json()
-    assert data["docker_image"].endswith(":v5.4.1")
+    assert data["docker_image"].endswith(":v5.5.0")
     assert not data["docker_image"].endswith(":latest")
 
 
@@ -163,3 +187,50 @@ async def test_clear_trade_history_deletes_only_matching_rows_and_audits(client:
     assert audit is not None
     assert audit.target_type == "trades"
     assert audit.target_id == "older_than_7d"
+
+
+@pytest.mark.asyncio
+async def test_user_clear_history_deletes_only_own_rows(client: AsyncClient, db_session, test_user_data):
+    headers, user_id = await _login_user(client, db_session, test_user_data)
+    own_trade = TradeModel(user_id=user_id, timestamp=utcnow(), ticker="BTCUSDT", payload_json="{}")
+    other_trade = TradeModel(user_id="other-user", timestamp=utcnow(), ticker="ETHUSDT", payload_json="{}")
+    db_session.add_all([own_trade, other_trade])
+    await db_session.commit()
+
+    response = await client.post("/api/history/clear", json={"confirm": True}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == {"trades": 1}
+    trades = (await db_session.execute(select(TradeModel))).scalars().all()
+    assert len(trades) == 1
+    assert trades[0].ticker == "ETHUSDT"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_backups_requires_confirmation(client: AsyncClient, db_session, test_admin_data):
+    headers = await _login_admin(client, db_session, test_admin_data)
+
+    response = await client.post("/api/admin/backups/cleanup", json={"confirm": False}, headers=headers)
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_cleanup_backups_audits_result(client: AsyncClient, db_session, test_admin_data, monkeypatch):
+    headers = await _login_admin(client, db_session, test_admin_data)
+
+    async def fake_cleanup_old_backups(max_backups: int = 7):
+        return {"deleted": 2, "kept": max_backups}
+
+    monkeypatch.setattr("backups.cleanup_old_backups", fake_cleanup_old_backups)
+
+    response = await client.post("/api/admin/backups/cleanup", json={"confirm": True, "max_backups": 7}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "deleted": 2, "kept": 7, "max_backups": 7}
+    audit = await db_session.scalar(
+        select(AdminAuditLogModel).where(AdminAuditLogModel.action == "cleanup_backups")
+    )
+    assert audit is not None
+    assert audit.target_type == "backup"
+    assert audit.target_id == "keep_7"

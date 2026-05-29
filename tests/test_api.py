@@ -9,7 +9,8 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from core.database import PaymentModel, SharedSignalModel, SubscriptionModel, SubscriptionPlanModel, UserModel
+from core.config import settings
+from core.database import PaymentModel, PositionModel, SharedSignalModel, SubscriptionModel, SubscriptionPlanModel, TradeModel, UserModel
 from core.security import hash_password
 from core.utils.datetime import utcnow
 from tests.test_admin_updates import _login_admin
@@ -235,7 +236,6 @@ class TestUserEndpoints:
 
     @pytest.mark.asyncio
     async def test_positions_returns_real_unrealized_pnl(self, client: AsyncClient, test_user_data, db_session):
-        from core.database import PositionModel
         from core.utils.datetime import utcnow
 
         login = await client.post("/api/auth/register", json=test_user_data)
@@ -261,6 +261,50 @@ class TestUserEndpoints:
         data = response.json()
         assert data[0]["unrealizedPnl"] == 12.34
         assert data[0]["unrealized_pnl"] == 12.34
+
+    @pytest.mark.asyncio
+    async def test_paper_balance_uses_equity_plus_realized_and_unrealized_pnl(self, client: AsyncClient, test_user_data, db_session, monkeypatch):
+        monkeypatch.setattr(settings.risk, "account_equity_usdt", 1000.0)
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        user_id = login.json()["user"]["id"]
+
+        db_session.add(TradeModel(
+            user_id=user_id,
+            timestamp=utcnow(),
+            ticker="BTCUSDT",
+            direction="close_long",
+            execute=True,
+            order_status="closed",
+            pnl_usdt=50.0,
+            payload_json="{}",
+        ))
+        db_session.add(PositionModel(
+            user_id=user_id,
+            ticker="ETHUSDT",
+            direction="long",
+            status="open",
+            entry_price=100.0,
+            quantity=1.0,
+            remaining_quantity=1.0,
+            opened_at=utcnow(),
+            leverage=1.0,
+            unrealized_pnl_usdt=10.0,
+            live_trading=False,
+        ))
+        await db_session.commit()
+
+        response = await client.get("/api/balance")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mode"] == "paper"
+        assert data["initial_equity_usdt"] == 1000.0
+        assert data["realized_pnl_usdt"] == 50.0
+        assert data["unrealized_pnl_usdt"] == 10.0
+        assert data["total_quote"] == 1060.0
+        assert data["used_quote"] == 100.0
+        assert data["free_quote"] == 960.0
 
     @pytest.mark.asyncio
     async def test_positions_include_pending_limit_orders(self, client: AsyncClient, test_user_data, db_session):

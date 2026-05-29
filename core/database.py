@@ -1194,6 +1194,7 @@ async def log_trade_db(
         "position_event": entry.get("position_event"),
         "close_reason": entry.get("close_reason"),
         "pnl_pct": float(entry.get("pnl_pct") or 0.0),
+        "pnl_usdt": float(entry.get("pnl_usdt") or 0.0),
     })
 
     trade = TradeModel(
@@ -1205,6 +1206,7 @@ async def log_trade_db(
         execute=execute,
         order_status=entry.get("order_status") or order_status,
         pnl_pct=float(entry.get("pnl_pct") or 0.0),
+        pnl_usdt=float(entry.get("pnl_usdt") or 0.0),
         signal_source=str(signal_source or "tradingview")[:20],
         payload_json=json.dumps(payload, default=str),
     )
@@ -1247,6 +1249,7 @@ async def insert_trade_log_async(session: AsyncSession, entry: dict) -> dict:
         execute=bool(entry.get("execute")),
         order_status=entry.get("order_status", ""),
         pnl_pct=float(entry.get("pnl_pct") or 0.0),
+        pnl_usdt=float(entry.get("pnl_usdt") or 0.0),
         payload_json=json.dumps(entry, ensure_ascii=False, default=str),
     )
     session.add(trade)
@@ -1370,8 +1373,8 @@ async def close_position_async(
     close_reason: str,
     close_trade_id: str | None = None,
     closed_at: datetime | None = None,
-) -> float:
-    """Close a tracked position and return realised leveraged PnL percentage.
+) -> tuple[float, float]:
+    """Close a tracked position and return realised PnL percentage and USDT amount.
 
     Deducts trading fees from user balance for paper trading to reflect true costs.
 
@@ -1406,7 +1409,7 @@ async def close_position_async(
     # If already closed by another process (TP hit, SL, etc.), abort
     if locked_position.status == "closed":
         logger.info(f"[Database] Position {position.id} already closed (status=closed), skipping")
-        return _safe_float(locked_position.pnl_pct, 0.0)
+        return _safe_float(locked_position.pnl_pct, 0.0), 0.0
 
     # Use the locked position for all calculations
     exit_price = _safe_float(exit_price)
@@ -1466,13 +1469,151 @@ async def close_position_async(
             user_id=locked_position.user_id,
             pnl_pct=pnl_pct,
             pnl_usdt=pnl_usdt,
-            equity_usdt=(entry_price * opened_qty) / max(1.0, leverage) if entry_price > 0 and opened_qty > 0 else 0.0,
+            equity_usdt=float(getattr(settings.risk, "account_equity_usdt", 0.0) or 0.0),
         )
     except Exception:
         logger.warning(f"[Database] Failed to record account risk PnL for position {locked_position.id}")
 
     await session.flush()
     return pnl_pct, pnl_usdt
+
+
+async def record_position_partial_close_trade_async(
+    session: AsyncSession,
+    position: PositionModel,
+    exit_price: float,
+    close_quantity: float,
+    close_reason: str,
+    order_status: str = "partial_closed",
+    order_details: dict | None = None,
+    close_trade_id: str | None = None,
+    closed_at: datetime | None = None,
+) -> tuple[float, float, float]:
+    """Close part of a tracked position and record the realised PnL event."""
+    write_ledger = bool(getattr(position, "id", None) and hasattr(session, "execute") and hasattr(session, "add"))
+    if write_ledger:
+        try:
+            result = await session.execute(
+                select(PositionModel)
+                .where(PositionModel.id == position.id)
+                .with_for_update(nowait=True)
+            )
+        except Exception as lock_exc:
+            logger.warning(f"[Database] partial close lock conflict for {position.id}: {lock_exc}. Retrying after 1s...")
+            await asyncio.sleep(1.0)
+            result = await session.execute(
+                select(PositionModel)
+                .where(PositionModel.id == position.id)
+                .with_for_update(nowait=True)
+            )
+
+        locked_position = result.scalar_one_or_none()
+        if not locked_position:
+            raise ValueError(f"Position {position.id} not found")
+    else:
+        locked_position = position
+    if locked_position.status == "closed":
+        return 0.0, 0.0, 0.0
+
+    exit_price = _safe_float(exit_price)
+    opened_qty = max(_safe_float(locked_position.quantity), 0.0)
+    remaining_qty = _effective_remaining_quantity(locked_position, opened_qty)
+    close_qty = min(max(_safe_float(close_quantity), 0.0), remaining_qty)
+    if exit_price <= 0 or opened_qty <= 0 or close_qty <= 0:
+        return 0.0, 0.0, remaining_qty
+
+    direction = str(locked_position.direction or "long").lower()
+    entry_price = _safe_float(locked_position.entry_price)
+    leverage = _safe_float(locked_position.leverage, 1.0)
+    event_pnl_pct = _position_pnl_pct(direction, entry_price, exit_price, leverage) * (close_qty / opened_qty)
+    total_realized_pct = round(_safe_float(locked_position.realized_pnl_pct) + event_pnl_pct, 6)
+
+    try:
+        ts_config = json.loads(locked_position.trailing_stop_config_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        ts_config = {}
+    contract_size = _safe_float(ts_config.get("_contract_size"), 1.0)
+    margin_used = (entry_price * close_qty * contract_size) / max(1.0, leverage) if entry_price > 0 else 0.0
+    event_pnl_usdt = margin_used * (_position_pnl_pct(direction, entry_price, exit_price, leverage) / 100.0)
+
+    new_remaining = max(0.0, remaining_qty - close_qty)
+    dust_qty = max(0.00000001, opened_qty * 0.000001)
+    is_final = new_remaining <= dust_qty
+    now = closed_at or utcnow()
+
+    locked_position.realized_pnl_pct = total_realized_pct
+    locked_position.current_pnl_pct = total_realized_pct
+    locked_position.remaining_quantity = 0.0 if is_final else new_remaining
+    locked_position.last_price = exit_price
+    locked_position.updated_at = now
+    if is_final:
+        locked_position.status = "closed"
+        locked_position.exit_price = exit_price
+        locked_position.pnl_pct = total_realized_pct
+        locked_position.close_reason = close_reason
+        locked_position.closed_at = now
+        locked_position.unrealized_pnl_usdt = 0.0
+    if close_trade_id:
+        locked_position.close_trade_id = close_trade_id
+
+    if not locked_position.live_trading and locked_position.user_id:
+        if event_pnl_usdt != 0.0:
+            await update_user_balance(session, locked_position.user_id, event_pnl_usdt)
+        if is_final:
+            fees_total = _safe_float(locked_position.fees_total_usdt, 0.0)
+            if fees_total > 0:
+                await update_user_balance(session, locked_position.user_id, -fees_total)
+
+    if write_ledger:
+        try:
+            await record_position_pnl(
+                user_id=locked_position.user_id,
+                pnl_pct=round(event_pnl_pct, 6),
+                pnl_usdt=event_pnl_usdt,
+                equity_usdt=float(getattr(settings.risk, "account_equity_usdt", 0.0) or 0.0),
+            )
+        except Exception:
+            logger.warning(f"[Database] Failed to record partial PnL for position {locked_position.id}")
+
+    if not write_ledger:
+        if hasattr(session, "flush"):
+            await session.flush()
+        return round(event_pnl_pct, 6), event_pnl_usdt, locked_position.remaining_quantity
+
+    trade_id = close_trade_id or str(uuid.uuid4())
+    close_direction = "close_long" if direction == "long" else "close_short"
+    payload = {
+        "position_id": locked_position.id,
+        "open_trade_id": locked_position.open_trade_id,
+        "ticker": locked_position.ticker,
+        "direction": close_direction,
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "quantity": close_qty,
+        "original_quantity": opened_qty,
+        "remaining_quantity": locked_position.remaining_quantity,
+        "pnl_pct": round(event_pnl_pct, 6),
+        "realized_pnl_pct": total_realized_pct,
+        "pnl_usdt": event_pnl_usdt,
+        "position_event": "closed" if is_final else "partial_closed",
+        "close_reason": close_reason,
+        "order_details": order_details or {},
+    }
+    trade = TradeModel(
+        id=trade_id,
+        user_id=locked_position.user_id,
+        timestamp=now,
+        ticker=locked_position.ticker,
+        direction=close_direction,
+        execute=True,
+        order_status=order_status,
+        pnl_pct=round(event_pnl_pct, 6),
+        pnl_usdt=event_pnl_usdt,
+        payload_json=json.dumps(payload, ensure_ascii=False, default=str),
+    )
+    session.add(trade)
+    await session.flush()
+    return round(event_pnl_pct, 6), event_pnl_usdt, locked_position.remaining_quantity
 
 
 async def update_user_balance(session: AsyncSession, user_id: str, delta_usdt: float) -> float:
@@ -1772,6 +1913,16 @@ async def get_trade_logs_async(session: AsyncSession, days: int = 30, user_id: s
     for trade in trades:
         try:
             payload = json.loads(trade.payload_json)
+            if isinstance(payload, dict):
+                payload.setdefault("id", trade.id)
+                payload.setdefault("user_id", trade.user_id)
+                payload.setdefault("timestamp", trade.timestamp.isoformat() if trade.timestamp else None)
+                payload.setdefault("ticker", trade.ticker)
+                payload.setdefault("direction", trade.direction)
+                payload.setdefault("execute", trade.execute)
+                payload.setdefault("order_status", trade.order_status)
+                payload.setdefault("pnl_pct", trade.pnl_pct)
+                payload.setdefault("pnl_usdt", trade.pnl_usdt)
             logs.append(payload)
         except (json.JSONDecodeError, TypeError):
             # Fallback to trade model fields

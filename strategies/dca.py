@@ -701,6 +701,7 @@ class DCAEngine:
             "total_capital_usdt": round(position.total_capital_usdt, 2),
             "average_entry_price": round(position.average_entry_price, 6),
             "current_price": round(position.current_price, 6),
+            "realized_pnl_usdt": round(position.realized_pnl_usdt, 2),
             "unrealized_pnl_usdt": round(position.unrealized_pnl_usdt, 2),
             "unrealized_pnl_pct": round(position.unrealized_pnl_pct, 2),
             "stop_loss_price": round(position.stop_loss_price, 6),

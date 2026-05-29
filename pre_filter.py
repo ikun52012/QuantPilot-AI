@@ -26,6 +26,7 @@ from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 
 from core.account_risk import check_account_loss_limits
+from core.config import settings
 from core.utils.common import position_symbol_key
 from core.utils.datetime import utcnow
 from models import MarketContext, PreFilterResult, SignalDirection, TradingViewSignal
@@ -832,8 +833,7 @@ async def run_pre_filter_async(
         record_filter_block("daily_trade_limit")
 
     # 鈹€鈹€ Check 2: Daily loss limit 鈹€鈹€
-    from core.database import get_user_balance_async
-    account_equity = await get_user_balance_async(user_id) if user_id else 10000.0
+    account_equity = float(getattr(settings.risk, "account_equity_usdt", 10000.0) or 10000.0)
     if account_equity <= 0:
         account_equity = 10000.0
 

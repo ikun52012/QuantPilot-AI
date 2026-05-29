@@ -730,7 +730,7 @@ function renderDashboardBrief(perf = {}, overview = {}, status = {}) {
     );
     setText('dash-dca-active', overview?.dca?.active_count ?? '--');
     setText('dash-grid-active', overview?.grid?.active_count ?? '--');
-    const botPnl = Number((overview?.dca?.total_pnl || 0) + (overview?.grid?.total_pnl || 0));
+    const botPnl = Number((overview?.dca?.total_pnl_usdt || 0) + (overview?.grid?.total_pnl_usdt || 0));
     setText('dash-bot-pnl', Number.isFinite(botPnl) ? `$${formatNum(botPnl)}` : '--');
 
     const queue = document.getElementById('dashboard-action-queue');
@@ -926,15 +926,17 @@ async function loadHistory() {
 }
 
 async function clearTradeHistory() {
-    if (!isAdmin()) { showToast('Admin access required', 'error'); return; }
-    if (!confirm('Delete ALL stored trade history records? This cannot be undone. Open positions are not closed or modified.')) return;
+    const admin = isAdmin();
+    const scopeText = admin ? 'ALL stored trade history records' : 'your stored trade history records';
+    if (!confirm(`Delete ${scopeText}? This cannot be undone. Open positions are not closed or modified.`)) return;
     const typed = prompt('Type DELETE to confirm clearing trade history.');
     if (typed !== 'DELETE') {
         showToast('Trade history cleanup cancelled', 'warning');
         return;
     }
     try {
-        const result = await fetchAPI('/api/admin/trades/clear', {
+        const endpoint = admin ? '/api/admin/trades/clear' : '/api/history/clear';
+        const result = await fetchAPI(endpoint, {
             method: 'POST',
             body: JSON.stringify({ confirm: true }),
         });
@@ -958,14 +960,21 @@ function renderHistoryPage() {
     const pageTrades = trades.slice(start, start + pageSize);
     tbody.innerHTML = pageTrades.map(t => {
         const dir = t.direction||'--', isLong = dir.includes('long'), conf = t.ai?.confidence||0;
-        const status = t.order_status||t.status||'--', pnl = t.pnl_pct||0;
+        const status = t.order_status||t.status||'--';
+        const pnlUsdt = Number(t.pnl_usdt || 0);
+        const accountPnl = Number(t.account_pnl_pct || 0);
+        const positionPnl = Number(t.pnl_pct || 0);
+        const pnlValue = pnlUsdt || accountPnl || positionPnl;
+        const pnlText = (pnlUsdt || accountPnl)
+            ? `$${formatNum(pnlUsdt)} / ${accountPnl >= 0 ? '+' : ''}${accountPnl.toFixed(2)}%`
+            : (positionPnl ? `${positionPnl.toFixed(2)}% pos` : '--');
         const time = t.timestamp ? new Date(t.timestamp).toLocaleString() : '--';
         const statusClass = safeClassToken(status);
         const leverage = t.ai?.recommended_leverage ? ` / ${Number(t.ai.recommended_leverage).toFixed(1)}x` : '';
         const tpText = Array.isArray(t.take_profit_levels) && t.take_profit_levels.length
             ? formatTakeProfitLevels(t.take_profit_levels)
             : (t.take_profit ? '$'+formatNum(t.take_profit) : '--');
-        return `<tr><td>${escapeHtml(time)}</td><td><strong>${escapeHtml(t.ticker||'--')}</strong></td><td><span class="badge ${isLong?'badge-long':'badge-short'}">${escapeHtml(dir)}</span></td><td>${t.entry_price?'$'+formatNum(t.entry_price):'--'}</td><td>${t.stop_loss?'$'+formatNum(t.stop_loss):'--'}</td><td>${tpText}</td><td>${(conf*100).toFixed(0)}%${escapeHtml(leverage)}</td><td><span class="badge badge-${statusClass}">${escapeHtml(status)}</span></td><td class="${pnl>=0?'pnl-positive':'pnl-negative'}">${pnl?pnl.toFixed(2)+'%':'--'}</td></tr>`;
+        return `<tr><td>${escapeHtml(time)}</td><td><strong>${escapeHtml(t.ticker||'--')}</strong></td><td><span class="badge ${isLong?'badge-long':'badge-short'}">${escapeHtml(dir)}</span></td><td>${t.entry_price?'$'+formatNum(t.entry_price):'--'}</td><td>${t.stop_loss?'$'+formatNum(t.stop_loss):'--'}</td><td>${tpText}</td><td>${(conf*100).toFixed(0)}%${escapeHtml(leverage)}</td><td><span class="badge badge-${statusClass}">${escapeHtml(status)}</span></td><td class="${pnlValue>=0?'pnl-positive':'pnl-negative'}">${escapeHtml(pnlText)}</td></tr>`;
     }).join('');
     const topEl = document.getElementById('history-pagination-top');
     if (topEl) topEl.innerHTML = `<span>${trades.length} trades total</span><span>Page ${_historyPage} of ${totalPages}</span>`;
@@ -3807,13 +3816,13 @@ function renderAdminBackups(backups) {
     const el = document.getElementById('admin-backups');
     if (!el) return;
     const rows = backups.length ? backups.map(b => `<tr><td>${escapeHtml(b.filename)}</td><td>${formatNum(Number(b.size || 0) / 1024)} KB</td><td>${escapeHtml(formatDateTime(b.created_at))}</td><td><div class="admin-actions"><button class="btn btn-sm" onclick="downloadBackup('${escapeJsSingle(b.filename)}')">Download</button><button class="btn btn-sm btn-warning" onclick="stageRestore('${escapeJsSingle(b.filename)}')">Stage Restore</button><button class="btn btn-sm btn-danger" onclick="restoreBackupPG('${escapeJsSingle(b.filename)}')">Restore PG</button></div></td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No backups yet</td></tr>';
-    el.innerHTML = `<div class="settings-form"><div class="form-row"><button class="btn btn-primary" onclick="createBackup()"><i class="ri-archive-line"></i> Create Backup</button><span class="hint">Restore PG requires PostgreSQL service restart. Stop QuantPilot first.</span></div><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Backup</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    el.innerHTML = `<div class="settings-form"><div class="form-row"><button class="btn btn-primary" onclick="createBackup()"><i class="ri-archive-line"></i> Create Backup</button><button class="btn btn-danger" onclick="cleanupBackups()"><i class="ri-delete-bin-6-line"></i> Clean Old Backups</button><span class="hint">Keeps the newest 7 backups. Restore PG requires PostgreSQL service restart. Stop QuantPilot first.</span></div><div class="table-wrapper mt-4"><table class="data-table"><thead><tr><th>Backup</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
 
 async function restoreBackupPG(filename) {
     if (!confirm('Restore PostgreSQL database from backup? This will REPLACE the current database. Stop the service first!')) return;
     try {
-        await fetchAPI(`/api/admin/backups/${encodeURIComponent(filename)}/restore-pg`, { method: 'POST' });
+        await fetchAPI(`/api/admin/backups/${encodeURIComponent(filename)}/restore-pg`, { method: 'POST', body: JSON.stringify({ confirm: 'restore' }) });
         showToast('PostgreSQL restore initiated. Check logs for result.', 'success', 'Restore Started');
     } catch (err) {
         showToast(err.message, 'error', 'Restore Failed');
@@ -3959,6 +3968,18 @@ async function createBackup() {
         showToast(backup.filename, 'success', 'Backup Created');
         loadAdmin();
     } catch (err) { showToast(err.message,'error','Backup Failed'); }
+}
+
+async function cleanupBackups() {
+    if (!confirm('Delete old backups and keep only the newest 7? This cannot be undone.')) return;
+    try {
+        const result = await fetchAPI('/api/admin/backups/cleanup', {
+            method:'POST',
+            body:JSON.stringify({ confirm:true, max_backups:7 }),
+        });
+        showToast(`Deleted ${result.deleted || 0} old backups`, 'success', 'Backups Cleaned');
+        loadAdmin();
+    } catch (err) { showToast(err.message,'error','Backup Cleanup Failed'); }
 }
 
 function downloadBackup(filename) {

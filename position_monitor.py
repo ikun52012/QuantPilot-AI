@@ -25,6 +25,7 @@ from core.database import (
     close_position_async,
     db_manager,
     record_position_close_trade_async,
+    record_position_partial_close_trade_async,
 )
 from core.security import decrypt_settings_payload
 from core.utils.common import (
@@ -995,7 +996,6 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
     if hit_levels:
         opened_qty = max(safe_float(position.quantity), 0.0)
         remaining_qty = _effective_remaining_quantity(position, opened_qty)
-        total_level_pnl_usdt = 0.0
 
         for level in hit_levels:
             qty_pct = max(0.0, safe_float(level.get("qty_pct"), 100.0))
@@ -1003,37 +1003,28 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
             if qty <= 0:
                 level["status"] = "hit"
                 continue
-            weight = qty / opened_qty if opened_qty > 0 else 1.0
-            leverage = safe_float(position.leverage, 1.0)
-            level_pnl = _price_pnl_pct(position.direction, position.entry_price, level.get("price"), leverage)
-            position.realized_pnl_pct = round(safe_float(position.realized_pnl_pct) + (level_pnl * weight), 6)
-            remaining_qty = max(0.0, remaining_qty - qty)
             level["status"] = "hit"
             level["hit_at"] = utcnow().isoformat()
+            _, _, remaining_qty = await record_position_partial_close_trade_async(
+                session=session,
+                position=position,
+                exit_price=safe_float(level.get("price"), close),
+                close_quantity=qty,
+                close_reason="take_profit",
+                order_status="paper_closed" if remaining_qty - qty <= max(0.00000001, opened_qty * 0.000001) else "partial_closed",
+                order_details={"trigger": "take_profit", "level": level, "candle": candle},
+            )
             stats["partials"] += 1
+            if remaining_qty <= max(0.00000001, opened_qty * 0.000001):
+                break
 
-            # Calculate USDT PnL for this partial close
-            entry_price = safe_float(position.entry_price)
-            leverage = safe_float(position.leverage, 1.0)
-            # Get contract_size from trailing_stop_config
-            ts_config = loads_dict(position.trailing_stop_config_json)
-            contract_size = safe_float(ts_config.get("_contract_size"), 1.0)
-            if entry_price > 0 and qty > 0:
-                # Margin = (entry_price * qty * contract_size) / leverage
-                margin_used = (entry_price * qty * contract_size) / max(1.0, leverage)
-                level_pnl_usdt = margin_used * (level_pnl / 100.0)
-                total_level_pnl_usdt += level_pnl_usdt
-
-        position.remaining_quantity = remaining_qty
         position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
-        _update_unrealized(position, close)
+        if remaining_qty > 0:
+            _update_unrealized(position, close)
+        else:
+            position.unrealized_pnl_usdt = 0.0
         position.updated_at = utcnow()
         await session.flush()
-
-        # Update user balance for partial TP hits in paper trading
-        if not position.live_trading and position.user_id and total_level_pnl_usdt != 0.0:
-            from core.database import update_user_balance
-            await update_user_balance(session, position.user_id, total_level_pnl_usdt)
 
         if remaining_qty > 0:
             if position.live_trading:
@@ -1054,15 +1045,6 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
                             position.stop_loss = new_stop
 
         if remaining_qty <= max(0.00000001, opened_qty * 0.000001):
-            final_price = safe_float(hit_levels[-1].get("price"), close)
-            await record_position_close_trade_async(
-                session=session,
-                position=position,
-                exit_price=final_price,
-                close_reason="take_profit",
-                order_status="paper_closed",
-                order_details={"trigger": "take_profit", "levels": hit_levels, "candle": candle},
-            )
             stats["closed"] += 1
 
     return stats

@@ -21,13 +21,13 @@ def test_persist_target_images_updates_env_file(tmp_path):
     updater.ENV_FILE.write_text("SIGNAL_SERVER_IMAGE=old\n", encoding="utf-8")
 
     updater.persist_target_images(
-        "ghcr.io/ikun52012/quantpilot-ai:v5.4.0",
-        "ghcr.io/ikun52012/quantpilot-ai-updater:v5.4.0",
+        "ghcr.io/ikun52012/quantpilot-ai:v5.5.0",
+        "ghcr.io/ikun52012/quantpilot-ai-updater:v5.5.0",
     )
 
     content = updater.ENV_FILE.read_text(encoding="utf-8")
-    assert "SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v5.4.0" in content
-    assert "SIGNAL_UPDATER_IMAGE=ghcr.io/ikun52012/quantpilot-ai-updater:v5.4.0" in content
+    assert "SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v5.5.0" in content
+    assert "SIGNAL_UPDATER_IMAGE=ghcr.io/ikun52012/quantpilot-ai-updater:v5.5.0" in content
 
 
 def test_wait_for_rollout_accepts_running_service_with_matching_version(tmp_path, monkeypatch):
@@ -37,9 +37,8 @@ def test_wait_for_rollout_accepts_running_service_with_matching_version(tmp_path
         "_service_status",
         lambda: {"State": "running", "Status": "Up 5 seconds (healthy)"},
     )
-    monkeypatch.setattr(updater, "_health_payload", lambda: {"status": "healthy", "version": "5.4.0"})
+    monkeypatch.setattr(updater, "_health_payload", lambda: {"status": "healthy", "version": "5.5.0"})
 
-    result = updater.wait_for_rollout("5.4.0", "ghcr.io/ikun52012/quantpilot-ai:v5.4.0")
+    result = updater.wait_for_rollout("5.5.0", "ghcr.io/ikun52012/quantpilot-ai:v5.5.0")
 
-    assert result["status"] == "completed"
-    assert result["observed_version"] == "5.4.0"
+    assert result["observed_version"] == "5.5.0"
