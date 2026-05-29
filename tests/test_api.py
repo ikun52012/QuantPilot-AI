@@ -10,7 +10,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from core.config import settings
-from core.database import PaymentModel, PositionModel, SharedSignalModel, SubscriptionModel, SubscriptionPlanModel, TradeModel, UserModel
+from core.database import (
+    PaymentModel,
+    PositionModel,
+    SharedSignalModel,
+    SubscriptionModel,
+    SubscriptionPlanModel,
+    TradeModel,
+    UserModel,
+)
 from core.security import hash_password
 from core.utils.datetime import utcnow
 from tests.test_admin_updates import _login_admin

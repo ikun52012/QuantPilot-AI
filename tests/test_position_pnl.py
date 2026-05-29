@@ -3,10 +3,10 @@ Position PnL calculation tests.
 
 Uses core.database async SQLAlchemy for position tracking and PnL calculation.
 """
+import json
 import os
 import sys
 import unittest
-import json
 
 try:
     import cryptography  # noqa: F401
