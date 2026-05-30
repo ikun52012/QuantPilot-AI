@@ -41,10 +41,23 @@ SENSITIVE_KEYS = {
 _HASH_ITERATIONS = 260_000  # OWASP minimum for PBKDF2-SHA256
 _SALT_SIZE = 32
 
-# Common passwords to reject
+# Common passwords to reject (top 50 most common)
 _COMMON_PASSWORDS = {
-    "123456", "12345678", "123456789", "password", "qwerty123",
-    "admin123", "admin123456", "letmein123", "tradingview",
+    "123456", "12345678", "123456789", "12345", "1234567", "1234567890",
+    "password", "password1", "password123",
+    "qwerty", "qwerty123", "qwerty1",
+    "admin", "admin123", "admin123456",
+    "letmein", "letmein123",
+    "tradingview", "tradingview123",
+    "welcome", "welcome1", "welcome123",
+    "monkey", "dragon", "master", "football", "baseball",
+    "iloveyou", "trustno1", "sunshine", "princess",
+    "abc123", "111111", "123123", "123321",
+    "passw0rd", "p@ssword", "p@ssw0rd",
+    "bitcoin", "crypto", "ethereum",
+    "changeme", "default", "temp123",
+    "test", "test123", "guest", "guest123",
+    "root", "root123", "user", "user123",
 }
 
 

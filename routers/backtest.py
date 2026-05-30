@@ -3,7 +3,7 @@ Backtest API Router.
 Provides endpoints for running backtests and retrieving results.
 """
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from loguru import logger
@@ -63,7 +63,7 @@ _BACKTEST_CACHE_MAX_SIZE = 100  # Max 100 cached results
 
 def _cleanup_backtest_cache():
     """Clean up expired and oversized backtest cache."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expired_keys = []
 
     for task_id, cached in _backtest_results_cache.items():
@@ -96,7 +96,7 @@ async def run_backtest(
     admin: dict = Depends(get_current_admin),
 ):
     """Run a backtest on historical data with specified strategy."""
-    start_time = datetime.now(timezone.utc)
+    start_time = datetime.now(UTC)
 
     try:
         ohlcv_data = await fetch_ohlcv_history(
@@ -138,7 +138,7 @@ async def run_backtest(
 
         result = engine.run()
 
-        execution_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+        execution_time = (datetime.now(UTC) - start_time).total_seconds() * 1000
 
         return BacktestResultResponse(
             status="completed",
@@ -207,7 +207,7 @@ async def start_async_backtest(
             _backtest_results_cache[task_id] = {
                 "status": "completed",
                 "result": result,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
             }
 
             # Clean up expired cache entries

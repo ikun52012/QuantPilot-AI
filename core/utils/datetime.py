@@ -2,7 +2,7 @@
 Datetime utilities for PostgreSQL compatibility.
 PostgreSQL TIMESTAMP WITHOUT TIME ZONE requires naive datetime (no timezone info).
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def utcnow() -> datetime:
@@ -18,7 +18,7 @@ def utcnow() -> datetime:
     Returns:
         datetime: Current UTC time as naive datetime object
     """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def utcnow_iso() -> str:
@@ -28,7 +28,7 @@ def utcnow_iso() -> str:
     Returns:
         str: ISO formatted UTC datetime string
     """
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def utcnow_str(fmt: str = "%Y-%m-%d") -> str:
@@ -41,7 +41,7 @@ def utcnow_str(fmt: str = "%Y-%m-%d") -> str:
     Returns:
         str: Formatted UTC datetime string
     """
-    return datetime.now(timezone.utc).strftime(fmt)
+    return datetime.now(UTC).strftime(fmt)
 
 
 def make_naive(dt: datetime) -> datetime:
@@ -69,7 +69,7 @@ def to_utc(dt: datetime) -> datetime:
     """
     if dt.tzinfo is None:
         return dt
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.astimezone(UTC).replace(tzinfo=None)
 
 
 def parse_datetime_utc_naive(value) -> datetime:

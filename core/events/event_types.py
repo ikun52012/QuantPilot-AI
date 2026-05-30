@@ -4,11 +4,13 @@ Standardized event definitions for inter-component communication.
 """
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
+from core.utils.datetime import utcnow
 
-class EventTypes(str, Enum):
+
+class EventTypes(StrEnum):
     """Standardized event type identifiers."""
 
     # Trading Events
@@ -51,7 +53,7 @@ class Event:
     """Base event class."""
 
     event_type: EventTypes
-    timestamp: datetime = field(default_factory=lambda: datetime.utcnow())
+    timestamp: datetime = field(default_factory=utcnow)
     event_id: str = field(default_factory=lambda: "")
     source: str = "unknown"
     data: dict[str, Any] = field(default_factory=dict)

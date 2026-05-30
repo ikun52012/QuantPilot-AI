@@ -2,12 +2,15 @@
 QuantPilot AI - Configuration
 Pydantic Settings with validation and type safety.
 """
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from loguru import logger
 from pydantic import BaseModel, Field, field_validator
 
 ENV_PATH = Path(__file__).parent.parent / ".env"
@@ -21,6 +24,7 @@ def _json_env(name: str, default: Any) -> Any:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        logger.warning(f"[Config] Failed to parse JSON for {name}, falling back to raw value")
         if isinstance(default, list):
             return [item.strip() for item in raw.split(",") if item.strip()]
         return default
@@ -121,7 +125,7 @@ class AIConfig(BaseModel):
         return normalized
 
     @classmethod
-    def from_env(cls) -> "AIConfig":
+    def from_env(cls) -> AIConfig:
         return cls(
             provider=os.getenv("AI_PROVIDER", "deepseek"),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
@@ -205,7 +209,7 @@ class ExchangeConfig(BaseModel):
         return normalized
 
     @classmethod
-    def from_env(cls) -> "ExchangeConfig":
+    def from_env(cls) -> ExchangeConfig:
         return cls(
             name=os.getenv("EXCHANGE", "binance"),
             api_key=os.getenv("EXCHANGE_API_KEY", ""),
@@ -227,7 +231,7 @@ class TelegramConfig(BaseModel):
     chat_id: str = ""
 
     @classmethod
-    def from_env(cls) -> "TelegramConfig":
+    def from_env(cls) -> TelegramConfig:
         return cls(
             bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
@@ -298,7 +302,7 @@ class RiskConfig(BaseModel):
         return normalized
 
     @classmethod
-    def from_env(cls) -> "RiskConfig":
+    def from_env(cls) -> RiskConfig:
         return cls(
             account_equity_usdt=float(os.getenv("ACCOUNT_EQUITY_USDT", "10000")),
             max_position_pct=float(os.getenv("MAX_POSITION_PCT", "10.0")),
@@ -340,7 +344,7 @@ class TakeProfitSettings(BaseModel):
         return v
 
     @classmethod
-    def from_env(cls) -> "TakeProfitSettings":
+    def from_env(cls) -> TakeProfitSettings:
         return cls(
             num_levels=int(os.getenv("TP_LEVELS", "1")),
             tp1_pct=float(os.getenv("TP1_PCT", "2.0")),
@@ -372,7 +376,7 @@ class TrailingStopSettings(BaseModel):
         return v
 
     @classmethod
-    def from_env(cls) -> "TrailingStopSettings":
+    def from_env(cls) -> TrailingStopSettings:
         return cls(
             mode=os.getenv("TRAILING_STOP_MODE", "none"),
             trail_pct=float(os.getenv("TRAILING_STOP_PCT", "1.0")),
@@ -395,7 +399,7 @@ class ServerConfig(BaseModel):
     trust_proxy_headers: bool = False
 
     @classmethod
-    def from_env(cls) -> "ServerConfig":
+    def from_env(cls) -> ServerConfig:
         cors_raw = os.getenv("CORS_ORIGINS", "")
         cors_origins = [s.strip() for s in cors_raw.split(",") if s.strip()] if cors_raw else ["http://localhost:8000"]
         trusted_raw = os.getenv("TRUSTED_HOSTS", "")
@@ -422,7 +426,7 @@ class DatabaseConfig(BaseModel):
     echo: bool = False
 
     @classmethod
-    def from_env(cls) -> "DatabaseConfig":
+    def from_env(cls) -> DatabaseConfig:
         return cls(
             url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/server.db"),
             pool_size=int(os.getenv("DATABASE_POOL_SIZE", "15")),
@@ -438,7 +442,7 @@ class RedisConfig(BaseModel):
     ttl: int = 300
 
     @classmethod
-    def from_env(cls) -> "RedisConfig":
+    def from_env(cls) -> RedisConfig:
         return cls(
             url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
             enabled=os.getenv("REDIS_ENABLED", "false").lower() == "true",
@@ -456,9 +460,13 @@ class RateLimitConfig(BaseModel):
     webhook_max_attempts: int = 30
     webhook_window_secs: int = 60
     api_default_limit: str = "60/minute"
+    api_max_requests: int = 60
+    api_window_secs: int = 60
 
     @classmethod
-    def from_env(cls) -> "RateLimitConfig":
+    def from_env(cls) -> RateLimitConfig:
+        api_limit_raw = os.getenv("API_DEFAULT_LIMIT", "60/minute")
+        api_max, api_window = cls._parse_limit(api_limit_raw)
         return cls(
             enabled=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true",
             login_max_attempts=int(os.getenv("LOGIN_MAX_ATTEMPTS", "10")),
@@ -467,8 +475,28 @@ class RateLimitConfig(BaseModel):
             register_window_secs=int(os.getenv("REGISTER_WINDOW_SECS", "600")),
             webhook_max_attempts=int(os.getenv("WEBHOOK_MAX_ATTEMPTS", "30")),
             webhook_window_secs=int(os.getenv("WEBHOOK_WINDOW_SECS", "60")),
-            api_default_limit=os.getenv("API_DEFAULT_LIMIT", "60/minute"),
+            api_default_limit=api_limit_raw,
+            api_max_requests=api_max,
+            api_window_secs=api_window,
         )
+
+    @staticmethod
+    def _parse_limit(raw: str) -> tuple[int, int]:
+        parts = raw.strip().split("/")
+        try:
+            requests = int(parts[0])
+        except (ValueError, IndexError):
+            requests = 60
+        unit = parts[1].lower() if len(parts) > 1 else "minute"
+        if unit in ("second", "sec", "s"):
+            window = 1
+        elif unit in ("minute", "min", "m"):
+            window = 60
+        elif unit in ("hour", "hr", "h"):
+            window = 3600
+        else:
+            window = 60
+        return requests, window
 
 
 class ScannerConfig(BaseModel):
@@ -626,7 +654,7 @@ class ScannerConfig(BaseModel):
         return normalized or ["15m", "1h", "4h"]
 
     @classmethod
-    def from_env(cls) -> "ScannerConfig":
+    def from_env(cls) -> ScannerConfig:
         return cls(
             enabled=os.getenv("SCANNER_ENABLED", "false").lower() == "true",
             mode=os.getenv("SCANNER_MODE", "observe"),
@@ -744,17 +772,17 @@ class Settings(BaseModel):
     position_monitor_interval_secs: int = 60
     notification_language: str = "en"
 
-    ai: AIConfig = None  # type: ignore[assignment]
-    exchange: ExchangeConfig = None  # type: ignore[assignment]
-    telegram: TelegramConfig = None  # type: ignore[assignment]
-    risk: RiskConfig = None  # type: ignore[assignment]
-    take_profit: TakeProfitSettings = None  # type: ignore[assignment]
-    trailing_stop: TrailingStopSettings = None  # type: ignore[assignment]
-    server: ServerConfig = None  # type: ignore[assignment]
-    database: DatabaseConfig = None  # type: ignore[assignment]
-    redis: RedisConfig = None  # type: ignore[assignment]
-    rate_limit: RateLimitConfig = None  # type: ignore[assignment]
-    scanner: ScannerConfig = None  # type: ignore[assignment]
+    ai: AIConfig | None = None
+    exchange: ExchangeConfig | None = None
+    telegram: TelegramConfig | None = None
+    risk: RiskConfig | None = None
+    take_profit: TakeProfitSettings | None = None
+    trailing_stop: TrailingStopSettings | None = None
+    server: ServerConfig | None = None
+    database: DatabaseConfig | None = None
+    redis: RedisConfig | None = None
+    rate_limit: RateLimitConfig | None = None
+    scanner: ScannerConfig | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -849,12 +877,8 @@ class Settings(BaseModel):
             error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {err}" for err in errors)
             raise RuntimeError(error_msg)
 
-    def _validate_production_settings(self):
-        """Legacy method - now calls _validate_settings."""
-        self._validate_settings()
-
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         """Create Settings instance from environment variables."""
         instance = cls(
             app_name=os.getenv("APP_NAME", "QuantPilot AI"),
@@ -880,7 +904,7 @@ class Settings(BaseModel):
             rate_limit=RateLimitConfig.from_env(),
             scanner=ScannerConfig.from_env(),
         )
-        instance._validate_production_settings()
+        instance._validate_settings()
         return instance
 
 

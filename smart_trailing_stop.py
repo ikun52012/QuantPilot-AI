@@ -13,10 +13,10 @@ The goal is to balance profit protection with profit potential.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class TrailingStopRecommendation(str, Enum):
+class TrailingStopRecommendation(StrEnum):
     NONE = "none"
     BREAKEVEN_ON_TP1 = "breakeven_on_tp1"
     STEP_TRAILING = "step_trailing"

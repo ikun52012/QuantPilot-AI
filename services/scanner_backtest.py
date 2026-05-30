@@ -12,7 +12,7 @@ import json
 import math
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -148,7 +148,7 @@ class ScannerBacktester:
 
             for bar_idx in range(min_history_bars, len(rows) - self.simulation_bars):
                 bar = rows[bar_idx]
-                bar_time = datetime.fromtimestamp(bar[0] / 1000.0, tz=timezone.utc)
+                bar_time = datetime.fromtimestamp(bar[0] / 1000.0, tz=UTC)
                 bar_close = bar[4]
                 indicators = _indicator_snapshot(candles[:bar_idx + 1])
                 atr_pct = self._safe_float(indicators.get("atr_pct"))

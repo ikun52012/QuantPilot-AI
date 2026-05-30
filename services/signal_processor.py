@@ -9,7 +9,7 @@ import math
 import os
 import time as _time
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from loguru import logger
@@ -1156,7 +1156,7 @@ class SignalProcessor:
             async with lock:
                 active = await get_active_webhook_event(self.session, fingerprint)
                 if active:
-                    age = (datetime.now(timezone.utc).replace(tzinfo=None) - active.created_at).total_seconds() if active.created_at else 0
+                    age = (datetime.now(UTC).replace(tzinfo=None) - active.created_at).total_seconds() if active.created_at else 0
                     if age < _WEBHOOK_ACTIVE_STALE_SECS:
                         return None
                     active.status = "failed"
@@ -3288,7 +3288,7 @@ class SignalProcessor:
 
             # Step 4: Mark position as cancelled in database
             position.status = "cancelled"
-            position.closed_at = datetime.now(timezone.utc)
+            position.closed_at = datetime.now(UTC)
             position.close_reason = "cancelled_reverse_signal"
             await self.session.flush()
 

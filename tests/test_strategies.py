@@ -1,6 +1,6 @@
 """Tests for DCA and Grid Strategies."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -381,7 +381,7 @@ class TestDCAEntry:
             entry_price=50000.0,
             quantity=0.02,
             capital_usdt=1000.0,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=datetime.now(UTC),
             entry_idx=1,
             reason="initial_entry",
         )
@@ -412,7 +412,7 @@ class TestGridLevel:
 
         level.status = "filled"
         level.filled_price = 49450.0
-        level.filled_at = datetime.now(timezone.utc)
+        level.filled_at = datetime.now(UTC)
 
         assert level.status == "filled"
         assert level.filled_price == 49450.0

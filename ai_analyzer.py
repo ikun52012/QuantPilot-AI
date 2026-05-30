@@ -2063,7 +2063,7 @@ async def analyze_signal(
                 )
             return final_analysis
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(f"[AI/Voting] Voting timed out after {_voting_timeout}s")
             return _fallback_analysis(f"Voting timed out after {_voting_timeout}s")
         except Exception as e:

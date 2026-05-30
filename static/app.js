@@ -3,7 +3,11 @@
  * v4.5 — AI command center redesign, trading controls, strategies, PWA, i18n content pages
  */
 
-const API = '';
+const API = (() => {
+    const meta = document.querySelector('meta[name="api-base-url"]');
+    if (meta && meta.content) return meta.content;
+    try { return window.QUANTPILOT_API_BASE || ''; } catch (_) { return ''; }
+})();
 const USDT_PAYMENT_NETWORKS = [
     { id: 'TRC20', name: 'Tron (TRC20)' },
     { id: 'ERC20', name: 'Ethereum (ERC20)' },
@@ -2034,13 +2038,13 @@ async function loadAdminLegacyUnused() {
         const [users, payments] = await Promise.all([fetchAPI('/api/admin/users'), fetchAPI('/api/admin/payments')]);
         // Users table
         const usersEl = document.getElementById('admin-users');
-        usersEl.innerHTML = `<table class="data-table"><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Subscription</th><th>Status</th><th>Actions</th></tr></thead><tbody>${users.map(u => `<tr><td><strong>${escapeHtml(u.username)}</strong></td><td>${escapeHtml(u.email)}</td><td><span class="role-badge ${safeClassToken(u.role)}">${escapeHtml(u.role)}</span></td><td>${u.subscription ? escapeHtml(u.subscription.plan_name) : '<span style="color:var(--text-muted)">None</span>'}</td><td>${u.is_active ? '<span class="badge badge-active">Active</span>' : '<span class="badge badge-inactive">Disabled</span>'}</td><td>${u.role !== 'admin' ? `<button class="btn-sm" onclick="toggleUser('${u.id}')">${u.is_active ? 'Disable' : 'Enable'}</button>` : ''}</td></tr>`).join('')}</tbody></table>`;
+        usersEl.innerHTML = `<table class="data-table"><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Subscription</th><th>Status</th><th>Actions</th></tr></thead><tbody>${users.map(u => `<tr><td><strong>${escapeHtml(u.username)}</strong></td><td>${escapeHtml(u.email)}</td><td><span class="role-badge ${safeClassToken(u.role)}">${escapeHtml(u.role)}</span></td><td>${u.subscription ? escapeHtml(u.subscription.plan_name) : '<span style="color:var(--text-muted)">None</span>'}</td><td>${u.is_active ? '<span class="badge badge-active">Active</span>' : '<span class="badge badge-inactive">Disabled</span>'}</td><td>${u.role !== 'admin' ? `<button class="btn-sm" onclick="toggleUser('${escapeJsSingle(u.id)}')">${u.is_active ? 'Disable' : 'Enable'}</button>` : ''}</td></tr>`).join('')}</tbody></table>`;
 
         // Pending payments
         const pendingPayments = payments.filter(p => p.status === 'submitted');
         const payEl = document.getElementById('admin-payments');
         if (pendingPayments.length) {
-            payEl.innerHTML = `<table class="data-table"><thead><tr><th>User</th><th>Amount</th><th>Network</th><th>TX Hash</th><th>Date</th><th>Actions</th></tr></thead><tbody>${pendingPayments.map(p => `<tr><td>${escapeHtml(p.username||'--')}</td><td>${escapeHtml(p.amount)} ${escapeHtml(p.currency)}</td><td>${escapeHtml(p.network)}</td><td><code style="font-size:11px">${p.tx_hash?escapeHtml(p.tx_hash.slice(0,20))+'...':'--'}</code></td><td>${escapeHtml(new Date(p.created_at).toLocaleDateString())}</td><td><div style="display:flex;gap:6px"><button class="btn-sm btn-success" onclick="adminConfirmPayment('${p.id}')">✓ Confirm</button><button class="btn-sm btn-danger" onclick="adminRejectPayment('${p.id}')">✕ Reject</button></div></td></tr>`).join('')}</tbody></table>`;
+            payEl.innerHTML = `<table class="data-table"><thead><tr><th>User</th><th>Amount</th><th>Network</th><th>TX Hash</th><th>Date</th><th>Actions</th></tr></thead><tbody>${pendingPayments.map(p => `<tr><td>${escapeHtml(p.username||'--')}</td><td>${escapeHtml(p.amount)} ${escapeHtml(p.currency)}</td><td>${escapeHtml(p.network)}</td><td><code style="font-size:11px">${p.tx_hash?escapeHtml(p.tx_hash.slice(0,20))+'...':'--'}</code></td><td>${escapeHtml(new Date(p.created_at).toLocaleDateString())}</td><td><div style="display:flex;gap:6px"><button class="btn-sm btn-success" onclick="adminConfirmPayment('${escapeJsSingle(p.id)}')">✓ Confirm</button><button class="btn-sm btn-danger" onclick="adminRejectPayment('${escapeJsSingle(p.id)}')">✕ Reject</button></div></td></tr>`).join('')}</tbody></table>`;
         } else {
             payEl.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:20px">No pending payments</p>';
         }

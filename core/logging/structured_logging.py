@@ -13,7 +13,7 @@ Features:
 """
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,7 @@ class StructuredFormatter:
         """
         # Base log structure
         log_data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "service": self.service_name,
             "version": self.version,
             "environment": self.environment,
@@ -127,7 +127,7 @@ class StructuredFormatter:
         except Exception as e:
             # Fallback if JSON serialization fails
             return json.dumps({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "level": "ERROR",
                 "message": f"Log serialization error: {e}",
                 "original_message": str(record.get("message", "")),

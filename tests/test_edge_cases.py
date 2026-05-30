@@ -3,7 +3,7 @@ QuantPilot AI - Edge Cases and Boundary Condition Tests
 Tests for edge cases, boundary conditions, and error handling.
 """
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -578,7 +578,7 @@ class TestPositionLedgerEdgeCases:
         entry = {
             "id": "trade-filled-limit",
             "user_id": "user123",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "ticker": "BTCUSDT",
             "direction": "long",
             "execute": True,

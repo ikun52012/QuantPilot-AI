@@ -13,7 +13,7 @@ import asyncio
 import os
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 
 import aiohttp
@@ -142,7 +142,7 @@ def _get_hardcoded_crypto_events() -> list[dict[str, Any]]:
 
     for event in known_events:
         try:
-            event_date = datetime.fromisoformat(event["approximate_date"]).replace(tzinfo=timezone.utc)
+            event_date = datetime.fromisoformat(event["approximate_date"]).replace(tzinfo=UTC)
             days_diff = abs((event_date - now).days)
             if days_diff <= 7:
                 events.append({
@@ -242,7 +242,7 @@ async def fetch_liquidation_heatmap(symbol: str) -> dict[str, Any]:
                                     heatmap["long_liquidations"].append({"price": price, "usd": liq_usd})
                                 elif side == "buy":
                                     heatmap["short_liquidations"].append({"price": price, "usd": liq_usd})
-                except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+                except (TimeoutError, aiohttp.ClientError, OSError) as e:
                     logger.debug(f"[EnhancedMarketData] Liquidation API error for {symbol}: {e}")
                 except Exception as e:
                     logger.debug(f"[EnhancedMarketData] Unexpected error fetching liquidation for {symbol}: {e}")
@@ -867,7 +867,7 @@ async def fetch_exchange_reserves(base_asset: str = "BTC") -> dict[str, Any]:
                                 reserve_data["net_flow_24h"] = data[-1].get("v") if data else None
                                 reserve_data["source"] = "glassnode"
 
-        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+        except (TimeoutError, aiohttp.ClientError, OSError) as e:
             logger.debug(f"[EnhancedData] Exchange reserves fetch failed for {base}: {e}")
         except Exception as e:
             logger.debug(f"[EnhancedData] Unexpected error in exchange reserves for {base}: {e}")
@@ -941,7 +941,7 @@ async def calculate_funding_term_structure(
                                 try:
                                     ft = datetime.fromtimestamp(
                                         float(entry.get("fundingTime", 0)) / 1000,
-                                        tz=timezone.utc,
+                                        tz=UTC,
                                     )
                                     fr = float(entry.get("fundingRate", 0))
                                     rates.append((ft, fr))
@@ -978,7 +978,7 @@ async def calculate_funding_term_structure(
                                 else:
                                     result["trend"] = "stable"
 
-        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+        except (TimeoutError, aiohttp.ClientError, OSError) as e:
             logger.debug(f"[EnhancedData] Funding term structure fetch failed: {e}")
             result["note"] = f"Fetch failed: {e}"
         except Exception as e:
@@ -1078,7 +1078,7 @@ async def check_exchange_price_discrepancy(
                             f"Price discrepancy {result['max_discrepancy_pct']:.2f}% across {len(prices)} exchanges"
                         )
 
-        except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+        except (TimeoutError, aiohttp.ClientError, OSError) as e:
             logger.debug(f"[EnhancedData] Exchange price check failed: {e}")
             result["note"] = f"Fetch failed: {e}"
         except Exception as e:

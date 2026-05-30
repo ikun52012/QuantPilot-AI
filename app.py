@@ -8,7 +8,6 @@ Usage:
   uvicorn app:app --host 0.0.0.0 --port 8000
 """
 import io
-import re
 import sys
 from pathlib import Path
 
@@ -16,19 +15,17 @@ from loguru import logger
 
 from core.config import settings
 from core.factory import create_app
+from core.utils.common import SENSITIVE_LOG_RE
 
 # ─────────────────────────────────────────────
 # Logging Setup
 # ─────────────────────────────────────────────
 
 logger.remove()
-_SENSITIVE_LOG_RE = re.compile(
-    r"(?i)(api[_-]?key|api[_-]?secret|secret|password|token)(['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+"
-)
 
 
 def _sanitize_log_record(record):
-    record["message"] = _SENSITIVE_LOG_RE.sub(r"\1\2***", record["message"])
+    record["message"] = SENSITIVE_LOG_RE.sub(r"\1\2***", record["message"])
     return True
 
 

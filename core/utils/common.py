@@ -12,6 +12,10 @@ from typing import Any, TypeVar
 
 T = TypeVar('T')
 
+SENSITIVE_LOG_RE = re.compile(
+    r"(?i)(api[_-]?key|api[_-]?secret|secret|password|token)(['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+"
+)
+
 
 def safe_float(value: Any, default: float = 0.0) -> float:
     """

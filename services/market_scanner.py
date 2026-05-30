@@ -220,7 +220,7 @@ class MarketScannerService:
         timeout = max(1, int(settings.scanner.shutdown_timeout_secs))
         try:
             await asyncio.wait_for(self._wait_until_idle(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 f"[Scanner] Shutdown timed out after {timeout}s; "
                 "current scan may still finish in background"
@@ -253,7 +253,7 @@ class MarketScannerService:
             try:
                 scan_timeout = max(60, int(settings.scanner.scan_timeout_secs))
                 return await asyncio.wait_for(self._scan_once_locked(run_id), timeout=scan_timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 timeout_error = f"Scanner timed out after {scan_timeout}s"
                 self._last_status["last_error"] = timeout_error
                 logger.error(f"[Scanner] Run {run_id} timed out after {scan_timeout}s")

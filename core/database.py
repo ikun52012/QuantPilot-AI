@@ -1,6 +1,15 @@
 """
 Signal Server - Database Layer (Enhanced)
 Async SQLAlchemy with PostgreSQL/SQLite support.
+
+FIXME: This module is 2600+ lines and should be split into:
+  - core/db/models.py       (SQLAlchemy ORM models)
+  - core/db/manager.py      (DatabaseManager class)
+  - core/db/migrations.py   (legacy DDL helpers - prefer Alembic)
+  - core/db/user_crud.py    (user CRUD operations)
+  - core/db/trade_crud.py   (trade/position CRUD operations)
+  - core/db/scanner_crud.py (scanner state CRUD operations)
+  - core/db/seed.py         (seed data / bootstrap)
 """
 import asyncio
 import hashlib
@@ -1023,7 +1032,8 @@ async def get_user_balance_async(user_id: str) -> float:
             )
             balance = result.scalar_one_or_none()
             return _safe_float(balance, 0.0)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[Database] Failed to fetch balance for user {user_id}: {e}")
         return 0.0
 
 
@@ -1472,7 +1482,8 @@ async def close_position_async(
             equity_usdt=float(getattr(settings.risk, "account_equity_usdt", 0.0) or 0.0),
         )
     except Exception:
-        logger.warning(f"[Database] Failed to record account risk PnL for position {locked_position.id}")
+        logger.error(f"[Database] CRITICAL: Failed to record account risk PnL for position {locked_position.id}")
+        locked_position.close_reason = (locked_position.close_reason or "") + " | risk_tracker_failed"
 
     await session.flush()
     return pnl_pct, pnl_usdt
@@ -1573,7 +1584,8 @@ async def record_position_partial_close_trade_async(
                 equity_usdt=float(getattr(settings.risk, "account_equity_usdt", 0.0) or 0.0),
             )
         except Exception:
-            logger.warning(f"[Database] Failed to record partial PnL for position {locked_position.id}")
+            logger.error(f"[Database] CRITICAL: Failed to record partial PnL for position {locked_position.id}")
+            locked_position.close_reason = (locked_position.close_reason or "") + " | risk_tracker_failed"
 
     if not write_ledger:
         if hasattr(session, "flush"):

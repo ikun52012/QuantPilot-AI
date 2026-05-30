@@ -8,7 +8,7 @@ import inspect
 import json
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -140,7 +140,7 @@ def _ws_message(msg_type: str, data: dict, ticker: str | None = None) -> dict:
     """Create standardized WebSocket message format."""
     message = {
         "type": msg_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
     if ticker:
         message["ticker"] = ticker
@@ -297,7 +297,7 @@ async def websocket_positions(websocket: WebSocket):
         await manager.send_personal({
             "type": "connected",
             "user_id": user_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "message": "WebSocket connected successfully",
         }, websocket)
 
@@ -311,7 +311,7 @@ async def websocket_positions(websocket: WebSocket):
                 if msg_type == "ping":
                     await manager.send_personal({
                         "type": "pong",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }, websocket)
 
                 elif msg_type == "subscribe":
@@ -319,7 +319,7 @@ async def websocket_positions(websocket: WebSocket):
                     await manager.send_personal({
                         "type": "subscribed",
                         "channels": channels,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }, websocket)
 
                 elif msg_type == "unsubscribe":
@@ -327,7 +327,7 @@ async def websocket_positions(websocket: WebSocket):
                     await manager.send_personal({
                         "type": "unsubscribed",
                         "channels": channels,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }, websocket)
 
                 elif msg_type == "get_positions":
@@ -335,7 +335,7 @@ async def websocket_positions(websocket: WebSocket):
                     await manager.send_personal({
                         "type": "positions_list",
                         "positions": positions,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }, websocket)
 
                 else:
@@ -614,7 +614,7 @@ async def _stream_prices(websocket: WebSocket, tickers: set[str]):
                             "change_1h_pct": cached.get("price_change_1h", 0),
                             "volume_24h": cached.get("volume_24h", 0),
                             "rsi_1h": cached.get("rsi_1h"),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         }, websocket)
 
                 except Exception as e:
@@ -681,7 +681,7 @@ async def _stream_system_status(websocket: WebSocket):
             await manager.send_personal({
                 "type": "system_status",
                 **stats,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }, websocket)
 
             await asyncio.sleep(30)
@@ -741,7 +741,7 @@ async def broadcast_position_update(user_id: str, position: dict):
     await manager.broadcast_to_user(user_id, {
         "type": "position_update",
         **position,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
 
 
@@ -750,7 +750,7 @@ async def broadcast_trade_executed(user_id: str, trade: dict):
     await manager.broadcast_to_user(user_id, {
         "type": "trade_executed",
         **trade,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
 
 
@@ -759,7 +759,7 @@ async def broadcast_position_closed(user_id: str, position: dict):
     await manager.broadcast_to_user(user_id, {
         "type": "position_closed",
         **position,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
 
 
@@ -768,7 +768,7 @@ async def broadcast_risk_alert(user_id: str, alert: dict):
     await manager.broadcast_to_user(user_id, {
         "type": "risk_alert",
         **alert,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
 
 
@@ -777,7 +777,7 @@ async def broadcast_webhook_received(admin_id: str, webhook: dict):
     await manager.broadcast_to_user(f"system_{admin_id}", {
         "type": "webhook_received",
         **webhook,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
 
 
@@ -787,5 +787,5 @@ async def broadcast_scanner_event(admin_id: str | None, event: dict):
     await manager.broadcast_to_user(target, {
         "type": "scanner_event",
         **event,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })

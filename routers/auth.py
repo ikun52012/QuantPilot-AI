@@ -2,7 +2,7 @@
 Signal Server - Authentication Router
 User registration, login, session management, and 2FA (TOTP).
 """
-from datetime import timezone
+from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
@@ -77,7 +77,7 @@ def _to_naive_utc(dt):
     if dt is None:
         return None
     if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.astimezone(UTC).replace(tzinfo=None)
     return dt
 
 

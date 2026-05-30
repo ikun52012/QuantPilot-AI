@@ -6,7 +6,11 @@ echo "[Entrypoint] Starting QuantPilot AI..."
 # Run database migrations if Alembic is configured
 if [ -f "alembic.ini" ] && [ "${SKIP_MIGRATIONS}" != "true" ]; then
     echo "[Entrypoint] Running database migrations..."
-    alembic upgrade head || echo "[Entrypoint] Alembic upgrade failed; continuing with existing schema"
+    if [ "${MIGRATION_FAIL_FAST}" = "true" ]; then
+        alembic upgrade head
+    else
+        alembic upgrade head || { echo "[Entrypoint] ERROR: Alembic upgrade failed" >&2; exit 1; }
+    fi
 fi
 
 # Start the application

@@ -7,12 +7,23 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from datetime import date, datetime
+from decimal import Decimal
 from functools import wraps
 from typing import Any
 
 from loguru import logger
 
 from core.config import settings
+
+
+class _CacheEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
 
 # ─────────────────────────────────────────────
 # In-Memory Cache (Fallback)
@@ -119,7 +130,7 @@ class RedisCache:
             await client.setex(
                 key,
                 ttl or self._default_ttl,
-                json.dumps(value, default=str)
+                json.dumps(value, cls=_CacheEncoder, default=str)
             )
         except Exception as e:
             logger.debug(f"[Cache] Redis set error: {e}")

@@ -9,7 +9,7 @@ import json
 import os
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from loguru import logger
@@ -226,7 +226,7 @@ def _calculate_session_levels(ohlcv: list[list[float]]) -> dict[str, float | Non
         return {"session_high": None, "session_low": None, "prior_session_high": None, "prior_session_low": None}
 
     def session_key(candle: list[float]) -> str:
-        return datetime.fromtimestamp(float(candle[0]) / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(float(candle[0]) / 1000.0, tz=UTC).strftime("%Y-%m-%d")
 
     latest_key = session_key(candles[-1])
     current_session = [c for c in candles if session_key(c) == latest_key]
@@ -612,7 +612,7 @@ def _candles_to_ohlcv_dicts(candles: list[list[float]]) -> list[dict[str, float 
     ohlcv_data: list[dict[str, float | str]] = []
     for candle in candles:
         timestamp_ms = candle[0]
-        timestamp_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        timestamp_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
         ohlcv_data.append({
             "timestamp": timestamp_dt.isoformat(),
             "datetime": timestamp_dt.strftime("%Y-%m-%d %H:%M:%S"),

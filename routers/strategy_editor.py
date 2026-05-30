@@ -3,7 +3,7 @@ Strategy Editor Router - custom strategy configuration.
 Provides template, JSON editing, activation, export, and import endpoints.
 """
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -170,8 +170,8 @@ def _strategy_payload(strategy_id: str, config: StrategyConfig, user_id: str, ex
         "tp_levels": config.tp_levels,
         "trailing_stop": config.trailing_stop,
         "user_id": user_id,
-        "created_at": existing.get("created_at") or datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": existing.get("created_at") or datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "is_active": bool(existing.get("is_active", False)),
     }
 
@@ -353,7 +353,7 @@ async def activate_strategy(
     row = await _get_strategy_row(db, strategy_id, _user_id(user))
     strategy = _row_to_strategy(row)
     strategy["is_active"] = True
-    strategy["activated_at"] = datetime.now(timezone.utc).isoformat()
+    strategy["activated_at"] = datetime.now(UTC).isoformat()
     _USER_STRATEGIES[strategy_id] = strategy
     await _save_strategy_row(db, strategy_id, _user_id(user), strategy, status="active")
 
@@ -376,7 +376,7 @@ async def deactivate_strategy(
     row = await _get_strategy_row(db, strategy_id, _user_id(user))
     strategy = _row_to_strategy(row)
     strategy["is_active"] = False
-    strategy["deactivated_at"] = datetime.now(timezone.utc).isoformat()
+    strategy["deactivated_at"] = datetime.now(UTC).isoformat()
     _USER_STRATEGIES[strategy_id] = strategy
     await _save_strategy_row(db, strategy_id, _user_id(user), strategy, status="draft")
 
@@ -435,7 +435,7 @@ async def import_strategy(
         strategy_id = f"imported_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
         strategy["strategy_id"] = strategy_id
         strategy["user_id"] = user_id
-        strategy["imported_at"] = datetime.now(timezone.utc).isoformat()
+        strategy["imported_at"] = datetime.now(UTC).isoformat()
         strategy["is_active"] = bool(strategy.get("is_active", False))
 
         _USER_STRATEGIES[strategy_id] = strategy

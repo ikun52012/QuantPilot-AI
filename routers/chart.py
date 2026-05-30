@@ -3,7 +3,7 @@ Chart Router - dashboard chart data endpoints.
 Provides OHLCV, realtime price, indicators, and marker data for the frontend.
 """
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -105,7 +105,7 @@ async def get_realtime_price(
             "price": context.current_price,
             "volume_24h": context.volume_24h,
             "change_24h_pct": context.price_change_24h,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
     except Exception as err:
@@ -169,7 +169,7 @@ async def get_position_markers(
 
         markers = []
         for pos in positions:
-            opened_at_utc = pos.opened_at.replace(tzinfo=timezone.utc) if pos.opened_at.tzinfo is None else pos.opened_at.astimezone(timezone.utc)
+            opened_at_utc = pos.opened_at.replace(tzinfo=UTC) if pos.opened_at.tzinfo is None else pos.opened_at.astimezone(UTC)
             markers.append({
                 "time": int(opened_at_utc.timestamp()),
                 "position": "belowBar" if pos.direction == "long" else "aboveBar",
@@ -223,7 +223,7 @@ async def get_signal_markers(
         markers = []
         for event in events:
             markers.append({
-                "time": int(event.created_at.replace(tzinfo=timezone.utc).timestamp()),
+                "time": int(event.created_at.replace(tzinfo=UTC).timestamp()),
                 "position": "belowBar" if event.direction == "long" else "aboveBar",
                 "color": "#4caf50" if event.direction == "long" else "#f44336",
                 "shape": "circle",

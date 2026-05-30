@@ -1,6 +1,6 @@
 """Tests for WebSocket functionality."""
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -305,7 +305,7 @@ class TestWebSocketMessages:
             "position_id": "pos123",
             "ticker": "BTCUSDT",
             "pnl_pct": 5.0,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
         assert message["type"] == "position_update"
@@ -318,7 +318,7 @@ class TestWebSocketMessages:
             "ticker": "BTCUSDT",
             "price": 50000.0,
             "change_1h_pct": 1.5,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
         assert message["type"] == "price_update"

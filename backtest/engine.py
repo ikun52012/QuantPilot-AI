@@ -3,7 +3,7 @@ Backtest Engine for QuantPilot AI.
 Simulates trading strategies on historical data with realistic execution.
 """
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -113,13 +113,13 @@ class BacktestEngine:
         self.data = []
         self.timestamps = []
 
-        fallback_start = self.config.start_date or datetime.now(timezone.utc)
+        fallback_start = self.config.start_date or datetime.now(UTC)
         for idx, bar in enumerate(ohlcv_data):
             ts = bar.get("timestamp") or bar.get("datetime") or bar.get("time")
             if isinstance(ts, str):
                 ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             elif isinstance(ts, (int, float)):
-                ts = datetime.fromtimestamp(ts, tz=timezone.utc)
+                ts = datetime.fromtimestamp(ts, tz=UTC)
             elif ts is None:
                 ts = fallback_start + timedelta(minutes=idx)
 

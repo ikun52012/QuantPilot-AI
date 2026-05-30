@@ -3,7 +3,7 @@ Social Signals Router - Community signal sharing.
 Allows users to share and subscribe to trading signals.
 """
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -141,7 +141,7 @@ async def share_signal(
         "strategy_name": signal.strategy_name,
         "user_id": user_id,
         "username": user.get("username", "Anonymous"),
-        "shared_at": datetime.now(timezone.utc).isoformat(),
+        "shared_at": datetime.now(UTC).isoformat(),
         "status": "active",
         "subscribers_count": 0,
         "executions_count": 0,
@@ -259,7 +259,7 @@ async def subscribe_to_signal(
         "signal_id": signal_id,
         "auto_execute": subscription.auto_execute,
         "max_position_pct": subscription.max_position_pct,
-        "subscribed_at": datetime.now(timezone.utc).isoformat(),
+        "subscribed_at": datetime.now(UTC).isoformat(),
     }
 
     stats = _loads_dict(signal.stats_json) or _stats_default()

@@ -1469,7 +1469,7 @@ async def run_pre_filter_async(
             return TimeoutError(f"{name} degraded 鈥?skipped to protect pipeline latency")
         try:
             return await asyncio.wait_for(coro, timeout=6.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"[PreFilter] Enhanced check {name} timed out")
             return TimeoutError(f"{name} timed out")
         except asyncio.CancelledError:

@@ -1,5 +1,5 @@
 """Alembic migration script template."""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from alembic import op
@@ -7,7 +7,7 @@ from alembic import op
 
 def _utcnow():
     """Get current UTC time as naive datetime for PostgreSQL compatibility."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 revision = "001_initial_schema"

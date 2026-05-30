@@ -1,6 +1,6 @@
 """Tests for Backtest Engine."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -65,7 +65,7 @@ class TestBacktestEngine:
 
     @pytest.fixture
     def timestamps(self):
-        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        base = datetime(2024, 1, 1, tzinfo=UTC)
         return [base.replace(hour=i) for i in range(10)]
 
     @pytest.fixture
@@ -230,7 +230,7 @@ class TestBacktestPosition:
             ticker="BTCUSDT",
             direction="buy",
             entry_price=100.0,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=datetime.now(UTC),
             quantity=10.0,
         )
 
@@ -244,7 +244,7 @@ class TestBacktestPosition:
             ticker="BTCUSDT",
             direction="buy",
             entry_price=100.0,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=datetime.now(UTC),
             quantity=10.0,
             trailing_stop_config={"mode": "moving", "trail_pct": 1.5},
         )
@@ -256,7 +256,7 @@ class TestBacktestPosition:
             ticker="BTCUSDT",
             direction="buy",
             entry_price=100.0,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=datetime.now(UTC),
             quantity=10.0,
             take_profit_levels=[
                 {"price": 103.0, "qty_pct": 50, "status": "pending"},
@@ -274,8 +274,8 @@ class TestBacktestTrade:
             direction="buy",
             entry_price=100.0,
             exit_price=105.0,
-            entry_time=datetime.now(timezone.utc),
-            exit_time=datetime.now(timezone.utc),
+            entry_time=datetime.now(UTC),
+            exit_time=datetime.now(UTC),
             quantity=10.0,
             pnl_pct=5.0,
             pnl_usdt=50.0,

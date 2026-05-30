@@ -18,7 +18,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -148,7 +148,7 @@ def _parse_webhook_timestamp(value: Any) -> float:
             except ValueError:
                 dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 timestamp = dt.timestamp()
         if timestamp > 10_000_000_000:
             timestamp = timestamp / 1000.0

@@ -3,7 +3,11 @@
  * Centralized API communication with error handling.
  */
 
-const API_BASE = '';
+const API_BASE = (() => {
+    const meta = document.querySelector('meta[name="api-base-url"]');
+    if (meta && meta.content) return meta.content;
+    try { return window.QUANTPILOT_API_BASE || ''; } catch (_) { return ''; }
+})();
 
 class APIClient {
     constructor() {

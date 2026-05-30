@@ -1,9 +1,9 @@
 [project]
 name = "signal-server"
-version = "5.4.0"
+version = "5.5.0"
 description = "AI-powered crypto trading signal processor with subscriptions"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Signal Server Team"}
@@ -15,9 +15,9 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial",
 ]
 
@@ -42,7 +42,7 @@ dependencies = [
     "greenlet>=3.0.0,<4.0",
     "alembic>=1.13.0,<2.0",
     "redis>=5.0.0,<6.0",
-    "hiredis>=2.3.0",
+    "hiredis>=2.3.0; sys_platform != 'win32'",
     "prometheus-client>=0.20.0,<1.0",
     "yfinance>=0.2.0,<1.0",
 ]
@@ -58,7 +58,7 @@ dev = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 exclude = ["docs/P1_P5_USAGE_EXAMPLES.py"]
 
 [tool.ruff.lint]
@@ -77,7 +77,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true

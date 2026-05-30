@@ -3,7 +3,7 @@ QuantPilot AI - Middleware
 Request processing middleware including rate limiting, logging, and security.
 """
 import hmac
-import re
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -18,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from core.config import settings
 from core.metrics import record_http_request
 from core.request_utils import client_ip
+from core.utils.common import SENSITIVE_LOG_RE
 
 # ─────────────────────────────────────────────
 # Request ID Middleware
@@ -39,14 +40,10 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 # Logging Middleware
 # ─────────────────────────────────────────────
 
-_SENSITIVE_LOG_RE = re.compile(
-    r"(?i)(api[_-]?key|api[_-]?secret|secret|password|token)(['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+"
-)
-
 
 def _sanitize_log_message(message: str) -> str:
     """Sanitize sensitive data from log messages."""
-    return _SENSITIVE_LOG_RE.sub(r"\1\2***", message)
+    return SENSITIVE_LOG_RE.sub(r"\1\2***", message)
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
@@ -128,7 +125,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._register_attempts: dict[str, list[float]] = {}
         self._webhook_attempts: dict[str, list[float]] = {}
         self._api_requests: dict[str, list[float]] = {}
-        self._lock = __import__("threading").Lock()
+        self._lock = threading.Lock()
         self._redis = None
         self._redis_checked = False
 
@@ -230,6 +227,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             store[key] = attempts
             return True
 
+    def _get_client_ip(self, request: Request) -> str:
+        """Extract client IP from request."""
+        return str(client_ip(request))
+
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         if not self.enabled:
             return await call_next(request)
@@ -280,8 +281,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         elif path.startswith("/api/"):
             if not await self._redis_check_rate(
                 "api", ip,
-                120,  # 120 requests per minute
-                60,
+                settings.rate_limit.api_max_requests,
+                settings.rate_limit.api_window_secs,
             ):
                 logger.warning(f"[RateLimit] API rate limit hit for {ip}")
                 return JSONResponse(
@@ -298,30 +299,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 self._login_attempts.pop(ip, None)
 
         return response
-
-    def _check_rate(
-        self,
-        store: dict[str, list[float]],
-        key: str,
-        max_attempts: int,
-        window_secs: int,
-    ) -> bool:
-        """In-memory rate limit check (kept for backward-compatible signature)."""
-        now = time.time()
-        cutoff = now - window_secs
-
-        with self._lock:
-            attempts = [t for t in store.get(key, []) if t > cutoff]
-            if len(attempts) >= max_attempts:
-                store[key] = attempts
-                return False
-            attempts.append(now)
-            store[key] = attempts
-            return True
-
-    def _get_client_ip(self, request: Request) -> str:
-        """Extract client IP from request."""
-        return str(client_ip(request))
 
 
 # ─────────────────────────────────────────────
@@ -436,7 +413,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Core security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
 

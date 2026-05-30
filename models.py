@@ -2,7 +2,7 @@
 QuantPilot AI - Data Models
 """
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -11,14 +11,14 @@ from core.utils.common import suggested_limit_timeout_secs
 from core.utils.datetime import utcnow
 
 
-class SignalDirection(str, Enum):
+class SignalDirection(StrEnum):
     LONG = "long"
     SHORT = "short"
     CLOSE_LONG = "close_long"
     CLOSE_SHORT = "close_short"
 
 
-class SignalSource(str, Enum):
+class SignalSource(StrEnum):
     TRADINGVIEW = "tradingview"
     MANUAL = "manual"
     AUTO_SCANNER = "auto_scanner"
@@ -27,7 +27,7 @@ class SignalSource(str, Enum):
 # ─────────────────────────────────────────────
 # Trailing-stop strategy types
 # ─────────────────────────────────────────────
-class TrailingStopMode(str, Enum):
+class TrailingStopMode(StrEnum):
     NONE = "none"
     AUTO = "auto"                              # Smart auto-select based on AI analysis
     MOVING = "moving"                          # Classic moving trailing stop

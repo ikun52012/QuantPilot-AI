@@ -9,7 +9,7 @@ P2-FIX: Verify and re-place TP/SL orders periodically to protect against exchang
 import asyncio
 import json
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -2485,7 +2485,7 @@ def _order_matches_position_close(position: PositionModel, order: dict) -> bool:
     if order_ts <= 0 or not opened_at:
         return False
     if opened_at.tzinfo is None:
-        opened_at = opened_at.replace(tzinfo=timezone.utc)
+        opened_at = opened_at.replace(tzinfo=UTC)
     opened_ms = opened_at.timestamp() * 1000
     if order_ts < opened_ms:
         return False

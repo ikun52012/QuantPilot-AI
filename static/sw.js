@@ -6,6 +6,10 @@ const STATIC_CACHE = `quantpilot-static-${CACHE_VERSION}`;
 const NETWORK_FIRST_PATHS = new Set([
   '/static/style.css',
   '/static/app.js',
+  '/static/js/api.js',
+  '/static/js/auth.js',
+  '/static/js/utils.js',
+  '/static/js/toast.js',
   '/static/js/qp-core.js',
   '/static/js/charts.js',
   '/static/js/i18n.js',
@@ -15,6 +19,10 @@ const NETWORK_FIRST_PATHS = new Set([
 const STATIC_ASSETS = [
   '/static/style.css?v=20260504-2',
   '/static/app.js?v=20260504-2',
+  '/static/js/api.js?v=20260504-2',
+  '/static/js/auth.js?v=20260504-2',
+  '/static/js/utils.js?v=20260504-2',
+  '/static/js/toast.js?v=20260504-2',
   '/static/js/qp-core.js?v=20260504-2',
   '/static/js/charts.js?v=20260504-2',
   '/static/js/i18n.js?v=20260504-2',

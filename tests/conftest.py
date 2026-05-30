@@ -211,9 +211,8 @@ def sample_market_context():
 @pytest.fixture
 def sample_position():
     """Sample position model."""
-    from datetime import datetime
-
     from core.database import PositionModel
+    from core.utils.datetime import utcnow
 
     position = PositionModel(
         id="pos123",
@@ -223,7 +222,7 @@ def sample_position():
         entry_price=50000.0,
         quantity=0.01,
         remaining_quantity=0.01,
-        opened_at=datetime.utcnow(),
+        opened_at=utcnow(),
         leverage=10.0,
         margin=50.0,
         stop_loss=48000.0,
