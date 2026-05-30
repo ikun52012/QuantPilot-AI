@@ -9,7 +9,7 @@ if [ -f "alembic.ini" ] && [ "${SKIP_MIGRATIONS}" != "true" ]; then
     if [ "${MIGRATION_FAIL_FAST}" = "true" ]; then
         alembic upgrade head
     else
-        alembic upgrade head || { echo "[Entrypoint] ERROR: Alembic upgrade failed" >&2; exit 1; }
+        alembic upgrade head || echo "[Entrypoint] WARNING: Alembic upgrade failed; continuing with existing schema"
     fi
 fi
 
