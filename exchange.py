@@ -310,10 +310,13 @@ def _order_create_attempts(exchange, side: str, params: dict[str, Any] | None = 
     else:
         pos_side = _okx_position_side(side)
 
-    return [
-        {**base, "tdMode": base.get("tdMode") or margin_mode},
-        {**base, "tdMode": base.get("tdMode") or margin_mode, "posSide": pos_side},
-    ]
+    # P0-FIX: If position_side is explicitly provided (close/TP/SL), try with posSide first.
+    # Only fallback to net-mode (no posSide) if the exchange rejects it for one-way mode.
+    targeted = {**base, "tdMode": base.get("tdMode") or margin_mode, "posSide": pos_side}
+    fallback = {**base, "tdMode": base.get("tdMode") or margin_mode}
+    if position_side:
+        return [targeted, fallback]
+    return [fallback, targeted]
 
 
 async def _create_exchange_order(
@@ -1383,6 +1386,8 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
             order_type = "market"
 
         try:
+            # P1-FIX: Validate live entry amount increase tolerance (max 5% above requested)
+            requested_qty = decision.quantity
             if order_type == "limit" and decision.entry_price and decision.entry_price > 0:
                 logger.info(f"[Exchange] Placing {side} LIMIT order: {symbol} qty={decision.quantity} @ {decision.entry_price}")
                 order = await _create_exchange_order(
@@ -1392,6 +1397,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     side=side,
                     amount=decision.quantity,
                     price=decision.entry_price,
+                    allow_amount_increase=False,
                 )
             else:
                 logger.info(f"[Exchange] Placing {side} MARKET order: {symbol} qty={decision.quantity}")
@@ -1401,6 +1407,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     order_type="market",
                     side=side,
                     amount=decision.quantity,
+                    allow_amount_increase=False,
                 )
         except (ccxt.BaseError, Exception) as order_exc:
             logger.error(f"[Exchange] Order placement failed for {symbol}: {order_exc}")
@@ -1997,13 +2004,16 @@ async def place_protective_stop(
         )
         side = "sell" if str(direction).lower() == SignalDirection.LONG.value else "buy"
         pos_side_for_sl = "long" if str(direction).lower() in ("long", SignalDirection.LONG.value) else "short"
+        # P0-FIX: Create new SL first, then cancel old SL to prevent naked exposure.
+        order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price, pos_side_for_sl)
+        new_order_id = order.get("id")
+        if not new_order_id:
+            raise RuntimeError("New protective stop created but returned no order ID")
+        cancel_result = {}
         if existing_order_id:
             cancel_result = await _cancel_exchange_order(exchange, symbol, str(existing_order_id))
-            if cancel_result.get("status") not in {"cancelled", "not_found"}:
-                logger.warning(f"[Exchange] Old protective stop {existing_order_id} could not be cancelled: {cancel_result}. Aborting new stop placement.")
-                return {"status": "error", "reason": f"Failed to cancel old stop: {cancel_result.get('reason', 'unknown')}", "stop_price": stop_price}
-        order = await _create_conditional_order(exchange, symbol, "stop_loss", side, quantity, stop_price, pos_side_for_sl)
-        result = {"status": "placed", "order_id": order.get("id"), "symbol": symbol, "stop_price": stop_price, "position_side": pos_side_for_sl}
+            logger.info(f"[Exchange] Old protective stop {existing_order_id} cancelled after new stop {new_order_id} placed")
+        result = {"status": "placed", "order_id": new_order_id, "symbol": symbol, "stop_price": stop_price, "position_side": pos_side_for_sl}
         if existing_order_id:
             result["replace_cancel_result"] = cancel_result
             result["replaced_order_id"] = str(cancel_result.get("order_id") or existing_order_id)

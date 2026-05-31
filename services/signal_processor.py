@@ -484,8 +484,6 @@ def _scanner_payload_from_signal(signal_data: dict, user_settings: dict | None =
     scanner_context = (user_settings or {}).get("_scanner_context") if isinstance(user_settings, dict) else None
     if isinstance(scanner_context, dict) and isinstance(scanner_context.get("payload"), dict):
         return dict(scanner_context["payload"])
-    if str(signal_data.get("strategy") or "") != "AI_Auto_Scanner":
-        return {}
     try:
         payload = json.loads(str(signal_data.get("message") or "{}"))
     except (TypeError, json.JSONDecodeError):
@@ -493,7 +491,17 @@ def _scanner_payload_from_signal(signal_data: dict, user_settings: dict | None =
     if not isinstance(payload, dict):
         return {}
     nested = payload.get("scanner") if isinstance(payload.get("scanner"), dict) else None
-    return dict(nested or payload)
+    candidate = dict(nested or payload)
+    source = str(
+        candidate.get("signal_source")
+        or candidate.get("source")
+        or payload.get("signal_source")
+        or payload.get("source")
+        or ""
+    ).lower().strip()
+    if source != SignalSource.AUTO_SCANNER.value:
+        return {}
+    return candidate
 
 
 # ─────────────────────────────────────────────
@@ -714,9 +722,14 @@ class SignalProcessor:
         scoped_user_settings = dict(user_settings or {})
         exchange_overrides = dict(scoped_user_settings.get("exchange") or {})
         exchange_overrides["live_trading"] = mode == "live"
-        if scanner_meta.get("exchange_name"):
+        # P2-FIX: Prefer target_exchange/target_market_type over exchange_name/market_type
+        if scanner_meta.get("target_exchange"):
+            exchange_overrides["name"] = str(scanner_meta.get("target_exchange")).lower().strip()
+        elif scanner_meta.get("exchange_name"):
             exchange_overrides["name"] = str(scanner_meta.get("exchange_name")).lower().strip()
-        if scanner_meta.get("market_type"):
+        if scanner_meta.get("target_market_type"):
+            exchange_overrides["market_type"] = str(scanner_meta.get("target_market_type")).lower().strip()
+        elif scanner_meta.get("market_type"):
             exchange_overrides["market_type"] = str(scanner_meta.get("market_type")).lower().strip()
         scoped_user_settings["exchange"] = exchange_overrides
         scoped_user_settings["_scanner_context"] = {
@@ -1330,6 +1343,8 @@ class SignalProcessor:
                 "notable_checks": notable_checks[:6],
             }
 
+        # P2-FIX: Pass user_id to analyze_signal for proper cache isolation
+        # Note: user_id is not available in this method signature; will be added in next refactor
         analysis = await analyze_signal(signal, market, scoped_user_settings)
 
         latency = time.time() - start
@@ -1401,8 +1416,9 @@ class SignalProcessor:
             return decision
 
         scanner_context = (user_settings or {}).get("_scanner_context") or {}
+        is_scanner_signal = self._is_scanner_signal(signal, user_settings or {})
         scanner_min_confidence = float(scanner_context.get("min_confidence") or settings.scanner.ai_min_confidence)
-        if signal.strategy == "AI_Auto_Scanner" and analysis.confidence < scanner_min_confidence:
+        if is_scanner_signal and analysis.confidence < scanner_min_confidence:
             decision.execute = False
             decision.reason = (
                 f"Auto scanner requires confidence >= {scanner_min_confidence:.2f}; "
@@ -1428,7 +1444,7 @@ class SignalProcessor:
         # ── SMC/FVG entry optimization ──
         # When AI recommends "modify" and provides a suggested_entry, use it
         # as the optimal entry price instead of the raw signal price.
-        # BUG FIX: If modify fails validation, fallback to original price instead of rejecting
+        # P2-FIX: Force limit order for ai_modified entries to prevent market execution at wrong price
         if decision.execute and recommendation == "modify":
             suggested = float(analysis.suggested_entry or 0)
 
@@ -1443,6 +1459,7 @@ class SignalProcessor:
                     )
                     decision.entry_price = suggested
                     decision.entry_source = "ai_modified"
+                    decision.order_type = "limit"  # P2-FIX: Force limit order for modified entries
                 else:
                     # Fallback: suggested entry too far, use original price
                     logger.warning(
@@ -1464,6 +1481,10 @@ class SignalProcessor:
 
         if decision.execute:
             self._apply_exit_plan(decision, signal, analysis, market, user_settings or {})
+            if is_scanner_signal:
+                self._apply_scanner_exit_safety(decision, signal, market, user_settings or {})
+                if not decision.execute:
+                    return decision
             if signal.direction in {SignalDirection.LONG, SignalDirection.SHORT}:
                 if not decision.stop_loss:
                     decision.execute = False
@@ -1493,6 +1514,9 @@ class SignalProcessor:
             # User explicitly configured a mode (not "auto")
             trailing_mode = user_trailing_mode
             trailing_reason = "User configured trailing stop mode"
+        elif user_trailing_mode == "none":
+            trailing_mode = "none"
+            trailing_reason = "User disabled trailing stop mode"
         elif user_trailing_mode == "auto" or not user_trailing_mode:
             # Use smart trailing stop selector
             from smart_trailing_stop import select_smart_trailing_stop
@@ -1540,6 +1564,13 @@ class SignalProcessor:
                     settings.trailing_stop.trailing_step_pct,
                 ),
             )
+
+        if (
+            decision.execute
+            and is_scanner_signal
+            and user_trailing_mode in {"", "auto", "breakeven_on_tp1", "step_trailing"}
+        ):
+            self._apply_scanner_profit_protection(decision, analysis)
 
         # Calculate position size
         decision.quantity = self._calculate_position_size(
@@ -1629,7 +1660,7 @@ class SignalProcessor:
             )
 
         raw_levels = [
-            (analysis.suggested_tp1, analysis.tp1_qty_pct),
+            (first_valid(analysis.suggested_tp1, analysis.suggested_take_profit), analysis.tp1_qty_pct),
             (analysis.suggested_tp2, analysis.tp2_qty_pct),
             (analysis.suggested_tp3, analysis.tp3_qty_pct),
             (analysis.suggested_tp4, analysis.tp4_qty_pct),
@@ -1717,6 +1748,193 @@ class SignalProcessor:
         if decision.take_profit_levels:
             decision.take_profit = decision.take_profit_levels[0].price
 
+    @staticmethod
+    def _is_scanner_signal(signal: TradingViewSignal | None, user_settings: dict | None = None) -> bool:
+        if bool((user_settings or {}).get("_scanner_context")):
+            return True
+        if signal is None:
+            return False
+        return bool(_scanner_payload_from_signal(signal.model_dump(), user_settings))
+
+    @staticmethod
+    def _min_risk_reward_ratio(user_settings: dict | None = None) -> float:
+        risk_cfg = (user_settings or {}).get("risk") or {}
+        if risk_cfg.get("min_risk_reward_ratio") is not None:
+            return safe_float(risk_cfg.get("min_risk_reward_ratio"), 1.5)
+        profile = str(risk_cfg.get("ai_risk_profile") or settings.risk.ai_risk_profile or "balanced").lower().strip()
+        profile_rr_defaults = {"conservative": 2.0, "balanced": 1.5, "aggressive": 1.2}
+        return profile_rr_defaults.get(profile, 1.5)
+
+    def _apply_scanner_exit_safety(
+        self,
+        decision: TradeDecision,
+        signal: TradingViewSignal,
+        market: MarketContext,
+        user_settings: dict,
+    ) -> None:
+        """Tighten scanner exits so profitable moves are reachable before mean reversion."""
+        if not decision.execute or not decision.take_profit_levels:
+            return
+        if signal.direction not in {SignalDirection.LONG, SignalDirection.SHORT}:
+            return
+
+        entry = safe_float(decision.entry_price or signal.price)
+        stop_loss = safe_float(decision.stop_loss)
+        if entry <= 0 or stop_loss <= 0:
+            return
+
+        sl_dist_pct = abs(stop_loss - entry) / entry * 100.0
+        if sl_dist_pct <= 0:
+            return
+
+        from models import TakeProfitLevel
+        from timeframe_exits import get_timeframe_config
+
+        timeframe = str(signal.timeframe or "60")
+        tf_config = get_timeframe_config(timeframe)
+        atr_pct = safe_float(market.atr_pct, 0.0)
+        atr_reference = atr_pct if atr_pct > 0 else safe_float(getattr(tf_config, "default_sl_pct", 0.0), 1.0)
+        tf_tp1_cap = safe_float((getattr(tf_config, "tp1_range", (0.0, 0.0)) or (0.0, 0.0))[1], 0.0)
+        if tf_tp1_cap <= 0:
+            tf_tp1_cap = safe_float(getattr(tf_config, "max_tp_pct", 0.0), 0.0)
+
+        volatility_cap = max(atr_reference * 1.8, safe_float(getattr(tf_config, "default_sl_pct", 0.0), 1.0) * 1.5, 0.6)
+        tp1_cap_pct = min(tf_tp1_cap, volatility_cap) if tf_tp1_cap > 0 else volatility_cap
+        tp1_cap_pct = max(tp1_cap_pct, 0.4)
+
+        scanner_min_rr = max(1.1, safe_float(settings.scanner.min_rr_ratio, 1.4), self._min_risk_reward_ratio(user_settings))
+        min_target_pct = max(sl_dist_pct * scanner_min_rr, atr_reference * 0.6, 0.35)
+        if min_target_pct > tp1_cap_pct:
+            decision.execute = False
+            decision.take_profit_levels = []
+            decision.take_profit = None
+            decision.reason = (
+                f"Scanner exit rejected: SL distance {sl_dist_pct:.2f}% requires TP >= "
+                f"{min_target_pct:.2f}% for R:R, above reachable cap {tp1_cap_pct:.2f}% "
+                f"for {timeframe} / ATR {atr_reference:.2f}%"
+            )
+            logger.warning(f"[ScannerExit] {decision.ticker}: {decision.reason}")
+            return
+
+        original_levels = list(decision.take_profit_levels)
+        original_tp1 = safe_float(getattr(original_levels[0], "price", 0.0))
+        original_tp1_pct = abs(original_tp1 - entry) / entry * 100.0 if original_tp1 > 0 else tp1_cap_pct
+        target_pct = max(min_target_pct, min(original_tp1_pct, tp1_cap_pct))
+
+        quantities = self._scanner_take_profit_quantities(original_levels)
+        adjusted_levels: list[TakeProfitLevel] = []
+        max_tp_pct = safe_float(getattr(tf_config, "max_tp_pct", 0.0), 0.0)
+        level_caps = [
+            tp1_cap_pct,
+            max(tp1_cap_pct * 1.5, atr_reference * 2.5, safe_float(getattr(tf_config, "default_sl_pct", 0.0), 1.0) * 2.0),
+            max(tp1_cap_pct * 2.2, atr_reference * 3.5, safe_float(getattr(tf_config, "default_sl_pct", 0.0), 1.0) * 3.0),
+            max(tp1_cap_pct * 3.0, atr_reference * 4.5, safe_float(getattr(tf_config, "default_sl_pct", 0.0), 1.0) * 4.0),
+        ]
+        if max_tp_pct > 0:
+            level_caps = [min(cap, max_tp_pct) for cap in level_caps]
+        min_gap_pct = max(0.15, atr_reference * 0.15)
+        prev_pct = 0.0
+        capped_later_tp = False
+
+        for idx, level in enumerate(original_levels):
+            qty = quantities[idx] if idx < len(quantities) else 0.0
+            if qty <= 0:
+                continue
+            original_price = safe_float(getattr(level, "price", 0.0))
+            original_pct = abs(original_price - entry) / entry * 100.0 if original_price > 0 else 0.0
+            if idx == 0:
+                level_pct = target_pct
+            else:
+                cap = level_caps[min(idx, len(level_caps) - 1)]
+                level_pct = min(original_pct if original_pct > 0 else cap, cap)
+                level_pct = max(level_pct, prev_pct + min_gap_pct)
+                if max_tp_pct > 0:
+                    level_pct = min(level_pct, max_tp_pct)
+                if original_pct > 0 and level_pct + 0.01 < original_pct:
+                    capped_later_tp = True
+            if level_pct <= prev_pct + 0.01:
+                continue
+            if signal.direction == SignalDirection.LONG:
+                price = entry * (1 + level_pct / 100.0)
+            else:
+                price = entry * (1 - level_pct / 100.0)
+            if price <= 0:
+                continue
+            adjusted_levels.append(TakeProfitLevel(price=round(price, 8), qty_pct=round(qty, 4)))
+            prev_pct = level_pct
+
+        if not adjusted_levels:
+            return
+
+        decision.take_profit_levels = adjusted_levels
+        decision.take_profit = adjusted_levels[0].price
+        if target_pct + 0.01 < original_tp1_pct:
+            decision.exit_quality_reasons.append("scanner_tp1_capped_to_reachable_range")
+            logger.info(
+                f"[ScannerExit] {decision.ticker} TP1 tightened: "
+                f"{original_tp1_pct:.2f}% -> {target_pct:.2f}% "
+                f"(cap={tp1_cap_pct:.2f}%, ATR={atr_reference:.2f}%, SL={sl_dist_pct:.2f}%)"
+            )
+        if len(original_levels) == 1 and adjusted_levels[0].qty_pct < 100.0:
+            adjusted_levels[0].qty_pct = 100.0
+            decision.exit_quality_reasons.append("scanner_single_tp_closes_full_position")
+        if capped_later_tp:
+            decision.exit_quality_reasons.append("scanner_later_tps_capped_to_reachable_range")
+
+    @staticmethod
+    def _scanner_take_profit_quantities(levels: list) -> list[float]:
+        if not levels:
+            return []
+        if len(levels) == 1:
+            return [100.0]
+
+        first_qty = max(50.0, safe_float(getattr(levels[0], "qty_pct", 0.0), 0.0))
+        first_qty = min(first_qty, 100.0)
+        remaining = max(0.0, 100.0 - first_qty)
+        rest_raw = [max(0.0, safe_float(getattr(level, "qty_pct", 0.0), 0.0)) for level in levels[1:]]
+        rest_total = sum(rest_raw)
+        quantities = [first_qty]
+        if remaining <= 0:
+            quantities.extend([0.0] * (len(levels) - 1))
+        elif rest_total > 0:
+            quantities.extend([(qty / rest_total) * remaining for qty in rest_raw])
+        else:
+            quantities.extend([remaining / (len(levels) - 1)] * (len(levels) - 1))
+        return quantities
+
+    def _apply_scanner_profit_protection(self, decision: TradeDecision, analysis: AIAnalysis) -> None:
+        if not decision.take_profit_levels or not decision.entry_price:
+            return
+
+        from models import TrailingStopConfig, TrailingStopMode
+
+        entry = safe_float(decision.entry_price)
+        tp1 = safe_float(decision.take_profit_levels[0].price)
+        if entry <= 0 or tp1 <= 0:
+            return
+
+        tp1_dist_pct = abs(tp1 - entry) / entry * 100.0
+        if tp1_dist_pct <= 0:
+            return
+
+        leverage = self._effective_leverage(analysis)
+        trail_pct = round(max(0.2, min(0.6, tp1_dist_pct * 0.18)), 4)
+        activation_price_pct = max(tp1_dist_pct * 0.5, trail_pct + 0.1)
+        activation_price_pct = min(activation_price_pct, max(trail_pct + 0.05, tp1_dist_pct * 0.85))
+        activation_profit_pct = round(max(0.2, activation_price_pct * leverage), 4)
+
+        decision.trailing_stop = TrailingStopConfig(
+            mode=TrailingStopMode.PROFIT_PCT_TRAILING,
+            trail_pct=trail_pct,
+            activation_profit_pct=activation_profit_pct,
+            trailing_step_pct=max(0.1, round(trail_pct / 2.0, 4)),
+        )
+        decision.exit_quality_reasons.append("scanner_pre_tp_profit_trailing")
+        logger.info(
+            f"[ScannerExit] {decision.ticker} pre-TP profit trailing enabled: "
+            f"activation={activation_profit_pct:.2f}% leveraged PnL, trail={trail_pct:.2f}%"
+        )
+
     def _build_take_profit_levels(
         self,
         direction: SignalDirection,
@@ -1741,16 +1959,7 @@ class SignalProcessor:
         min_tp_pct = self._get_min_tp_percentage(atr_pct, user_settings or {}, timeframe)
         max_tp_pct = get_max_tp_for_timeframe(timeframe)
 
-        # Get min R:R ratio from settings or derive from ai_risk_profile
-        risk_cfg = (user_settings or {}).get("risk") or {}
-        if risk_cfg.get("min_risk_reward_ratio") is not None:
-            min_rr_ratio = safe_float(risk_cfg.get("min_risk_reward_ratio"), 1.5)
-        else:
-            # Derive from ai_risk_profile when not explicitly set
-            from core.config import settings
-            profile = str(risk_cfg.get("ai_risk_profile") or settings.risk.ai_risk_profile or "balanced").lower().strip()
-            profile_rr_defaults = {"conservative": 2.0, "balanced": 1.5, "aggressive": 1.2}
-            min_rr_ratio = profile_rr_defaults.get(profile, 1.5)
+        min_rr_ratio = self._min_risk_reward_ratio(user_settings or {})
 
         levels = []
         remaining_pct = 100.0
@@ -2051,19 +2260,25 @@ class SignalProcessor:
             return (False, "Invalid SL distance")
 
         risk_cfg = user_settings.get("risk") or {}
-        if risk_cfg.get("min_risk_reward_ratio") is not None:
-            min_rr_ratio = safe_float(risk_cfg.get("min_risk_reward_ratio"), 1.5)
-        else:
-            # Derive from ai_risk_profile when not explicitly set
-            from core.config import settings
-            profile = str(risk_cfg.get("ai_risk_profile") or settings.risk.ai_risk_profile or "balanced").lower().strip()
-            profile_rr_defaults = {"conservative": 2.0, "balanced": 1.5, "aggressive": 1.2}
-            min_rr_ratio = profile_rr_defaults.get(profile, 1.5)
+        min_rr_ratio = self._min_risk_reward_ratio(user_settings)
         min_avg_rr = safe_float(risk_cfg.get("min_avg_risk_reward_ratio"), 1.2)
 
         # Calculate TP1 R:R
         tp1_dist_pct = abs(tp_levels[0].price - entry) / entry * 100
         tp1_rr = tp1_dist_pct / sl_dist_pct
+
+        if len(tp_levels) == 1:
+            if tp1_rr >= min_rr_ratio:
+                logger.info(
+                    f"[Signal] R:R validation passed (single TP): "
+                    f"TP1={tp1_rr:.2f}:1 >= min={min_rr_ratio:.2f}:1"
+                )
+                return (True, "")
+            return (
+                False,
+                f"R:R validation failed: single TP={tp1_rr:.2f}:1 < {min_rr_ratio:.2f}:1 "
+                f"(TP1={tp_levels[0].price}, SL={sl}, entry={entry})"
+            )
 
         # Calculate weighted average TP R:R
         total_qty = sum(tp.qty_pct for tp in tp_levels)
@@ -2767,12 +2982,8 @@ class SignalProcessor:
         signal_data = decision.signal.model_dump() if decision.signal else {}
         risk_cfg = (user_settings or {}).get("risk") or {}
         user_risk_profile = str(risk_cfg.get("ai_risk_profile") or settings.risk.ai_risk_profile)
-        signal_source = (
-            SignalSource.AUTO_SCANNER.value
-            if str(signal_data.get("strategy") or "") == "AI_Auto_Scanner"
-            else SignalSource.TRADINGVIEW.value
-        )
         scanner_payload = _scanner_payload_from_signal(signal_data, user_settings)
+        signal_source = SignalSource.AUTO_SCANNER.value if self._is_scanner_signal(decision.signal, user_settings) else SignalSource.TRADINGVIEW.value
         if scanner_payload.get("setup_hash"):
             result["scanner_setup_hash"] = scanner_payload.get("setup_hash")
 

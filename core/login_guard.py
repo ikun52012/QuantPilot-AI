@@ -188,6 +188,25 @@ def record_successful_login(ip: str) -> None:
             _lockouts.pop(composite_key, None)
 
 
+def record_successful_2fa(ip: str) -> None:
+    """P0-FIX: Clear only 2FA-phase failures after successful 2FA verification.
+    This prevents password-phase login from bypassing 2FA lockout."""
+    _init_redis()
+
+    if _redis_client:
+        try:
+            _redis_client.delete(_redis_key_attempts(ip, "2fa"))
+            _redis_client.delete(_redis_key_lockout(ip, "2fa"))
+            return
+        except Exception as exc:
+            logger.debug(f"[LoginGuard] Redis delete failed, falling back to memory: {exc}")
+
+    with _lock:
+        composite_key = f"2fa:{ip}"
+        _attempts.pop(composite_key, None)
+        _lockouts.pop(composite_key, None)
+
+
 def get_stats() -> dict:
     """Return current lockout statistics."""
     _init_redis()

@@ -447,8 +447,15 @@ def _paper_trailing_stop_price(position: PositionModel, mark_price: float) -> fl
         return None
 
     if direction == "short":
-        return mark_price * (1 + trail_pct / 100.0)
-    return mark_price * (1 - trail_pct / 100.0)
+        stop_price = mark_price * (1 + trail_pct / 100.0)
+        if trailing_mode == "profit_pct_trailing" and mark_price < entry_price:
+            stop_price = min(stop_price, entry_price)
+        return stop_price
+
+    stop_price = mark_price * (1 - trail_pct / 100.0)
+    if trailing_mode == "profit_pct_trailing" and mark_price > entry_price:
+        stop_price = max(stop_price, entry_price)
+    return stop_price
 
 
 def _has_partial_position_fills(position: PositionModel) -> bool:
@@ -1222,7 +1229,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     f"qty={filled_amount}, price={filled_price}, cost={filled_cost}, margin={position.margin}"
                 )
 
-                await _create_protective_orders_for_position(position, exchange, symbol, filled_amount)
+                await _create_protective_orders_for_position(position, exchange, symbol, filled_amount, session=session)
 
             elif order_status in {"canceled", "cancelled", "expired", "rejected"}:
                 filled_amount = safe_float(order.get("filled") or 0)
@@ -1267,7 +1274,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         f"[PositionMonitor] Limit order {order_status} with partial fill for {position.ticker}: "
                         f"qty={filled_amount}, price={filled_price}, position remains open"
                     )
-                    await _create_protective_orders_for_position(position, exchange, symbol, filled_amount)
+                    await _create_protective_orders_for_position(position, exchange, symbol, filled_amount, session=session)
                 else:
                     position.status = "closed"
                     position.close_reason = "limit_order_expired"
@@ -1321,7 +1328,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         f"[PositionMonitor] Limit order partially filled for {position.ticker}: "
                         f"qty={filled_amount}, price={filled_price}, position remains open"
                     )
-                    await _create_protective_orders_for_position(position, exchange, symbol, filled_amount)
+                    await _create_protective_orders_for_position(position, exchange, symbol, filled_amount, session=session)
                     return
 
                 # Check if order has exceeded timeout
@@ -1384,10 +1391,18 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
         logger.debug(f"[PositionMonitor] Error checking limit order for {position.ticker}: {e}")
 
 
-async def _create_protective_orders_for_position(position: PositionModel, exchange, symbol: str, filled_qty: float) -> None:
-    """Create TP/SL orders for a position that just filled from a pending limit order."""
+async def _create_protective_orders_for_position(
+    position: PositionModel,
+    exchange,
+    symbol: str,
+    filled_qty: float,
+    session: AsyncSession | None = None,
+) -> dict:
+    """Create TP/SL orders for a position that just filled from a pending limit order.
+    P1-FIX: Expand protection when filled_qty increases beyond previously protected quantity."""
+    result = {"tp_failed": 0, "sl_failed": False, "closed_for_safety": False}
     if filled_qty <= 0:
-        return
+        return result
 
     side = "buy" if str(position.direction or "").lower() == "long" else "sell"
     tp_side = "sell" if side == "buy" else "buy"
@@ -1427,6 +1442,7 @@ async def _create_protective_orders_for_position(position: PositionModel, exchan
                 order_id = str(tp_order.get("id") or "")
                 if not order_id:
                     logger.warning(f"[PositionMonitor] TP{i+1} for filled limit returned no order id: price={tp_price}")
+                    result["tp_failed"] += 1
                     continue
                 tp_ids[i] = order_id
                 tp["order_id"] = order_id
@@ -1434,8 +1450,10 @@ async def _create_protective_orders_for_position(position: PositionModel, exchan
                 logger.info(f"[PositionMonitor] TP{i+1} created for filled limit: price={tp_price}")
             except ccxt.BaseError as e:
                 logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
+                result["tp_failed"] += 1
             except Exception as e:
                 logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
+                result["tp_failed"] += 1
 
         if tp_changed:
             position.take_profit_order_ids_json = json.dumps(tp_ids, ensure_ascii=False)
@@ -1448,11 +1466,83 @@ async def _create_protective_orders_for_position(position: PositionModel, exchan
             try:
                 sl_order = await _cco(exchange, symbol, "stop_loss", tp_side, filled_qty, sl_price, pos_side)
                 position.stop_loss_order_id = str(sl_order.get("id") or "")
-                logger.info(f"[PositionMonitor] SL created for filled limit: price={sl_price}")
+                if not position.stop_loss_order_id:
+                    result["sl_failed"] = True
+                    logger.error(f"[PositionMonitor] SL for filled limit returned no order id: price={sl_price}")
+                else:
+                    logger.info(f"[PositionMonitor] SL created for filled limit: price={sl_price}")
             except ccxt.BaseError as e:
                 logger.error(f"[PositionMonitor] Failed to create SL for filled limit: {e}")
+                result["sl_failed"] = True
             except Exception as e:
                 logger.error(f"[PositionMonitor] Failed to create SL for filled limit: {e}")
+                result["sl_failed"] = True
+
+    if result["sl_failed"]:
+        await _close_unprotected_filled_limit(position, exchange, symbol, filled_qty, pos_side, session)
+        result["closed_for_safety"] = str(position.status or "").lower() == "closed"
+
+    return result
+
+
+async def _close_unprotected_filled_limit(
+    position: PositionModel,
+    exchange,
+    symbol: str,
+    filled_qty: float,
+    pos_side: str,
+    session: AsyncSession | None = None,
+) -> None:
+    """Close a live filled limit if the protective SL cannot be placed."""
+    try:
+        from exchange import _close_position as _exchange_close
+
+        close_result = await _exchange_close(
+            exchange,
+            symbol,
+            position_side=pos_side,
+            close_quantity=filled_qty,
+            max_retries=3,
+        )
+    except Exception as exc:
+        logger.critical(
+            f"[PositionMonitor] CRITICAL: SL placement failed and safety close raised for "
+            f"{position.ticker}: {exc}. Manual intervention required."
+        )
+        position.close_reason = "protective_order_failed_close_error"
+        position.updated_at = utcnow()
+        return
+
+    if close_result.get("status") in {"closed", "no_position"}:
+        exit_price = safe_float(close_result.get("exit_price") or position.last_price or position.entry_price)
+        if session is not None and exit_price > 0:
+            await record_position_close_trade_async(
+                session=session,
+                position=position,
+                exit_price=exit_price,
+                close_reason="protective_order_failed",
+                order_status="exchange_closed",
+                order_details={"trigger": "protective_order_failed", "close_result": close_result},
+            )
+        else:
+            position.status = "closed"
+            position.close_reason = "protective_order_failed"
+            position.closed_at = utcnow()
+            position.remaining_quantity = 0.0
+            if exit_price > 0:
+                position.exit_price = exit_price
+            position.updated_at = utcnow()
+        logger.critical(
+            f"[PositionMonitor] Closed {position.ticker} filled limit because SL protection failed: {close_result}"
+        )
+        return
+
+    position.close_reason = "protective_order_failed_close_unconfirmed"
+    position.updated_at = utcnow()
+    logger.critical(
+        f"[PositionMonitor] CRITICAL: SL placement failed and safety close was not confirmed for "
+        f"{position.ticker}: {close_result}. Manual intervention required."
+    )
 
 
 async def _verify_protective_orders(session, position: PositionModel, exchange_config: dict) -> bool:
@@ -1570,7 +1660,16 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
         # Re-place missing TP orders
         if missing_tp_indices and tp_levels:
             tp_changed = False
-            for i in missing_tp_indices:
+            # P1-FIX: Renormalize pending TP percentages to sum to 100% of remaining quantity
+            pending_pcts = [safe_float(tp_levels[i].get("qty_pct"), 100.0) for i in missing_tp_indices if i < len(tp_levels)]
+            total_pending_pct = sum(pending_pcts)
+            if total_pending_pct > 0:
+                scale = 100.0 / total_pending_pct
+                normalized_pending_pcts = [p * scale for p in pending_pcts]
+            else:
+                normalized_pending_pcts = [100.0 / max(1, len(missing_tp_indices))] * len(missing_tp_indices)
+
+            for idx, i in enumerate(missing_tp_indices):
                 if i >= len(tp_levels):
                     continue
                 tp = tp_levels[i]
@@ -1578,7 +1677,7 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                 if level_status in {"hit", "filled", "closed"}:
                     continue
                 tp_price = safe_float(tp.get("price"))
-                tp_qty_pct = safe_float(tp.get("qty_pct"), 100.0)
+                tp_qty_pct = normalized_pending_pcts[idx] if idx < len(normalized_pending_pcts) else 100.0
                 if tp_price <= 0:
                     continue
                 tp_qty = remaining_qty * (tp_qty_pct / 100.0)
@@ -1599,7 +1698,7 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                             tp_ids.append(new_id)
                         logger.info(
                             f"[PositionMonitor] TP{i+1} re-placed for {position.ticker} @ {tp_price}, "
-                            f"new order id={new_id[:8]}"
+                            f"new order id={new_id[:8]}, qty_pct={tp_qty_pct:.1f}%"
                         )
                         re_placed = True
                 except Exception as e:
@@ -2315,7 +2414,8 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
 
 
 def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> list[dict]:
-    tp_order_ids = {str(order_id) for order_id in loads_list(position.take_profit_order_ids_json) if order_id}
+    raw_tp_ids = [str(order_id or "") for order_id in loads_list(position.take_profit_order_ids_json)]
+    tp_order_ids = {order_id for order_id in raw_tp_ids if order_id}
     tp_levels = loads_list(position.take_profit_json)
     for level in tp_levels:
         if isinstance(level, dict) and level.get("order_id"):
@@ -2339,7 +2439,15 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
             level_status = str(level.get("status") or "pending").lower()
             if level_status in {"hit", "filled", "closed"}:
                 continue
-            if level_price > 0 and (abs(order_price - level_price) / level_price < 0.001 or order_id in tp_order_ids):
+            level_order_id = str(level.get("order_id") or (raw_tp_ids[i] if i < len(raw_tp_ids) else "") or "")
+            order_id_matches_level = bool(level_order_id and order_id == level_order_id)
+            price_matches_level = bool(
+                not level_order_id
+                and level_price > 0
+                and order_price > 0
+                and abs(order_price - level_price) / level_price < 0.001
+            )
+            if order_id_matches_level or price_matches_level:
                 level_qty_pct = safe_float(level.get("qty_pct"), 100.0)
 
                 hit_info = {
@@ -2585,8 +2693,12 @@ async def _maybe_adjust_trailing_stop(position: PositionModel, exchange_config: 
             return False
         if direction == "short":
             new_stop = mark_price * (1 + trail_pct / 100.0)
+            if mark_price < entry_price:
+                new_stop = min(new_stop, entry_price)
         else:
             new_stop = mark_price * (1 - trail_pct / 100.0)
+            if mark_price > entry_price:
+                new_stop = max(new_stop, entry_price)
 
     if new_stop is None or new_stop <= 0:
         return False
@@ -2638,7 +2750,7 @@ async def _adjust_trailing_stop_on_tp_hit(
     trailing_config = loads_dict(position.trailing_stop_config_json)
     trailing_mode = _resolve_trailing_mode(trailing_config, position)
 
-    if trailing_mode not in {"breakeven_on_tp1", "step_trailing"}:
+    if trailing_mode not in {"breakeven_on_tp1", "step_trailing", "profit_pct_trailing"}:
         return False
 
     if not hit_levels:
@@ -2674,7 +2786,30 @@ async def _adjust_trailing_stop_on_tp_hit(
 
     highest_hit = max(hit_level_numbers)
 
-    if trailing_mode == "breakeven_on_tp1":
+    if trailing_mode == "profit_pct_trailing":
+        # Profit-percent trailing may not have updated yet if TP fills between monitor cycles.
+        # Lock the remaining position to at least breakeven immediately after any TP fill.
+        if highest_hit >= 1:
+            breakeven_target = entry_price
+            if current_stop > 0:
+                if direction == "long" and current_stop >= breakeven_target:
+                    return False
+                if direction == "short" and current_stop <= breakeven_target:
+                    return False
+
+            new_stop = breakeven_target
+            tp_note = f"TP{highest_hit} hit — profit trailing SL moved to breakeven"
+            trigger_type = f"tp{highest_hit}_profit_pct_lock"
+
+            profit_locked_pct = 0.0
+            for i in range(highest_hit):
+                tp_price = safe_float(all_levels[i].get("price"))
+                tp_qty = safe_float(all_levels[i].get("qty_pct"), 25.0)
+                if tp_price > 0 and entry_price > 0:
+                    profit_pct = abs(tp_price - entry_price) / entry_price * 100
+                    profit_locked_pct += profit_pct * tp_qty / 100.0
+
+    elif trailing_mode == "breakeven_on_tp1":
         # Only trigger on TP1 hit
         if highest_hit >= 1:
             # Check if already at breakeven (avoid duplicate trigger)
@@ -3184,9 +3319,10 @@ async def _enable_emergency_trailing_stop(
         if current_sl > 0 and emergency_sl <= current_sl:
             emergency_sl = current_sl * (1 + 0.2 / 100.0)  # Slightly higher
     else:
-        emergency_sl = entry_price * (1 + buffer_pct / 100.0)
+        # P2-FIX: For shorts, emergency SL should be BELOW entry to lock profit
+        emergency_sl = entry_price * (1 - buffer_pct / 100.0)
         current_sl = safe_float(position.stop_loss)
-        if current_sl > 0 and emergency_sl <= current_sl:
+        if current_sl > 0 and emergency_sl >= current_sl:
             emergency_sl = current_sl * (1 + 0.2 / 100.0)
 
     # Update position with emergency trailing config

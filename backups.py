@@ -181,11 +181,8 @@ async def create_backup(note: str = "") -> dict:
         if db_file.exists():
             files_to_backup.append(("server.db", db_file))
 
-    # Always include encryption key and runtime settings
-    key_file = data_dir / "app_encryption.key"
-    if key_file.exists():
-        files_to_backup.append(("app_encryption.key", key_file))
-
+    # P1-FIX: Exclude encryption key from ordinary downloadable backups to prevent secret exposure
+    # Include runtime settings only
     settings_file = data_dir / "runtime_settings.json"
     if settings_file.exists():
         files_to_backup.append(("runtime_settings.json", settings_file))

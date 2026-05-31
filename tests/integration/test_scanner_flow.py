@@ -42,7 +42,7 @@ async def test_scanner_signal_paper_flow_records_auto_source(monkeypatch, db_ses
             confidence=0.82,
             recommendation="execute",
             reasoning="Clean scanner setup with valid levels",
-            suggested_stop_loss=49000.0,
+            suggested_stop_loss=49500.0,
             suggested_tp1=53000.0,
             suggested_tp2=55000.0,
             tp1_qty_pct=50.0,

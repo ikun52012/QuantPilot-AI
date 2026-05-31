@@ -37,6 +37,9 @@ EVM_USDT_CONTRACTS = {
     "ARBITRUM": {"0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"},
 }
 
+# P0-FIX: Canonical TRON USDT contract address
+TRC20_USDT_CONTRACT = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"
+
 
 async def verify_payment_tx(
     tx_hash: str,
@@ -127,6 +130,10 @@ async def _verify_trc20(
         for transfer in transfers:
             to_address = transfer.get("to_address", "")
             amount_str = transfer.get("amount_str", "0")
+            # P0-FIX: Verify TRC20 USDT contract address
+            contract_address = transfer.get("contract_address", "").lower()
+            if contract_address and contract_address != TRC20_USDT_CONTRACT.lower():
+                continue
 
             try:
                 amount = float(amount_str) / 1e6  # USDT has 6 decimals

@@ -81,10 +81,12 @@ async def record_position_pnl(
     async with _ACCOUNT_TRACKER_GUARD:
         tracker = _ACCOUNT_DAILY_TRACKER.get(key)
         if tracker is None or tracker.get("date") != today:
+            # P1-FIX: Carry over cumulative_pnl_usdt to new day to prevent daily reset bypass
+            prev_cumulative = safe_float(tracker.get("cumulative_pnl_usdt", 0.0) if tracker else 0.0)
             tracker = {
                 "date": today,
                 "daily_pnl_usdt": 0.0,
-                "cumulative_pnl_usdt": 0.0,
+                "cumulative_pnl_usdt": prev_cumulative,
                 "positions_closed": 0,
                 "limit_triggered": False,
                 "account_equity_usdt": 0.0,

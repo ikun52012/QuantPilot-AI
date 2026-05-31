@@ -1989,11 +1989,17 @@ async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, wind
     """Check if a webhook with this fingerprint was recently processed.
 
     Returns the existing WebhookEventModel if found, otherwise None.
+    P0-FIX: Ignore failed/error/cancelled statuses to allow legitimate retries after stale reservations.
     """
     cutoff = utcnow() - timedelta(seconds=window_secs)
+    ignored_statuses = {"failed", "error", "cancelled", "rejected"}
     result = await session.execute(
         select(WebhookEventModel)
-        .where(WebhookEventModel.fingerprint == fingerprint, WebhookEventModel.created_at >= cutoff)
+        .where(
+            WebhookEventModel.fingerprint == fingerprint,
+            WebhookEventModel.created_at >= cutoff,
+            WebhookEventModel.status.notin_(ignored_statuses),
+        )
         .order_by(WebhookEventModel.created_at.desc())
         .limit(1)
     )

@@ -212,7 +212,8 @@ async def login(
                 token = create_token(user.id, user.username, user.role, user.token_version or 0)
                 set_auth_cookie(response, token, request)
                 logger.info(f"[Auth] User logged in with 2FA (inline): {username}")
-                record_successful_login(ip)
+                # P0-FIX: Clear only 2FA counters after successful 2FA verification
+                record_successful_2fa(ip)
                 return {
                     "token": token,
                     "user": {
@@ -233,7 +234,8 @@ async def login(
                 token = create_token(user.id, user.username, user.role, user.token_version or 0)
                 set_auth_cookie(response, token, request)
                 logger.info(f"[Auth] User logged in with recovery code: {username}")
-                record_successful_login(ip)
+                # P0-FIX: Clear only 2FA counters after successful 2FA verification
+                record_successful_2fa(ip)
                 return {
                     "token": token,
                     "requires_2fa": False,
@@ -252,7 +254,7 @@ async def login(
             raise HTTPException(401, f"Invalid 2FA code or recovery code. {remaining} attempts remaining.")
 
         # No code provided — issue a short-lived pending token
-        record_successful_login(ip)
+        # P0-FIX: Do NOT clear password/2FA counters here. Only clear after successful 2FA verify.
         pending_token = create_token(
             user.id, user.username, user.role,
             user.token_version or 0, pending_2fa=True,

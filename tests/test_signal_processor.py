@@ -211,6 +211,197 @@ class TestSignalProcessorBuildDecision:
         assert decision.stop_loss == 49000
         assert len(decision.take_profit_levels) > 0
 
+    def test_scanner_tightens_far_tp_and_enables_pre_tp_trailing(self, processor):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timeframe="60",
+            strategy="AI_Auto_Scanner",
+            message="",
+        )
+        market = MarketContext(ticker="BTCUSDT", current_price=100.0, atr_pct=1.0)
+        analysis = AIAnalysis(
+            confidence=0.85,
+            recommendation="execute",
+            reasoning="Scanner setup",
+            suggested_stop_loss=99.0,
+            suggested_tp1=120.0,
+            tp1_qty_pct=25.0,
+            recommended_leverage=5.0,
+        )
+
+        decision = processor._build_trade_decision(
+            signal,
+            analysis,
+            market,
+            None,
+            {"_scanner_context": {"mode": "paper"}},
+        )
+
+        assert decision.execute is True
+        assert decision.take_profit_levels[0].price == pytest.approx(101.8)
+        assert decision.take_profit_levels[0].qty_pct == 100.0
+        assert decision.trailing_stop.mode.value == "profit_pct_trailing"
+        assert decision.trailing_stop.activation_profit_pct == pytest.approx(4.5)
+        assert "scanner_pre_tp_profit_trailing" in decision.exit_quality_reasons
+
+    def test_scanner_rejects_when_reachable_tp_cannot_cover_sl(self, processor):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timeframe="60",
+            strategy="AI_Auto_Scanner",
+            message="",
+        )
+        market = MarketContext(ticker="BTCUSDT", current_price=100.0, atr_pct=1.0)
+        analysis = AIAnalysis(
+            confidence=0.85,
+            recommendation="execute",
+            reasoning="Wide stop scanner setup",
+            suggested_stop_loss=96.0,
+            suggested_tp1=120.0,
+            recommended_leverage=5.0,
+        )
+
+        decision = processor._build_trade_decision(
+            signal,
+            analysis,
+            market,
+            None,
+            {"_scanner_context": {"mode": "paper"}},
+        )
+
+        assert decision.execute is False
+        assert "Scanner exit rejected" in decision.reason
+
+    def test_legacy_suggested_take_profit_is_used_as_tp1(self, processor, sample_signal, sample_market):
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="Legacy TP field",
+            suggested_stop_loss=49000,
+            suggested_take_profit=51500,
+            tp1_qty_pct=100.0,
+        )
+
+        decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
+
+        assert decision.execute is True
+        assert decision.take_profit_levels[0].price == 51500
+
+    def test_single_tp_requires_min_rr_not_just_average_rr(self, processor, sample_signal, sample_market):
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="Thin single TP",
+            suggested_stop_loss=48000,
+            suggested_tp1=52500,
+            tp1_qty_pct=100.0,
+        )
+
+        decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
+
+        assert decision.execute is False
+        assert "single TP" in decision.reason
+
+    def test_strategy_name_alone_does_not_trigger_scanner_exit_safety(self, processor):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timeframe="60",
+            strategy="AI_Auto_Scanner",
+            message="",
+        )
+        market = MarketContext(ticker="BTCUSDT", current_price=100.0, atr_pct=1.0)
+        analysis = AIAnalysis(
+            confidence=0.85,
+            recommendation="execute",
+            reasoning="Normal webhook using scanner-like strategy name",
+            suggested_stop_loss=99.0,
+            suggested_tp1=120.0,
+            tp1_qty_pct=100.0,
+            recommended_leverage=5.0,
+        )
+
+        decision = processor._build_trade_decision(signal, analysis, market, None, {})
+
+        assert decision.execute is True
+        assert decision.take_profit_levels[0].price == 120.0
+        assert decision.trailing_stop.mode.value != "profit_pct_trailing"
+
+    def test_scanner_context_low_confidence_rejects_even_with_custom_strategy(self, processor):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timeframe="60",
+            strategy="custom_scanner_strategy",
+            message="",
+        )
+        market = MarketContext(ticker="BTCUSDT", current_price=100.0, atr_pct=1.0)
+        analysis = AIAnalysis(
+            confidence=0.65,
+            recommendation="execute",
+            reasoning="Below scanner threshold",
+            suggested_stop_loss=99.0,
+            suggested_tp1=103.0,
+        )
+
+        decision = processor._build_trade_decision(
+            signal,
+            analysis,
+            market,
+            None,
+            {"_scanner_context": {"mode": "paper", "min_confidence": 0.7}},
+        )
+
+        assert decision.execute is False
+        assert "Auto scanner requires confidence" in decision.reason
+
+    def test_explicit_scanner_trailing_none_is_respected(self, processor):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timeframe="60",
+            strategy="AI_Auto_Scanner",
+            message="",
+        )
+        market = MarketContext(ticker="BTCUSDT", current_price=100.0, atr_pct=1.0)
+        analysis = AIAnalysis(
+            confidence=0.85,
+            recommendation="execute",
+            reasoning="Scanner setup",
+            suggested_stop_loss=99.0,
+            suggested_tp1=102.0,
+            tp1_qty_pct=100.0,
+            recommended_leverage=5.0,
+        )
+
+        decision = processor._build_trade_decision(
+            signal,
+            analysis,
+            market,
+            None,
+            {"_scanner_context": {"mode": "paper"}, "trailing_stop": {"mode": "none"}},
+        )
+
+        assert decision.execute is True
+        assert decision.trailing_stop.mode.value == "none"
+
     def test_ai_stop_loss_survives_atr_timeframe_guidance_conflict(self, processor):
         """AI structural SL should be accepted when ATR guidance exceeds timeframe cap."""
         signal = TradingViewSignal(

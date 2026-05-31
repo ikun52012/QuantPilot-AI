@@ -204,6 +204,9 @@ class ConnectionManager:
         if user_id:
             if websocket in self.active_connections[user_id]:
                 self.active_connections[user_id].remove(websocket)
+            # P2-FIX: Delete empty user keys to prevent state leak
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
             del self.user_connections[websocket]
             logger.info(f"[WebSocket] User {user_id} disconnected")
 
@@ -212,26 +215,40 @@ class ConnectionManager:
             await websocket.send_json(message)
         except Exception as e:
             logger.debug(f"[WebSocket] Send failed: {e}")
+            # P2-FIX: Clean up dead socket on send failure
+            self.disconnect(websocket)
 
     async def broadcast_to_user(self, user_id: str, message: dict):
         connections = self.active_connections.get(user_id, [])
+        dead_connections = []
         for connection in connections:
             try:
                 await connection.send_json(message)
             except (RuntimeError, OSError) as e:
                 logger.debug(f"[WebSocket] Broadcast to user {user_id} failed: {e}")
+                dead_connections.append(connection)
             except Exception as e:
                 logger.debug(f"[WebSocket] Broadcast to user {user_id} unexpected error: {e}")
+                dead_connections.append(connection)
+        # P2-FIX: Remove dead sockets
+        for dead in dead_connections:
+            self.disconnect(dead)
 
     async def broadcast_all(self, message: dict):
+        dead_connections = []
         for _user_id, connections in self.active_connections.items():
             for connection in connections:
                 try:
                     await connection.send_json(message)
                 except (RuntimeError, OSError) as e:
                     logger.debug(f"[WebSocket] Broadcast to {_user_id} failed: {e}")
+                    dead_connections.append(connection)
                 except Exception as e:
                     logger.debug(f"[WebSocket] Broadcast to {_user_id} unexpected error: {e}")
+                    dead_connections.append(connection)
+        # P2-FIX: Remove dead sockets
+        for dead in dead_connections:
+            self.disconnect(dead)
 
     def get_user_count(self) -> int:
         return len(self.user_connections)

@@ -12,6 +12,8 @@ from position_monitor import (
     _MAX_GHOST_THRESHOLD,
     _adjust_trailing_stop_on_tp_hit,
     _check_pending_limit_orders,
+    _create_protective_orders_for_position,
+    _detect_tp_hits_from_orders,
     _filled_margin_from_order,
     _find_exchange_position,
     _find_recent_close_order,
@@ -222,6 +224,68 @@ class TestTrailingStopLogic:
         assert profit_pct == 2.5
         assert profit_pct >= activation_pct
 
+    def test_profit_pct_trailing_long_stops_no_worse_than_entry(self):
+        position = PositionModel(
+            direction="long",
+            entry_price=100.0,
+            leverage=1.0,
+            trailing_stop_config_json=json.dumps({
+                "mode": "profit_pct_trailing",
+                "activation_profit_pct": 0.5,
+                "trail_pct": 1.0,
+            }),
+        )
+
+        new_stop = _paper_trailing_stop_price(position, 100.6)
+
+        assert new_stop == pytest.approx(100.0)
+
+    def test_profit_pct_trailing_short_stops_no_worse_than_entry(self):
+        position = PositionModel(
+            direction="short",
+            entry_price=100.0,
+            leverage=1.0,
+            trailing_stop_config_json=json.dumps({
+                "mode": "profit_pct_trailing",
+                "activation_profit_pct": 0.5,
+                "trail_pct": 1.0,
+            }),
+        )
+
+        new_stop = _paper_trailing_stop_price(position, 99.4)
+
+        assert new_stop == pytest.approx(100.0)
+
+    @pytest.mark.asyncio
+    async def test_profit_pct_trailing_tp_hit_moves_stop_to_breakeven(self):
+        position = PositionModel(
+            id="pos-profit-lock",
+            ticker="BTCUSDT",
+            direction="long",
+            entry_price=100.0,
+            quantity=1.0,
+            remaining_quantity=0.5,
+            stop_loss=95.0,
+            trailing_stop_config_json=json.dumps({"mode": "profit_pct_trailing"}),
+            take_profit_json=json.dumps([
+                {"level": 1, "price": 102.0, "qty_pct": 50.0, "status": "hit"},
+                {"level": 2, "price": 104.0, "qty_pct": 50.0, "status": "pending"},
+            ]),
+        )
+        place_stop = AsyncMock(return_value={"status": "placed", "order_id": "sl-breakeven"})
+
+        adjusted = await _adjust_trailing_stop_on_tp_hit(
+            position,
+            _loads_list(position.take_profit_json),
+            [{"level": 1, "price": 102.0, "qty_pct": 50.0}],
+            {"live_trading": True},
+            place_stop,
+        )
+
+        assert adjusted is True
+        assert position.stop_loss == pytest.approx(100.0)
+        place_stop.assert_awaited_once()
+
     def test_trailing_stop_moves_correctly_for_long(self):
         mark_price = 105.0
         trail_pct = 1.0
@@ -279,7 +343,7 @@ async def test_place_protective_stop_replaces_existing_order(monkeypatch):
     assert result["replaced_order_id"] == "stop-old"
     assert cancel_calls == [(fake_exchange, "TRB/USDT:USDT", "stop-old")]
     assert create_calls == [(fake_exchange, "TRB/USDT:USDT", "stop_loss", "sell", 1.5, 99.0, "long")]
-    assert call_order == ["cancel", "create"]
+    assert call_order == ["create", "cancel"]
 
 
 @pytest.mark.asyncio
@@ -310,8 +374,8 @@ async def test_place_protective_stop_keeps_old_stop_when_new_stop_fails(monkeypa
 
     assert result["status"] == "error"
     assert "create failed" in result["reason"]
-    # Cancel is called first, then create fails
-    cancel_order.assert_awaited_once()
+    # P0-FIX: Create is attempted first; cancel is only called after successful create
+    cancel_order.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -469,6 +533,76 @@ async def test_find_recent_close_order_skips_already_hit_partial_tp():
     order = await _find_recent_close_order(position, {}, fake_recent_orders)
 
     assert order["id"] == "sl1"
+
+
+def test_detect_tp_hits_matches_each_level_by_own_order_id():
+    position = PositionModel(
+        id="pos-tp-id-match",
+        ticker="BTCUSDT",
+        direction="long",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        take_profit_order_ids_json=json.dumps(["tp1", "tp2"]),
+        take_profit_json=json.dumps([
+            {"level": 1, "price": 102.0, "qty_pct": 50.0, "order_id": "tp1", "status": "pending"},
+            {"level": 2, "price": 104.0, "qty_pct": 50.0, "order_id": "tp2", "status": "pending"},
+        ]),
+    )
+
+    hits = _detect_tp_hits_from_orders(position, [{"id": "tp2", "status": "closed", "filled": 0.5, "average": 104.0}])
+    levels = _loads_list(position.take_profit_json)
+
+    assert len(hits) == 1
+    assert hits[0]["level"] == 2
+    assert levels[0]["status"] == "pending"
+    assert levels[1]["status"] == "hit"
+
+
+@pytest.mark.asyncio
+async def test_filled_limit_closes_for_safety_when_sl_creation_fails(monkeypatch):
+    position = PositionModel(
+        id="pos-protect-fail",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        last_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        stop_loss=95.0,
+    )
+
+    async def fake_create_conditional_order(*args, **kwargs):
+        raise RuntimeError("SL create failed")
+
+    close_position = AsyncMock(return_value={"status": "closed", "exit_price": 99.5, "order_id": "close-1"})
+
+    async def fake_record_close(**kwargs):
+        kwargs["position"].status = "closed"
+        kwargs["position"].close_reason = kwargs["close_reason"]
+
+    record_close = AsyncMock(side_effect=fake_record_close)
+    monkeypatch.setattr("exchange._create_conditional_order", fake_create_conditional_order)
+    monkeypatch.setattr("exchange._close_position", close_position)
+    monkeypatch.setattr("position_monitor.record_position_close_trade_async", record_close)
+
+    class FakeSession:
+        pass
+
+    result = await _create_protective_orders_for_position(
+        position,
+        object(),
+        "BTC/USDT:USDT",
+        1.0,
+        session=FakeSession(),
+    )
+
+    assert result["sl_failed"] is True
+    assert result["closed_for_safety"] is True
+    close_position.assert_awaited_once()
+    record_close.assert_awaited_once()
+    assert record_close.await_args.kwargs["close_reason"] == "protective_order_failed"
 
 
 @pytest.mark.asyncio
