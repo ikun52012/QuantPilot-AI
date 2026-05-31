@@ -1878,15 +1878,19 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         order = await _find_recent_close_order(position, checked_exchange_config, get_recent_orders)
     except Exception as exc:
         logger.warning(
-            f"[PositionMonitor] Skipping missing-position handling for {position.ticker}; "
-            f"recent-order query failed: {exc}"
+            f"[PositionMonitor] Recent-order query failed for {position.ticker}: {exc}; "
+            f"proceeding to ghost-position detection"
         )
-        ticker = await get_ticker(position.ticker, exchange_config)
-        mark_price = safe_float(ticker.get("last") or position.last_price)
+        order = None
+        try:
+            ticker = await get_ticker(position.ticker, exchange_config)
+            mark_price = safe_float(ticker.get("last") or position.last_price)
+        except Exception:
+            mark_price = safe_float(position.last_price)
         if mark_price > 0:
             _update_unrealized(position, mark_price)
             stats["updated"] += 1
-        return stats
+        # Fall through to ghost detection below — do NOT return here
 
     if not order:
         # P0-CRITICAL: NEVER trust batch list absence alone to increment ghost counter.
@@ -1921,22 +1925,28 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             except Exception as single_exc:
                 logger.warning(
                     f"[P0-CRITICAL] Empty positions list but single-position verification failed "
-                    f"for {position.ticker}: {single_exc}. Keeping DB state unchanged."
+                    f"for {position.ticker}: {single_exc}. Proceeding to ghost detection."
                 )
-                ticker = await get_ticker(position.ticker, exchange_config)
-                mark_price = safe_float(ticker.get("last") or position.last_price)
+                try:
+                    ticker = await get_ticker(position.ticker, exchange_config)
+                    mark_price = safe_float(ticker.get("last") or position.last_price)
+                except Exception:
+                    mark_price = safe_float(position.last_price)
                 if mark_price > 0:
                     _update_unrealized(position, mark_price)
                     stats["updated"] += 1
-                return stats
+                # Fall through to ghost detection — do NOT return here
 
             if str(position.status or "").lower() == "pending" and position.entry_order_id:
                 logger.info(
                     f"[PositionMonitor] Empty exchange positions and no filled exposure for pending "
                     f"limit order {position.entry_order_id} on {position.ticker}; keeping pending order state."
                 )
-                ticker = await get_ticker(position.ticker, exchange_config)
-                mark_price = safe_float(ticker.get("last") or position.last_price)
+                try:
+                    ticker = await get_ticker(position.ticker, exchange_config)
+                    mark_price = safe_float(ticker.get("last") or position.last_price)
+                except Exception:
+                    mark_price = safe_float(position.last_price)
                 if mark_price > 0:
                     _update_unrealized(position, mark_price)
                     stats["updated"] += 1
@@ -2000,8 +2010,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                                 f"{position.entry_order_id} (age={age_secs:.0f}s < timeout={limit_timeout}s). "
                                 f"Keeping position open — order may still fill."
                             )
-                            ticker = await get_ticker(position.ticker, exchange_config)
-                            mark_price = safe_float(ticker.get("last") or position.last_price)
+                            try:
+                                ticker = await get_ticker(position.ticker, exchange_config)
+                                mark_price = safe_float(ticker.get("last") or position.last_price)
+                            except Exception:
+                                mark_price = safe_float(position.last_price)
                             if mark_price > 0:
                                 _update_unrealized(position, mark_price)
                                 stats["updated"] += 1
@@ -2114,8 +2127,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 f"Batch list had {len(exchange_positions)} positions but single-fetch error. "
                 f"Deferring ghost decision to next cycle."
             )
-            ticker = await get_ticker(position.ticker, exchange_config)
-            mark_price = safe_float(ticker.get("last") or position.last_price)
+            try:
+                ticker = await get_ticker(position.ticker, exchange_config)
+                mark_price = safe_float(ticker.get("last") or position.last_price)
+            except Exception:
+                mark_price = safe_float(position.last_price)
             if mark_price > 0:
                 _update_unrealized(position, mark_price)
                 stats["updated"] += 1
@@ -2136,8 +2152,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         f"(age={age_secs:.0f}s < timeout={limit_timeout}s). "
                         f"Skipping ghost detection — order may still fill."
                     )
-                    ticker = await get_ticker(position.ticker, exchange_config)
-                    mark_price = safe_float(ticker.get("last") or position.last_price)
+                    try:
+                        ticker = await get_ticker(position.ticker, exchange_config)
+                        mark_price = safe_float(ticker.get("last") or position.last_price)
+                    except Exception:
+                        mark_price = safe_float(position.last_price)
                     if mark_price > 0:
                         _update_unrealized(position, mark_price)
                         stats["updated"] += 1
