@@ -26,7 +26,13 @@ from core.database import (
     get_user_by_username,
     update_user_login,
 )
-from core.login_guard import is_locked_out, record_failed_attempt, record_successful_login, remaining_lockout_seconds
+from core.login_guard import (
+    is_locked_out,
+    record_failed_attempt,
+    record_successful_2fa,
+    record_successful_login,
+    remaining_lockout_seconds,
+)
 from core.request_utils import client_ip
 from core.security import hash_password, validate_password_strength, verify_password
 from core.utils.datetime import utcnow
