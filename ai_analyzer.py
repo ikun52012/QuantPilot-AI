@@ -140,7 +140,7 @@ async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, cache_key
         # BUG-4 FIX: Clean expired entries during reads
         expired_keys = [k for k, (ts, ttl, _) in _SMC_CACHE.items() if _time.monotonic() - ts > ttl]
         for expired_key in expired_keys:
-            del _SMC_CACHE[expired_key]
+            _SMC_CACHE.pop(expired_key, None)
 
         entry = _SMC_CACHE.get(cache_key)
         if entry:
@@ -415,7 +415,7 @@ async def _get_cached_analysis(
         now = _time.monotonic()
         expired_keys = [k for k, (ts, ttl, _) in _AI_CACHE.items() if now - ts > ttl]
         for expired_key in expired_keys:
-            del _AI_CACHE[expired_key]
+            _AI_CACHE.pop(expired_key, None)
 
         entry = _AI_CACHE.get(key)
         if entry:
@@ -462,7 +462,7 @@ async def _set_cached_analysis(
             now = _time.monotonic()
             stale = [k for k, (ts, t, _) in _AI_CACHE.items() if now - ts > t]
             for k in stale:
-                del _AI_CACHE[k]
+                _AI_CACHE.pop(k, None)
 
             # LRU eviction: remove least-recently-used entries
             while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:

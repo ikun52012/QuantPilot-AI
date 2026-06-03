@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from loguru import logger
+
 
 class TrailingStopRecommendation(StrEnum):
     NONE = "none"
@@ -66,12 +68,18 @@ def select_smart_trailing_stop(
 
     # User override takes priority
     if user_override and user_override.lower() not in {"none", "", "auto"}:
-        return TrailingStopDecision(
-            mode=TrailingStopRecommendation(user_override.lower()),
-            reasoning="User explicitly configured this trailing stop mode",
-            expected_benefit="Follows user preference for risk management",
-            risk_reduction_pct=100.0 if "breakeven" in user_override.lower() else 50.0,
-        )
+        try:
+            mode = TrailingStopRecommendation(user_override.lower())
+        except ValueError:
+            logger.warning(f"[TrailingStop] Invalid user override '{user_override}', falling back to auto selection")
+            mode = None
+        if mode is not None:
+            return TrailingStopDecision(
+                mode=mode,
+                reasoning="User explicitly configured this trailing stop mode",
+                expected_benefit="Follows user preference for risk management",
+                risk_reduction_pct=100.0 if "breakeven" in user_override.lower() else 50.0,
+            )
 
     # Normalize inputs
     condition = str(market_condition or "").lower().strip()

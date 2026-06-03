@@ -415,14 +415,6 @@ async def calculate_directional_volume_delta(ohlcv_data: list[list[float]], look
 
     Returns divergence status and strength.
     """
-
-
-async def calculate_cvd_divergence(ohlcv_data: list[list[float]], lookback: int = 20) -> dict[str, Any]:
-    """
-    Backward-compatible alias for calculate_directional_volume_delta.
-    DEPRECATED: Use calculate_directional_volume_delta instead.
-    """
-    return await calculate_directional_volume_delta(ohlcv_data, lookback)
     if len(ohlcv_data) < lookback:
         return {"divergence": None, "strength": 0, "type": None}
 
@@ -458,6 +450,14 @@ async def calculate_cvd_divergence(ohlcv_data: list[list[float]], lookback: int 
         divergence_data["type"] = "bullish"
 
     return divergence_data
+
+
+async def calculate_cvd_divergence(ohlcv_data: list[list[float]], lookback: int = 20) -> dict[str, Any]:
+    """
+    Backward-compatible alias for calculate_directional_volume_delta.
+    DEPRECATED: Use calculate_directional_volume_delta instead.
+    """
+    return await calculate_directional_volume_delta(ohlcv_data, lookback)
 
 
 async def detect_volatility_regime(ohlcv_data: list[list[float]], lookback: int = 100, thresholds: Any | None = None) -> dict[str, Any]:
@@ -1110,7 +1110,18 @@ async def fetch_all_enhanced_data(symbol: str, ohlcv_data: list[list[float]] | N
         fetch_fear_greed_index(),
         check_macro_event_risk(),
         analyze_liquidity_structure(symbol, current_price, ohlcv_data),
+        return_exceptions=True,
     )
+
+    # Handle exceptions in results
+    processed_results = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.warning(f"[EnhancedData] Enhanced data fetch #{i} failed: {result}")
+            processed_results.append({})
+        else:
+            processed_results.append(result)
+    results = processed_results
 
     cvd_data = {}
     regime_data = {}

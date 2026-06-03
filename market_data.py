@@ -784,8 +784,8 @@ async def _fetch_market_context_live(
                 logger.warning(f"[MarketData] {exchange_id} returned zero price for {ticker}")
                 raise ValueError("Zero price from exchange")
 
-            price_1h_ago = float(ohlcv_1h[-2][4]) if len(ohlcv_1h) >= 2 else current_price
-            price_4h_ago = float(ohlcv_4h[-2][4]) if len(ohlcv_4h) >= 2 else current_price
+            price_1h_ago = float(ohlcv_1h[-3][4]) if len(ohlcv_1h) >= 3 else current_price
+            price_4h_ago = float(ohlcv_4h[-3][4]) if len(ohlcv_4h) >= 3 else current_price
 
             price_change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0.0
             price_change_4h = ((current_price - price_4h_ago) / price_4h_ago * 100) if price_4h_ago else 0.0

@@ -461,9 +461,9 @@ def _validate_and_adjust_amount(exchange, symbol: str, amount: float, allow_incr
                 )
                 amount = min_amount
             else:
-                logger.warning(
-                    f"[Exchange] Amount {amount} < min_amount {min_amount} for {symbol}, "
-                    f"but allow_increase=False (close order). Order may be rejected by exchange."
+                raise ValueError(
+                    f"Amount {amount} < min_amount {min_amount} for {symbol}, "
+                    f"cannot increase for close order"
                 )
 
         # Adjust for maximum amount

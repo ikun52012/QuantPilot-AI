@@ -164,7 +164,7 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
     thread.join(timeout=30)
 
     if thread.is_alive():
-        logger.warning("[TradeLog] log_trade() thread timed out — trade may not be logged")
+        logger.warning("[TradeLog] log_trade() thread timed out — trade logging in progress, will complete asynchronously")
         return str(uuid.uuid4())
 
     if "error" in error_container:

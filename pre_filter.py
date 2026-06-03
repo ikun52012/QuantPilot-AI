@@ -16,7 +16,6 @@ v5.0 Upgrades:
 import asyncio
 import json
 import os
-import threading  # TODO: Remove after full async refactor of perf/latency locks
 import time
 from collections import deque
 from datetime import timedelta
@@ -33,7 +32,7 @@ from models import MarketContext, PreFilterResult, SignalDirection, TradingViewS
 from trade_logger import get_recent_trade_results_async, get_today_pnl_async
 
 # Filter statistics and block history
-_filter_stats_lock = threading.RLock()
+_filter_stats_lock = asyncio.Lock()
 _filter_stats: dict[str, dict[str, int]] = {}
 _filter_stats_buffer: dict[str, dict[str, int]] = {}
 _filter_stats_last_flush: float = 0.0
@@ -112,10 +111,10 @@ def _flush_filter_stats() -> None:
     _save_filter_stats(_filter_stats)
 
 
-def _record_filter_block(check_name: str, ticker: str) -> None:
+async def _record_filter_block(check_name: str, ticker: str) -> None:
     global _filter_stats_last_flush
     key = position_symbol_key(ticker).upper() or ticker.upper()
-    with _filter_stats_lock:
+    async with _filter_stats_lock:
         bucket = _filter_stats_buffer.setdefault(check_name, {})
         bucket[key] = bucket.get(key, 0) + 1
         now = time.time()
@@ -125,8 +124,8 @@ def _record_filter_block(check_name: str, ticker: str) -> None:
     _block_history.append({"ticker": key, "check": check_name, "timestamp": time.time()})
 
 
-def get_filter_stats() -> dict[str, dict[str, int]]:
-    with _filter_stats_lock:
+async def get_filter_stats() -> dict[str, dict[str, int]]:
+    async with _filter_stats_lock:
         if not _filter_stats:
             _filter_stats.update(_load_filter_stats())
         merged = {check_name: dict(ticker_counts) for check_name, ticker_counts in _filter_stats.items()}
@@ -137,9 +136,9 @@ def get_filter_stats() -> dict[str, dict[str, int]]:
         return merged
 
 
-def reset_filter_stats() -> None:
+async def reset_filter_stats() -> None:
     global _filter_stats, _filter_stats_buffer, _filter_stats_last_flush, _filter_stats_last_cleanup
-    with _filter_stats_lock:
+    async with _filter_stats_lock:
         _filter_stats = {}
         _filter_stats_buffer = {}
         _filter_stats_last_flush = 0.0
@@ -798,9 +797,9 @@ async def run_pre_filter_async(
     except Exception:
         pass  # Never let feedback loop affect trade decisions
 
-    def record_filter_block(check_name: str) -> None:
+    async def record_filter_block(check_name: str) -> None:
         if check_name.lower() not in disabled:
-            _record_filter_block(check_name, ticker)
+            await _record_filter_block(check_name, ticker)
 
     # Market data availability flags
     has_price_data = market.current_price > 0

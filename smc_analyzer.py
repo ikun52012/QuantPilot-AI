@@ -886,9 +886,9 @@ def detect_order_blocks(
                             midpoint=round(mid_price, 8),
                             timeframe=timeframe,
                             candle_index=i,
-                        strength=round(strength, 3),
-                        effectiveness=effectiveness,
-                    ))
+                            strength=round(strength, 3),
+                            effectiveness=effectiveness,
+                        ))
 
     return obs[-max_results:]
 

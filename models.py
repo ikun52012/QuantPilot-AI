@@ -236,6 +236,13 @@ class AIAnalysis(BaseModel):
     recommended_trailing_stop_mode: str = "none"  # none / breakeven_on_tp1 / step_trailing / moving
     raw_response: str = ""              # raw LLM output for debugging
 
+    @model_validator(mode="after")
+    def _validate_tp_qty_sum(self):
+        total = self.tp1_qty_pct + self.tp2_qty_pct + self.tp3_qty_pct + self.tp4_qty_pct
+        if total > 100.0:
+            raise ValueError(f"TP quantity percentages sum to {total}%, must not exceed 100%")
+        return self
+
 
 # ─────────────────────────────────────────────
 # Final trade decision (enhanced with multi-TP & trailing stop)
