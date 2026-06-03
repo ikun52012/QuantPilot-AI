@@ -363,22 +363,22 @@ class TestPreFilterThresholds:
         thresholds = FilterThresholds.instance()
         assert thresholds.get("unknown_key") is None
 
-    def test_filter_stats_canonicalize_symbol_aliases(self):
+    async def test_filter_stats_canonicalize_symbol_aliases(self):
         """Filter stats should merge alias-equivalent symbols into one key."""
-        reset_filter_stats()
-        _record_filter_block("cooldown", "BTCUSDT.P")
-        _record_filter_block("cooldown", "BTC/USDT:USDT")
+        await reset_filter_stats()
+        await _record_filter_block("cooldown", "BTCUSDT.P")
+        await _record_filter_block("cooldown", "BTC/USDT:USDT")
 
-        stats = get_filter_stats()
+        stats = await get_filter_stats()
         assert stats["cooldown"]["BTCUSDT"] == 2
 
-    def test_reset_filter_stats_clears_buffered_counts(self):
+    async def test_reset_filter_stats_clears_buffered_counts(self):
         """Reset should clear pending buffered stats as well as flushed stats."""
-        reset_filter_stats()
-        _record_filter_block("cooldown", "BTCUSDT")
-        reset_filter_stats()
+        await reset_filter_stats()
+        await _record_filter_block("cooldown", "BTCUSDT")
+        await reset_filter_stats()
 
-        assert get_filter_stats() == {}
+        assert await get_filter_stats() == {}
 
 
 class TestFilterScoreCalculation:

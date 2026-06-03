@@ -130,6 +130,9 @@ class TestAggregateVotingResults:
                 suggested_stop_loss=95.0,
                 suggested_tp1=110.0,
                 tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
             ), "executor_a"),
             (AIAnalysis(
                 confidence=0.7,
@@ -138,6 +141,9 @@ class TestAggregateVotingResults:
                 suggested_stop_loss=94.0,
                 suggested_tp1=112.0,
                 tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
             ), "executor_b"),
         ]
 

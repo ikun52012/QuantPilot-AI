@@ -205,6 +205,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49000,
             suggested_tp1=51500,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
         assert decision.execute is True
@@ -288,6 +291,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49000,
             suggested_take_profit=51500,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
 
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
@@ -303,6 +309,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=48000,
             suggested_tp1=52500,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
 
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
@@ -329,6 +338,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=99.0,
             suggested_tp1=120.0,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
             recommended_leverage=5.0,
         )
 
@@ -388,6 +400,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=99.0,
             suggested_tp1=102.0,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
             recommended_leverage=5.0,
         )
 
@@ -422,6 +437,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=99.4,
             suggested_tp1=101.5,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
 
         decision = processor._build_trade_decision(signal, analysis, market, None, {})
@@ -464,6 +482,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49000,
             suggested_tp1=51000,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
 
         decision = processor._build_trade_decision(signal, analysis, sample_market, None, {})
@@ -488,6 +509,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49000,
             suggested_tp1=51000,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
 
         decision = processor._build_trade_decision(
@@ -523,6 +547,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49000,
             suggested_tp1=51000,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
         monkeypatch.setattr("services.signal_processor.settings.exchange.limit_timeout_overrides", {"1h": 2 * 60 * 60})
 
@@ -864,6 +891,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49200,  # 1.6% from 50000, within 2.0% max
             suggested_tp1=51500,  # 3% from 50000, meets 3.0% min
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
         assert decision.execute is True
@@ -881,6 +911,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=39200,  # Adjusted for timeframe limits
             suggested_tp1=41200,  # 3% from 40000
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
 # NEW BEHAVIOR: fallback to original price instead of reject
@@ -897,6 +930,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49200,  # Adjusted for timeframe limits
             suggested_tp1=51500,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
         )
 
         decision = processor._build_trade_decision(sample_signal, analysis, sample_market, None, {})
@@ -913,6 +949,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49000,
             suggested_tp1=51500,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
             position_size_pct=1.0,
         )
 
@@ -931,6 +970,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=None,
             suggested_tp1=51500,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
             position_size_pct=1.0,
         )
 
@@ -948,6 +990,9 @@ class TestSignalProcessorBuildDecision:
             suggested_stop_loss=49000,
             suggested_tp1=51500,
             tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
             position_size_pct=1.0,
             recommended_leverage=10,
         )
