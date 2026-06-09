@@ -14,7 +14,7 @@ from typing import Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,6 +68,14 @@ class CreateUserRequest(BaseModel):
     max_leverage: int = Field(default=20, ge=1, le=125)
     max_position_pct: float = Field(default=10.0, ge=0.1, le=100)
 
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        username = str(value or "").lower().strip()
+        if not re.fullmatch(r"[a-z0-9_]{3,32}", username):
+            raise ValueError("Username may only contain lowercase letters, numbers, and underscores")
+        return username
+
 
 class UpdateUserRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32)
@@ -78,6 +86,14 @@ class UpdateUserRequest(BaseModel):
     live_trading_allowed: bool = Field(default=False)
     max_leverage: int = Field(default=20, ge=1, le=125)
     max_position_pct: float = Field(default=10.0, ge=0.1, le=100)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        username = str(value or "").lower().strip()
+        if not re.fullmatch(r"[a-z0-9_]{3,32}", username):
+            raise ValueError("Username may only contain lowercase letters, numbers, and underscores")
+        return username
 
 
 class CreatePlanRequest(BaseModel):
@@ -564,17 +580,30 @@ async def reset_user_password(
 
     The temporary password is returned in the response over HTTPS.
     Admins must deliver it to the user immediately and instruct them to change it.
+    The password expires after first login or 24 hours.
     """
     user = await get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(404, "User not found")
     _raise_if_deleted(user)
 
+    if settings.is_production and request.url.scheme != "https" and "localhost" not in request.url.hostname:
+        logger.warning(f"[Admin] Password reset attempted over non-HTTPS by {admin['username']}")
+        raise HTTPException(400, "Password reset requires HTTPS. Use localhost for development.")
+
     new_password = secrets.token_urlsafe(12)
     pw_hash = hash_password(new_password)
 
     await update_user_password_hash(db, user_id, pw_hash)
+    # P2-FIX: Clear password_changed_at to force user to change password on next login
+    from sqlalchemy import update as sa_update
 
+    from core.database import UserModel
+    await db.execute(
+        sa_update(UserModel)
+        .where(UserModel.id == user_id)
+        .values(password_changed_at=None)
+    )
     await _add_audit_log(db, admin, "reset_password", "user", user_id, f"Reset password for {user.username}", request)
 
     logger.info(f"[Admin] Password reset for user {user.username} by {admin['username']}")
@@ -582,13 +611,14 @@ async def reset_user_password(
     return Response(
         content=json.dumps({
             "status": "success",
-            "message": "Password has been reset. Deliver this temporary password to the user immediately.",
+            "message": "Password has been reset. Deliver this temporary password to the user immediately. It expires after first login or 24 hours.",
             "user_id": user_id,
             "username": user.username,
             "temporary_password": new_password,
+            "expires_in_hours": 24,
         }),
         media_type="application/json",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
     )
 
 
@@ -853,6 +883,7 @@ async def list_webhook_events(
     db: AsyncSession = Depends(get_db),
 ):
     """List recent webhook events."""
+    import html as _html
     result = await db.execute(
         select(WebhookEventModel)
         .order_by(WebhookEventModel.created_at.desc())
@@ -868,7 +899,7 @@ async def list_webhook_events(
             "direction": e.direction,
             "status": e.status,
             "status_code": e.status_code,
-            "reason": e.reason,
+            "reason": _html.escape(str(e.reason)) if e.reason else None,
             "client_ip": e.client_ip,
             "created_at": e.created_at.isoformat() if e.created_at else None,
         }
@@ -888,6 +919,7 @@ async def list_audit_logs(
     db: AsyncSession = Depends(get_db),
 ):
     """List admin audit logs."""
+    import html as _html
     result = await db.execute(
         select(AdminAuditLogModel)
         .order_by(AdminAuditLogModel.created_at.desc())
@@ -903,7 +935,7 @@ async def list_audit_logs(
             "action": log_entry.action,
             "target_type": log_entry.target_type,
             "target_id": log_entry.target_id,
-            "summary": log_entry.summary,
+            "summary": _html.escape(str(log_entry.summary)) if log_entry.summary else None,
             "client_ip": log_entry.client_ip,
             "created_at": log_entry.created_at.isoformat() if log_entry.created_at else None,
         }
@@ -1259,8 +1291,8 @@ async def get_system_status(
         "live_trading": settings.exchange.live_trading,
         "exchange_sandbox_mode": settings.exchange.sandbox_mode,
         "storage": {
-            "data": {"path": str(data_dir), "writable": os_access_writable(data_dir)},
-            "logs": {"path": str(logs_dir), "writable": os_access_writable(logs_dir)},
+            "data": {"path": str(data_dir), "writable": os.access(data_dir, os.W_OK)},
+            "logs": {"path": str(logs_dir), "writable": os.access(logs_dir, os.W_OK)},
         },
     }
 
@@ -1424,7 +1456,7 @@ async def approve_order_event(
 ):
     """Approve a manual review order event for re-execution."""
     from services.order_reconciler import approve_order_event as _approve
-    body = await request.json() if request.body else {}
+    body = await request.json() if request.headers.get("content-length") else {}
     admin_notes = body.get("admin_notes", "")
     result = await _approve(db, event_id, admin_notes)
     await _add_audit_log(
@@ -1444,7 +1476,7 @@ async def reject_order_event(
 ):
     """Reject a manual review order event permanently."""
     from services.order_reconciler import reject_order_event as _reject
-    body = await request.json() if request.body else {}
+    body = await request.json() if request.headers.get("content-length") else {}
     admin_notes = body.get("admin_notes", "")
     result = await _reject(db, event_id, admin_notes)
     await _add_audit_log(
@@ -1464,7 +1496,7 @@ async def retry_order_event(
 ):
     """Queue a manual review order event for retry."""
     from services.order_reconciler import retry_order_event as _retry
-    body = await request.json() if request.body else {}
+    body = await request.json() if request.headers.get("content-length") else {}
     admin_notes = body.get("admin_notes", "")
     result = await _retry(db, event_id, admin_notes)
     await _add_audit_log(

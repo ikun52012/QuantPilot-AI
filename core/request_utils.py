@@ -5,6 +5,34 @@ from fastapi import Request
 
 from core.config import settings
 
+# Allowed host patterns for x-forwarded-host validation
+_ALLOWED_HOST_PATTERNS = [
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+]
+
+
+def _is_allowed_host(host: str) -> bool:
+    """Validate host against allowed patterns to prevent host header injection."""
+    if not host:
+        return False
+    host_lower = host.lower().split(":")[0]  # Remove port
+    # Allow if it matches configured public_base_url domain
+    configured = str(settings.server.public_base_url or "").strip().rstrip("/")
+    if configured and "your-domain" not in configured.lower():
+        configured_host = configured.split("://", 1)[-1].split(":")[0].lower()
+        if host_lower == configured_host:
+            return True
+    # Allow localhost variants
+    if host_lower in _ALLOWED_HOST_PATTERNS:
+        return True
+    # Allow if it's in trusted_hosts
+    for allowed in settings.server.trusted_hosts or []:
+        if allowed == "*" or allowed.lower() == host_lower:
+            return True
+    return False
+
 
 def _first_header_value(value: str) -> str:
     return str(value or "").split(",", 1)[0].strip()
@@ -54,6 +82,9 @@ def public_base_url(request: Request) -> str:
             or request.headers.get("host", "")
             or request.url.netloc
         ).strip()
+        # SECURITY: Validate x-forwarded-host to prevent host header injection
+        if not _is_allowed_host(host):
+            host = request.headers.get("host", "") or request.url.netloc
         port = _first_header_value(request.headers.get("x-forwarded-port", ""))
     else:
         proto = (request.url.scheme or "http").lower()

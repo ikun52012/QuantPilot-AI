@@ -2,6 +2,7 @@
 QuantPilot AI - Application Lifespan Management
 Handles startup and shutdown logic separately from app factory.
 """
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -184,6 +185,7 @@ async def _on_startup():
     await _init_cache()
     await _init_scheduler()
     await _restore_strategies()
+    await _init_backup_scheduler()
 
 
 async def _init_database():
@@ -286,7 +288,7 @@ async def _init_scheduler():
     async def _exchange_pool_cleanup_job():
         try:
             from exchange import cleanup_idle_exchange_pool
-            cleaned = cleanup_idle_exchange_pool()
+            cleaned = await asyncio.to_thread(cleanup_idle_exchange_pool)
             if cleaned:
                 logger.info(f"[Scheduler] Exchange pool cleanup: removed {cleaned} idle connections")
         except Exception as e:
@@ -363,6 +365,22 @@ async def _init_scheduler():
     )
 
 
+async def _init_backup_scheduler():
+    """Initialize automatic backup scheduler on startup."""
+    try:
+        from backups import start_backup_scheduler
+
+        # Start backup scheduler with default settings (24h interval, 30 days retention)
+        result = start_backup_scheduler(interval_hours=24.0, max_age_days=30)
+
+        if result.get("status") == "started":
+            logger.info(f"[Backup] {result.get('message')}")
+        elif result.get("status") == "already_running":
+            logger.info(f"[Backup] Scheduler already running (every {result.get('interval_hours')}h, keep {result.get('max_age_days')} days)")
+    except Exception as e:
+        logger.warning(f"[Backup] Failed to start backup scheduler: {e}")
+
+
 async def _restore_strategies():
     """Restore active DCA/Grid strategies from database."""
     try:
@@ -399,6 +417,22 @@ async def _restore_strategies():
 async def _on_shutdown():
     """Cleanup all services on application shutdown."""
     global _scheduler
+
+    # P1-FIX: Stop cache cleanup task
+    try:
+        from ai_analyzer import stop_cache_cleanup
+        stop_cache_cleanup()
+        logger.info("[Cache] Cleanup task stopped")
+    except Exception as e:
+        logger.debug(f"[Cache] Cleanup shutdown failed: {e}")
+
+    # Cancel WebSocket background tasks first
+    try:
+        from routers.websocket import cancel_price_cache_task
+        cancel_price_cache_task()
+    except Exception as e:
+        logger.debug(f"[WebSocket] Shutdown cleanup failed: {e}")
+
     try:
         from services.market_scanner import shutdown_market_scanner_service
         await shutdown_market_scanner_service()
@@ -418,5 +452,24 @@ async def _on_shutdown():
     except Exception as e:
         logger.debug(f"[Exchange] Pool cleanup on shutdown: {e}")
 
+    # Close Redis connections
+    try:
+        from core.cache import cache
+        if hasattr(cache, "close"):
+            await cache.close()
+        from core.redis_coordination import redis_close
+        await redis_close()
+    except Exception as e:
+        logger.debug(f"[Redis] Shutdown cleanup failed: {e}")
+
     await db_manager.close()
+
+    # Stop backup scheduler
+    try:
+        from backups import stop_backup_scheduler
+        result = stop_backup_scheduler()
+        logger.info(f"[Backup] {result.get('message', 'Scheduler stopped')}")
+    except Exception as e:
+        logger.debug(f"[Backup] Shutdown: {e}")
+
     logger.info("QuantPilot AI shut down complete")

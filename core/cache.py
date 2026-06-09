@@ -107,6 +107,21 @@ class RedisCache:
                 return None
         return self._client
 
+    async def close(self):
+        """Close Redis connection on shutdown."""
+        if self._client:
+            try:
+                await self._client.aclose()
+            except AttributeError:
+                # Older redis-py versions use close()
+                await self._client.close()
+            except Exception as e:
+                logger.debug(f"[Cache] Redis close error: {e}")
+            finally:
+                self._client = None
+                self._connected = False
+                logger.info("[Cache] Redis connection closed")
+
     async def get(self, key: str) -> Any | None:
         """Get a value from cache."""
         client = await self._get_client()
@@ -146,12 +161,25 @@ class RedisCache:
             logger.debug(f"[Cache] Redis delete error: {e}")
 
     async def clear(self):
-        """Clear all cache entries."""
+        """Clear all cache entries.
+
+        P2-FIX: Use key prefix matching instead of flushdb() to avoid
+        clearing other applications' data if Redis is shared.
+        """
         client = await self._get_client()
         if client is None:
             return
         try:
-            await client.flushdb()
+            # P2-FIX: Only delete keys with our prefix instead of flushdb()
+            prefix = "quantpilot:*"
+            cursor = 0
+            while True:
+                cursor, keys = await client.scan(cursor, match=prefix, count=100)
+                if keys:
+                    await client.delete(*keys)
+                if cursor == 0:
+                    break
+            logger.info("[Cache] Cleared all quantpilot cache entries")
         except Exception as e:
             logger.debug(f"[Cache] Redis clear error: {e}")
 

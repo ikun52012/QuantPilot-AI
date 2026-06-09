@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -48,7 +48,8 @@ def _dt(value: Any) -> datetime | None:
         raw = float(value)
         if raw > 10_000_000_000:
             raw /= 1000.0
-        return datetime.utcfromtimestamp(raw)
+        # BUG FIX: Use timezone-aware datetime
+        return datetime.fromtimestamp(raw, tz=UTC).replace(tzinfo=None)
     if isinstance(value, str):
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
@@ -93,7 +94,7 @@ async def _candidate_payload_for_setup(session: AsyncSession, setup_hash: str) -
     return _parse_json(row.payload_json) if row else {}
 
 
-async def _path_metrics(position: PositionModel, timeframe: str) -> dict[str, float | None]:
+async def _path_metrics(position: PositionModel, timeframe: str, skip_path_metrics: bool = False) -> dict[str, float | None]:
     if not settings.scanner.outcome_path_metrics_enabled:
         return {"mae_pct": None, "mfe_pct": None}
     if not position.opened_at or not position.closed_at:
@@ -103,6 +104,10 @@ async def _path_metrics(position: PositionModel, timeframe: str) -> dict[str, fl
     days = max(2, min(90, int(hold_seconds / 86400.0) + 2))
     try:
         from market_data import fetch_ohlcv_history
+
+        # BUG FIX: Skip path metrics for bulk sync to avoid N+1 API calls
+        if skip_path_metrics:
+            return {"mae_pct": None, "mfe_pct": None}
 
         rows = await fetch_ohlcv_history(position.ticker, timeframe=timeframe or "1h", days=days)
     except Exception as exc:
@@ -221,7 +226,7 @@ async def sync_scanner_outcomes(
                 if close_trade:
                     close_payload = _parse_json(close_trade.payload_json)
                     pnl_usdt = _safe_float(close_payload.get("pnl_usdt"), pnl_usdt)
-            path = await _path_metrics(position, timeframe)
+            path = await _path_metrics(position, timeframe, skip_path_metrics=False)
             hold_minutes = 0.0
             if position.opened_at and position.closed_at:
                 hold_minutes = max(0.0, (position.closed_at - position.opened_at).total_seconds() / 60.0)
@@ -309,7 +314,17 @@ async def _refresh_state_from_outcomes(session: AsyncSession, *, scope: str, day
         "losses": state.signal_losses,
         "expectancy_pct": summary.get("expectancy_pct"),
     }
-    state.win_rate_history_json = json.dumps([history])
+    # BUG FIX: Append to history instead of replacing entire array
+    try:
+        existing_history = json.loads(state.win_rate_history_json or "[]")
+        if not isinstance(existing_history, list):
+            existing_history = []
+    except (json.JSONDecodeError, TypeError):
+        existing_history = []
+
+    existing_history.append(history)
+    # Keep only last 100 entries to prevent unbounded growth
+    state.win_rate_history_json = json.dumps(existing_history[-100:])
     if settings.scanner.adaptive_threshold_enabled:
         total = int(summary.get("total") or 0)
         if total >= max(5, int(settings.scanner.walk_forward_min_samples)):

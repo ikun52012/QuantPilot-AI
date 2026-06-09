@@ -2,10 +2,11 @@
 Strategy Editor Router - custom strategy configuration.
 Provides template, JSON editing, activation, export, and import endpoints.
 """
+import asyncio
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -143,6 +144,7 @@ _STRATEGY_TEMPLATES = [
 ]
 
 _USER_STRATEGIES = {}
+_STRATEGY_LOCK = asyncio.Lock()  # Protect concurrent access to module-level dict
 
 
 def _user_id(user: dict) -> str:
@@ -261,7 +263,7 @@ async def create_custom_strategy(
 ):
     """Create a custom strategy configuration."""
     user_id = _user_id(user)
-    strategy_id = config.strategy_id or f"custom_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    strategy_id = config.strategy_id or f"custom_{user_id}_{utcnow().strftime('%Y%m%d%H%M%S%f')}"
     strategy = _strategy_payload(strategy_id, config, user_id)
 
     _USER_STRATEGIES[strategy_id] = strategy
@@ -423,35 +425,64 @@ async def export_strategy(
 
 @router.post("/import")
 async def import_strategy(
-    strategy_json: str,
+    strategy_json: str = Body(..., max_length=100000),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Import strategy from JSON."""
+    """Import strategy from JSON with schema validation and length limit."""
     try:
         strategy = json.loads(strategy_json)
-
-        user_id = _user_id(user)
-        strategy_id = f"imported_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-        strategy["strategy_id"] = strategy_id
-        strategy["user_id"] = user_id
-        strategy["imported_at"] = datetime.now(UTC).isoformat()
-        strategy["is_active"] = bool(strategy.get("is_active", False))
-
-        _USER_STRATEGIES[strategy_id] = strategy
-        await _save_strategy_row(
-            db,
-            strategy_id,
-            user_id,
-            strategy,
-            status="active" if strategy.get("is_active") else "draft",
-        )
-
-        return {
-            "status": "imported",
-            "strategy_id": strategy_id,
-            "name": strategy.get("name"),
-        }
-
     except json.JSONDecodeError as err:
         raise HTTPException(400, "Invalid JSON format") from err
+
+    # Validate imported strategy against expected schema
+    REQUIRED_FIELDS = {"strategy_id", "name", "version"}
+    ALLOWED_TOP_LEVEL_KEYS = {
+        "strategy_id", "name", "description", "version", "author", "created_at",
+        "updated_at", "imported_at", "is_active", "user_id", "parameters",
+        "rules", "indicators", "risk_settings", "entry_conditions",
+        "exit_conditions", "metadata", "tags",
+    }
+
+    if not isinstance(strategy, dict):
+        raise HTTPException(400, "Strategy must be a JSON object")
+
+    missing_fields = REQUIRED_FIELDS - set(strategy.keys())
+    if missing_fields:
+        raise HTTPException(400, f"Missing required fields: {', '.join(missing_fields)}")
+
+    # Reject unknown top-level keys that could indicate tampering
+    unknown_keys = set(strategy.keys()) - ALLOWED_TOP_LEVEL_KEYS
+    if unknown_keys:
+        logger.warning(f"[StrategyEditor] Imported strategy has unknown fields: {unknown_keys}")
+        # Remove unknown fields for safety
+        for key in unknown_keys:
+            del strategy[key]
+
+    # Validate field types
+    if not isinstance(strategy.get("name"), str) or not strategy["name"].strip():
+        raise HTTPException(400, "Strategy name must be a non-empty string")
+    if not isinstance(strategy.get("version"), str):
+        raise HTTPException(400, "Strategy version must be a string")
+
+    user_id = _user_id(user)
+    strategy_id = f"imported_{user_id}_{utcnow().strftime('%Y%m%d%H%M%S%f')}"
+    strategy["strategy_id"] = strategy_id
+    strategy["user_id"] = user_id
+    strategy["imported_at"] = datetime.now(UTC).isoformat()
+    strategy["is_active"] = bool(strategy.get("is_active", False))
+
+    _USER_STRATEGIES[strategy_id] = strategy
+    await _save_strategy_row(
+        db,
+        strategy_id,
+        user_id,
+        strategy,
+        status="active" if strategy.get("is_active") else "draft",
+    )
+
+    return {
+        "status": "imported",
+        "strategy_id": strategy_id,
+        "name": strategy.get("name"),
+    }

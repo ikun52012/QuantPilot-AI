@@ -119,6 +119,43 @@ async def test_close_long_matches_aliased_symbol_even_when_newer_unrelated_posit
 
 
 @pytest.mark.asyncio
+async def test_partial_closed_trade_reduces_remaining_quantity(db_session: AsyncSession):
+    open_entry = {
+        "id": "open-partial-sync",
+        "timestamp": "2026-04-21T00:00:00+00:00",
+        "user_id": "user-1",
+        "ticker": "ETHUSDT",
+        "direction": "long",
+        "execute": True,
+        "entry_price": 100.0,
+        "quantity": 2.0,
+        "order_status": "filled",
+        "order_details": {"entry_price": 100.0, "quantity": 2.0},
+    }
+    await insert_trade_log_async(db_session, open_entry)
+    await db_session.flush()
+
+    close_entry = {
+        "id": "close-partial-sync",
+        "timestamp": "2026-04-21T00:05:00+00:00",
+        "user_id": "user-1",
+        "ticker": "ETHUSDT",
+        "direction": "close_long",
+        "execute": True,
+        "entry_price": 110.0,
+        "order_status": "partial_closed",
+        "order_details": {"exit_price": 110.0, "closed_quantity": 0.5, "remaining_contracts": 1.5},
+    }
+
+    result = await insert_trade_log_async(db_session, close_entry)
+    position = (await db_session.execute(select(PositionModel).where(PositionModel.ticker == "ETHUSDT"))).scalar_one()
+
+    assert result["position_event"] == "partial_closed"
+    assert position.status == "open"
+    assert position.remaining_quantity == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
 async def test_performance_profit_uses_principal_based_pnl_usdt(db_session: AsyncSession, monkeypatch):
     """Winning trades should be scaled by account equity, not summed position PnL %."""
     monkeypatch.setattr(settings.risk, "account_equity_usdt", 1000.0)

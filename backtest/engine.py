@@ -487,6 +487,13 @@ class BacktestEngine:
         )
 
     def _close_all_positions(self, idx: int, bar: dict, ts: datetime) -> None:
+        """Close all open positions at end of backtest.
+
+        P2-FIX: Use bar["close"] as base price, slippage is applied in _close_position.
+        Added logging to track forced closes.
+        """
+        if self.positions:
+            logger.info(f"[Backtest] Forcing close of {len(self.positions)} position(s) at end of backtest")
         for pos in list(self.positions):
             self._close_position(pos, idx, bar, ts, "end_of_backtest", bar["close"])
 

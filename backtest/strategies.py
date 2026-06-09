@@ -313,10 +313,13 @@ class AIAssistantStrategy(BaseStrategy):
 
         multiplier = 2 / (period + 1)
 
+        # Calculate SMA for the first 'period' values as seed
         sma = sum(float(data[i].get("close", 0)) for i in range(idx - period, idx)) / period
 
+        # Start EMA from the SMA seed, then iterate from the NEXT value (idx - period + 1)
+        # to avoid double-processing the last value of the SMA window
         ema = sma
-        for i in range(idx - period, idx + 1):
+        for i in range(idx - period + 1, idx + 1):
             close = float(data[i].get("close", 0))
             ema = (close - ema) * multiplier + ema
 

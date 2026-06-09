@@ -2,6 +2,7 @@
 Signal Server - Backup Module
 Database backup and restore functionality.
 Supports both SQLite (file copy) and PostgreSQL (pg_dump).
+Includes automatic scheduled backup functionality.
 """
 import asyncio
 import json
@@ -9,6 +10,7 @@ import os
 import re
 import shutil
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -20,6 +22,12 @@ from core.utils.datetime import utcnow
 # Backup directory
 backup_path = Path(__file__).parent / "data" / "backups"
 backup_path.mkdir(parents=True, exist_ok=True)
+
+# Backup scheduler settings
+_BACKUP_SCHEDULER_TASK: asyncio.Task | None = None
+_BACKUP_INTERVAL_HOURS: float = 24.0  # Default: daily backups
+_BACKUP_MAX_AGE_DAYS: int = 30  # Keep backups for 30 days
+_BACKUP_SCHEDULER_RUNNING: bool = False
 
 
 def _backup_file_for_name(backup_name: str) -> Path:
@@ -125,8 +133,18 @@ async def create_backup(note: str = "") -> dict:
         dump_file = backup_path / f"{backup_name}.sql"
 
         env = os.environ.copy()
+        # SECURITY: Use .pgpass file instead of PGPASSWORD env var to avoid
+        # password exposure in /proc/*/environ
+        pgpass_file = None
         if pg["password"]:
-            env["PGPASSWORD"] = pg["password"]
+            import tempfile
+            pgpass_content = f"{pg['host']}:{pg['port']}:{pg['dbname']}:{pg['user']}:{pg['password']}\n"
+            pgpass_fd, pgpass_path = tempfile.mkstemp(prefix=".pgpass_")
+            with os.fdopen(pgpass_fd, 'w') as f:
+                f.write(pgpass_content)
+            os.chmod(pgpass_path, 0o600)
+            env["PGPASSFILE"] = pgpass_path
+            pgpass_file = pgpass_path
 
         cmd = [
             "pg_dump",
@@ -138,6 +156,12 @@ async def create_backup(note: str = "") -> dict:
             "-f", str(dump_file),
         ]
 
+        # P0-FIX: Validate all command parameters to prevent injection
+        for param in [pg["host"], pg["port"], pg["user"], pg["dbname"], str(dump_file)]:
+            if not param or any(ord(ch) < 32 or ord(ch) > 126 for ch in str(param)):
+                logger.error(f"[Backup] Invalid parameter detected in pg_dump command: {param[:20]}")
+                return {"status": "error", "reason": "Invalid database connection parameter"}
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -146,6 +170,13 @@ async def create_backup(note: str = "") -> dict:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
+
+            # Cleanup pgpass file
+            if pgpass_file and os.path.exists(pgpass_file):
+                try:
+                    os.unlink(pgpass_file)
+                except OSError:
+                    pass
 
             if proc.returncode != 0:
                 error_msg = stderr.decode().strip() if stderr else "Unknown error"
@@ -244,7 +275,7 @@ async def list_backups() -> list[dict]:
                 "files": metadata.get("files", []),
                 "database_type": metadata.get("database_type", "sqlite"),
             })
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
             logger.warning(f"[Backup] Could not read {file.name}: {e}")
 
     return sorted(backups, key=lambda x: x.get("created_at", ""), reverse=True)
@@ -265,7 +296,7 @@ async def cleanup_old_backups(max_backups: int = 7) -> dict:
                 backup_file.unlink()
                 deleted += 1
                 logger.info(f"[Backup] Deleted old backup: {backup['name']}")
-        except Exception as e:
+        except (OSError, PermissionError) as e:
             logger.warning(f"[Backup] Failed to delete {backup.get('name', 'unknown')}: {e}")
 
     return {"deleted": deleted, "kept": len(backups) - deleted}
@@ -410,4 +441,145 @@ def stage_restore(backup_name: str) -> dict:
             )
             + "WARNING: This will overwrite existing data!"
         ),
+    }
+
+
+async def _cleanup_old_backups() -> dict:
+    """Remove backups older than _BACKUP_MAX_AGE_DAYS."""
+    try:
+        cutoff = utcnow() - timedelta(days=_BACKUP_MAX_AGE_DAYS)
+        removed_count = 0
+        removed_size = 0
+
+        for backup_file in backup_path.glob("backup_*.zip"):
+            try:
+                # Extract timestamp from filename
+                stat = backup_file.stat()
+                file_mtime = datetime.fromtimestamp(stat.st_mtime)
+                if file_mtime < cutoff:
+                    size = stat.st_size
+                    backup_file.unlink()
+                    removed_count += 1
+                    removed_size += size
+            except Exception as e:
+                logger.warning(f"[Backup] Failed to remove old backup {backup_file}: {e}")
+
+        return {
+            "status": "success",
+            "removed_count": removed_count,
+            "removed_size_mb": round(removed_size / (1024 * 1024), 2),
+        }
+    except Exception as e:
+        logger.error(f"[Backup] Cleanup failed: {e}")
+        return {"status": "error", "reason": str(e)}
+
+
+async def _backup_scheduler_loop() -> None:
+    """Background task for scheduled backups."""
+    global _BACKUP_SCHEDULER_RUNNING
+
+    _BACKUP_SCHEDULER_RUNNING = True
+    logger.info(f"[Backup] Scheduler started with interval {_BACKUP_INTERVAL_HOURS}h")
+
+    while _BACKUP_SCHEDULER_RUNNING:
+        try:
+            # Create backup with note
+            result = await create_backup(note=f"Scheduled backup (interval: {_BACKUP_INTERVAL_HOURS}h)")
+
+            if result.get("status") == "ok":
+                logger.info(f"[Backup] Scheduled backup created: {result.get('backup_name')}")
+            else:
+                logger.error(f"[Backup] Scheduled backup failed: {result.get('reason')}")
+
+            # Cleanup old backups
+            cleanup_result = await _cleanup_old_backups()
+            if cleanup_result.get("status") == "success" and cleanup_result.get("removed_count", 0) > 0:
+                logger.info(f"[Backup] Cleaned up {cleanup_result['removed_count']} old backups ({cleanup_result['removed_size_mb']} MB)")
+
+        except Exception as e:
+            logger.error(f"[Backup] Scheduler error: {e}")
+
+        # Wait for next backup interval
+        try:
+            await asyncio.wait_for(
+                asyncio.sleep(_BACKUP_INTERVAL_HOURS * 3600),
+                timeout=None
+            )
+        except asyncio.CancelledError:
+            logger.info("[Backup] Scheduler cancelled")
+            break
+
+    _BACKUP_SCHEDULER_RUNNING = False
+
+
+def start_backup_scheduler(interval_hours: float | None = None, max_age_days: int | None = None) -> dict:
+    """Start the automatic backup scheduler.
+
+    Args:
+        interval_hours: Hours between backups (default: 24.0)
+        max_age_days: Days to keep backups (default: 30)
+
+    Returns:
+        Dict with status and message
+    """
+    global _BACKUP_SCHEDULER_TASK, _BACKUP_INTERVAL_HOURS, _BACKUP_MAX_AGE_DAYS
+
+    # Update settings if provided
+    if interval_hours is not None:
+        _BACKUP_INTERVAL_HOURS = max(0.5, interval_hours)  # Minimum 30 minutes
+    if max_age_days is not None:
+        _BACKUP_MAX_AGE_DAYS = max(1, max_age_days)
+
+    # Check if already running
+    if _BACKUP_SCHEDULER_TASK and not _BACKUP_SCHEDULER_TASK.done():
+        return {
+            "status": "already_running",
+            "interval_hours": _BACKUP_INTERVAL_HOURS,
+            "max_age_days": _BACKUP_MAX_AGE_DAYS,
+        }
+
+    # Start scheduler task
+    _BACKUP_SCHEDULER_TASK = asyncio.create_task(_backup_scheduler_loop())
+
+    return {
+        "status": "started",
+        "interval_hours": _BACKUP_INTERVAL_HOURS,
+        "max_age_days": _BACKUP_MAX_AGE_DAYS,
+        "message": f"Backup scheduler started (every {_BACKUP_INTERVAL_HOURS}h, keep {_BACKUP_MAX_AGE_DAYS} days)",
+    }
+
+
+def stop_backup_scheduler() -> dict:
+    """Stop the automatic backup scheduler.
+
+    Returns:
+        Dict with status and message
+    """
+    global _BACKUP_SCHEDULER_TASK, _BACKUP_SCHEDULER_RUNNING
+
+    if not _BACKUP_SCHEDULER_TASK or _BACKUP_SCHEDULER_TASK.done():
+        return {"status": "not_running", "message": "Backup scheduler is not running"}
+
+    _BACKUP_SCHEDULER_RUNNING = False
+    _BACKUP_SCHEDULER_TASK.cancel()
+
+    return {"status": "stopped", "message": "Backup scheduler stopped"}
+
+
+def get_backup_scheduler_status() -> dict:
+    """Get the current status of the backup scheduler.
+
+    Returns:
+        Dict with status, interval, and age settings
+    """
+    is_running = (
+        _BACKUP_SCHEDULER_TASK is not None
+        and not _BACKUP_SCHEDULER_TASK.done()
+        and _BACKUP_SCHEDULER_RUNNING
+    )
+
+    return {
+        "status": "running" if is_running else "stopped",
+        "interval_hours": _BACKUP_INTERVAL_HOURS,
+        "max_age_days": _BACKUP_MAX_AGE_DAYS,
     }

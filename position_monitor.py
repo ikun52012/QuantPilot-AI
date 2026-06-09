@@ -105,6 +105,7 @@ _position_monitor_lock = asyncio.Lock()
 _GHOST_POSITION_TRACKER: dict[str, dict[str, Any]] = {}
 _PROTECTIVE_ORDERS_LAST_VERIFY: dict[str, datetime] = {}
 _PROTECTIVE_ORDERS_VERIFY_INTERVAL = 600  # seconds (10 min) between TP/SL existence checks
+_PROTECTION_QTY_EPSILON = 1e-8
 
 # P2-14: Per-position reconcile locks to prevent concurrent TP/SL processing
 _position_reconcile_locks: dict[str, asyncio.Lock] = {}
@@ -118,13 +119,45 @@ _GHOST_THRESHOLD_LARGE_POSITION = 12   # > $1000
 _GHOST_THRESHOLD_HUGE_POSITION = 15    # > $10,000
 _MAX_GHOST_THRESHOLD = _GHOST_THRESHOLD_HUGE_POSITION  # Backward compatibility alias
 _GHOST_CHECK_INTERVAL_SECS = 3600
+
+
+def _protection_covers_quantity(protected_qty: float, required_qty: float) -> bool:
+    if required_qty <= 0:
+        return True
+    tolerance = max(_PROTECTION_QTY_EPSILON, required_qty * 0.000001)
+    return protected_qty > 0 and protected_qty + tolerance >= required_qty
+
+
+def _normalized_pending_tp_pcts(tp_levels: list[dict]) -> dict[int, float]:
+    pending: list[tuple[int, float]] = []
+    for index, level in enumerate(tp_levels):
+        if not isinstance(level, dict):
+            continue
+        level_status = str(level.get("status") or "pending").lower()
+        if level_status in {"hit", "filled", "closed"}:
+            continue
+        if safe_float(level.get("price")) <= 0:
+            continue
+        pending.append((index, max(0.0, safe_float(level.get("qty_pct"), 100.0))))
+
+    if not pending:
+        return {}
+    total_pct = sum(pct for _, pct in pending)
+    if total_pct <= 0:
+        fallback = 100.0 / len(pending)
+        return {index: fallback for index, _ in pending}
+    if total_pct > 100.0:
+        return {index: pct * 100.0 / total_pct for index, pct in pending}
+    return dict(pending)
+
+
 _GHOST_MIN_ELAPSED_SECS = 900  # minimum elapsed before ghost-close (15 min, protects against API instability)
 _GHOST_TRACKER_FILE = Path("data") / "ghost_position_tracker.json"
 _CLOSED_POSITION_RECOVERY_LOOKBACK_HOURS = 24
 
 
 def _save_ghost_tracker() -> None:
-    """Persist ghost tracker to disk for restart survival."""
+    """Persist ghost tracker to disk for restart survival. Uses atomic write to prevent corruption."""
     if not _GHOST_TRACKER_FILE:
         return
     try:
@@ -136,7 +169,10 @@ def _save_ghost_tracker() -> None:
                 "fail_count": entry.get("fail_count", 0),
                 "first_missing_at": first_missing.isoformat() if first_missing else None,
             }
-        _GHOST_TRACKER_FILE.write_text(json.dumps(serializable))
+        # Atomic write: write to temp file first, then rename
+        tmp_file = _GHOST_TRACKER_FILE.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(serializable))
+        tmp_file.replace(_GHOST_TRACKER_FILE)
     except Exception:
         pass
 
@@ -250,8 +286,8 @@ async def _fetch_market_price_changes(symbol: str, exchange_config: dict, curren
         api_key=exchange_config.get("api_key", settings.exchange.api_key),
         api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
         password=exchange_config.get("password", settings.exchange.password),
-        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type", settings.exchange.market_type),
         margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
     )
@@ -704,8 +740,10 @@ async def _recover_ghost_closed_positions(session: AsyncSession, user_configs: d
     for position in closed_positions:
         exchange_config = await _exchange_config_for_position(session, position, user_configs)
         if not exchange_config.get("live_trading"):
+            exchange_config.clear()
             continue
         if await _has_active_duplicate_position(session, position):
+            exchange_config.clear()
             continue
 
         try:
@@ -713,16 +751,20 @@ async def _recover_ghost_closed_positions(session: AsyncSession, user_configs: d
             exchange_pos = await fetch_single_position(position.ticker, {**exchange_config, "raise_on_error": True})
         except Exception as exc:
             logger.debug(f"[GhostRecovery] Cannot verify {position.ticker}: {exc}")
+            exchange_config.clear()
             continue
 
         if exchange_pos is None:
+            exchange_config.clear()
             continue
         if not _exchange_position_side_matches_position(position, exchange_pos):
+            exchange_config.clear()
             continue
 
         contracts = _exchange_position_contracts(exchange_pos)
 
         if contracts <= 0:
+            exchange_config.clear()
             continue
         exchange_entry = safe_float(exchange_pos.get("entry_price") or exchange_pos.get("entryPrice"))
         db_entry = safe_float(position.entry_price)
@@ -731,6 +773,7 @@ async def _recover_ghost_closed_positions(session: AsyncSession, user_configs: d
                 f"[ClosedRecovery] Skipping {position.ticker}: exchange entry {exchange_entry} "
                 f"differs from closed DB entry {db_entry}; likely a separate manual position."
             )
+            exchange_config.clear()
             continue
 
         logger.warning(
@@ -747,6 +790,7 @@ async def _recover_ghost_closed_positions(session: AsyncSession, user_configs: d
         _GHOST_POSITION_TRACKER.pop(str(position.id), None)
         _save_ghost_tracker()
         recovered += 1
+        exchange_config.clear()
 
     if recovered > 0:
         logger.warning(f"[ClosedRecovery] Recovered {recovered} closed position(s) that are still on the exchange")
@@ -830,6 +874,16 @@ async def _get_position_lock(position_id: str) -> asyncio.Lock:
 
 
 async def _reconcile_position(session, position: PositionModel, user_configs: dict) -> dict:
+    locked_result = await session.execute(
+        select(PositionModel)
+        .where(PositionModel.id == position.id, PositionModel.status.in_(["open", "pending"]))
+        .with_for_update()
+    )
+    locked_position = locked_result.scalar_one_or_none()
+    if not locked_position:
+        return {"updated": 0, "partials": 0, "closed": 0, "adjusted": 0}
+    position = locked_position
+
     exchange_config = await _exchange_config_for_position(session, position, user_configs)
 
     if not bool(position.live_trading):
@@ -852,11 +906,18 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
     }
     if position.user_id and position.user_id in user_configs:
         config.update(user_configs[position.user_id])
+        if position.live_trading and (not config.get("api_key") or not config.get("api_secret")):
+            raise RuntimeError("Live position exchange credentials are missing")
         return config
 
     if position.user_id:
         user = await session.get(UserModel, position.user_id)
-        if user:
+        if not user:
+            if position.live_trading:
+                raise RuntimeError("Live position user no longer exists")
+        elif user:
+            if str(user.role or "").lower() != "admin":
+                config.update({"api_key": "", "api_secret": "", "password": ""})
             try:
                 raw = loads_dict(user.settings_json)
                 user_settings = decrypt_settings_payload(raw)
@@ -871,8 +932,12 @@ async def _exchange_config_for_position(session, position: PositionModel, user_c
                     "market_type": exchange.get("market_type") or config["market_type"],
                     "margin_mode": exchange.get("margin_mode") or config["margin_mode"],
                 })
-            except (ValueError, TypeError, KeyError) as exc:
-                logger.warning(f"[PositionMonitor] Could not decrypt user exchange config: {exc}")
+            except Exception as exc:
+                logger.error(f"[PositionMonitor] Could not decrypt user exchange config for {position.user_id}: {exc}")
+                if position.live_trading:
+                    raise RuntimeError("Live position exchange config could not be decrypted") from exc
+        if position.live_trading and (not config.get("api_key") or not config.get("api_secret")):
+            raise RuntimeError("Live position exchange credentials are missing")
     return config
 
 
@@ -1006,13 +1071,13 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
 
         for level in hit_levels:
             qty_pct = max(0.0, safe_float(level.get("qty_pct"), 100.0))
-            qty = min(remaining_qty, opened_qty * (qty_pct / 100.0)) if opened_qty > 0 else 0.0
+            requested_qty = opened_qty * (qty_pct / 100.0) if opened_qty > 0 else 0.0
+            qty = min(remaining_qty, requested_qty)
             if qty <= 0:
-                level["status"] = "hit"
                 continue
             level["status"] = "hit"
             level["hit_at"] = utcnow().isoformat()
-            _, _, remaining_qty = await record_position_partial_close_trade_async(
+            _, _, new_remaining_qty = await record_position_partial_close_trade_async(
                 session=session,
                 position=position,
                 exit_price=safe_float(level.get("price"), close),
@@ -1021,6 +1086,7 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
                 order_status="paper_closed" if remaining_qty - qty <= max(0.00000001, opened_qty * 0.000001) else "partial_closed",
                 order_details={"trigger": "take_profit", "level": level, "candle": candle},
             )
+            remaining_qty = new_remaining_qty
             stats["partials"] += 1
             if remaining_qty <= max(0.00000001, opened_qty * 0.000001):
                 break
@@ -1107,10 +1173,12 @@ def _compute_paper_trailing_stop(position: PositionModel, hit_levels: list[dict]
 def _hit_take_profit_levels(direction: str, levels: list[dict], high: float, low: float) -> list[dict]:
     pending = [level for level in levels if str(level.get("status") or "pending").lower() not in {"hit", "filled", "closed"}]
     if str(direction).lower() == "short":
+        # For shorts: price drops to hit TP. Sort highest to lowest (closest to entry first).
         pending.sort(key=lambda item: safe_float(item.get("price")), reverse=True)
-        return [level for level in pending if safe_float(level.get("price")) > 0 and low <= safe_float(level.get("price"))]
+        return [level for level in pending if (tp_price := safe_float(level.get("price"))) > 0 and low <= tp_price]
+    # For longs: price rises to hit TP. Sort lowest to highest (closest to entry first).
     pending.sort(key=lambda item: safe_float(item.get("price")))
-    return [level for level in pending if safe_float(level.get("price")) > 0 and high >= safe_float(level.get("price"))]
+    return [level for level in pending if (tp_price := safe_float(level.get("price"))) > 0 and high >= tp_price]
 
 
 async def _check_pending_limit_orders(session, position: PositionModel, exchange_config: dict) -> None:
@@ -1128,8 +1196,8 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
             api_key=exchange_config.get("api_key", settings.exchange.api_key),
             api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
             password=exchange_config.get("password", settings.exchange.password),
-            live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-            sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+            live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+            sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
             market_type=exchange_config.get("market_type", settings.exchange.market_type),
             margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
         )
@@ -1204,8 +1272,10 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     except Exception as e:
                         logger.warning(
                             f"[P1-FIX] Failed to re-evaluate trailing_stop for live limit order: {e}. "
-                            f"Using original config."
+                            f"Using original config. Position {position.id} flagged for manual review."
                         )
+                        # Flag position for manual review
+                        position.close_reason = "trailing_config_reevaluation_failed"
 
                 # Sync actual filled quantity from exchange
                 if filled_amount > 0:
@@ -1329,6 +1399,31 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                         f"qty={filled_amount}, price={filled_price}, position remains open"
                     )
                     await _create_protective_orders_for_position(position, exchange, symbol, filled_amount, session=session)
+
+                    created_at = order.get("timestamp")
+                    if created_at:
+                        order_age_secs = (time.time() * 1000 - created_at) / 1000
+                        limit_timeout = _position_limit_timeout_secs(position)
+                        if order_age_secs > limit_timeout:
+                            try:
+                                cancel_result = await asyncio.to_thread(exchange.cancel_order, position.entry_order_id, symbol)
+                                position.entry_order_id = ""
+                                position.updated_at = utcnow()
+                                logger.warning(
+                                    f"[PositionMonitor] Cancelled expired unfilled remainder for partial limit "
+                                    f"{position.ticker}: {cancel_result}"
+                                )
+                            except ccxt.OrderNotFound:
+                                position.entry_order_id = ""
+                                position.updated_at = utcnow()
+                                logger.warning(
+                                    f"[PositionMonitor] Partial limit remainder already absent for {position.ticker}; "
+                                    "keeping filled position open"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"[PositionMonitor] Failed to cancel expired partial limit remainder for {position.ticker}: {e}"
+                                )
                     return
 
                 # Check if order has exceeded timeout
@@ -1400,7 +1495,7 @@ async def _create_protective_orders_for_position(
 ) -> dict:
     """Create TP/SL orders for a position that just filled from a pending limit order.
     P1-FIX: Expand protection when filled_qty increases beyond previously protected quantity."""
-    result = {"tp_failed": 0, "sl_failed": False, "closed_for_safety": False}
+    result = {"tp_failed": 0, "tp_replaced": 0, "sl_failed": False, "sl_replaced": False, "closed_for_safety": False}
     if filled_qty <= 0:
         return result
 
@@ -1410,18 +1505,30 @@ async def _create_protective_orders_for_position(
 
     tp_levels = loads_list(position.take_profit_json)
     if tp_levels:
+        from exchange import _cancel_exchange_order as _cancel_exchange_order
         from exchange import _create_conditional_order as _cco
         tp_ids = [str(order_id or "") for order_id in loads_list(position.take_profit_order_ids_json)]
         if len(tp_ids) < len(tp_levels):
             tp_ids.extend([""] * (len(tp_levels) - len(tp_ids)))
+        normalized_tp_pcts = _normalized_pending_tp_pcts(tp_levels)
         tp_changed = False
 
         for i, tp in enumerate(tp_levels):
             level_status = str(tp.get("status") or "pending").lower()
             if level_status in {"hit", "filled", "closed"}:
                 continue
+            tp_price = safe_float(tp.get("price"))
+            if tp_price <= 0:
+                continue
+            tp_qty_pct = normalized_tp_pcts.get(i, safe_float(tp.get("qty_pct"), 100.0))
+            tp_qty = filled_qty * (tp_qty_pct / 100.0)
+            if tp_qty <= 0:
+                continue
+
             existing_id = str(tp.get("order_id") or (tp_ids[i] if i < len(tp_ids) else "") or "")
-            if existing_id:
+            protected_qty = safe_float(tp.get("protected_qty") or tp.get("protected_quantity") or 0.0)
+            protected_base_qty = safe_float(tp.get("protected_base_qty") or 0.0)
+            if existing_id and _protection_covers_quantity(protected_base_qty, filled_qty) and _protection_covers_quantity(protected_qty, tp_qty):
                 if i < len(tp_ids) and tp_ids[i] != existing_id:
                     tp_ids[i] = existing_id
                     tp_changed = True
@@ -1430,13 +1537,19 @@ async def _create_protective_orders_for_position(
                     tp_changed = True
                 continue
 
-            tp_price = safe_float(tp.get("price"))
-            tp_qty_pct = safe_float(tp.get("qty_pct"), 100.0)
-            if tp_price <= 0:
-                continue
-            tp_qty = filled_qty * (tp_qty_pct / 100.0)
-            if tp_qty <= 0:
-                continue
+            if existing_id:
+                cancel_result = await _cancel_exchange_order(exchange, symbol, existing_id)
+                if cancel_result.get("status") == "error":
+                    logger.error(
+                        f"[PositionMonitor] Failed to cancel under-sized TP{i+1} {existing_id[:8]} "
+                        f"for {position.ticker}: {cancel_result}"
+                    )
+                    result["tp_failed"] += 1
+                    continue
+                tp_ids[i] = ""
+                tp["order_id"] = ""
+                tp_changed = True
+
             try:
                 tp_order = await _cco(exchange, symbol, "take_profit", tp_side, round(tp_qty, 6), tp_price, pos_side)
                 order_id = str(tp_order.get("id") or "")
@@ -1446,8 +1559,16 @@ async def _create_protective_orders_for_position(
                     continue
                 tp_ids[i] = order_id
                 tp["order_id"] = order_id
+                tp["protected_qty"] = round(tp_qty, 8)
+                tp["protected_base_qty"] = round(filled_qty, 8)
+                tp["qty_pct_effective"] = round(tp_qty_pct, 8)
                 tp_changed = True
-                logger.info(f"[PositionMonitor] TP{i+1} created for filled limit: price={tp_price}")
+                if existing_id:
+                    result["tp_replaced"] += 1
+                logger.info(
+                    f"[PositionMonitor] TP{i+1} created for filled limit: "
+                    f"price={tp_price}, qty={tp_qty:.8f}, base_qty={filled_qty:.8f}"
+                )
             except ccxt.BaseError as e:
                 logger.error(f"[PositionMonitor] Failed to create TP{i+1} for filled limit: {e}")
                 result["tp_failed"] += 1
@@ -1459,18 +1580,40 @@ async def _create_protective_orders_for_position(
             position.take_profit_order_ids_json = json.dumps(tp_ids, ensure_ascii=False)
             position.take_profit_json = json.dumps(tp_levels, ensure_ascii=False, default=str)
 
-    if not position.stop_loss_order_id:
-        sl_price = safe_float(position.stop_loss)
-        if sl_price > 0:
+    sl_price = safe_float(position.stop_loss)
+    if sl_price > 0:
+        trailing_config = loads_dict(position.trailing_stop_config_json)
+        existing_sl_id = str(position.stop_loss_order_id or "")
+        protected_sl_qty = safe_float(trailing_config.get("_stop_loss_protected_qty") or 0.0)
+        sl_covers_current_qty = bool(
+            existing_sl_id and _protection_covers_quantity(protected_sl_qty, filled_qty)
+        )
+        if not sl_covers_current_qty:
+            from exchange import _cancel_exchange_order as _cancel_exchange_order
             from exchange import _create_conditional_order as _cco
             try:
                 sl_order = await _cco(exchange, symbol, "stop_loss", tp_side, filled_qty, sl_price, pos_side)
-                position.stop_loss_order_id = str(sl_order.get("id") or "")
-                if not position.stop_loss_order_id:
+                new_sl_id = str(sl_order.get("id") or "")
+                if not new_sl_id:
                     result["sl_failed"] = True
                     logger.error(f"[PositionMonitor] SL for filled limit returned no order id: price={sl_price}")
                 else:
-                    logger.info(f"[PositionMonitor] SL created for filled limit: price={sl_price}")
+                    position.stop_loss_order_id = new_sl_id
+                    trailing_config["_stop_loss_protected_qty"] = round(filled_qty, 8)
+                    trailing_config["_stop_loss_protected_at"] = utcnow().isoformat()
+                    position.trailing_stop_config_json = json.dumps(trailing_config, ensure_ascii=False, default=str)
+                    if existing_sl_id and existing_sl_id != new_sl_id:
+                        cancel_result = await _cancel_exchange_order(exchange, symbol, existing_sl_id)
+                        if cancel_result.get("status") == "error":
+                            logger.error(
+                                f"[PositionMonitor] New SL {new_sl_id[:8]} created but old SL "
+                                f"{existing_sl_id[:8]} could not be cancelled for {position.ticker}: {cancel_result}"
+                            )
+                        result["sl_replaced"] = True
+                    logger.info(
+                        f"[PositionMonitor] SL created for filled limit: "
+                        f"price={sl_price}, qty={filled_qty:.8f}"
+                    )
             except ccxt.BaseError as e:
                 logger.error(f"[PositionMonitor] Failed to create SL for filled limit: {e}")
                 result["sl_failed"] = True
@@ -1543,6 +1686,19 @@ async def _close_unprotected_filled_limit(
         f"[PositionMonitor] CRITICAL: SL placement failed and safety close was not confirmed for "
         f"{position.ticker}: {close_result}. Manual intervention required."
     )
+    # P2-FIX: Send urgent notification for unconfirmed close
+    try:
+        from notifier import send_urgent_alert
+        alert_msg = (
+            f"URGENT: Position close unconfirmed for {position.ticker} ({position.id[:8]}). "
+            f"The position may still be open on the exchange. "
+            f"Close result: {close_result.get('reason', 'Unknown')}. "
+            f"Remaining contracts: {close_result.get('remaining_contracts', 'Unknown')}. "
+            f"Manual intervention required immediately!"
+        )
+        await send_urgent_alert(alert_msg)
+    except Exception as alert_exc:
+        logger.error(f"[PositionMonitor] Failed to send urgent alert: {alert_exc}")
 
 
 async def _verify_protective_orders(session, position: PositionModel, exchange_config: dict) -> bool:
@@ -1637,8 +1793,8 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
         api_key=exchange_config.get("api_key", ""),
         api_secret=exchange_config.get("api_secret", ""),
         password=exchange_config.get("password", ""),
-        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type", ""),
         margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
     )
@@ -1660,16 +1816,10 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
         # Re-place missing TP orders
         if missing_tp_indices and tp_levels:
             tp_changed = False
-            # P1-FIX: Renormalize pending TP percentages to sum to 100% of remaining quantity
-            pending_pcts = [safe_float(tp_levels[i].get("qty_pct"), 100.0) for i in missing_tp_indices if i < len(tp_levels)]
-            total_pending_pct = sum(pending_pcts)
-            if total_pending_pct > 0:
-                scale = 100.0 / total_pending_pct
-                normalized_pending_pcts = [p * scale for p in pending_pcts]
-            else:
-                normalized_pending_pcts = [100.0 / max(1, len(missing_tp_indices))] * len(missing_tp_indices)
+            # Normalize across every still-pending TP, not just the missing subset.
+            normalized_pending_pcts = _normalized_pending_tp_pcts(tp_levels)
 
-            for idx, i in enumerate(missing_tp_indices):
+            for i in missing_tp_indices:
                 if i >= len(tp_levels):
                     continue
                 tp = tp_levels[i]
@@ -1677,7 +1827,7 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                 if level_status in {"hit", "filled", "closed"}:
                     continue
                 tp_price = safe_float(tp.get("price"))
-                tp_qty_pct = normalized_pending_pcts[idx] if idx < len(normalized_pending_pcts) else 100.0
+                tp_qty_pct = normalized_pending_pcts.get(i, safe_float(tp.get("qty_pct"), 100.0))
                 if tp_price <= 0:
                     continue
                 tp_qty = remaining_qty * (tp_qty_pct / 100.0)
@@ -1691,6 +1841,9 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                     new_id = str(tp_order.get("id") or "")
                     if new_id:
                         tp["order_id"] = new_id
+                        tp["protected_qty"] = round(tp_qty, 8)
+                        tp["protected_base_qty"] = round(remaining_qty, 8)
+                        tp["qty_pct_effective"] = round(tp_qty_pct, 8)
                         tp_changed = True
                         if i < len(tp_ids):
                             tp_ids[i] = new_id
@@ -1725,6 +1878,10 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                     )
                     if sl_result.get("order_id"):
                         position.stop_loss_order_id = sl_result["order_id"]
+                        trailing_config = loads_dict(position.trailing_stop_config_json)
+                        trailing_config["_stop_loss_protected_qty"] = round(remaining_qty, 8)
+                        trailing_config["_stop_loss_protected_at"] = utcnow().isoformat()
+                        position.trailing_stop_config_json = json.dumps(trailing_config, ensure_ascii=False, default=str)
                         logger.info(
                             f"[PositionMonitor] SL re-placed for {position.ticker} @ {sl_price}, "
                             f"new order id={str(sl_result['order_id'])[:8]}"
@@ -1827,8 +1984,8 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                                 api_key=exchange_config.get("api_key", settings.exchange.api_key),
                                 api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
                                 password=exchange_config.get("password", settings.exchange.password),
-                                live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-                                sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+                                live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+                                sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
                                 market_type=exchange_config.get("market_type", settings.exchange.market_type),
                                 margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
                             )
@@ -1967,8 +2124,8 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         api_key=exchange_config.get("api_key", settings.exchange.api_key),
                         api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
                         password=exchange_config.get("password", settings.exchange.password),
-                        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-                        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+                        live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+                        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
                         market_type=exchange_config.get("market_type", settings.exchange.market_type),
                         margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
                     )
@@ -2037,8 +2194,8 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         api_key=exchange_config.get("api_key", settings.exchange.api_key),
                         api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
                         password=exchange_config.get("password", settings.exchange.password),
-                        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-                        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+                        live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+                        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
                         market_type=exchange_config.get("market_type", settings.exchange.market_type),
                         margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
                     )
@@ -2264,8 +2421,8 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         api_key=exchange_config.get("api_key", settings.exchange.api_key),
                         api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
                         password=exchange_config.get("password", settings.exchange.password),
-                        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-                        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+                        live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+                        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
                         market_type=exchange_config.get("market_type", settings.exchange.market_type),
                         margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
                     )
@@ -2498,7 +2655,10 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
         if total_filled_qty_pct > 0 and current_remaining > 0:
             filled_qty_total = (total_filled_qty_pct / 100.0) * safe_float(position.quantity)
             new_remaining = max(0, current_remaining - filled_qty_total)
-            position.remaining_quantity = new_remaining
+            if position.live_trading:
+                new_remaining = current_remaining
+            else:
+                position.remaining_quantity = new_remaining
 
             entry_price = safe_float(position.entry_price)
             leverage = safe_float(position.leverage, 1.0)
@@ -2521,7 +2681,8 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
             str((lv.get("status") or "pending").lower()) in {"hit", "filled", "closed"}
             for lv in tp_levels if isinstance(lv, dict)
         )
-        if all_tp_hit and safe_float(position.remaining_quantity) > 0:
+        total_tp_qty_pct = sum(safe_float(lv.get("qty_pct"), 0.0) for lv in tp_levels if isinstance(lv, dict))
+        if all_tp_hit and total_tp_qty_pct >= 99.999 and safe_float(position.remaining_quantity) > 0:
             for hit in hit_levels:
                 hit["close_remaining"] = True
 
@@ -3216,20 +3377,26 @@ async def monitor_black_swan_events(session: AsyncSession) -> dict[str, Any]:
                         if pos.live_trading:
                             try:
                                 exchange_config = await _exchange_config_for_position(session, pos, {})
-                                from exchange import _get_or_create_exchange
+                                from exchange import _get_or_create_exchange, _resolve_symbol
                                 exchange = _get_or_create_exchange(
                                     exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
-                                    api_key=exchange_config.get("api_key") or settings.exchange.api_key,
-                                    api_secret=exchange_config.get("api_secret") or settings.exchange.api_secret,
-                                    password=exchange_config.get("password") or settings.exchange.password,
-                                    live=bool(exchange_config.get("live_trading", True)),
-                                    sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+                                    api_key=exchange_config.get("api_key"),
+                                    api_secret=exchange_config.get("api_secret"),
+                                    password=exchange_config.get("password"),
+                                    live=safe_bool(exchange_config.get("live_trading", True), True),
+                                    sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
                                     market_type=exchange_config.get("market_type") or settings.exchange.market_type,
                                     margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
                                 )
+                                close_symbol = await asyncio.to_thread(
+                                    _resolve_symbol,
+                                    exchange,
+                                    pos.ticker,
+                                    exchange_config.get("market_type") or settings.exchange.market_type,
+                                )
                                 from exchange import _close_position as _exchange_close
                                 close_result = await _exchange_close(
-                                    exchange, pos.ticker,
+                                    exchange, close_symbol,
                                     position_side=str(pos.direction).lower() if pos.direction else None,
                                 )
                                 if close_result.get("status") == "closed":
@@ -3357,11 +3524,8 @@ async def _enable_emergency_trailing_stop(
 
     new_stop_order_id = str(position.stop_loss_order_id or "")
     if position.live_trading:
-        exchange_config = _get_exchange_config_for_position(position)
-        if not exchange_config:
-            logger.warning(f"[PositionMonitor] Cannot enable emergency trailing for {position.ticker}: missing exchange config")
-            return False
         try:
+            exchange_config = await _exchange_config_for_position(session, position, {})
             from exchange import place_protective_stop
             remaining_qty = _effective_remaining_quantity(position, safe_float(position.quantity))
             result = await place_protective_stop(

@@ -312,11 +312,10 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     """CSRF protection middleware."""
 
     EXEMPT_PATHS = {
-        "/webhook",
         "/api/auth/login",
         "/api/auth/register",
-        "/api/auth/logout",
         "/api/auth/2fa/verify",
+        "/webhook",
     }
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
@@ -448,19 +447,35 @@ def setup_middleware(app) -> None:
     base_url = (settings.server.public_base_url or "").strip().rstrip("/")
     if base_url and base_url not in cors_origins:
         cors_origins.append(base_url)
+    trusted_hosts = list(settings.server.trusted_hosts)
+    if not settings.is_production and trusted_hosts != ["*"]:
+        for test_host in ("test", "testserver"):
+            if test_host not in trusted_hosts:
+                trusted_hosts.append(test_host)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "Origin",
+            "X-Requested-With",
+            "X-CSRF-Token",
+            "X-Request-ID",
+            "X-PWA-Sync",
+        ],
+        expose_headers=["X-Request-ID", "X-Response-Time"],
+        max_age=600,
     )
 
     # Trusted hosts (production)
-    if settings.server.trusted_hosts and settings.server.trusted_hosts != ["*"]:
+    if trusted_hosts and trusted_hosts != ["*"]:
         app.add_middleware(
             TrustedHostMiddleware,
-            allowed_hosts=settings.server.trusted_hosts,
+            allowed_hosts=trusted_hosts,
         )
 
     # Custom middleware (order matters — outermost first)

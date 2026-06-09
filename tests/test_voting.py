@@ -182,6 +182,19 @@ class TestAggregateVotingResults:
         assert final.recommendation == "execute"
         assert final.suggested_stop_loss == 95.0
 
+    @pytest.mark.asyncio
+    async def test_consensus_modify_majority_without_execute_rejects(self):
+        results = [
+            (AIAnalysis(confidence=0.9, recommendation="modify", reasoning="adjust", suggested_stop_loss=95.0), "modifier_a"),
+            (AIAnalysis(confidence=0.8, recommendation="modify", reasoning="adjust2", suggested_stop_loss=96.0), "modifier_b"),
+            (AIAnalysis(confidence=0.7, recommendation="reject", reasoning="no"), "rejector"),
+        ]
+
+        final = await _aggregate_voting_results_async(results, "consensus", {})
+
+        assert final.recommendation == "reject"
+        assert final.suggested_stop_loss is None
+
 
 class TestTrailingStopMode:
     def test_mode_values(self):

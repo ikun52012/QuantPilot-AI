@@ -8,10 +8,12 @@ import secrets
 import time
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel
 
 from core.config import settings
+from core.request_utils import client_ip
 from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/health", tags=["Health"])
@@ -67,15 +69,16 @@ async def check_database() -> HealthCheckResult:
             result.scalar()
 
         latency = (time.time() - start) * 1000
+        # P2-FIX: Round latency to prevent precise fingerprinting
         return HealthCheckResult(
             status="healthy",
-            latency_ms=latency,
+            latency_ms=round(latency, 1),
         )
     except Exception as e:
         logger.warning(f"[Health] Database check failed: {e}")
         return HealthCheckResult(
             status="unhealthy",
-            error=str(e),
+            error="Database unavailable",
         )
 
 
@@ -104,7 +107,7 @@ async def check_redis() -> HealthCheckResult:
             latency = (time.time() - start) * 1000
             return HealthCheckResult(
                 status="healthy",
-                latency_ms=latency,
+                latency_ms=round(latency, 1),
             )
         else:
             return HealthCheckResult(
@@ -115,7 +118,7 @@ async def check_redis() -> HealthCheckResult:
         logger.warning(f"[Health] Redis check failed: {e}")
         return HealthCheckResult(
             status="degraded",
-            error=str(e),
+            error="Redis unavailable",
         )
 
 
@@ -136,16 +139,27 @@ async def check_exchange_api() -> HealthCheckResult:
         latency = (time.time() - start) * 1000
         markets_count = len(exchange.markets)
 
+        # P2-FIX: Sanitize markets_count to prevent system fingerprinting
+        # Only return approximate range instead of exact count
+        if markets_count > 1000:
+            markets_range = "1000+"
+        elif markets_count > 500:
+            markets_range = "500-1000"
+        elif markets_count > 100:
+            markets_range = "100-500"
+        else:
+            markets_range = f"<100 ({markets_count})"
+
         return HealthCheckResult(
             status="healthy",
-            latency_ms=latency,
-            details={"markets_loaded": markets_count},
+            latency_ms=round(latency, 1),
+            details={"markets_loaded": markets_range},
         )
     except Exception as e:
         logger.warning(f"[Health] Exchange API check failed: {e}")
         return HealthCheckResult(
             status="unhealthy",
-            error=str(e),
+            error="Exchange API unavailable",
         )
 
 
@@ -240,13 +254,20 @@ async def check_memory() -> HealthCheckResult:
         import psutil
 
         memory = psutil.virtual_memory()
+        # P2-FIX: Sanitize memory details to prevent system fingerprinting
+        # Only return usage percentage range, not exact values
+        if memory.percent < 50:
+            usage_range = "low (<50%)"
+        elif memory.percent < 75:
+            usage_range = "moderate (50-75%)"
+        elif memory.percent < 90:
+            usage_range = "high (75-90%)"
+        else:
+            usage_range = "critical (>90%)"
+
         return HealthCheckResult(
             status="healthy" if memory.percent < 90 else "degraded",
-            details={
-                "total_gb": round(memory.total / (1024**3), 2),
-                "available_gb": round(memory.available / (1024**3), 2),
-                "used_percent": memory.percent,
-            },
+            details={"usage_range": usage_range},
         )
     except ImportError:
         return HealthCheckResult(
@@ -309,11 +330,18 @@ async def health_check(request: Request):
 
 
 @router.get("/quick")
-async def quick_health_check():
+async def quick_health_check(request: Request):
     """
     Quick health check - only checks critical components.
-    Faster response for load balancer health checks.
+    Rate-limited to prevent abuse from unauthenticated access.
     """
+    # Rate limit unauthenticated health checks
+    from core.request_utils import client_ip
+
+    ip = client_ip(request)
+    if not await _check_health_rate_limit(ip):
+        return JSONResponse(status_code=429, content={"status": "rate_limited"})
+
     try:
         await check_database()
         return {"status": "healthy", "timestamp": utcnow().isoformat()}
@@ -322,14 +350,20 @@ async def quick_health_check():
 
 
 @router.get("/live")
-async def liveness_check():
+async def liveness_check(request: Request):
     """Kubernetes liveness probe - application is running."""
+    ip = client_ip(request)
+    if not await _check_health_rate_limit(ip):
+        return JSONResponse(status_code=429, content={"status": "rate_limited"})
     return {"status": "alive", "timestamp": utcnow().isoformat()}
 
 
 @router.get("/ready")
-async def readiness_check():
+async def readiness_check(request: Request):
     """Kubernetes readiness probe - application is ready to serve requests."""
+    ip = client_ip(request)
+    if not await _check_health_rate_limit(ip):
+        return JSONResponse(status_code=429, content={"status": "rate_limited"})
     try:
         db_check = await check_database()
         if db_check.status != "healthy":
@@ -337,3 +371,46 @@ async def readiness_check():
         return {"status": "ready", "timestamp": utcnow().isoformat()}
     except Exception:
         return {"status": "not_ready", "reason": "Readiness check failed"}
+
+
+# Rate limiting for health endpoints
+_HEALTH_RATE_LIMIT: dict[str, float] = {}
+_HEALTH_RATE_WINDOW = 10.0  # seconds
+_HEALTH_RATE_MAX = 30  # max requests per window
+_HEALTH_RATE_MAX_ENTRIES = 5000  # Hard cap to prevent memory exhaustion
+_HEALTH_RATE_LOCK = None  # asyncio.Lock, lazily initialized
+
+
+def _get_health_rate_lock() -> asyncio.Lock:
+    """Lazily initialize the health rate limit lock."""
+    global _HEALTH_RATE_LOCK
+    if _HEALTH_RATE_LOCK is None:
+        _HEALTH_RATE_LOCK = asyncio.Lock()
+    return _HEALTH_RATE_LOCK
+
+
+async def _check_health_rate_limit(ip: str) -> bool:
+    """Check rate limit for health check endpoints.
+
+    P2-FIX: Added asyncio.Lock to prevent race conditions in concurrent access.
+    """
+    import time
+    now = time.time()
+
+    async with _get_health_rate_lock():
+        last = _HEALTH_RATE_LIMIT.get(ip, 0)
+        if now - last < _HEALTH_RATE_WINDOW:
+            return False
+        _HEALTH_RATE_LIMIT[ip] = now
+        # BUG FIX: Hard cap with LRU eviction
+        if len(_HEALTH_RATE_LIMIT) > _HEALTH_RATE_MAX_ENTRIES:
+            sorted_entries = sorted(_HEALTH_RATE_LIMIT.items(), key=lambda x: x[1])
+            to_remove = len(_HEALTH_RATE_LIMIT) - _HEALTH_RATE_MAX_ENTRIES
+            for k, _ in sorted_entries[:to_remove]:
+                _HEALTH_RATE_LIMIT.pop(k, None)
+        # Also cleanup expired entries
+        cutoff = now - _HEALTH_RATE_WINDOW
+        expired = [k for k, v in _HEALTH_RATE_LIMIT.items() if v < cutoff]
+        for k in expired:
+            _HEALTH_RATE_LIMIT.pop(k, None)
+        return True

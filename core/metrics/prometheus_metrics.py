@@ -57,7 +57,7 @@ POSITION_COUNT = Gauge(
 PNL_TOTAL = Counter(
     'quantpilot_pnl_total_usdt',
     'Total realized PnL in USDT',
-    ['exchange', 'user_id']
+    ['exchange']
 )
 
 
@@ -104,19 +104,13 @@ GHOST_POSITION_COUNT = Gauge(
 LEVERAGE_SETUP_FAILURE = Counter(
     'quantpilot_leverage_setup_failure_total',
     'Leverage setup failures',
-    ['exchange', 'symbol', 'retry_attempt']
+    ['exchange', 'symbol', 'leverage', 'retry_attempt']
 )
 
 EXCHANGE_ERRORS = Counter(
     'quantpilot_exchange_errors_total',
     'Exchange API errors',
     ['exchange', 'error_type']
-)
-
-LEVERAGE_SETUP_FAILURE = Counter(
-    'quantpilot_leverage_setup_failure_total',
-    'Leverage setup failures',
-    ['exchange', 'symbol', 'leverage', 'retry_attempt']
 )
 
 SYSTEM_INFO = Info(

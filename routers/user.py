@@ -26,7 +26,7 @@ from core.database import (
 )
 from core.request_utils import public_base_url
 from core.security import decrypt_settings_payload, encrypt_settings_payload, mask_secret
-from core.utils.common import normalize_limit_timeout_overrides, position_symbol_key
+from core.utils.common import normalize_limit_timeout_overrides, position_symbol_key, safe_bool
 from core.utils.datetime import utcnow
 
 router = APIRouter(prefix="/api", tags=["user"])
@@ -53,14 +53,21 @@ def _status_text(status: str) -> str:
     return status_map.get(str(status or "").lower(), status or "未知")
 
 
-def _loads_list(json_str: str) -> list:
-    """Parse JSON list safely."""
+def _loads_list(value) -> list:
+    """Parse JSON list safely from string or return list unchanged.
+
+    P4-FIX: Consolidated from two duplicate definitions.
+    Accepts strings (JSON-encoded) or already-parsed lists.
+    """
+    if isinstance(value, list):
+        return value
     try:
-        data = json.loads(str(json_str or "[]"))
-        return data if isinstance(data, list) else []
+        parsed = json.loads(str(value or "[]"))
+        return parsed if isinstance(parsed, list) else []
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
-    except Exception:
+    except Exception as e:
+        logger.debug(f"[User] Failed to parse list value: {e}")
         return []
 
 
@@ -79,6 +86,11 @@ class UserSettingsRequest(BaseModel):
     default_order_type: str = Field(default="limit", max_length=20)
     stop_loss_order_type: str = Field(default="market", max_length=20)
     limit_timeout_overrides: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("api_key", "api_secret", "password")
+    @classmethod
+    def _strip_api_key_whitespace(cls, v: str) -> str:
+        return v.strip()
 
     @field_validator("exchange")
     @classmethod
@@ -255,6 +267,17 @@ class OfflineTradeSyncRequest(BaseModel):
     order_status: str = Field(default="offline_synced", max_length=30)
     payload: dict = Field(default_factory=dict)
 
+    @field_validator("timestamp")
+    @classmethod
+    def _validate_not_future(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return None
+        from core.utils.datetime import utcnow
+        # Reject timestamps more than 1 hour in the future
+        if v > utcnow() + __import__("datetime").timedelta(hours=1):
+            raise ValueError("timestamp cannot be more than 1 hour in the future")
+        return v
+
     @field_validator("ticker")
     @classmethod
     def _normalize_ticker(cls, value: str) -> str:
@@ -284,6 +307,28 @@ def _is_admin(user: dict) -> bool:
     return user.get("role") == "admin"
 
 
+async def _log_admin_data_access(user: dict, db: AsyncSession, resource: str, detail: str = "") -> None:
+    """Log admin data access for audit trail."""
+    if _is_admin(user):
+        try:
+            from core.database import AdminAuditLogModel
+            from core.utils.datetime import utcnow
+            log_entry = AdminAuditLogModel(
+                admin_id=user.get("sub", ""),
+                admin_username=user.get("username", ""),
+                action="admin_data_access",
+                target_type=resource,
+                target_id="",
+                summary=f"Admin accessed {resource}: {detail}",
+                client_ip="",
+                created_at=utcnow(),
+            )
+            db.add(log_entry)
+            await db.flush()
+        except Exception as e:
+            logger.debug(f"[User] Failed to log admin data access: {e}")
+
+
 def _require_admin(user: dict) -> None:
     """Require admin role - raises 403 if not admin."""
     if not _is_admin(user):
@@ -309,17 +354,6 @@ def _load_user_settings(db_user) -> dict:
         return {}
 
 
-def _loads_list(value) -> list:
-    if isinstance(value, list):
-        return value
-    try:
-        parsed = json.loads(value or "[]")
-        return parsed if isinstance(parsed, list) else []
-    except Exception as e:
-        logger.debug(f"[User] Failed to parse list value: {e}")
-        return []
-
-
 def _present_str(value, fallback: str = "") -> str:
     if value is None:
         return fallback
@@ -340,8 +374,8 @@ async def _save_user_exchange(db: AsyncSession, db_user, req: UserSettingsReques
         "api_key": _present_str(req.api_key, _present_str(current_exchange.get("api_key"), "")),
         "api_secret": _present_str(req.api_secret, _present_str(current_exchange.get("api_secret"), "")),
         "password": _present_str(req.password, _present_str(current_exchange.get("password"), "")),
-        "live_trading": bool(req.live_trading),
-        "sandbox_mode": bool(req.sandbox_mode),
+        "live_trading": safe_bool(req.live_trading, False),
+        "sandbox_mode": safe_bool(req.sandbox_mode, False),
         "market_type": req.market_type,
         "default_order_type": req.default_order_type,
         "stop_loss_order_type": req.stop_loss_order_type,
@@ -379,8 +413,8 @@ async def _exchange_config_for_user(db: AsyncSession, user: dict) -> dict:
         "api_key": str(exchange.get("api_key") if "api_key" in exchange else ""),
         "api_secret": str(exchange.get("api_secret") if "api_secret" in exchange else ""),
         "password": str(exchange.get("password") if "password" in exchange else ""),
-        "live_trading": bool(exchange.get("live_trading")),
-        "sandbox_mode": bool(exchange.get("sandbox_mode")),
+        "live_trading": safe_bool(exchange.get("live_trading"), False),
+        "sandbox_mode": safe_bool(exchange.get("sandbox_mode"), False),
         "market_type": exchange.get("market_type") if "market_type" in exchange else settings.exchange.market_type,
         "default_order_type": exchange.get("default_order_type") if "default_order_type" in exchange else settings.exchange.default_order_type,
         "stop_loss_order_type": exchange.get("stop_loss_order_type") if "stop_loss_order_type" in exchange else settings.exchange.stop_loss_order_type,
@@ -485,6 +519,13 @@ async def get_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Get system status and configuration."""
+    if str(user.get("role") or "").lower() != "admin":
+        return {
+            "version": settings.app_version,
+            "exchange": settings.exchange.name,
+            "live_trading": settings.exchange.live_trading,
+            "exchange_sandbox_mode": settings.exchange.sandbox_mode,
+        }
     status = runtime_settings.runtime_status()
     return {
         **status,
@@ -522,6 +563,8 @@ async def get_positions(
     filters = [PositionModel.status == "open"]
     if not _is_admin(user):
         filters.append(PositionModel.user_id == user.get("sub"))
+    else:
+        await _log_admin_data_access(user, db, "positions", "viewed all user positions")
 
     result = await db.execute(
         select(PositionModel)
@@ -903,6 +946,8 @@ async def get_trades(
     filters = [TradeModel.timestamp >= cutoff]
     if not _is_admin(user):
         filters.append(TradeModel.user_id == user.get("sub"))
+    else:
+        await _log_admin_data_access(user, db, "trades", f"viewed all user trades (last {days} days)")
 
     result = await db.execute(
         select(TradeModel)

@@ -2,6 +2,7 @@
 Signal Server - Analytics Module (Enhanced)
 Performance analytics and trade statistics.
 """
+import asyncio
 import json
 from collections import defaultdict
 from datetime import timedelta
@@ -13,6 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import TradeModel, UserModel
 from core.security import decrypt_settings_payload
 from core.utils.datetime import utcnow
+
+# Thread-safe cache lock
+_performance_cache_lock = asyncio.Lock()
 
 
 async def _get_account_equity(session: AsyncSession, user_id: str | None = None) -> float:
@@ -212,8 +216,12 @@ async def get_daily_pnl(
     for trade in trades:
         timestamp = getattr(trade, "timestamp", None)
         if timestamp is not None and _is_closed_trade(trade):
-            day = timestamp.strftime("%Y-%m-%d")
-            daily_pnl[day] += _trade_account_pnl_pct(trade, account_equity)
+            # Only include trades with actual PnL to avoid counting non-closed events
+            pnl_usdt = getattr(trade, "pnl_usdt", 0.0) or 0.0
+            pnl_pct = getattr(trade, "pnl_pct", 0.0) or 0.0
+            if pnl_usdt != 0.0 or pnl_pct != 0.0:
+                day = timestamp.strftime("%Y-%m-%d")
+                daily_pnl[day] += _trade_account_pnl_pct(trade, account_equity)
 
     # Fill missing days
     all_days = []
@@ -499,9 +507,10 @@ _performance_cache: dict[str, object] = {}
 _cache_time: dict[str, float] = {}
 
 
-def invalidate_performance_cache(user_id: str | None = None):
+async def invalidate_performance_cache(user_id: str | None = None):
     """Invalidate performance cache."""
     global _performance_cache, _cache_time
     key = user_id or "global"
-    _performance_cache.pop(key, None)
-    _cache_time.pop(key, None)
+    async with _performance_cache_lock:
+        _performance_cache.pop(key, None)
+        _cache_time.pop(key, None)

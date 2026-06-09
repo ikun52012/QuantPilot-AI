@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import time
+from collections import OrderedDict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,7 +36,8 @@ from services.signal_processor import SignalProcessor, compute_webhook_fingerpri
 
 router = APIRouter(prefix="", tags=["webhook"])
 
-_WEBHOOK_REPLAY_WINDOW_SECS = 300
+# P0-FIX: Reduced replay window from 300s (5min) to 60s (1min) for better security
+_WEBHOOK_REPLAY_WINDOW_SECS = 60
 
 
 async def _verify_hmac_signature(request: Request, raw_body: bytes) -> None:
@@ -74,7 +76,7 @@ async def _verify_hmac_signature(request: Request, raw_body: bytes) -> None:
         logger.error(f"[Webhook] HMAC verification error: {e}")
         raise HTTPException(500, "HMAC verification failed") from e
 
-_NONCE_CACHE: dict[str, float] = {}
+_NONCE_CACHE: "OrderedDict[str, float]" = OrderedDict()
 _NONCE_CACHE_MAX_SIZE = 10000
 _NONCE_CACHE_CLEANUP_INTERVAL = 3600
 _last_nonce_cleanup: float = 0.0
@@ -84,6 +86,9 @@ _nonce_lock = asyncio.Lock()
 _WEBHOOK_IP_RATE_LIMITS: dict[str, list[float]] = {}
 _WEBHOOK_IP_RATE_MAX = 60  # Maximum requests per window
 _WEBHOOK_IP_RATE_WINDOW = 60.0  # Window in seconds
+_WEBHOOK_IP_RATE_MAX_ENTRIES = 5000  # Cap to prevent memory leak
+_WEBHOOK_IP_RATE_CLEANUP_THRESHOLD = 6000  # Trigger cleanup when exceeding this
+_webhook_ip_rate_lock = asyncio.Lock()  # P1-FIX: Protect concurrent access
 
 # Redis nonce cache for multi-process deployments
 _redis_nonce_available: bool | None = None
@@ -107,7 +112,7 @@ async def _get_redis_nonce_client():
         return None
 
     try:
-        from core.cache import cache_manager
+        from core.cache import cache as cache_manager
         redis_obj = getattr(cache_manager, "_redis", None)
         if redis_obj and getattr(redis_obj, "is_connected", lambda: False)():
             _redis_nonce_client = redis_obj
@@ -172,12 +177,27 @@ def _parse_webhook_nonce(value: Any) -> str:
 async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> None:
     """Check for replay attacks using timestamp and nonce.
 
+    P0-FIX: Stricter timestamp validation (60s window) to prevent replay attacks.
+
     Uses Redis for multi-process safety when available, falls back to
     in-memory dict for single-process deployments.
     """
     now = time.time()
-    if abs(now - timestamp) > _WEBHOOK_REPLAY_WINDOW_SECS:
-        raise HTTPException(401, "Webhook timestamp expired — possible replay attack")
+    time_diff = abs(now - timestamp)
+
+    # P0-FIX: Stricter timestamp window (60s instead of 300s)
+    if time_diff > _WEBHOOK_REPLAY_WINDOW_SECS:
+        logger.warning(
+            f"[Webhook] Timestamp expired: {time_diff:.1f}s old (max {_WEBHOOK_REPLAY_WINDOW_SECS}s). "
+            f"Possible replay attack from scope '{scope}'."
+        )
+        raise HTTPException(401, f"Webhook timestamp expired ({time_diff:.1f}s) — possible replay attack")
+
+    # P0-FIX: Validate nonce format to prevent injection
+    if not nonce or len(nonce) > 128:
+        raise HTTPException(400, "Invalid nonce length")
+    if any(ord(ch) < 32 or ord(ch) > 126 for ch in nonce):
+        raise HTTPException(400, "Nonce contains invalid characters")
 
     nonce_key = hashlib.sha256(f"{scope}:{nonce}".encode()).hexdigest()
 
@@ -190,8 +210,10 @@ async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> 
                 redis_key = f"webhook:nonce:{nonce_key}"
                 existing = await client.get(redis_key)
                 if existing:
+                    logger.warning(f"[Webhook] Duplicate nonce detected in Redis: {nonce[:16]}...")
                     raise HTTPException(409, "Duplicate nonce — possible replay attack")
-                await client.setex(redis_key, _WEBHOOK_REPLAY_WINDOW_SECS, str(now))
+                # P0-FIX: Store nonce for full replay window duration
+                await client.setex(redis_key, _WEBHOOK_REPLAY_WINDOW_SECS + 10, str(now))
                 return
         except HTTPException:
             raise
@@ -210,14 +232,22 @@ async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> 
             _last_nonce_cleanup = now
 
         if nonce_key in _NONCE_CACHE:
+            logger.warning(f"[Webhook] Duplicate nonce detected in memory: {nonce[:16]}...")
             raise HTTPException(409, "Duplicate nonce — possible replay attack")
 
+        # P4-FIX: Use OrderedDict with LRU eviction on every insert to
+        # guarantee cache stays bounded even under sustained high traffic.
         _NONCE_CACHE[nonce_key] = now
+        _NONCE_CACHE.move_to_end(nonce_key)
         if len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
+            # First clean expired entries
             cutoff = now - _WEBHOOK_REPLAY_WINDOW_SECS
             expired = [k for k, v in _NONCE_CACHE.items() if v < cutoff]
             for k in expired:
                 _NONCE_CACHE.pop(k, None)
+            # Then evict oldest entries to enforce hard cap (LRU)
+            while len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
+                _NONCE_CACHE.popitem(last=False)
 
 
 async def _check_ip_rate_limit(client_ip: str) -> None:
@@ -225,32 +255,45 @@ async def _check_ip_rate_limit(client_ip: str) -> None:
 
     Prevents abuse by limiting requests per IP address.
     Uses a sliding window approach with in-memory tracking.
+    Includes bounded cache size and periodic cleanup to prevent memory leak.
+    P1-FIX: Protected by asyncio.Lock for concurrent access safety.
     """
     global _WEBHOOK_IP_RATE_LIMITS
     now = time.time()
     cutoff = now - _WEBHOOK_IP_RATE_WINDOW
 
-    # Clean up old entries for this IP
-    timestamps = _WEBHOOK_IP_RATE_LIMITS.get(client_ip, [])
-    timestamps = [ts for ts in timestamps if ts > cutoff]
-    _WEBHOOK_IP_RATE_LIMITS[client_ip] = timestamps
+    async with _webhook_ip_rate_lock:
+        # Periodic global cleanup to prevent memory leak
+        if len(_WEBHOOK_IP_RATE_LIMITS) > _WEBHOOK_IP_RATE_CLEANUP_THRESHOLD:
+            expired_ips = [
+                ip for ip, ts_list in _WEBHOOK_IP_RATE_LIMITS.items()
+                if not ts_list or ts_list[-1] < cutoff
+            ]
+            for ip in expired_ips:
+                _WEBHOOK_IP_RATE_LIMITS.pop(ip, None)
 
-    # Check rate limit
-    if len(timestamps) >= _WEBHOOK_IP_RATE_MAX:
-        raise HTTPException(429, "Rate limit exceeded - too many requests")
+            # If still over limit, evict oldest entries
+            if len(_WEBHOOK_IP_RATE_LIMITS) > _WEBHOOK_IP_RATE_MAX_ENTRIES:
+                sorted_ips = sorted(
+                    _WEBHOOK_IP_RATE_LIMITS.items(),
+                    key=lambda item: item[1][-1] if item[1] else 0,
+                )
+                to_remove = len(_WEBHOOK_IP_RATE_LIMITS) - _WEBHOOK_IP_RATE_MAX_ENTRIES
+                for ip, _ in sorted_ips[:to_remove]:
+                    _WEBHOOK_IP_RATE_LIMITS.pop(ip, None)
 
-    # Record this request
-    timestamps.append(now)
-    _WEBHOOK_IP_RATE_LIMITS[client_ip] = timestamps
+        # Clean up old entries for this IP
+        timestamps = _WEBHOOK_IP_RATE_LIMITS.get(client_ip, [])
+        timestamps = [ts for ts in timestamps if ts > cutoff]
+        _WEBHOOK_IP_RATE_LIMITS[client_ip] = timestamps
 
-    # Periodic global cleanup to prevent memory leak
-    if len(_WEBHOOK_IP_RATE_LIMITS) > 10000:
-        expired_ips = [
-            ip for ip, ts_list in _WEBHOOK_IP_RATE_LIMITS.items()
-            if not ts_list or ts_list[-1] < cutoff
-        ]
-        for ip in expired_ips:
-            _WEBHOOK_IP_RATE_LIMITS.pop(ip, None)
+        # Check rate limit
+        if len(timestamps) >= _WEBHOOK_IP_RATE_MAX:
+            raise HTTPException(429, "Rate limit exceeded - too many requests")
+
+        # Record this request
+        timestamps.append(now)
+        _WEBHOOK_IP_RATE_LIMITS[client_ip] = timestamps
 
 
 @router.post("/webhook")
@@ -378,6 +421,7 @@ async def _process_webhook_background(
     """
     max_retries = 2
     for attempt in range(1, max_retries + 1):
+        session = None
         try:
             async with db_manager.async_session_factory() as session:
                 processor = SignalProcessor(session)
@@ -392,6 +436,11 @@ async def _process_webhook_background(
                 logger.info(f"[Webhook] Background processing complete: {result.get('status')}")
                 return
         except Exception as exc:
+            if session is not None:
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
             if attempt < max_retries:
                 import asyncio
                 delay = 2 ** attempt
@@ -406,18 +455,21 @@ async def _process_webhook_background(
                     f"Signal queued for manual review. Ticker: {signal.ticker}, "
                     f"Direction: {signal.direction.value}, Error: {exc}"
                 )
-                # Mark the webhook event as failed for recovery
                 try:
                     from core.database import has_recent_webhook_event
                     from services.signal_processor import compute_webhook_fingerprint
-                    async with db_manager.async_session_factory() as session:
-                        fingerprint = compute_webhook_fingerprint(raw_body, user_id)
-                        existing = await has_recent_webhook_event(session, fingerprint, window_secs=3600)
-                        if existing and existing.status in {"received", "reserved", "retrying"}:
-                            existing.status = "failed"
-                            existing.reason = str(exc)[:500]
-                            await session.commit()
-                            logger.info(f"[Webhook] Marked event {fingerprint[:12]}... as failed for recovery")
+                    async with db_manager.async_session_factory() as failure_session:
+                        try:
+                            fingerprint = compute_webhook_fingerprint(raw_body, user_id)
+                            existing = await has_recent_webhook_event(failure_session, fingerprint, window_secs=3600)
+                            if existing and existing.status in {"received", "reserved", "retrying"}:
+                                existing.status = "failed"
+                                existing.reason = str(exc)[:500]
+                                await failure_session.commit()
+                                logger.info(f"[Webhook] Marked event {fingerprint[:12]}... as failed for recovery")
+                        except Exception:
+                            await failure_session.rollback()
+                            raise
                 except Exception:
                     pass
 

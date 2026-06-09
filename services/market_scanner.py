@@ -36,9 +36,11 @@ from services.unified_ohlcv import OHLCVBundle, UnifiedOHLCVProvider, timeframe_
 # Lazy import to avoid circular dependency
 _bcast_scanner = None
 _bcast_tasks: set[asyncio.Task] = set()
+_BCAST_FAILURE_COUNT = 0
+_BCAST_FAILURE_LOG_THRESHOLD = 10  # Log warning after N consecutive failures
 
 def _broadcast_scanner(event: dict) -> None:
-    global _bcast_scanner
+    global _bcast_scanner, _BCAST_FAILURE_COUNT
     if _bcast_scanner is None:
         try:
             from routers.websocket import broadcast_scanner_event
@@ -49,8 +51,22 @@ def _broadcast_scanner(event: dict) -> None:
         task = asyncio.create_task(_bcast_safe_broadcast(_bcast_scanner, event))
         _bcast_tasks.add(task)
         task.add_done_callback(_bcast_tasks.discard)
+        task.add_done_callback(
+            lambda t: _on_bcast_complete(t.exception()) if t.exception() else _on_bcast_complete(None)
+        )
     except Exception:
         pass
+
+
+def _on_bcast_complete(exc: Exception | None) -> None:
+    """Track broadcast failures and log after threshold."""
+    global _BCAST_FAILURE_COUNT
+    if exc:
+        _BCAST_FAILURE_COUNT += 1
+        if _BCAST_FAILURE_COUNT >= _BCAST_FAILURE_LOG_THRESHOLD:
+            logger.warning(f"[Scanner] {(_BCAST_FAILURE_COUNT)} consecutive broadcast failures: {exc}")
+    else:
+        _BCAST_FAILURE_COUNT = 0  # Reset on success
 
 
 async def _bcast_safe_broadcast(func, event: dict) -> None:
@@ -210,6 +226,8 @@ class MarketScannerService:
         self._adaptive_min_score_cached_at: float = 0.0
         self._threshold_overrides: dict[str, dict[str, Any]] = {}
         self._learning_summary: dict[str, Any] = {}
+        self._last_learning_refreshed_at: float = 0.0
+        self._learning_summary_cache: dict[str, Any] = {}
 
     @property
     def last_status(self) -> dict[str, Any]:
@@ -570,19 +588,20 @@ class MarketScannerService:
     def _coerce_universe_item(self, symbol: str | ScannerUniverseItem) -> ScannerUniverseItem:
         if isinstance(symbol, ScannerUniverseItem):
             return symbol
-        watch = str(symbol or "").upper().strip()
+        watch = str(symbol or "").upper().replace(" ", "").strip()
+        compacted = self._compact_market_symbol(watch)
         target_exchange = str(settings.exchange.name or "").lower().strip()
         target_market_type = self._scanner_market_type(settings.exchange.market_type)
         source_exchange = str(settings.scanner.source_exchange or target_exchange).lower().strip()
         source_market_type = self._scanner_market_type(settings.scanner.source_market_type, target_market_type)
         return ScannerUniverseItem(
-            watch_symbol=watch,
-            exchange_symbol=watch,
+            watch_symbol=compacted,
+            exchange_symbol=compacted,
             target_exchange=target_exchange,
             target_market_type=target_market_type,
             source_exchange=source_exchange,
             source_market_type=source_market_type,
-            source_symbol=watch,
+            source_symbol=compacted,
             universe_source="manual",
         )
 
@@ -1523,6 +1542,13 @@ class MarketScannerService:
         if not settings.scanner.learning_enabled or db_manager.async_session_factory is None:
             self._threshold_overrides = {}
             return {"enabled": False}
+
+        now = time.time()
+        elapsed = now - self._last_learning_refreshed_at
+        if elapsed < settings.scanner.learning_refresh_interval_secs and self._learning_summary_cache:
+            logger.debug(f"[ScannerLearning] Skipping refresh, using cached learning summary (elapsed={elapsed:.1f}s)")
+            return self._learning_summary_cache
+
         try:
             async with db_manager.async_session_factory() as session:
                 sync_result = await sync_scanner_outcomes(
@@ -1545,7 +1571,7 @@ class MarketScannerService:
                 ) if settings.scanner.walk_forward_enabled else {"thresholds": {}}
                 self._threshold_overrides = dict(threshold_summary.get("thresholds") or {})
                 await session.commit()
-                return {
+                result = {
                     "enabled": True,
                     "synced_outcomes": int(sync_result.get("synced") or 0),
                     "outcome_labels": int(outcome_summary.get("total") or 0),
@@ -1553,6 +1579,9 @@ class MarketScannerService:
                     "expectancy_pct": outcome_summary.get("expectancy_pct"),
                     "walk_forward_thresholds": len(self._threshold_overrides),
                 }
+                self._learning_summary_cache = result
+                self._last_learning_refreshed_at = now
+                return result
         except Exception as exc:
             logger.warning(f"[ScannerLearning] Refresh failed: {exc}")
             self._threshold_overrides = {}

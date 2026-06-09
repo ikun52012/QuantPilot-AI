@@ -38,8 +38,8 @@ def check(label: str, condition: bool, fail_msg: str = "", warn: bool = False) -
 # ──────────────────────────────────────────────
 print("\n[1/7] Python 版本检查")
 vi = sys.version_info
-py_ok = vi >= (3, 10)
-check("Python >= 3.10", py_ok, f"当前版本 {vi.major}.{vi.minor}.{vi.micro}，需要 3.10+")
+py_ok = vi >= (3, 11)
+check("Python >= 3.11", py_ok, f"当前版本 {vi.major}.{vi.minor}.{vi.micro}，需要 3.11+")
 print(f"       当前: Python {vi.major}.{vi.minor}.{vi.micro} ({sys.executable})")
 
 # ──────────────────────────────────────────────

@@ -37,10 +37,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
-# Create appuser with fixed uid 1000 to match typical host user
+# Create appuser with fixed uid 10001 to avoid conflicts with typical host users
+# UID 1000 is commonly used on host systems, so we use 10001 instead
 # This avoids permission issues when mounting host volumes (./data, ./logs, etc.)
-RUN groupadd -g 1000 appgroup && \
-    useradd -u 1000 -g appgroup -m -d /home/appuser -s /bin/bash appuser
+RUN groupadd -g 10001 appgroup && \
+    useradd -u 10001 -g appgroup -m -d /home/appuser -s /bin/bash appuser
 
 COPY --chown=appuser:appgroup . .
 

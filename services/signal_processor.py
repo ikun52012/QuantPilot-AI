@@ -38,6 +38,7 @@ from core.metrics import (
     record_signal_received,
     record_trade,
 )
+from core.redis_coordination import DistributedLockTimeout, distributed_lock
 from core.security import decrypt_settings_payload
 from core.trading_control import trading_allowed
 from core.utils.common import (
@@ -45,6 +46,7 @@ from core.utils.common import (
     loads_list,
     position_symbol_key,
     resolve_limit_timeout_secs,
+    safe_bool,
     safe_float,
     safe_int,
 )
@@ -83,6 +85,7 @@ _SENSITIVE_EVENT_KEY_PARTS = ("secret", "token", "password", "api_key", "api_sec
 _TICKER_LOCKS: dict[str, asyncio.Lock] = {}
 _TICKER_LOCKS_GUARD = asyncio.Lock()
 _TICKER_LOCK_MAX_SIZE = 1000
+_TICKER_LOCK_TIMEOUT_SECONDS = 120.0
 
 # Per-ticker pending signal count for queue backpressure
 _TICKER_PENDING: dict[str, int] = {}
@@ -515,18 +518,20 @@ class SignalProcessor:
         self.session = session
 
     @staticmethod
-    def _live_trading_requested(user_settings: dict | None = None) -> bool:
+    def _live_trading_requested(user_settings: dict | None = None, user_id: str | None = None) -> bool:
         exchange_cfg = (user_settings or {}).get("exchange") or {}
         if "live_trading" in exchange_cfg:
-            return bool(exchange_cfg.get("live_trading"))
-        return bool(settings.exchange.live_trading)
+            return safe_bool(exchange_cfg.get("live_trading"), False)
+        if user_id:
+            return False
+        return safe_bool(settings.exchange.live_trading, False)
 
     @staticmethod
     def _block_live_risk_check_errors(user_settings: dict | None = None) -> bool:
         risk_cfg = (user_settings or {}).get("risk") or {}
         if "block_live_on_risk_check_error" in risk_cfg:
-            return bool(risk_cfg.get("block_live_on_risk_check_error"))
-        return bool(settings.risk.block_live_on_risk_check_error)
+            return safe_bool(risk_cfg.get("block_live_on_risk_check_error"), True)
+        return safe_bool(settings.risk.block_live_on_risk_check_error, True)
 
     @staticmethod
     async def _validate_scanner_live_market(signal: TradingViewSignal, raw_body: dict) -> tuple[bool, str, dict]:
@@ -661,32 +666,79 @@ class SignalProcessor:
             # Acquire ticker-specific lock to prevent same-ticker conflicts
             ticker_lock = await _ticker_lock(signal.ticker, user_id)
 
+            # P2-FIX: Use timeout to prevent deadlocks from stuck locks
             try:
-                async with ticker_lock:
-                    # Process signal with prefetched market data
-                    result = await self._process_signal_locked(
-                        signal,
-                        user_id,
-                        client_ip,
-                        raw_body,
-                        prefetched_market=prefetched_market,
-                        reserved_event_id=reserved_event_id,
-                    )
+                await asyncio.wait_for(ticker_lock.acquire(), timeout=_TICKER_LOCK_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.error(
+                    f"[SignalProcessor] Deadlock timeout: could not acquire lock for "
+                    f"{signal.ticker} (user={user_id}) after {_TICKER_LOCK_TIMEOUT_SECONDS}s"
+                )
+                await _release_ticker_queue_slot(signal.ticker, user_id)
+                await self._mark_reserved_event_by_id(
+                    reserved_event_id,
+                    fingerprint,
+                    status="error",
+                    status_code=503,
+                    reason=f"Lock timeout for {signal.ticker} - possible deadlock detected",
+                    payload=payload,
+                )
+                return {
+                    "status": "error",
+                    "reason": f"Lock timeout for {signal.ticker} - possible deadlock detected",
+                }
 
-                # Optimization 2: Check confidence for interval skip
-                skip_interval = False
+            try:
+                try:
+                    # P2-FIX: Check processing interval BEFORE processing (inside ticker lock)
+                    # to prevent same-ticker signals from bypassing the interval wait
+                    interval = await _get_dynamic_interval()
+                    if interval > 0:
+                        rate_key = user_id if user_id is not None else _ADMIN_RATE_LIMIT_KEY
+                        async with _PROCESSING_INTERVAL_SEMAPHORE:
+                            now = _time.time()
+                            last_time = _LAST_SIGNAL_PROCESS_TIME.get(rate_key, 0.0)
+                            elapsed = now - last_time
+                            if elapsed < interval:
+                                wait_time = interval - elapsed
+                                logger.debug(f"[SignalProcessor] Waiting {wait_time:.1f}s before processing (user={user_id})")
+                                await asyncio.sleep(wait_time)
+                            _LAST_SIGNAL_PROCESS_TIME[rate_key] = _time.time()
+
+                    lock_user_settings = await self._load_user_settings(user_id) if user_id else None
+                    lock_live_trading = self._live_trading_requested(lock_user_settings, user_id)
+
+                    # Process signal with prefetched market data
+                    try:
+                        async with distributed_lock(
+                            f"signal:{user_id or _ADMIN_RATE_LIMIT_KEY}:{position_symbol_key(signal.ticker)}",
+                            ttl_seconds=180,
+                            blocking_timeout_seconds=_TICKER_LOCK_TIMEOUT_SECONDS,
+                            allow_local_fallback=not lock_live_trading,
+                        ):
+                            result = await self._process_signal_locked(
+                                signal,
+                                user_id,
+                                client_ip,
+                                raw_body,
+                                prefetched_market=prefetched_market,
+                                reserved_event_id=reserved_event_id,
+                            )
+                    except DistributedLockTimeout as exc:
+                        logger.error(f"[SignalProcessor] Distributed signal lock failed: {exc}")
+                        result = {"status": "error", "reason": str(exc)}
+                finally:
+                    ticker_lock.release()
+
+                # High confidence signals still log but don't need extra wait
                 if result.get("status") in ("filled", "simulated"):
                     analysis_data = result.get("analysis", {})
                     analysis_confidence = analysis_data.get("confidence", 0.0) if isinstance(analysis_data, dict) else 0.0
                     if analysis_confidence >= settings.ai.priority_skip_interval_confidence_threshold:
-                        skip_interval = True
                         logger.info(
                             f"[SignalProcessor] High confidence signal ({analysis_confidence:.2f}) "
                             f"skips interval for faster next signal"
                         )
-
-                # Optimization 1: Wait dynamic interval (per-user)
-                await _wait_processing_interval(skip_interval=skip_interval, user_id=user_id)
 
                 return result
             finally:
@@ -752,7 +804,7 @@ class SignalProcessor:
         if mode in {"paper", "live"}:
             if live_requested:
                 whitelist = {str(item).upper().strip() for item in settings.scanner.live_symbol_whitelist}
-                if not settings.exchange.live_trading:
+                if not safe_bool(settings.exchange.live_trading, False):
                     reason = "Scanner live mode requires global LIVE_TRADING=true"
                     self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
                     return {"status": "blocked", "reason": reason}
@@ -817,7 +869,13 @@ class SignalProcessor:
                 return {"status": "held", "reason": cb_reason, "circuit_breaker": True}
 
             try:
-                analysis = await self._run_ai_analysis(signal, market, scoped_user_settings, prefilter_result)
+                analysis = await self._run_ai_analysis(
+                    signal,
+                    market,
+                    scoped_user_settings,
+                    prefilter_result,
+                    user_id=user_id,
+                )
                 await _ai_circuit_breaker_record(True)
             except Exception as ai_exc:
                 await _ai_circuit_breaker_record(False)
@@ -874,30 +932,57 @@ class SignalProcessor:
                 )
                 return result
 
-            if decision.execute:
-                conflict_reason, conflicting_position = await self._check_position_conflict(
-                    decision, user_id, scoped_user_settings
-                )
-                if conflict_reason and not conflicting_position:
+            if mode != "observe" and decision.execute:
+                ticker_lock = await _ticker_lock(signal.ticker, user_id)
+                try:
+                    await asyncio.wait_for(ticker_lock.acquire(), timeout=_TICKER_LOCK_TIMEOUT_SECONDS)
+                except TimeoutError:
                     decision.execute = False
-                    decision.reason = conflict_reason
-                elif conflict_reason and conflicting_position:
-                    close_result = await self._close_conflicting_position(
-                        conflicting_position, user_id, scoped_user_settings
-                    )
-                    if close_result.get("status") == "error":
-                        decision.execute = False
-                        decision.reason = f"Failed to close existing position: {close_result.get('reason')}"
-                    await self.session.flush()
+                    decision.reason = f"Lock timeout for scanner signal {signal.ticker}"
+                    result = {"status": "error", "reason": decision.reason}
+                else:
+                    try:
+                        async with distributed_lock(
+                            f"signal:{user_id or _ADMIN_RATE_LIMIT_KEY}:{position_symbol_key(signal.ticker)}",
+                            ttl_seconds=180,
+                            blocking_timeout_seconds=_TICKER_LOCK_TIMEOUT_SECONDS,
+                            allow_local_fallback=not live_requested,
+                        ):
+                            conflict_reason, conflicting_position = await self._check_position_conflict(
+                                decision, user_id, scoped_user_settings
+                            )
+                            if conflict_reason and not conflicting_position:
+                                decision.execute = False
+                                decision.reason = conflict_reason
+                            elif conflict_reason and conflicting_position:
+                                close_result = await self._close_conflicting_position(
+                                    conflicting_position, user_id, scoped_user_settings
+                                )
+                                if close_result.get("status") == "error":
+                                    decision.execute = False
+                                    decision.reason = f"Failed to close existing position: {close_result.get('reason')}"
+                                await self.session.flush()
 
-            if decision.execute:
-                correlation_risk = await self._check_correlation_risk(decision, user_id, scoped_user_settings)
-                if correlation_risk.get("exceeded"):
-                    decision.execute = False
-                    decision.reason = correlation_risk.get("reason")
+                            if decision.execute:
+                                correlation_risk = await self._check_correlation_risk(decision, user_id, scoped_user_settings)
+                                if correlation_risk.get("exceeded"):
+                                    decision.execute = False
+                                    decision.reason = correlation_risk.get("reason")
 
-            if decision.execute:
-                result = await self._execute_trade(decision, user_id, scoped_user_settings)
+                            if decision.execute:
+                                result = await self._execute_trade(
+                                    decision,
+                                    user_id,
+                                    scoped_user_settings,
+                                    idempotency_key=fingerprint,
+                                )
+                            else:
+                                result = {"status": "rejected", "reason": decision.reason}
+                                await notify_trade_executed(decision, result)
+                    except DistributedLockTimeout as exc:
+                        result = {"status": "error", "reason": str(exc)}
+                    finally:
+                        ticker_lock.release()
             else:
                 result = {"status": "rejected", "reason": decision.reason}
                 await notify_trade_executed(decision, result)
@@ -970,7 +1055,7 @@ class SignalProcessor:
             return {"status": "duplicate", "reason": "Duplicate signal within 30 minutes"}
 
         # Step 0: Check global trading control (emergency stop, paused, read_only)
-        live_trading = self._live_trading_requested(user_settings)
+        live_trading = self._live_trading_requested(user_settings, user_id)
         trading_state = await trading_allowed(self.session, user_id=user_id, live_trading=live_trading)
         if not trading_state.get("allowed"):
             logger.warning(
@@ -1033,7 +1118,13 @@ class SignalProcessor:
                 }
 
             # Step 3: AI Analysis
-            analysis = await self._run_ai_analysis(signal, market, user_settings, prefilter_result)
+            analysis = await self._run_ai_analysis(
+                signal,
+                market,
+                user_settings,
+                prefilter_result,
+                user_id=user_id,
+            )
             await self._record_signal_audit(
                 fingerprint=fingerprint,
                 signal=signal,
@@ -1100,7 +1191,12 @@ class SignalProcessor:
 
             # Step 7: Execute trade
             if decision.execute:
-                result = await self._execute_trade(decision, user_id, user_settings)
+                result = await self._execute_trade(
+                    decision,
+                    user_id,
+                    user_settings,
+                    idempotency_key=fingerprint,
+                )
             else:
                 result = {"status": "rejected", "reason": decision.reason}
                 # Notify rejection to Telegram
@@ -1255,7 +1351,7 @@ class SignalProcessor:
         use_scoring = min_pass_score > 0.0
 
         user_risk = (user_settings or {}).get("risk") or {}
-        live_trading = self._live_trading_requested(user_settings)
+        live_trading = self._live_trading_requested(user_settings, user_id)
         live_data_quality_mode = str(
             user_risk.get("live_data_quality_mode") or settings.risk.live_data_quality_mode
         ).lower().strip()
@@ -1312,6 +1408,7 @@ class SignalProcessor:
         market: MarketContext,
         user_settings: dict | None = None,
         prefilter_result: PreFilterResult | None = None,
+        user_id: str | None = None,
     ) -> AIAnalysis:
         """Run AI analysis on the signal."""
         import time
@@ -1343,9 +1440,10 @@ class SignalProcessor:
                 "notable_checks": notable_checks[:6],
             }
 
-        # P2-FIX: Pass user_id to analyze_signal for proper cache isolation
-        # Note: user_id is not available in this method signature; will be added in next refactor
-        analysis = await analyze_signal(signal, market, scoped_user_settings)
+        if user_id:
+            analysis = await analyze_signal(signal, market, scoped_user_settings, user_id=str(user_id))
+        else:
+            analysis = await analyze_signal(signal, market, scoped_user_settings)
 
         latency = time.time() - start
         # Optimization 1: Track AI response time for dynamic interval
@@ -1440,6 +1538,15 @@ class SignalProcessor:
 
         # Set execute flag
         decision.execute = recommendation in ("execute", "modify")
+
+        if decision.execute and signal.direction in {SignalDirection.CLOSE_LONG, SignalDirection.CLOSE_SHORT}:
+            decision.order_type = "market"
+            decision.quantity = None
+            decision.stop_loss = None
+            decision.take_profit = None
+            decision.take_profit_levels = []
+            decision.reason = analysis.reasoning or "Close signal"
+            return decision
 
         # ── SMC/FVG entry optimization ──
         # When AI recommends "modify" and provides a suggested_entry, use it
@@ -2558,7 +2665,7 @@ class SignalProcessor:
             )
 
         except Exception as e:
-            live_trading = self._live_trading_requested(user_settings)
+            live_trading = self._live_trading_requested(user_settings, user_id)
             if live_trading and self._block_live_risk_check_errors(user_settings):
                 result["exceeded"] = True
                 result["reason"] = f"Correlation risk check failed in live mode: {e}"
@@ -2900,8 +3007,11 @@ class SignalProcessor:
         decision: TradeDecision,
         user_id: str | None,
         user_settings: dict | None = None,
+        idempotency_key: str = "",
     ) -> dict:
         """Execute the trade on the exchange."""
+        if idempotency_key and not decision.idempotency_key:
+            decision.idempotency_key = str(idempotency_key)[:128]
         exchange_config = {
             "exchange": settings.exchange.name,
             "api_key": settings.exchange.api_key,
@@ -2914,17 +3024,30 @@ class SignalProcessor:
             "stop_loss_order_type": settings.exchange.stop_loss_order_type,
             "limit_timeout_overrides": settings.exchange.limit_timeout_overrides,
         }
+        db_user = None
+        is_admin_user = user_id is None
+        if user_id:
+            db_user = await get_user_by_id(self.session, user_id)
+            is_admin_user = bool(db_user and str(getattr(db_user, "role", "") or "").lower() == "admin")
         if user_id and user_settings is None:
             user_settings = await self._load_user_settings(user_id)
         user_exchange = (user_settings or {}).get("exchange") or {}
+        is_close_decision = decision.direction in {SignalDirection.CLOSE_LONG, SignalDirection.CLOSE_SHORT}
+        if user_id and not is_admin_user:
+            exchange_config.update({
+                "api_key": "",
+                "api_secret": "",
+                "password": "",
+                "live_trading": False,
+            })
         if user_exchange:
             exchange_config.update({
                 "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
-                "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else settings.exchange.api_key,
-                "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else settings.exchange.api_secret,
-                "password": user_exchange.get("password") if "password" in user_exchange else settings.exchange.password,
-                "live_trading": bool(user_exchange.get("live_trading")) if "live_trading" in user_exchange else bool(settings.exchange.live_trading),
-                "sandbox_mode": bool(user_exchange.get("sandbox_mode")) if "sandbox_mode" in user_exchange else bool(settings.exchange.sandbox_mode),
+                "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else (settings.exchange.api_key if is_admin_user else ""),
+                "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else (settings.exchange.api_secret if is_admin_user else ""),
+                "password": user_exchange.get("password") if "password" in user_exchange else (settings.exchange.password if is_admin_user else ""),
+                "live_trading": safe_bool(user_exchange.get("live_trading"), safe_bool(settings.exchange.live_trading, False) if is_admin_user else False),
+                "sandbox_mode": safe_bool(user_exchange.get("sandbox_mode"), safe_bool(settings.exchange.sandbox_mode, False)),
                 "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
                 "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
                 "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
@@ -2935,7 +3058,7 @@ class SignalProcessor:
                 ),
             })
         if user_id:
-            user = await get_user_by_id(self.session, user_id)
+            user = db_user
             if user:
                 exchange_config.update({
                     "max_leverage": user.max_leverage or 20,
@@ -2943,11 +3066,10 @@ class SignalProcessor:
                 })
 
                 subscription = await get_user_active_subscription(self.session, user_id)
-                if exchange_config["live_trading"] and (not user.live_trading_allowed or not subscription):
+                if exchange_config["live_trading"] and not is_close_decision and (not user.live_trading_allowed or not subscription):
                     logger.warning(
-                        f"[Signal] User {user_id} requested live trading without permission/subscription; using paper mode"
+                        f"[Signal] User {user_id} requested live trading without permission/subscription; rejecting signal"
                     )
-                    exchange_config["live_trading"] = False
                     # Notify user if subscription just expired
                     if user.live_trading_allowed and not subscription:
                         try:
@@ -2955,6 +3077,9 @@ class SignalProcessor:
                             await notify_subscription_expired(user_id)
                         except Exception:
                             pass
+                    return {"status": "rejected", "reason": "Live trading requires permission and an active subscription"}
+                if exchange_config["live_trading"] and (not exchange_config.get("api_key") or not exchange_config.get("api_secret")):
+                    return {"status": "rejected", "reason": "User exchange API credentials are required for live trading"}
 
         self._apply_position_limits(decision, exchange_config, user_settings)
         if not decision.execute:
@@ -2963,7 +3088,7 @@ class SignalProcessor:
             control_state = await trading_allowed(
                 self.session,
                 user_id=user_id,
-                live_trading=bool(exchange_config.get("live_trading")),
+                live_trading=safe_bool(exchange_config.get("live_trading"), False),
             )
             if not control_state.get("allowed"):
                 reason = control_state.get("block_reason") or "Trading is currently disabled"
@@ -3009,8 +3134,8 @@ class SignalProcessor:
                 "result": result,
                 "exchange_config": {
                     "exchange": exchange_config.get("exchange") or exchange_config.get("name"),
-                    "live_trading": bool(exchange_config.get("live_trading")),
-                    "sandbox_mode": bool(exchange_config.get("sandbox_mode")),
+                    "live_trading": safe_bool(exchange_config.get("live_trading"), False),
+                    "sandbox_mode": safe_bool(exchange_config.get("sandbox_mode"), False),
                     "market_type": exchange_config.get("market_type") or settings.exchange.market_type,
                     "limit_timeout_overrides": exchange_config.get("limit_timeout_overrides") or {},
                 },
@@ -3053,7 +3178,7 @@ class SignalProcessor:
         """Load decrypted per-user settings once for this webhook.
 
         Logs at ERROR level if decryption fails so admins are alerted.
-        Returns empty dict as fallback — signal processing continues with defaults.
+        Fails closed instead of falling back to global live credentials.
         """
         if not user_id:
             return {}
@@ -3067,9 +3192,9 @@ class SignalProcessor:
         except Exception as exc:
             logger.error(
                 f"[Signal] Could not load user settings for user {user_id}: {exc}. "
-                f"Signal will process with default settings — verify user configuration."
+                f"Signal processing is blocked until user configuration is fixed."
             )
-            return {}
+            raise RuntimeError("User settings could not be loaded; trading blocked") from exc
 
     def _apply_position_limits(
         self,
@@ -3267,15 +3392,8 @@ class SignalProcessor:
                     logger.warning(f"[Signal] Database position conflict detected: {msg}")
                     return (msg, pos)
 
-            # Step 2: Check exchange actual positions (for live trading)
-            # This catches positions that might not be in database yet (concurrent signals)
-            # FIX: Use settings.exchange.live_trading as fallback, not hardcoded False
-            live_trading = bool(settings.exchange.live_trading)
-            if user_settings:
-                exchange_cfg = (user_settings or {}).get("exchange") or {}
-                user_live = exchange_cfg.get("live_trading")
-                if user_live is not None:
-                    live_trading = bool(user_live)
+            # Step 2: Check exchange actual positions only for the effective live account.
+            live_trading = self._live_trading_requested(user_settings, user_id)
 
             if live_trading:
                 from exchange import get_open_positions
@@ -3286,13 +3404,30 @@ class SignalProcessor:
                         ex_symbol = position_symbol_key(ex_pos.get("symbol") or "")
                         if ex_symbol != target_key:
                             continue
-                        ex_side = str(ex_pos.get("side") or "").lower()
-                        excontracts = safe_float(ex_pos.get("contracts") or ex_pos.get("contractSize") or 0)
+                        ex_side = str(
+                            ex_pos.get("side")
+                            or ex_pos.get("posSide")
+                            or ex_pos.get("positionSide")
+                            or ""
+                        ).lower()
+                        raw_contracts = safe_float(ex_pos.get("contracts") or ex_pos.get("contractSize") or 0)
+                        excontracts = abs(raw_contracts)
                         if excontracts <= 0:
                             continue
 
                         # Map exchange side to position direction
-                        ex_dir = "long" if ex_side in ("long", "buy") else "short"
+                        if ex_side in ("long", "buy"):
+                            ex_dir = "long"
+                        elif ex_side in ("short", "sell"):
+                            ex_dir = "short"
+                        elif raw_contracts < 0:
+                            ex_dir = "short"
+                        elif raw_contracts > 0:
+                            ex_dir = "long"
+                        else:
+                            msg = f"Exchange position side is ambiguous for {decision.ticker}; blocking live conflict check"
+                            logger.error(f"[Signal] {msg}: {ex_pos}")
+                            return (msg, None)
                         if (direction in ("long", "short") and ex_dir in ("long", "short")
                                 and direction != ex_dir):
                             msg = (
@@ -3328,7 +3463,12 @@ class SignalProcessor:
             # Allow same-direction (scaling in)
             return (None, None)
         except Exception as e:
-            logger.warning(f"[Signal] Position conflict check failed (allowing trade): {e}")
+            live_trading = self._live_trading_requested(user_settings, user_id)
+            if live_trading and self._block_live_risk_check_errors(user_settings):
+                msg = f"Position conflict check failed in live mode: {e}"
+                logger.error(f"[Signal] {msg}")
+                return (msg, None)
+            logger.warning(f"[Signal] Position conflict check failed (allowing non-live trade): {e}")
             return (None, None)
 
     async def _close_conflicting_position(
@@ -3419,7 +3559,10 @@ class SignalProcessor:
                     elif locked_position and locked_position.status != "open":
                         logger.info(f"[Signal] Position {position.id[:8]} already closed by concurrent operation")
                 except Exception as db_err:
-                    logger.warning(f"[Signal] Failed to update database position: {db_err}")
+                    logger.error(f"[Signal] Failed to update database position after exchange close: {db_err}")
+                    result["status"] = "error"
+                    result["reason"] = "Exchange close succeeded but database update failed; reconciliation required"
+                    return result
 
             # Step 3: The position is closed or already absent; now clean up any leftover TP/SL orders.
             if not is_synthetic and hasattr(position, "take_profit_order_ids_json"):
@@ -3533,17 +3676,25 @@ class SignalProcessor:
             "margin_mode": settings.risk.margin_mode,
         }
 
+        if user_id:
+            exchange_config.update({
+                "api_key": "",
+                "api_secret": "",
+                "password": "",
+                "live_trading": False,
+            })
+
         if user_id and user_settings:
             user_exchange = (user_settings or {}).get("exchange") or {}
             user_live = user_exchange.get("live_trading")
             user_sandbox = user_exchange.get("sandbox_mode")
             exchange_config.update({
                 "exchange": user_exchange.get("name") or user_exchange.get("exchange") or settings.exchange.name,
-                "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else settings.exchange.api_key,
-                "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else settings.exchange.api_secret,
-                "password": user_exchange.get("password") if "password" in user_exchange else settings.exchange.password,
-                "live_trading": bool(user_live if user_live is not None else settings.exchange.live_trading),
-                "sandbox_mode": bool(user_sandbox if user_sandbox is not None else settings.exchange.sandbox_mode),
+                "api_key": user_exchange.get("api_key") if "api_key" in user_exchange else "",
+                "api_secret": user_exchange.get("api_secret") if "api_secret" in user_exchange else "",
+                "password": user_exchange.get("password") if "password" in user_exchange else "",
+                "live_trading": safe_bool(user_live, False),
+                "sandbox_mode": safe_bool(user_sandbox, safe_bool(settings.exchange.sandbox_mode, False)),
                 "market_type": user_exchange.get("market_type") or settings.exchange.market_type,
                 "default_order_type": user_exchange.get("default_order_type") or settings.exchange.default_order_type,
                 "stop_loss_order_type": user_exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,

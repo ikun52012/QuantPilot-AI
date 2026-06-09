@@ -922,7 +922,7 @@ async def calculate_funding_term_structure(
             result["note"] = "No current funding rate"
             return result
 
-        from enhanced_market_data import _binance_usdt_symbol
+        # _binance_usdt_symbol is defined at module level, no import needed
         binance_symbol = _binance_usdt_symbol(symbol)
         if not binance_symbol:
             result["note"] = "Could not resolve symbol"

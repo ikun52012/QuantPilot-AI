@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from models import SignalDirection
 from strategies.dca import DCAConfig, DCAEngine, DCAEntry
 from strategies.grid import GridConfig, GridEngine, GridLevel
 
@@ -157,6 +158,22 @@ class TestDCAEngine:
 
         assert position.status == "active"
         assert position.close_reason == ""
+
+    @pytest.mark.asyncio
+    async def test_live_close_rejects_partial_closed_status(self, engine, config, monkeypatch):
+        position = engine.create_position(config, 50000.0)
+        config.paper_mode = False
+        engine.configs[position.config_id] = config
+
+        execute_trade = AsyncMock(return_value={"status": "partial_closed", "order_id": "close-1"})
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+
+        with pytest.raises(RuntimeError):
+            await engine._close_position(position.config_id, 49000.0, "stop_loss", {"live_trading": True})
+
+        assert position.status == "active"
+        decision = execute_trade.await_args.args[0]
+        assert decision.idempotency_key == f"dca:{position.config_id}:close:stop_loss"
 
 
 class TestGridConfig:
@@ -328,12 +345,106 @@ class TestGridEngine:
         level.exchange_order_status = "open"
 
         execute_trade = AsyncMock()
+        get_recent_orders = AsyncMock(return_value=[{
+            "id": "limit-1",
+            "status": "closed",
+            "filled": level.quantity,
+            "average": level.price,
+        }])
         monkeypatch.setattr("exchange.execute_trade", execute_trade)
+        monkeypatch.setattr("exchange.get_recent_orders", get_recent_orders)
 
         result = await engine._execute_grid_level(grid.config_id, level, level.price, config, {"live_trading": True})
 
         assert result["success"] is True
         execute_trade.assert_not_awaited()
+        get_recent_orders.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_live_grid_limit_order_must_be_confirmed_filled(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        config.paper_mode = False
+        level = grid.grid_levels[0]
+        level.order_id = "limit-1"
+        level.exchange_order_status = "open"
+
+        execute_trade = AsyncMock()
+        get_recent_orders = AsyncMock(return_value=[{"id": "limit-1", "status": "open", "filled": 0.0}])
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+        monkeypatch.setattr("exchange.get_recent_orders", get_recent_orders)
+
+        result = await engine._execute_grid_level(grid.config_id, level, level.price, config, {"live_trading": True})
+
+        assert result["success"] is False
+        assert level.status == "pending"
+        execute_trade.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_live_grid_existing_order_id_never_falls_back_to_market(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        config.paper_mode = False
+        level = grid.grid_levels[0]
+        level.order_id = "limit-closed"
+        level.exchange_order_status = "closed"
+
+        execute_trade = AsyncMock()
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+        monkeypatch.setattr(
+            "exchange.get_recent_orders",
+            AsyncMock(return_value=[{
+                "id": "limit-closed",
+                "status": "closed",
+                "filled": level.quantity,
+                "average": level.price,
+            }]),
+        )
+
+        result = await engine._execute_grid_level(grid.config_id, level, level.price, config, {"live_trading": True})
+
+        assert result["success"] is True
+        execute_trade.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_live_grid_protection_failure_closes_unprotected_fill(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        config.paper_mode = False
+        level = grid.grid_levels[0]
+        level.order_id = "limit-closed"
+        level.exchange_order_status = "closed"
+
+        monkeypatch.setattr(
+            "exchange.get_recent_orders",
+            AsyncMock(return_value=[{
+                "id": "limit-closed",
+                "status": "closed",
+                "filled": level.quantity,
+                "average": level.price,
+            }]),
+        )
+        monkeypatch.setattr(
+            engine,
+            "_place_live_fill_protection",
+            AsyncMock(side_effect=RuntimeError("protection failed")),
+        )
+        execute_trade = AsyncMock(return_value={
+            "status": "partial_closed",
+            "order_id": "fail-safe-close",
+            "closed_quantity": level.quantity,
+            "exit_price": level.price,
+        })
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+
+        result = await engine._execute_grid_level(grid.config_id, level, level.price, config, {"live_trading": True})
+
+        assert result["success"] is True
+        assert result["closed_fail_safe"] is True
+        assert level.status == "closed"
+        assert grid.total_buy_quantity == 0
+        assert grid.total_sell_quantity == 0
+        decision = execute_trade.await_args.args[0]
+        expected_direction = SignalDirection.CLOSE_LONG if level.side == "buy" else SignalDirection.CLOSE_SHORT
+        assert decision.direction == expected_direction
+        assert decision.quantity == level.quantity
 
     @pytest.mark.asyncio
     async def test_close_live_grid_cancels_pending_orders_instead_of_market_closing(self, engine, config, monkeypatch):
@@ -365,7 +476,7 @@ class TestGridEngine:
         engine.configs[grid.config_id] = config
 
         cancel_order = AsyncMock(return_value={"status": "cancelled"})
-        execute_trade = AsyncMock(return_value={"status": "filled", "order_id": "close-net"})
+        execute_trade = AsyncMock(return_value={"status": "closed", "order_id": "close-net"})
         monkeypatch.setattr("exchange.cancel_order", cancel_order)
         monkeypatch.setattr("exchange.execute_trade", execute_trade)
 
@@ -373,6 +484,24 @@ class TestGridEngine:
 
         execute_trade.assert_awaited_once()
         assert grid.status == "closed"
+        decision = execute_trade.await_args.args[0]
+        assert decision.idempotency_key == f"grid:{grid.config_id}:close:out_of_range"
+
+    @pytest.mark.asyncio
+    async def test_close_live_grid_rejects_partial_closed_net_exposure(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        buy_level = next(level for level in grid.grid_levels if level.side == "buy")
+        await engine._execute_grid_level(grid.config_id, buy_level, buy_level.price, config)
+        config.paper_mode = False
+        engine.configs[grid.config_id] = config
+
+        monkeypatch.setattr("exchange.cancel_order", AsyncMock(return_value={"status": "cancelled"}))
+        monkeypatch.setattr("exchange.execute_trade", AsyncMock(return_value={"status": "partial_closed", "order_id": "close-net"}))
+
+        with pytest.raises(RuntimeError):
+            await engine._close_grid(grid.config_id, 53000.0, "out_of_range", {"live_trading": True})
+
+        assert grid.status == "active"
 
 
 class TestDCAEntry:

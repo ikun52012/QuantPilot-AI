@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any
 
 from loguru import logger
@@ -18,6 +19,9 @@ from core.config import settings
 from core.database import get_admin_setting, set_admin_setting
 from core.security import decrypt_settings_payload, encrypt_settings_payload, mask_secret
 from core.utils.common import first_valid, normalize_limit_timeout_overrides
+
+# P4-FIX: Thread-safe lock to protect concurrent modifications to global settings
+_SETTINGS_APPLY_LOCK = threading.RLock()
 
 EXCHANGE_KEY = "runtime_exchange"
 AI_KEY = "runtime_ai"
@@ -256,7 +260,17 @@ async def load_admin_runtime_settings(session: AsyncSession) -> dict[str, dict[s
 
 
 def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
-    """Apply loaded runtime settings to the process-wide settings object."""
+    """Apply loaded runtime settings to the process-wide settings object.
+
+    P4-FIX: Protected with a reentrant lock to prevent race conditions
+    when multiple concurrent requests modify settings simultaneously.
+    """
+    with _SETTINGS_APPLY_LOCK:
+        _apply_runtime_settings_unlocked(runtime)
+
+
+def _apply_runtime_settings_unlocked(runtime: dict[str, dict[str, Any]]) -> None:
+    """Internal implementation of apply_runtime_settings. Must be called with _SETTINGS_APPLY_LOCK held."""
     exchange = runtime.get("exchange") or {}
     if exchange:
         settings.exchange.name = str(exchange.get("name") or exchange.get("exchange") or settings.exchange.name).lower().strip()
@@ -578,6 +592,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 
     try:
         from core.database import get_admin_setting
+        from core.security import decrypt_value
 
         # Load AI provider from admin_settings (saved separately in ai_config.py)
         ai_provider_raw = await get_admin_setting(session, "ai_provider", "")
@@ -590,7 +605,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
         # Also load individual AI keys that may be saved separately
         mistral_api_key = await get_admin_setting(session, "mistral_api_key", "")
         if mistral_api_key:
-            settings.ai.mistral_api_key = mistral_api_key
+            settings.ai.mistral_api_key = decrypt_value(mistral_api_key)
 
         mistral_model = await get_admin_setting(session, "mistral_model", "")
         if mistral_model:
@@ -598,7 +613,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 
         openai_api_key = await get_admin_setting(session, "openai_api_key", "")
         if openai_api_key:
-            settings.ai.openai_api_key = openai_api_key
+            settings.ai.openai_api_key = decrypt_value(openai_api_key)
 
         openai_model = await get_admin_setting(session, "openai_model", "")
         if openai_model:
@@ -606,7 +621,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 
         anthropic_api_key = await get_admin_setting(session, "anthropic_api_key", "")
         if anthropic_api_key:
-            settings.ai.anthropic_api_key = anthropic_api_key
+            settings.ai.anthropic_api_key = decrypt_value(anthropic_api_key)
 
         anthropic_model = await get_admin_setting(session, "anthropic_model", "")
         if anthropic_model:
@@ -614,7 +629,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 
         deepseek_api_key = await get_admin_setting(session, "deepseek_api_key", "")
         if deepseek_api_key:
-            settings.ai.deepseek_api_key = deepseek_api_key
+            settings.ai.deepseek_api_key = decrypt_value(deepseek_api_key)
 
         deepseek_model = await get_admin_setting(session, "deepseek_model", "")
         if deepseek_model:
@@ -622,7 +637,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 
         openrouter_api_key = await get_admin_setting(session, "openrouter_api_key", "")
         if openrouter_api_key:
-            settings.ai.openrouter_api_key = openrouter_api_key
+            settings.ai.openrouter_api_key = decrypt_value(openrouter_api_key)
 
         openrouter_model = await get_admin_setting(session, "openrouter_model", "")
         if openrouter_model:
@@ -694,7 +709,7 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 
         custom_provider_api_key_raw = await get_admin_setting(session, "custom_ai_api_key", "")
         if custom_provider_api_key_raw:
-            settings.ai.custom_provider_api_key = str(custom_provider_api_key_raw).strip()
+            settings.ai.custom_provider_api_key = decrypt_value(str(custom_provider_api_key_raw).strip())
 
         ai_temperature_raw = await get_admin_setting(session, "ai_temperature", "")
         if ai_temperature_raw:
@@ -769,7 +784,8 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
                 pass
         hmac_secret_raw = await get_admin_setting(session, "webhook_hmac_secret", "")
         if hmac_secret_raw:
-            settings.server.webhook_hmac_secret = hmac_secret_raw
+            # Decrypt if stored encrypted
+            settings.server.webhook_hmac_secret = decrypt_value(hmac_secret_raw)
         hmac_name_raw = await get_admin_setting(session, "webhook_hmac_header_name", "")
         if hmac_name_raw:
             settings.server.webhook_hmac_header_name = hmac_name_raw

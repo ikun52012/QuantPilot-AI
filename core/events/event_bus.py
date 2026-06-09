@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -191,7 +191,7 @@ class EventBus:
     async def _persist_event(self, event: Event) -> None:
         """Persist event to disk for audit trail."""
         try:
-            date_str = datetime.utcnow().strftime("%Y-%m-%d")
+            date_str = datetime.now(UTC).replace(tzinfo=None).strftime("%Y-%m-%d")
             event_file = self._event_store_path / f"events_{date_str}.json"
 
             # Append event to daily log
@@ -208,15 +208,17 @@ class EventBus:
                 # Read existing events
                 events = []
                 if event_file.exists():
-                    with open(event_file) as f:
+                    with open(event_file, encoding="utf-8") as f:
                         events = json.load(f)
 
                 # Append new event
                 events.append(event_dict)
 
-                # Write back
-                with open(event_file, "w") as f:
+                # Write back with atomic swap to prevent corruption
+                tmp_file = event_file.with_suffix(".tmp")
+                with open(tmp_file, "w", encoding="utf-8") as f:
                     json.dump(events, f, indent=2, default=str)
+                tmp_file.replace(event_file)
 
         except Exception as e:
             logger.warning(f"[P2-FIX] Event persistence error: {e}")

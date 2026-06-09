@@ -784,6 +784,7 @@ async def _fetch_market_context_live(
                 logger.warning(f"[MarketData] {exchange_id} returned zero price for {ticker}")
                 raise ValueError("Zero price from exchange")
 
+            # BUG FIX: Check length before using negative index to avoid wrap-around
             price_1h_ago = float(ohlcv_1h[-3][4]) if len(ohlcv_1h) >= 3 else current_price
             price_4h_ago = float(ohlcv_4h[-3][4]) if len(ohlcv_4h) >= 3 else current_price
 

@@ -373,7 +373,11 @@ async def scanner_send_rejection_summary(
 
 @router.post("/run-once")
 async def scanner_run_once(admin: dict = Depends(require_admin)):
-    admin_id = str(admin.get("id") or admin.get("username") or "admin")
+    # Use JWT sub claim as unique identifier to avoid shared key collision
+    admin_id = str(admin.get("sub") or admin.get("id") or admin.get("username") or "")
+    if not admin_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Admin identity missing in token")
     now = __import__("time").time()
     last_run = _RUN_ONCE_RATELIMIT.get(admin_id, 0.0)
     if now - last_run < _RUN_ONCE_WINDOW_SECS:
@@ -416,6 +420,7 @@ async def scanner_backtest(
         timeframes=request.timeframes,
         weights_override=request.weights_override,
     )
+    backtester.save_results()
     return summary.to_dict()
 
 

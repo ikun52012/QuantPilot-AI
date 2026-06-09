@@ -114,16 +114,30 @@ def _t(key: str) -> str:
 
 
 async def send_telegram(text: str):
-    """Send a message to Telegram with retry mechanism."""
+    """Send a message to Telegram with retry mechanism.
+
+    P2-FIX: Use parameterized URL construction to prevent token leakage in logs.
+    """
     if not settings.telegram.bot_token or not settings.telegram.chat_id:
         logger.debug("[Telegram] Not configured, skipping notification")
         return
+
+    # P2-FIX: Validate bot_token format to prevent URL parsing issues
+    bot_token = settings.telegram.bot_token.strip()
+    if not bot_token or ":" not in bot_token:
+        logger.warning("[Telegram] Invalid bot token format, skipping")
+        return
+
+    # P2-FIX: Build URL safely using urllib to handle special characters
+    from urllib.parse import quote
+    safe_token = quote(bot_token, safe="")
+    url = f"https://api.telegram.org/bot{safe_token}/sendMessage"
 
     for attempt in range(_TELEGRAM_MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
-                    f"https://api.telegram.org/bot{settings.telegram.bot_token}/sendMessage",
+                    url,
                     json={
                         "chat_id": settings.telegram.chat_id,
                         "text": text,
@@ -134,12 +148,12 @@ async def send_telegram(text: str):
                 resp.raise_for_status()
                 logger.debug("[Telegram] Message sent")
                 return
-        except Exception as e:
+        except (TimeoutError, httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException):
             if attempt < _TELEGRAM_MAX_RETRIES:
-                logger.warning(f"[Telegram] Send failed (attempt {attempt + 1}), retrying: {e}")
+                logger.warning(f"[Telegram] Send failed (attempt {attempt + 1}), retrying")
                 await asyncio.sleep(_TELEGRAM_RETRY_DELAY_SECS)
             else:
-                logger.error(f"[Telegram] Failed to send message after {_TELEGRAM_MAX_RETRIES + 1} attempts: {e}")
+                logger.error(f"[Telegram] Failed to send message after {_TELEGRAM_MAX_RETRIES + 1} attempts")
 
 
 async def notify_signal_received(ticker: str, direction: str, price: float):
@@ -239,8 +253,8 @@ async def notify_trade_executed(decision: TradeDecision, order_result: dict):
             f"━━━━━━━━━━━━━━━━━━\n"
             f"{_t('ticker')}: <code>{decision.ticker}</code>\n"
             f"{_t('direction')}: <b>{decision.direction.value.upper() if decision.direction else 'N/A'}</b>\n"
-            f"{_t('entry')}: <code>{decision.entry_price}</code>\n"
-            f"{_t('stop_loss')}: <code>{decision.stop_loss}</code>\n"
+            f"{_t('entry')}: <code>{decision.entry_price or 'N/A'}</code>\n"
+            f"{_t('stop_loss')}: <code>{decision.stop_loss or 'N/A'}</code>\n"
             f"{_t('take_profit')}: <code>{_format_take_profit_text(decision)}</code>\n"
             f"{_t('quantity')}: <code>{decision.quantity}</code>"
         )

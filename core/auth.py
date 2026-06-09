@@ -37,6 +37,7 @@ def _get_jwt_secret() -> str:
     """
     secret = settings.jwt_secret
     if secret:
+        _validate_jwt_secret_strength(secret)
         return secret
     if settings.exchange.live_trading:
         raise RuntimeError("JWT_SECRET must be set when LIVE_TRADING=true")
@@ -47,6 +48,32 @@ def _get_jwt_secret() -> str:
         "to persist sessions across restarts."
     )
     return secret
+
+
+def _validate_jwt_secret_strength(secret: str) -> None:
+    """Validate JWT secret meets minimum security requirements."""
+    if len(secret) < 32:
+        raise RuntimeError(
+            f"JWT_SECRET is too weak ({len(secret)} chars). "
+            "Must be at least 32 characters. Generate a strong secret: "
+            "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+        )
+
+    WEAK_SECRETS = {
+        "change-this-to-a-long-random-secret-at-least-32-characters",
+        "your-jwt-secret", "your_jwt_secret", "changeme", "change-me",
+        "secret", "jwt-secret", "jwt_secret", "tvss-change-this-secret",
+    }
+    normalized = secret.lower().replace("-", "").replace("_", "")
+    for weak in WEAK_SECRETS:
+        if weak.replace("-", "").replace("_", "") in normalized:
+            raise RuntimeError(
+                "JWT_SECRET appears to use a placeholder value. "
+                "Generate a strong secret: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+
+    if secret == "a" * len(secret) or secret == "1" * len(secret):
+        raise RuntimeError("JWT_SECRET must not be a repeated character pattern")
 
 
 JWT_SECRET = _get_jwt_secret()
@@ -140,18 +167,22 @@ def _cookie_secure(request: Request | None = None) -> bool:
 # ─────────────────────────────────────────────
 
 def set_auth_cookie(response, token: str, request: Request | None = None):
-    """Set authentication cookies."""
+    """Set authentication cookies.
+
+    P0-FIX: Use SameSite=strict for maximum CSRF protection instead of lax.
+    """
     max_age = settings.jwt_expiry_hours * 3600
     csrf_token = create_csrf_token()
     secure = _cookie_secure(request)
 
+    # P0-FIX: Use SameSite=strict for maximum CSRF protection
     response.set_cookie(
         AUTH_COOKIE_NAME,
         token,
         max_age=max_age,
         httponly=True,
         secure=secure,
-        samesite="lax",
+        samesite="strict",  # Changed from "lax" to "strict" for P0 security fix
         path="/",
     )
     response.set_cookie(
@@ -160,16 +191,19 @@ def set_auth_cookie(response, token: str, request: Request | None = None):
         max_age=max_age,
         httponly=False,
         secure=secure,
-        samesite="lax",
+        samesite="strict",  # Changed from "lax" to "strict" for P0 security fix
         path="/",
     )
 
 
 def clear_auth_cookie(response, request: Request | None = None):
-    """Clear authentication cookies."""
+    """Clear authentication cookies.
+
+    P0-FIX: Match SameSite=strict when clearing cookies.
+    """
     for secure in (False, True):
-        response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="lax")
-        response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure, samesite="lax")
+        response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=secure, samesite="strict")
+        response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure, samesite="strict")
 
 
 # ─────────────────────────────────────────────
@@ -210,7 +244,14 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="User no longer exists")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
-    if int(payload.get("ver", 0)) != int(user.token_version or 0):
+
+    # P2-FIX: Safer token version comparison with type validation
+    try:
+        token_ver = int(payload.get("ver", 0))
+        user_ver = int(user.token_version) if user.token_version is not None else 0
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="Token version invalid") from None
+    if token_ver != user_ver:
         raise HTTPException(status_code=401, detail="Token has been revoked")
 
     return {

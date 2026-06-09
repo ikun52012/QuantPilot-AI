@@ -8,7 +8,7 @@ services:
   # Signal Server
   # ─────────────────────────────────────────────
   signal-server:
-    image: ${SIGNAL_SERVER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai:v5.5.0}
+    image: ${SIGNAL_SERVER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai:v5.5.1}
     container_name: signal-server
     restart: unless-stopped
     ports:
@@ -22,9 +22,9 @@ services:
       - PYTHONIOENCODING=utf-8
       - AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED:-false}
     volumes:
-      - ./data:/app/data
-      - ./trade_logs:/app/trade_logs
-      - ./logs:/app/logs
+      - app-data:/app/data
+      - app-trade-logs:/app/trade_logs
+      - app-logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,7 +45,7 @@ services:
       - signal-network
 
   updater:
-    image: ${SIGNAL_UPDATER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai-updater:v5.5.0}
+    image: ${SIGNAL_UPDATER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai-updater:v5.5.1}
     container_name: signal-updater
     profiles: ["updates"]
     restart: unless-stopped
@@ -54,12 +54,14 @@ services:
       - UPDATER_BASE_DIR=/workspace
       - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-quantpilot-ai}
       - UPDATE_TARGET_SERVICE=signal-server
-      - UPDATE_TARGET_IMAGE=${SIGNAL_SERVER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai:v5.5.0}
+      - UPDATE_TARGET_IMAGE=${SIGNAL_SERVER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai:v5.5.1}
       - UPDATE_TARGET_HEALTH_URL=http://signal-server:8000/health
       - UPDATER_ROLLOUT_TIMEOUT_SECS=180
       - UPDATER_HEARTBEAT_SECS=10
     volumes:
       - ./:/workspace:ro
+      - app-data:/workspace/data
+      - ./.env:/workspace/.env
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - signal-server
@@ -140,7 +142,7 @@ services:
   #   container_name: signal-grafana
   #   restart: unless-stopped
   #   environment:
-  #     - GF_SECURITY_ADMIN_PASSWORD=admin
+  #     - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
   #   volumes:
   #     - grafana-data:/var/lib/grafana
   #   ports:
@@ -161,6 +163,9 @@ networks:
 # Volumes
 # ─────────────────────────────────────────────
 volumes:
+  app-data:
+  app-logs:
+  app-trade-logs:
   postgres-data:
   redis-data:
   # prometheus-data:

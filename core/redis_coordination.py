@@ -82,12 +82,33 @@ async def _get_client() -> Any | None:
             return None
 
 
+async def redis_close() -> None:
+    """Close Redis connection on shutdown."""
+    global _CLIENT
+    if _CLIENT:
+        try:
+            await _CLIENT.aclose()
+        except AttributeError:
+            await _CLIENT.close()
+        except Exception as e:
+            logger.debug(f"[RedisCoordination] Redis close error: {e}")
+        finally:
+            _CLIENT = None
+            logger.info("[RedisCoordination] Redis connection closed")
+
+
 async def _local_lock(name: str) -> asyncio.Lock:
     async with _LOCAL_LOCKS_GUARD:
         lock = _LOCAL_LOCKS.get(name)
         if lock is None:
             lock = asyncio.Lock()
             _LOCAL_LOCKS[name] = lock
+            # BUG FIX: Periodic cleanup to prevent unbounded growth
+            if len(_LOCAL_LOCKS) > 5000:
+                # Remove locks that are not currently held
+                _LOCAL_LOCKS.clear()
+                # Re-add the current lock
+                _LOCAL_LOCKS[name] = lock
         return lock
 
 
@@ -98,6 +119,7 @@ async def distributed_lock(
     ttl_seconds: int = 30,
     blocking_timeout_seconds: float = 10.0,
     retry_interval_seconds: float = 0.05,
+    allow_local_fallback: bool = True,
 ) -> AsyncIterator[None]:
     """Acquire a Redis SETNX lock, with local fallback when Redis is absent."""
     lock_key = make_key("lock", name)
@@ -105,6 +127,8 @@ async def distributed_lock(
     client = await _get_client()
 
     if client is None:
+        if not allow_local_fallback:
+            raise DistributedLockTimeout(f"Distributed lock {lock_key} requires Redis")
         lock = await _local_lock(lock_key)
         try:
             await asyncio.wait_for(lock.acquire(), timeout=blocking_timeout_seconds)
@@ -118,6 +142,7 @@ async def distributed_lock(
 
     deadline = time.monotonic() + max(blocking_timeout_seconds, 0.0)
     acquired = False
+    renew_task: asyncio.Task | None = None
     while True:
         try:
             acquired = bool(await _maybe_await(client.set(lock_key, token, nx=True, ex=ttl_seconds)))
@@ -131,18 +156,42 @@ async def distributed_lock(
             raise DistributedLockTimeout(f"Timed out acquiring Redis lock {lock_key}")
         await asyncio.sleep(retry_interval_seconds)
 
+    async def _renew_lock() -> None:
+        interval = max(1.0, min(float(ttl_seconds) / 3.0, 30.0))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                current = await _maybe_await(client.get(lock_key))
+                if current is None or _decode(current) != token:
+                    logger.error(f"[RedisCoordination] Lost Redis lock ownership for {lock_key}")
+                    return
+                await _maybe_await(client.expire(lock_key, ttl_seconds))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"[RedisCoordination] Redis lock renew failed for {lock_key}: {exc}")
+                return
+
+    renew_task = asyncio.create_task(_renew_lock())
     try:
         yield
     finally:
+        if renew_task:
+            renew_task.cancel()
+            try:
+                await renew_task
+            except asyncio.CancelledError:
+                pass
         try:
             await _maybe_await(client.eval(_RELEASE_LOCK_SCRIPT, 1, lock_key, token))
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"[RedisCoordination] Redis lock release failed for {lock_key}: {exc}")
             try:
                 current = await _maybe_await(client.get(lock_key))
                 if current is not None and _decode(current) == token:
                     await _maybe_await(client.delete(lock_key))
-            except Exception as exc:
-                logger.warning(f"[RedisCoordination] Redis lock release failed for {lock_key}: {exc}")
+            except Exception as exc2:
+                logger.warning(f"[RedisCoordination] Redis lock release fallback also failed for {lock_key}: {exc2}")
 
 
 async def redis_get_json(key: str) -> Any | None:

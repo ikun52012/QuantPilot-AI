@@ -1,7 +1,7 @@
 # QuantPilot AI - Deployment Guide
 
 
-> Version: v5.4.0 | Last Updated: 2026-05
+> Version: v5.5.1 | Last Updated: 2026-06
 
 ---
 
@@ -14,7 +14,7 @@
 5. [Environment Variables Configuration](#5-environment-variables-configuration)
 6. [Troubleshooting](#6-troubleshooting)
 7. [Security Checklist](#7-security-checklist)
-8. [New Features in v5.4.0](#8-new-features-in-v540)
+8. [New Features in v5.5.1](#8-new-features-in-v551)
 
 ---
 
@@ -22,7 +22,7 @@
 
 | Component | Minimum Version | Notes |
 |-----------|-----------------|-------|
-| Python | **3.10+ 64-bit** | Python 3.12 64-bit is recommended; avoid 32-bit Windows Python because exchange dependencies such as `ccxt` may fail to build |
+| Python | **3.11+ 64-bit** | Python 3.12 64-bit is recommended; avoid 32-bit Windows Python because exchange dependencies such as `ccxt` may fail to build |
 | pip | 21.0+ | - |
 | Docker | 24.0+ | Docker deployment only |
 | Docker Compose | 2.20+ | Docker deployment only |
@@ -101,7 +101,7 @@ PYTHONIOENCODING=utf-8 uvicorn app:app --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://localhost:8000/health
-# Expected: {"status":"healthy","version":"5.4.0","database":"ok","cache":"ok"}
+# Expected: {"status":"healthy","version":"5.5.1","database":"ok","cache":"ok"}
 ```
 
 Open browser at `http://localhost:8000`, login with default account:
@@ -140,7 +140,7 @@ docker compose up -d
 The production compose file uses the published GHCR image by default:
 
 ```bash
-SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v5.4.0
+SIGNAL_SERVER_IMAGE=ghcr.io/ikun52012/quantpilot-ai:v5.5.1
 ```
 
 If you want the admin panel one-click update button to work, explicitly opt in with
@@ -192,7 +192,7 @@ docker compose exec postgres pg_dump -U signal signal_server > backup_$(date +%Y
 
 For servers without Docker.
 
-### 4.1 Install Python 3.10+
+### 4.1 Install Python 3.11+
 
 ```bash
 # Ubuntu/Debian
@@ -430,7 +430,7 @@ Common causes:
 
 ### Q: Python 3.9 error `TypeError: unsupported type`
 
-Project uses Python 3.10+ native type hint syntax (`list[str]`, `X | Y`), must upgrade Python.
+Project uses Python 3.11+ features such as `StrEnum` and `datetime.UTC`; upgrade Python.
 
 ---
 
@@ -462,7 +462,7 @@ Verify each item before production deployment:
 
 ---
 
-## 8. New Features in v5.4.0
+## 8. New Features in v5.5.1
 
 ### Exchange-Aware Scanner Universe
 - Empty watchlists now scan all tradable symbols on the target exchange, while empty live whitelists allow all symbols in the live universe snapshot
@@ -485,7 +485,7 @@ Verify each item before production deployment:
 - Adaptive score and cooldown state are persisted in `scanner_states` for safe upgrades
 
 ### Release and Operations
-- Docker Compose defaults now point to the versioned `v5.4.0` GHCR images
+- Docker Compose defaults now point to the versioned `v5.5.1` GHCR images
 - Database startup migration adds scanner learning columns to existing deployments automatically
 - Scanner audits are cleaned daily to bound database growth
 

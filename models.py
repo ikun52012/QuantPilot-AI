@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from loguru import logger
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core.utils.common import suggested_limit_timeout_secs
@@ -78,9 +79,42 @@ class TakeProfitLevel(BaseModel):
 
 
 class TakeProfitConfig(BaseModel):
-    """Up to 4 take-profit levels."""
+    """Up to 4 take-profit levels.
+
+    P0-FIX: Added validation for total quantity percentage.
+    """
     enabled: bool = True
     levels: list[TakeProfitLevel] = Field(default_factory=list, max_length=4)
+
+    @field_validator('levels')
+    @classmethod
+    def validate_levels_total(cls, v: list[TakeProfitLevel]) -> list[TakeProfitLevel]:
+        """P0-FIX: Validate that TP quantities sum to reasonable range."""
+        if not v:
+            return v
+
+        total_pct = sum(level.qty_pct for level in v)
+
+        # Allow some flexibility - total should be between 50-100%
+        if total_pct < 50.0:
+            logger.warning(
+                f"[Models] TP quantities sum to {total_pct:.1f}% < 50%. "
+                f"Consider adjusting TP levels to close more of the position."
+            )
+        elif total_pct > 100.0:
+            raise ValueError(
+                f"TP quantities sum to {total_pct:.1f}% > 100%. "
+                f"Cannot close more than 100% of position. "
+                f"Please adjust qty_pct values."
+            )
+        elif total_pct < 100.0:
+            # Warning but allow - remaining position will stay open
+            logger.info(
+                f"[Models] TP quantities sum to {total_pct:.1f}% < 100%. "
+                f"Remaining {100.0 - total_pct:.1f}% will stay open after all TPs hit."
+            )
+
+        return v
 
 
 # ─────────────────────────────────────────────
@@ -110,7 +144,7 @@ class TradingViewSignal(BaseModel):
     timeframe: str = Field(default="60", max_length=20)  # e.g. "60" for 1h
     strategy: str = Field(default="unknown", max_length=120)
     message: str = Field(default="", max_length=2000)
-    timestamp: datetime = Field(default_factory=lambda: utcnow())
+    timestamp: datetime = Field(default_factory=utcnow)
 
     @field_validator("secret")
     @classmethod
@@ -260,7 +294,7 @@ class TradeDecision(BaseModel):
     reason: str = ""
     signal: TradingViewSignal | None = None
     ai_analysis: AIAnalysis | None = None
-    timestamp: datetime = Field(default_factory=lambda: utcnow())
+    timestamp: datetime = Field(default_factory=utcnow)
     # Order type: market or limit
     order_type: str = Field(default="market", description="market or limit")
     # For limit orders: maximum time to wait before cancelling (seconds)
@@ -269,6 +303,7 @@ class TradeDecision(BaseModel):
     exit_quality_score: float = Field(default=100.0, ge=0.0, le=100.0)
     exit_quality_reasons: list[str] = Field(default_factory=list)
     position_size_multiplier: float = Field(default=1.0, ge=0.0, le=1.0)
+    idempotency_key: str = Field(default="", max_length=128)
 
     @model_validator(mode="after")
     def _apply_signal_timeframe_timeout(self):
@@ -282,7 +317,7 @@ class TradeDecision(BaseModel):
 # ─────────────────────────────────────────────
 class TradeLog(BaseModel):
     id: str = ""
-    timestamp: datetime = Field(default_factory=lambda: utcnow())
+    timestamp: datetime = Field(default_factory=utcnow)
     ticker: str
     direction: str
     entry_price: float

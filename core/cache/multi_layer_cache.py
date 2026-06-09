@@ -17,7 +17,7 @@ Features:
 """
 import asyncio
 import hashlib
-import pickle
+import json
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -180,7 +180,8 @@ class MultiLayerCache:
             try:
                 cached_bytes = await asyncio.to_thread(self._l2_client.get, key)
                 if cached_bytes:
-                    value = pickle.loads(cached_bytes)
+                    # BUG FIX: Use JSON instead of pickle to prevent RCE
+                    value = json.loads(cached_bytes)
                     await self._record_hit(CacheLayer.L2_REDIS)
                     logger.debug(f"[P1-FIX] L2 Redis cache hit: {key}")
 
@@ -198,8 +199,9 @@ class MultiLayerCache:
                 cache_file = self._l3_cache_dir / f"{self._hash_key(key)}.cache"
                 if cache_file.exists():
                     async with self._l3_lock:
-                        with open(cache_file, "rb") as f:
-                            data = pickle.load(f)
+                        with open(cache_file, encoding="utf-8") as f:
+                            # BUG FIX: Use JSON instead of pickle to prevent RCE
+                            data = json.load(f)
                         timestamp, ttl, value = data["timestamp"], data["ttl"], data["value"]
 
                         if now - timestamp < ttl:
@@ -280,7 +282,8 @@ class MultiLayerCache:
         if self._l2_enabled and self._l2_client:
             try:
                 ttl_l2 = ttl * 5  # L2 TTL = 5x L1 TTL
-                cached_bytes = pickle.dumps(value)
+                # BUG FIX: Use JSON instead of pickle to prevent RCE
+                cached_bytes = json.dumps(value, default=str).encode("utf-8")
                 await asyncio.to_thread(
                     self._l2_client.setex,
                     key,
@@ -297,13 +300,14 @@ class MultiLayerCache:
                 cache_file = self._l3_cache_dir / f"{self._hash_key(key)}.cache"
                 ttl_l3 = ttl * 60  # L3 TTL = 60x L1 TTL
                 async with self._l3_lock:
-                    with open(cache_file, "wb") as f:
-                        pickle.dump({
+                    # BUG FIX: Use JSON instead of pickle to prevent RCE
+                    with open(cache_file, "w", encoding="utf-8") as f:
+                        json.dump({
                             "key": key,
                             "value": value,
                             "timestamp": now,
                             "ttl": ttl_l3,
-                        }, f)
+                        }, f, default=str)
                 logger.debug(f"[P1-FIX] L3 disk cache set: {key} (ttl={ttl_l3}s)")
             except Exception as e:
                 logger.warning(f"[P1-FIX] L3 disk cache set error: {e}")
@@ -406,8 +410,9 @@ class MultiLayerCache:
                     expired_files = []
                     for cache_file in self._l3_cache_dir.glob("*.cache"):
                         try:
-                            with open(cache_file, "rb") as f:
-                                data = pickle.load(f)
+                            # BUG FIX: Use JSON instead of pickle to prevent RCE
+                            with open(cache_file, encoding="utf-8") as f:
+                                data = json.load(f)
                             if now - data["timestamp"] > data["ttl"]:
                                 expired_files.append(cache_file)
                         except Exception:
@@ -494,7 +499,7 @@ class MultiLayerCache:
             import redis
             self._l2_client = redis.from_url(
                 self._l2_redis_url,
-                decode_responses=False,  # For pickle compatibility
+                decode_responses=True,  # Use JSON serialization, not pickle
             )
 
             # Test connection

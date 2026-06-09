@@ -2,6 +2,8 @@
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
+from core.config import settings
+
 
 def custom_openapi(app: FastAPI):
     """Generate enhanced OpenAPI documentation."""
@@ -11,7 +13,7 @@ def custom_openapi(app: FastAPI):
 
     openapi_schema = get_openapi(
         title="QuantPilot AI Trading API",
-        version="4.3.0",
+        version=settings.app_version,
         description="""
 ## QuantPilot AI - Production-grade Crypto Trading Platform
 

@@ -41,15 +41,15 @@ echo -e "  ${CYAN}TradingView Signal Server - 启动脚本${NC}"
 echo -e "  ${CYAN}======================================${NC}"
 
 # ─────────────────────────────────────────────
-# 查找 Python 3.10+
+# 查找 Python 3.11+
 # ─────────────────────────────────────────────
 find_python() {
-    for py in python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
+    for py in python3.14 python3.13 python3.12 python3.11 python3 python; do
         if command -v "$py" &>/dev/null; then
             ver=$("$py" -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}')" 2>/dev/null)
             major=$(echo "$ver" | cut -d. -f1)
             minor=$(echo "$ver" | cut -d. -f2)
-            if [ "$major" -gt 3 ] || ([ "$major" -eq 3 ] && [ "$minor" -ge 10 ]); then
+            if [ "$major" -gt 3 ] || ([ "$major" -eq 3 ] && [ "$minor" -ge 11 ]); then
                 echo "$py"
                 return 0
             fi
@@ -58,7 +58,7 @@ find_python() {
     return 1
 }
 
-PYTHON=$(find_python) || { fail "未找到 Python 3.10+，请先安装"; exit 1; }
+PYTHON=$(find_python) || { fail "未找到 Python 3.11+，请先安装"; exit 1; }
 ok "Python: $($PYTHON --version)"
 
 # ─────────────────────────────────────────────

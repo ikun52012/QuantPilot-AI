@@ -693,6 +693,12 @@ class UnifiedOHLCVProvider:
         return await self._fetch_yfinance_chart(symbol, interval, range_value)
 
     async def _fetch_yfinance_chart(self, symbol: str, interval: str, range_value: str) -> list[NormalizedCandle]:
+        # SSRF prevention: validate symbol against allowlist pattern
+        import re
+        if not re.match(r"^[A-Z0-9/.^=-]{1,20}$", symbol.upper()):
+            logger.warning(f"[Scanner/OHLCV] Invalid yfinance symbol rejected: {symbol}")
+            return []
+
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         params = {"interval": interval, "range": range_value}
         headers = {"User-Agent": "Mozilla/5.0"}

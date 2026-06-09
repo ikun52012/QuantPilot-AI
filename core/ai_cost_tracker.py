@@ -9,25 +9,25 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
-# Approximate cost per 1M tokens (input/output) as of 2026
+# Approximate cost per 1M tokens (input/output) as of 2025
 _COST_PER_1M: dict[str, tuple[float, float]] = {
-    "gpt-5.5": (5.00, 30.00),
-    "gpt-5.4": (2.50, 15.00),
-    "gpt-5.4-mini": (0.75, 4.50),
-    "gpt-5.4-nano": (0.30, 1.50),
+    # OpenAI Models
     "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
-    "claude-opus-4-7": (5.00, 25.00),
-    "claude-opus-4-6": (5.00, 25.00),
-    "claude-sonnet-4-6": (3.00, 15.00),
-    "claude-sonnet-4-5": (3.00, 15.00),
-    "claude-haiku-4-5": (1.00, 5.00),
+    "gpt-4-turbo": (10.00, 30.00),
+    "gpt-4": (30.00, 60.00),
+    "gpt-3.5-turbo": (0.50, 1.50),
+    # Anthropic Models
+    "claude-3-opus-20240229": (15.00, 75.00),
+    "claude-3-sonnet-20240229": (3.00, 15.00),
+    "claude-3-haiku-20240307": (0.25, 1.25),
     "claude-3-5-sonnet-latest": (3.00, 15.00),
     "claude-3-5-haiku-latest": (0.80, 4.00),
-    "deepseek-v4-pro": (12.00, 24.00),
-    "deepseek-v4-flash": (1.00, 2.00),
+    # DeepSeek Models
     "deepseek-chat": (1.00, 2.00),
+    "deepseek-coder": (1.00, 2.00),
     "deepseek-reasoner": (0.55, 2.19),
+    # Mistral Models
     "mistral-large-latest": (2.00, 6.00),
     "mistral-small-latest": (0.20, 0.60),
     "codestral-latest": (0.30, 0.90),
@@ -98,7 +98,7 @@ class AICostTracker:
     def _estimate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
         """Estimate cost based on known pricing."""
         model_lower = model.lower()
-        for key, (input_cost, output_cost) in _COST_PER_1M.items():
+        for key, (input_cost, output_cost) in sorted(_COST_PER_1M.items(), key=lambda item: len(item[0]), reverse=True):
             if key in model_lower:
                 return (prompt_tokens * input_cost + completion_tokens * output_cost) / 1_000_000
         return 0.0

@@ -171,7 +171,6 @@ async def create_subscription(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new subscription."""
-    # Get plan
     result = await db.execute(
         select(SubscriptionPlanModel).where(SubscriptionPlanModel.id == req.plan_id)
     )
@@ -192,22 +191,28 @@ async def create_subscription(
 
     now = utcnow()
     activate_now = plan.price_usdt <= 0 or (db_user.balance_usdt or 0) >= plan.price_usdt
+    original_balance = db_user.balance_usdt
 
     if activate_now and plan.price_usdt > 0:
         db_user.balance_usdt = (db_user.balance_usdt or 0) - plan.price_usdt
 
-    subscription = SubscriptionModel(
-        user_id=user["sub"],
-        plan_id=plan.id,
-        status="pending",
-        start_date=None,
-        end_date=None,
-    )
-    db.add(subscription)
-    await db.flush()
-    if activate_now:
-        await _activate_subscription_row(db, subscription, duration_days=plan.duration_days, now=now)
-    await db.commit()
+    try:
+        subscription = SubscriptionModel(
+            user_id=user["sub"],
+            plan_id=plan.id,
+            status="pending",
+            start_date=None,
+            end_date=None,
+        )
+        db.add(subscription)
+        await db.flush()
+        if activate_now:
+            await _activate_subscription_row(db, subscription, duration_days=plan.duration_days, now=now)
+        await db.commit()
+    except Exception:
+        if activate_now and plan.price_usdt > 0 and original_balance is not None:
+            db_user.balance_usdt = original_balance
+        raise
 
     return {
         "id": subscription.id,
@@ -234,9 +239,18 @@ async def list_user_subscriptions(
     )
     subs = result.scalars().all()
 
+    # Batch-fetch all plan IDs to avoid N+1 queries
+    plan_ids = list({s.plan_id for s in subs if s.plan_id})
+    plans = {}
+    if plan_ids:
+        plan_result = await db.execute(
+            select(SubscriptionPlanModel).where(SubscriptionPlanModel.id.in_(plan_ids))
+        )
+        plans = {p.id: p for p in plan_result.scalars().all()}
+
     output = []
     for s in subs:
-        plan = await db.get(SubscriptionPlanModel, s.plan_id)
+        plan = plans.get(s.plan_id)
         output.append({
             "id": s.id,
             "plan_name": plan.name if plan else None,

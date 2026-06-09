@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from core.auth import AUTH_COOKIE_NAME, require_admin, verify_token
 from core.cache import cache
 from core.config import settings
-from core.database import db_manager
+from core.database import db_manager, get_user_by_id
 from core.lifespan import lifespan
 from core.metrics import metrics_endpoint
 from core.middleware import setup_middleware
@@ -250,7 +250,16 @@ def _setup_utility_routes(app: FastAPI):
             token = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else request.cookies.get(AUTH_COOKIE_NAME, "")
             if token:
                 auth_payload = verify_token(token)
-            if not auth_payload or auth_payload.get("role") != "admin" or auth_payload.get("2fa_pending"):
+            if not auth_payload or auth_payload.get("2fa_pending"):
+                raise HTTPException(status_code=403, detail="Admin access required")
+            async with db_manager.async_session_factory() as session:
+                db_user = await get_user_by_id(session, str(auth_payload.get("sub") or ""))
+            try:
+                token_ver = int(auth_payload.get("ver", 0))
+                user_ver = int(db_user.token_version) if db_user and db_user.token_version is not None else 0
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=403, detail="Admin access required") from None
+            if not db_user or not db_user.is_active or db_user.role != "admin" or token_ver != user_ver:
                 raise HTTPException(status_code=403, detail="Admin access required")
         return await metrics_endpoint()
 
@@ -333,9 +342,22 @@ def create_app() -> FastAPI:
     # Global error handler
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
+        import re
+
         from loguru import logger
         request_id = getattr(request.state, "request_id", "unknown")
-        logger.error(f"Unhandled exception (rid={request_id}): {exc}", exc_info=True)
+        exc_str = str(exc)
+        sensitive_patterns = [
+            (r'(password["\s:=]+)["\']?[^"\'\s,}]+', r'\1***'),
+            (r'(token["\s:=]+)["\']?[^"\'\s,}]+', r'\1***'),
+            (r'(secret["\s:=]+)["\']?[^"\'\s,}]+', r'\1***'),
+            (r'(api[_-]?key["\s:=]+)["\']?[^"\'\s,}]+', r'\1***'),
+            (r'(authorization["\s:=]+)["\']?[^"\'\s,}]+', r'\1***'),
+        ]
+        sanitized_exc = exc_str
+        for pattern, replacement in sensitive_patterns:
+            sanitized_exc = re.sub(pattern, replacement, sanitized_exc, flags=re.IGNORECASE)
+        logger.error(f"Unhandled exception (rid={request_id}): {sanitized_exc}", exc_info=False)
         return JSONResponse(
             status_code=500,
             content={"status": "error", "detail": "Internal server error", "reason": "Internal server error", "request_id": request_id},

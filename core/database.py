@@ -2,7 +2,7 @@
 Signal Server - Database Layer (Enhanced)
 Async SQLAlchemy with PostgreSQL/SQLite support.
 
-FIXME: This module is 2600+ lines and should be split into:
+ARCHITECTURE-NOTE: This module is 2600+ lines and could be split into:
   - core/db/models.py       (SQLAlchemy ORM models)
   - core/db/manager.py      (DatabaseManager class)
   - core/db/migrations.py   (legacy DDL helpers - prefer Alembic)
@@ -10,6 +10,9 @@ FIXME: This module is 2600+ lines and should be split into:
   - core/db/trade_crud.py   (trade/position CRUD operations)
   - core/db/scanner_crud.py (scanner state CRUD operations)
   - core/db/seed.py         (seed data / bootstrap)
+
+NOTE: Keeping as single file for now due to tight coupling between models and CRUD operations.
+Consider refactoring when module grows beyond 3000 lines.
 """
 import asyncio
 import hashlib
@@ -120,6 +123,11 @@ class SubscriptionPlanModel(Base):
 class SubscriptionModel(Base):
     """User subscription model."""
     __tablename__ = "subscriptions"
+    __table_args__ = (
+        # P4-FIX: Composite index for active subscription lookups
+        # (used by get_user_active_subscription which filters by user_id, status, end_date)
+        Index("idx_subscriptions_user_status_end", "user_id", "status", "end_date"),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
@@ -136,6 +144,10 @@ class SubscriptionModel(Base):
 class PaymentModel(Base):
     """Payment model."""
     __tablename__ = "payments"
+    __table_args__ = (
+        # P4-FIX: Composite index for payment status queries by user
+        Index("idx_payments_user_status", "user_id", "status"),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
@@ -158,6 +170,8 @@ class TradeModel(Base):
     __tablename__ = "trades"
     __table_args__ = (
         Index("idx_trades_user_timestamp", "user_id", "timestamp"),
+        # P4-FIX: Composite index for executed trades by user
+        Index("idx_trades_user_execute_timestamp", "user_id", "execute", "timestamp"),
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -364,6 +378,16 @@ class PositionModel(Base):
     """Position tracking model.
 
     P1-FIX: Enhanced indexes for position_monitor and analytics queries.
+
+    P4-NOTE: Financial fields (entry_price, quantity, pnl_*, margin, etc.) use
+    Float for backward compatibility with existing data. For new deployments,
+    consider migrating to Numeric(precision=24, scale=8) to avoid floating-point
+    precision errors in financial calculations. Migration requires:
+      1. Alembic migration to change column types
+      2. Updating all arithmetic operations to use Decimal
+      3. Updating JSON serialization to handle Decimal -> str conversion
+    Until migration, use core.utils.common.safe_float and round results to
+    8 decimal places before persistence to mitigate precision drift.
     """
     __tablename__ = "positions"
     __table_args__ = (
@@ -615,10 +639,16 @@ class DatabaseManager:
             return bool(re.match(r'^[a-z_][a-z0-9_]*$', name))
 
         def validate_ddl(ddl: str) -> bool:
-            upper_ddl = ddl.upper().strip()
+            ddl_stripped = ddl.strip()
+            upper_ddl = ddl_stripped.upper()
             if not any(t in upper_ddl for t in VALID_COLUMN_TYPES):
                 return False
-            if any(ch in upper_ddl for ch in (";", "--", "/*", "DROP", "DELETE", "INSERT", "UPDATE")):
+            dangerous_patterns = (
+                r";", r"--", r"/\*", r"\*/", r"\bDROP\b", r"\bDELETE\b",
+                r"\bINSERT\b", r"\bUPDATE\b", r"\bALTER\b", r"\bEXEC\b",
+                r"\bTRUNCATE\b", r"\bGRANT\b", r"\bREVOKE\b",
+            )
+            if any(re.search(p, upper_ddl) for p in dangerous_patterns):
                 return False
             return True
 
@@ -1325,7 +1355,11 @@ def _effective_remaining_quantity(position: PositionModel, opened_qty: float) ->
         and not _has_partial_position_fills(position)
     ):
         return opened_qty
-    return 0.0
+
+    # Position is fully closed or fully settled. Add dust tolerance to avoid
+    # returning tiny positive values due to floating-point rounding in qty_pct sums.
+    _DUST_QTY = 1e-8
+    return 0.0 if remaining_qty < _DUST_QTY else remaining_qty
 
 
 def _take_profit_levels_from_entry(entry: dict) -> list[dict]:
@@ -1499,6 +1533,7 @@ async def record_position_partial_close_trade_async(
     order_details: dict | None = None,
     close_trade_id: str | None = None,
     closed_at: datetime | None = None,
+    create_trade: bool = True,
 ) -> tuple[float, float, float]:
     """Close part of a tracked position and record the realised PnL event."""
     write_ledger = bool(getattr(position, "id", None) and hasattr(session, "execute") and hasattr(session, "add"))
@@ -1512,11 +1547,15 @@ async def record_position_partial_close_trade_async(
         except Exception as lock_exc:
             logger.warning(f"[Database] partial close lock conflict for {position.id}: {lock_exc}. Retrying after 1s...")
             await asyncio.sleep(1.0)
-            result = await session.execute(
-                select(PositionModel)
-                .where(PositionModel.id == position.id)
-                .with_for_update(nowait=True)
-            )
+            try:
+                result = await session.execute(
+                    select(PositionModel)
+                    .where(PositionModel.id == position.id)
+                    .with_for_update(nowait=True)
+                )
+            except Exception as retry_exc:
+                logger.error(f"[Database] partial close retry FAILED for {position.id}: {retry_exc}")
+                raise
 
         locked_position = result.scalar_one_or_none()
         if not locked_position:
@@ -1587,7 +1626,7 @@ async def record_position_partial_close_trade_async(
             logger.error(f"[Database] CRITICAL: Failed to record partial PnL for position {locked_position.id}")
             locked_position.close_reason = (locked_position.close_reason or "") + " | risk_tracker_failed"
 
-    if not write_ledger:
+    if not write_ledger or not create_trade:
         if hasattr(session, "flush"):
             await session.flush()
         return round(event_pnl_pct, 6), event_pnl_usdt, locked_position.remaining_quantity
@@ -1721,7 +1760,7 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
         return entry
 
     status = str(entry.get("order_status") or "").lower()
-    if status not in {"filled", "simulated", "closed", "pending", "partial", "partial_protection"}:
+    if status not in {"filled", "simulated", "closed", "pending", "partial", "partial_closed", "partial_protection"}:
         return entry
 
     direction = str(entry.get("direction") or "").lower()
@@ -1891,18 +1930,43 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
         return entry
 
     entry["position_id"] = position.id
-    entry["position_event"] = "closed"
     entry["close_reason"] = "manual_close"
-    pnl_pct, pnl_usdt = await close_position_async(
-        session=session,
-        position=position,
-        exit_price=exit_price,
-        close_reason="manual_close",
-        close_trade_id=entry.get("id"),
-    )
+    if status == "partial_closed":
+        opened_qty = max(_safe_float(position.quantity), 0.0)
+        remaining_qty = _effective_remaining_quantity(position, opened_qty)
+        close_qty = _safe_float(
+            order_details.get("closed_quantity")
+            or order_details.get("filled_quantity")
+            or order_details.get("quantity")
+        )
+        reported_remaining = _safe_float(order_details.get("remaining_contracts"), -1.0)
+        if close_qty <= 0 and reported_remaining >= 0:
+            close_qty = max(0.0, remaining_qty - reported_remaining)
+        pnl_pct, pnl_usdt, new_remaining = await record_position_partial_close_trade_async(
+            session=session,
+            position=position,
+            exit_price=exit_price,
+            close_quantity=close_qty,
+            close_reason="manual_close",
+            order_status="partial_closed",
+            order_details=order_details,
+            close_trade_id=entry.get("id"),
+            create_trade=False,
+        )
+        entry["position_event"] = "closed" if new_remaining <= max(0.00000001, opened_qty * 0.000001) else "partial_closed"
+        entry["order_status"] = "closed" if entry["position_event"] == "closed" else "partial_closed"
+    else:
+        entry["position_event"] = "closed"
+        pnl_pct, pnl_usdt = await close_position_async(
+            session=session,
+            position=position,
+            exit_price=exit_price,
+            close_reason="manual_close",
+            close_trade_id=entry.get("id"),
+        )
+        entry["order_status"] = "closed"
     entry["pnl_pct"] = pnl_pct
     entry["pnl_usdt"] = pnl_usdt
-    entry["order_status"] = "closed"
     await session.flush()
 
     return entry
@@ -1992,7 +2056,7 @@ async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, wind
     P0-FIX: Ignore failed/error/cancelled statuses to allow legitimate retries after stale reservations.
     """
     cutoff = utcnow() - timedelta(seconds=window_secs)
-    ignored_statuses = {"failed", "error", "cancelled", "rejected"}
+    ignored_statuses = {"failed", "cancelled", "rejected"}
     result = await session.execute(
         select(WebhookEventModel)
         .where(

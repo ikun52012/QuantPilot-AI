@@ -57,12 +57,13 @@ class BacktestResultResponse(BaseModel):
 
 _backtest_results_cache: dict[str, dict] = {}
 _backtest_tasks: dict[str, asyncio.Task] = {}
+_BACKTEST_CACHE_LOCK = asyncio.Lock()  # Protect concurrent access to cache dicts
 _BACKTEST_CACHE_TTL = 3600  # 1 hour TTL
 _BACKTEST_CACHE_MAX_SIZE = 100  # Max 100 cached results
 
 
 def _cleanup_backtest_cache():
-    """Clean up expired and oversized backtest cache."""
+    """Clean up expired and oversized backtest cache. Must be called with _BACKTEST_CACHE_LOCK held."""
     now = datetime.now(UTC)
     expired_keys = []
 
@@ -74,9 +75,8 @@ def _cleanup_backtest_cache():
                 expired_keys.append(task_id)
 
     for key in expired_keys:
-        del _backtest_results_cache[key]
-        if key in _backtest_tasks:
-            del _backtest_tasks[key]
+        _backtest_results_cache.pop(key, None)
+        _backtest_tasks.pop(key, None)
 
     # Enforce max size
     if len(_backtest_results_cache) > _BACKTEST_CACHE_MAX_SIZE:
@@ -85,9 +85,8 @@ def _cleanup_backtest_cache():
             key=lambda k: _backtest_results_cache[k].get("completed_at", ""),
         )
         for key in sorted_keys[:len(_backtest_results_cache) - _BACKTEST_CACHE_MAX_SIZE]:
-            del _backtest_results_cache[key]
-            if key in _backtest_tasks:
-                del _backtest_tasks[key]
+            _backtest_results_cache.pop(key, None)
+            _backtest_tasks.pop(key, None)
 
 
 @router.post("/run", response_model=BacktestResultResponse)
@@ -165,8 +164,9 @@ async def start_async_backtest(
     admin: dict = Depends(get_current_admin),
 ):
     """Start a backtest asynchronously and return task ID."""
-    if task_id in _backtest_tasks:
-        raise HTTPException(400, f"Task {task_id} already running")
+    async with _BACKTEST_CACHE_LOCK:
+        if task_id in _backtest_tasks:
+            raise HTTPException(400, f"Task {task_id} already running")
 
     async def _run_backtest_task():
         try:
@@ -177,7 +177,8 @@ async def start_async_backtest(
             )
 
             if not ohlcv_data:
-                _backtest_results_cache[task_id] = {"status": "error", "error": "No data"}
+                async with _BACKTEST_CACHE_LOCK:
+                    _backtest_results_cache[task_id] = {"status": "error", "error": "No data"}
                 return
 
             strategy = _get_strategy(request.strategy, {**request.strategy_params, "ticker": request.ticker})
@@ -204,29 +205,33 @@ async def start_async_backtest(
             engine.load_data(ohlcv_data)
             result = engine.run()
 
-            _backtest_results_cache[task_id] = {
-                "status": "completed",
-                "result": result,
-                "completed_at": datetime.now(UTC).isoformat(),
-            }
+            async with _BACKTEST_CACHE_LOCK:
+                _backtest_results_cache[task_id] = {
+                    "status": "completed",
+                    "result": result,
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
 
-            # Clean up expired cache entries
-            _cleanup_backtest_cache()
+                # Clean up expired cache entries
+                _cleanup_backtest_cache()
 
         except HTTPException as e:
-            _backtest_results_cache[task_id] = {
-                "status": "error",
-                "error": e.detail,
-                "status_code": e.status_code,
-            }
+            async with _BACKTEST_CACHE_LOCK:
+                _backtest_results_cache[task_id] = {
+                    "status": "error",
+                    "error": e.detail,
+                    "status_code": e.status_code,
+                }
         except Exception as e:
-            _backtest_results_cache[task_id] = {"status": "error", "error": str(e)}
+            async with _BACKTEST_CACHE_LOCK:
+                _backtest_results_cache[task_id] = {"status": "error", "error": str(e)}
 
         finally:
-            if task_id in _backtest_tasks:
-                del _backtest_tasks[task_id]
+            async with _BACKTEST_CACHE_LOCK:
+                _backtest_tasks.pop(task_id, None)
 
-    _backtest_tasks[task_id] = asyncio.create_task(_run_backtest_task())
+    async with _BACKTEST_CACHE_LOCK:
+        _backtest_tasks[task_id] = asyncio.create_task(_run_backtest_task())
 
     return {"task_id": task_id, "status": "running", "message": "Backtest started"}
 
@@ -237,12 +242,13 @@ async def get_backtest_result(
     admin: dict = Depends(get_current_admin),
 ):
     """Get backtest result by task ID."""
-    if task_id not in _backtest_results_cache:
-        if task_id in _backtest_tasks:
-            return {"task_id": task_id, "status": "running"}
-        raise HTTPException(404, f"Task {task_id} not found")
+    async with _BACKTEST_CACHE_LOCK:
+        if task_id not in _backtest_results_cache:
+            if task_id in _backtest_tasks:
+                return {"task_id": task_id, "status": "running"}
+            raise HTTPException(404, f"Task {task_id} not found")
 
-    cached = _backtest_results_cache[task_id]
+        cached = dict(_backtest_results_cache[task_id])
 
     return {
         "task_id": task_id,

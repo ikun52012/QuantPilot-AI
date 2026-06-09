@@ -9,7 +9,7 @@ Features:
     - Version-specific request/response schemas
     - Automatic version detection from headers
 """
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
 from loguru import logger
@@ -81,7 +81,7 @@ class APIVersionManager:
 
         # Store metadata
         self.version_metadata[version] = metadata or {
-            "release_date": datetime.utcnow().isoformat(),
+            "release_date": datetime.now(UTC).isoformat(),
             "stability": "stable",
         }
 
@@ -106,7 +106,7 @@ class APIVersionManager:
         self.deprecated_versions[version] = {
             "sunset_date": sunset_date,
             "migration_guide_url": migration_guide_url or "",
-            "deprecated_at": datetime.utcnow().isoformat(),
+            "deprecated_at": datetime.now(UTC).isoformat(),
         }
 
         # Update metadata
@@ -268,7 +268,7 @@ class APIVersionManager:
 
         try:
             sunset_date = datetime.fromisoformat(sunset_date_str)
-            return datetime.utcnow() > sunset_date
+            return datetime.now(UTC).replace(tzinfo=None) > sunset_date
         except Exception:
             return False
 
@@ -331,39 +331,8 @@ def add_version_middleware(app):
     logger.info("[P2-FIX] API version middleware added")
 
 
-# Example v1 and v2 routers
+# Versioned routers should be created in individual route modules
+# and registered with the APIVersionManager in the app factory.
+# Do NOT define example endpoints at module level in production code.
 v1_router = create_versioned_router("v1", tags=["Trading v1"])
 v2_router = create_versioned_router("v2", tags=["Trading v2"])
-
-
-# Example endpoints for different versions
-@v1_router.post("/trade/execute")
-async def execute_trade_v1(request: Request):
-    """Execute trade (v1 API - deprecated)."""
-    return {
-        "version": "v1",
-        "status": "success",
-        "message": "Trade executed (legacy API)",
-    }
-
-
-@v2_router.post("/trade/execute")
-async def execute_trade_v2(request: Request):
-    """Execute trade (v2 API - current)."""
-    return {
-        "version": "v2",
-        "status": "success",
-        "message": "Trade executed (modern API)",
-        "enhanced_features": ["multi_tp", "trailing_stop", "dynamic_leverage"],
-    }
-
-
-@v2_router.get("/versions")
-async def get_api_versions():
-    """Get API version information."""
-    manager = APIVersionManager(default_version="v1", latest_version="v2")
-    manager.register_version("v1", v1_router)
-    manager.register_version("v2", v2_router)
-    manager.deprecate_version("v1", sunset_date="2025-08-01", migration_guide_url="/docs/api-migration")
-
-    return manager.get_version_info_response()

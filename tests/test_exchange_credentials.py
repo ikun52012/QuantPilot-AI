@@ -56,7 +56,7 @@ def _assert_empty_credentials(captured: dict):
 
 
 @pytest.mark.asyncio
-async def test_execute_trade_does_not_fallback_to_global_credentials_for_user(monkeypatch):
+async def test_execute_trade_rejects_user_live_without_credentials(monkeypatch):
     processor = SignalProcessor(session=AsyncMock())
     decision = processor._build_trade_decision(
         TradingViewSignal(
@@ -98,8 +98,7 @@ async def test_execute_trade_does_not_fallback_to_global_credentials_for_user(mo
 
     fake_user = SimpleNamespace(live_trading_allowed=True, max_leverage=20, max_position_pct=10.0)
 
-    async def fake_execute_trade(_decision, exchange_config):
-        return {"status": "simulated", "captured_exchange_config": dict(exchange_config)}
+    fake_execute_trade = AsyncMock(return_value={"status": "simulated"})
 
     monkeypatch.setattr("services.signal_processor.get_user_by_id", AsyncMock(return_value=fake_user))
     monkeypatch.setattr("services.signal_processor.get_user_active_subscription", AsyncMock(return_value=object()))
@@ -130,14 +129,9 @@ async def test_execute_trade_does_not_fallback_to_global_credentials_for_user(mo
 
     result = await processor._execute_trade(decision, "user-1", user_settings)
 
-    config = result["captured_exchange_config"]
-    assert config["exchange"] == "okx"
-    assert config["api_key"] == ""
-    assert config["api_secret"] == ""
-    assert config["password"] == ""
-    assert config["live_trading"] is True
-    assert config["sandbox_mode"] is True
-    assert config["limit_timeout_overrides"] == {"1h": 3600}
+    assert result["status"] == "rejected"
+    assert "credentials" in result["reason"]
+    fake_execute_trade.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -202,11 +196,13 @@ async def test_execute_trade_preserves_explicit_empty_limit_timeout_overrides(mo
     result = await processor._execute_trade(
         decision,
         "user-1",
-        {"exchange": {"name": "okx", "limit_timeout_overrides": {}, "live_trading": True}},
+        {"exchange": {"name": "okx", "limit_timeout_overrides": {}, "live_trading": "false", "sandbox_mode": "false"}},
     )
 
     config = result["captured_exchange_config"]
     assert config["limit_timeout_overrides"] == {}
+    assert config["live_trading"] is False
+    assert config["sandbox_mode"] is False
 
 
 @pytest.mark.asyncio
@@ -287,6 +283,80 @@ async def test_exchange_execute_trade_preserves_explicit_empty_credentials(monke
 
     assert result["status"] == "filled"
     _assert_empty_credentials(captured)
+
+
+@pytest.mark.asyncio
+async def test_exchange_execute_trade_treats_string_false_as_paper(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(exchange_module, "get_market_limits", lambda *args, **kwargs: {})
+
+    def fail_if_live(*args, **kwargs):
+        raise AssertionError("live exchange client should not be created")
+
+    monkeypatch.setattr(exchange_module, "_get_or_create_exchange", fail_if_live)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            order_type="market",
+        ),
+        {"live_trading": "false", "sandbox_mode": "false"},
+    )
+
+    assert result["status"] == "simulated"
+
+
+@pytest.mark.asyncio
+async def test_exchange_execute_trade_blocks_live_entry_when_global_live_disabled(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(settings.exchange, "live_trading", False)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            order_type="market",
+        ),
+        {"live_trading": True, "sandbox_mode": False},
+    )
+
+    assert result["status"] == "rejected"
+    assert "LIVE_TRADING=false" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_execute_trade_close_uses_requested_quantity(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(exchange_module, "_get_or_create_exchange", lambda **kwargs: SimpleNamespace(options={}))
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    close_position = AsyncMock(return_value={"status": "partial_closed", "remaining_contracts": 0.75})
+    monkeypatch.setattr(exchange_module, "_close_position", close_position)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.CLOSE_LONG,
+            ticker="BTCUSDT",
+            quantity=0.25,
+            idempotency_key="webhook-close-1",
+        ),
+        {"live_trading": True, "sandbox_mode": False, "market_type": "contract"},
+    )
+
+    assert result["status"] == "partial_closed"
+    close_position.assert_awaited_once()
+    assert close_position.await_args.kwargs["close_quantity"] == pytest.approx(0.25)
+    assert close_position.await_args.kwargs["client_order_id"].startswith("qp_")
 
 
 @pytest.mark.asyncio
@@ -657,6 +727,47 @@ async def test_close_position_requires_exchange_flat_confirmation(monkeypatch):
 
     assert result["status"] == "close_unconfirmed"
     assert result["remaining_contracts"] == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_close_position_partial_quantity_does_not_full_close(monkeypatch):
+    monkeypatch.setattr(exchange_module.asyncio, "sleep", AsyncMock())
+
+    class FakeExchange:
+        id = "binance"
+        options = {"defaultType": "future"}
+
+        def __init__(self):
+            self.remaining = 2.0
+            self.create_calls = []
+
+        def load_markets(self):
+            return {"BTC/USDT:USDT": {"limits": {"amount": {}}, "precision": {"amount": 8}}}
+
+        def fetch_positions(self, symbols):
+            if self.remaining <= 0:
+                return []
+            return [{"symbol": "BTC/USDT:USDT", "side": "long", "contracts": self.remaining, "markPrice": 100.0}]
+
+        def create_order(self, **kwargs):
+            self.create_calls.append(kwargs)
+            self.remaining = max(0.0, self.remaining - kwargs["amount"])
+            return {"id": "close-partial", "status": "closed", "filled": kwargs["amount"], "average": 99.0}
+
+    fake_exchange = FakeExchange()
+
+    result = await exchange_module._close_position(
+        fake_exchange,
+        "BTC/USDT:USDT",
+        position_side="long",
+        close_quantity=0.5,
+        client_order_id="qp_partial",
+    )
+
+    assert result["status"] == "partial_closed"
+    assert result["remaining_contracts"] == pytest.approx(1.5)
+    assert fake_exchange.create_calls[0]["amount"] == pytest.approx(0.5)
+    assert fake_exchange.create_calls[0]["params"]["clientOrderId"] == "qp_partial"
 
 
 @pytest.mark.asyncio

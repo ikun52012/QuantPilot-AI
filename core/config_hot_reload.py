@@ -13,13 +13,21 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+    _WATCHDOG_AVAILABLE = True
+except ImportError:
+    _WATCHDOG_AVAILABLE = False
+    FileSystemEventHandler = object
+    Observer = object
+    logger.warning("[ConfigHotReload] watchdog not installed, hot-reload disabled")
 
 
 class ConfigHotReloader:
@@ -104,7 +112,7 @@ class ConfigHotReloader:
                 logger.warning(f"[P2-FIX] Config file not found: {self.config_path}")
                 return {}
 
-            with open(self.config_path) as f:
+            with open(self.config_path, encoding="utf-8") as f:
                 config = json.load(f)
 
             return config
@@ -127,11 +135,15 @@ class ConfigHotReloader:
 
     async def start(self) -> None:
         """Start watching config file for changes."""
-        # Load initial config
-        self._current_config = self.load_config()
-        self._current_hash = self.calculate_hash(self._current_config)
+        # Load initial config (async wrapper for sync operations)
+        self._current_config = await asyncio.to_thread(self.load_config)
+        self._current_hash = await asyncio.to_thread(self.calculate_hash, self._current_config)
 
-        # Setup file watcher
+        # Setup file watcher (run sync observer setup in thread)
+        if not _WATCHDOG_AVAILABLE:
+            logger.warning("[P2-FIX] Config hot-reload disabled (watchdog not installed)")
+            return
+
         event_handler = ConfigChangeHandler(self._on_config_change)
         self._observer = Observer()
         self._observer.schedule(
@@ -139,7 +151,8 @@ class ConfigHotReloader:
             str(self.config_path.parent),
             recursive=False,
         )
-        self._observer.start()
+        # Run blocking start in thread pool
+        await asyncio.to_thread(self._observer.start)
 
         logger.info(
             f"[P2-FIX] Config hot-reloader started: "
@@ -324,11 +337,11 @@ class ConfigHotReloader:
             history = []
 
             if self.history_file.exists():
-                with open(self.history_file) as f:
+                with open(self.history_file, encoding="utf-8") as f:
                     history = json.load(f)
 
             history.append({
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(UTC).replace(tzinfo=None).isoformat(),
                 "change_count": self._change_count,
                 "hash": self._current_hash,
                 "changed_sections": changed_sections,
@@ -337,8 +350,11 @@ class ConfigHotReloader:
             # Keep last 100 changes
             history = history[-100:]
 
-            with open(self.history_file, "w") as f:
+            # Write back with atomic swap to prevent corruption
+            tmp_file = self.history_file.with_suffix(".tmp")
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(history, f, indent=2, default=str)
+            tmp_file.replace(self.history_file)
 
         except Exception as e:
             logger.warning(f"[P2-FIX] Error logging change history: {e}")

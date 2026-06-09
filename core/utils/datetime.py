@@ -26,9 +26,9 @@ def utcnow_iso() -> str:
     Get current UTC time as ISO format string.
 
     Returns:
-        str: ISO formatted UTC datetime string
+        str: ISO formatted UTC datetime string (naive, no timezone suffix)
     """
-    return datetime.now(UTC).isoformat()
+    return datetime.now(UTC).replace(tzinfo=None).isoformat()
 
 
 def utcnow_str(fmt: str = "%Y-%m-%d") -> str:

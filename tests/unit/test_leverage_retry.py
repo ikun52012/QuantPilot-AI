@@ -242,10 +242,13 @@ class TestLeverageRetryMechanism:
 class TestLeverageRetryIntegration:
     """Integration tests for leverage retry in execute_trade."""
 
-    async def test_execute_trade_calls_retry_mechanism(self):
+    async def test_execute_trade_calls_retry_mechanism(self, monkeypatch):
         """Test execute_trade uses leverage retry mechanism."""
+        from core.config import settings
         from exchange import execute_trade
         from models import AIAnalysis, SignalDirection, TradeDecision
+
+        monkeypatch.setattr(settings.exchange, "live_trading", True)
 
         # Mock exchange
         with patch("exchange._get_or_create_exchange") as mock_get_exchange:

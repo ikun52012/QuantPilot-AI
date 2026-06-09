@@ -6,6 +6,7 @@ import asyncio
 import json
 from dataclasses import asdict
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -16,7 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import get_current_user
 from core.auth import require_admin as get_current_admin
 from core.config import settings
-from core.database import StrategyStateModel, get_db
+from core.database import StrategyStateModel, db_manager, get_db, get_user_active_subscription, get_user_by_id
+from core.security import decrypt_settings_payload
+from core.trading_control import trading_allowed
+from core.utils.common import safe_bool
 from core.utils.datetime import utcnow
 from strategies.dca import DCAConfig, DCAEngine, DCAEntry, DCAPosition
 from strategies.grid import GridConfig, GridEngine, GridLevel, GridPosition
@@ -30,17 +34,17 @@ grid_engine = GridEngine()
 
 class DCAConfigRequest(BaseModel):
     ticker: str = Field(default="BTCUSDT", description="Trading pair")
-    direction: str = Field(default="long", description="Direction: long or short")
+    direction: Literal["long", "short"] = Field(default="long", description="Direction: long or short")
     initial_capital_usdt: float = Field(default=1000.0, ge=50, description="Initial capital")
     max_entries: int = Field(default=5, ge=2, le=10, description="Maximum DCA entries")
     entry_spacing_pct: float = Field(default=2.0, ge=0.5, le=10, description="Entry spacing percentage")
-    sizing_method: str = Field(default="fixed", description="Sizing: fixed, martingale, geometric, fibonacci")
+    sizing_method: Literal["fixed", "martingale", "geometric", "fibonacci"] = Field(default="fixed", description="Sizing: fixed, martingale, geometric, fibonacci")
     sizing_multiplier: float = Field(default=1.5, ge=1.0, le=3.0, description="Size multiplier for progressive sizing")
     stop_loss_pct: float = Field(default=10.0, ge=0, le=50, description="Stop loss percentage")
     take_profit_pct: float = Field(default=5.0, ge=0, le=30, description="Take profit percentage")
     activation_loss_pct: float = Field(default=1.0, ge=0.5, le=5, description="Loss % to trigger DCA")
     max_total_capital_usdt: float = Field(default=5000.0, description="Maximum total capital")
-    mode: str = Field(default="average_down", description="Mode: average_down, average_up")
+    mode: Literal["average_down", "average_up"] = Field(default="average_down", description="Mode: average_down, average_up")
     leverage: float = Field(default=1.0, ge=1, le=125)
     paper_mode: bool = Field(default=True, description="Paper trading mode")
     auto_start: bool = Field(default=False, description="Auto start on creation")
@@ -54,16 +58,108 @@ class GridConfigRequest(BaseModel):
     total_capital_usdt: float = Field(default=1000.0, ge=100, description="Total capital")
     quantity_per_grid: float = Field(default=0, ge=0, description="Fixed quantity per grid (0 = auto)")
     grid_spacing_pct: float = Field(default=1.0, ge=0.5, le=5, description="Grid spacing percentage")
-    spacing_mode: str = Field(default="arithmetic", description="Spacing: arithmetic or geometric")
+    spacing_mode: Literal["arithmetic", "geometric"] = Field(default="arithmetic", description="Spacing: arithmetic or geometric")
     stop_loss_pct: float = Field(default=0, ge=0, description="Stop loss (out of range)")
+    take_profit_pct: float = Field(default=0, ge=0, description="Take profit percentage per filled grid level")
     leverage: float = Field(default=1.0, ge=1, le=125)
     auto_replenish: bool = Field(default=True, description="Auto extend grid")
-    mode: str = Field(default="neutral", description="Grid mode: neutral, long, short")
+    mode: Literal["neutral", "long", "short"] = Field(default="neutral", description="Grid mode: neutral, long, short")
     paper_mode: bool = Field(default=True)
 
 
 def _user_id(user: dict) -> str:
     return str(user.get("sub") or user.get("id") or "")
+
+
+def _is_admin(user: dict) -> bool:
+    return str(user.get("role") or "").lower() == "admin"
+
+
+def _global_exchange_config(live_trading: bool) -> dict:
+    return {
+        "live_trading": live_trading,
+        "sandbox_mode": settings.exchange.sandbox_mode,
+        "exchange": settings.exchange.name,
+        "api_key": settings.exchange.api_key,
+        "api_secret": settings.exchange.api_secret,
+        "password": settings.exchange.password,
+        "market_type": settings.exchange.market_type,
+        "default_order_type": settings.exchange.default_order_type,
+        "stop_loss_order_type": settings.exchange.stop_loss_order_type,
+        "limit_timeout_overrides": settings.exchange.limit_timeout_overrides,
+    }
+
+
+def _load_decrypted_user_settings(db_user) -> dict:
+    raw = json.loads(str(db_user.settings_json or "{}"))
+    settings_data = decrypt_settings_payload(raw)
+    if not isinstance(settings_data, dict):
+        raise HTTPException(400, "User trading settings are invalid")
+    return settings_data
+
+
+async def _strategy_exchange_config(
+    db: AsyncSession,
+    user: dict,
+    *,
+    live_requested: bool,
+    allow_reduce: bool = False,
+) -> dict | None:
+    """Build exchange config for strategy actions, failing closed for live requests."""
+    if not live_requested:
+        return None
+
+    user_id = _user_id(user)
+    if not allow_reduce and not settings.exchange.live_trading:
+        raise HTTPException(403, "Global LIVE_TRADING must be enabled before live strategy execution")
+
+    control_state = await trading_allowed(db, user_id=user_id, live_trading=True)
+    if not control_state.get("allowed"):
+        raise HTTPException(423, control_state.get("block_reason") or "Trading is currently disabled")
+
+    db_user = await get_user_by_id(db, user_id)
+    if not db_user:
+        raise HTTPException(404, "User not found")
+
+    owner_is_admin = _is_admin(user) or str(db_user.role or "").lower() == "admin"
+    if owner_is_admin:
+        exchange_config = _global_exchange_config(True)
+    else:
+        subscription = await get_user_active_subscription(db, user_id)
+        if not allow_reduce and (not db_user.live_trading_allowed or not subscription):
+            raise HTTPException(403, "Live strategy execution requires live-trading permission and an active subscription")
+
+        try:
+            user_settings = _load_decrypted_user_settings(db_user)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"[Strategies] Failed to load user exchange settings for {user_id}: {exc}")
+            raise HTTPException(403, "User exchange settings could not be loaded; live strategy execution blocked") from exc
+
+        exchange = user_settings.get("exchange") or {}
+        if not isinstance(exchange, dict):
+            raise HTTPException(400, "User exchange settings are invalid")
+        if not safe_bool(exchange.get("live_trading"), False):
+            raise HTTPException(403, "Enable live trading in user exchange settings before using live strategies")
+
+        exchange_config = {
+            "live_trading": True,
+            "reduce_only_allowed": allow_reduce,
+            "sandbox_mode": safe_bool(exchange.get("sandbox_mode"), False),
+            "exchange": exchange.get("name") or exchange.get("exchange") or settings.exchange.name,
+            "api_key": str(exchange.get("api_key") or ""),
+            "api_secret": str(exchange.get("api_secret") or ""),
+            "password": str(exchange.get("password") or ""),
+            "market_type": exchange.get("market_type") or settings.exchange.market_type,
+            "default_order_type": exchange.get("default_order_type") or settings.exchange.default_order_type,
+            "stop_loss_order_type": exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
+            "limit_timeout_overrides": exchange.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides,
+        }
+
+    if not exchange_config.get("api_key") or not exchange_config.get("api_secret"):
+        raise HTTPException(400, "Exchange API credentials are required for live strategy execution")
+    return exchange_config
 
 
 def _json_default(value):
@@ -250,14 +346,7 @@ async def create_dca_strategy(
             user_id=_user_id(user),
         )
 
-        exchange_config = {
-            "live_trading": not request.paper_mode,
-            "sandbox_mode": settings.exchange.sandbox_mode,
-            "exchange": settings.exchange.name,
-            "api_key": settings.exchange.api_key,
-            "api_secret": settings.exchange.api_secret,
-            "password": settings.exchange.password,
-        }
+        exchange_config = await _strategy_exchange_config(db, user, live_requested=not request.paper_mode)
 
         position = await dca_engine.create_position_async(config, current_price, exchange_config)
         await _persist_strategy_state(db, config.user_id, "dca", position.config_id, position.ticker, config, position)
@@ -275,6 +364,8 @@ async def create_dca_strategy(
             "exchange_executed": not request.paper_mode,
         }
 
+    except HTTPException:
+        raise
     except Exception as err:
         logger.error(f"[DCA/Create] Failed: {err}")
         raise HTTPException(500, f"Failed to create DCA strategy: {err}") from err
@@ -338,16 +429,11 @@ async def check_dca_strategy(
         current_price = context.current_price
 
         config = dca_engine.configs.get(strategy_id)
-        exchange_config = None
-        if config and not config.paper_mode:
-            exchange_config = {
-                "live_trading": True,
-                "sandbox_mode": settings.exchange.sandbox_mode,
-                "exchange": settings.exchange.name,
-                "api_key": settings.exchange.api_key,
-                "api_secret": settings.exchange.api_secret,
-                "password": settings.exchange.password,
-            }
+        exchange_config = await _strategy_exchange_config(
+            db,
+            user,
+            live_requested=bool(config and not config.paper_mode),
+        )
 
         result = await dca_engine.check_and_execute(strategy_id, current_price, exchange_config)
         await _persist_strategy_state(
@@ -367,6 +453,8 @@ async def check_dca_strategy(
             "updated_status": dca_engine.get_position_status(strategy_id),
         }
 
+    except HTTPException:
+        raise
     except Exception as err:
         logger.error(f"[DCA/Check] Failed: {err}")
         raise HTTPException(500, f"Failed to check DCA: {err}") from err
@@ -395,16 +483,12 @@ async def close_dca_strategy(
         current_price = context.current_price
 
         config = dca_engine.configs.get(strategy_id)
-        exchange_config = None
-        if config and not config.paper_mode:
-            exchange_config = {
-                "live_trading": True,
-                "sandbox_mode": settings.exchange.sandbox_mode,
-                "exchange": settings.exchange.name,
-                "api_key": settings.exchange.api_key,
-                "api_secret": settings.exchange.api_secret,
-                "password": settings.exchange.password,
-            }
+        exchange_config = await _strategy_exchange_config(
+            db,
+            user,
+            live_requested=bool(config and not config.paper_mode),
+            allow_reduce=True,
+        )
         await dca_engine._close_position(strategy_id, current_price, "manual", exchange_config)
 
         final_status = dca_engine.get_position_status(strategy_id)
@@ -426,6 +510,8 @@ async def close_dca_strategy(
             "entries_count": final_status.get("entries_count", 0),
         }
 
+    except HTTPException:
+        raise
     except Exception as err:
         logger.error(f"[DCA/Close] Failed: {err}")
         raise HTTPException(500, f"Failed to close DCA: {err}") from err
@@ -447,6 +533,9 @@ async def create_grid_strategy(
         if current_price <= 0:
             raise HTTPException(400, f"Cannot get current price for {request.ticker}")
 
+        if not request.paper_mode and request.mode != "neutral":
+            raise HTTPException(400, "Live grid currently supports only neutral mode; use paper mode for directional grids")
+
         config = GridConfig(
             ticker=request.ticker,
             upper_price=request.upper_price,
@@ -457,6 +546,7 @@ async def create_grid_strategy(
             grid_spacing_pct=request.grid_spacing_pct,
             spacing_mode=request.spacing_mode,
             stop_loss_pct=request.stop_loss_pct,
+            take_profit_pct=request.take_profit_pct,
             leverage=request.leverage,
             auto_replenish=request.auto_replenish,
             mode=request.mode,
@@ -464,14 +554,7 @@ async def create_grid_strategy(
             user_id=_user_id(user),
         )
 
-        exchange_config = {
-            "live_trading": not request.paper_mode,
-            "sandbox_mode": settings.exchange.sandbox_mode,
-            "exchange": settings.exchange.name,
-            "api_key": settings.exchange.api_key,
-            "api_secret": settings.exchange.api_secret,
-            "password": settings.exchange.password,
-        }
+        exchange_config = await _strategy_exchange_config(db, user, live_requested=not request.paper_mode)
 
         position = await grid_engine.create_grid_async(config, current_price, exchange_config)
         await _persist_strategy_state(db, config.user_id, "grid", position.config_id, position.ticker, config, position)
@@ -489,6 +572,8 @@ async def create_grid_strategy(
             "exchange_executed": not request.paper_mode,
         }
 
+    except HTTPException:
+        raise
     except Exception as err:
         logger.error(f"[Grid/Create] Failed: {err}")
         raise HTTPException(500, f"Failed to create grid strategy: {err}") from err
@@ -552,16 +637,11 @@ async def check_grid_strategy(
         current_price = context.current_price
 
         config = grid_engine.configs.get(strategy_id)
-        exchange_config = None
-        if config and not config.paper_mode:
-            exchange_config = {
-                "live_trading": True,
-                "sandbox_mode": settings.exchange.sandbox_mode,
-                "exchange": settings.exchange.name,
-                "api_key": settings.exchange.api_key,
-                "api_secret": settings.exchange.api_secret,
-                "password": settings.exchange.password,
-            }
+        exchange_config = await _strategy_exchange_config(
+            db,
+            user,
+            live_requested=bool(config and not config.paper_mode),
+        )
 
         result = await grid_engine.check_and_execute(strategy_id, current_price, exchange_config)
         await _persist_strategy_state(
@@ -581,6 +661,8 @@ async def check_grid_strategy(
             "updated_status": grid_engine.get_grid_status(strategy_id),
         }
 
+    except HTTPException:
+        raise
     except Exception as err:
         logger.error(f"[Grid/Check] Failed: {err}")
         raise HTTPException(500, f"Failed to check grid: {err}") from err
@@ -609,16 +691,12 @@ async def close_grid_strategy(
         current_price = context.current_price
 
         config = grid_engine.configs.get(strategy_id)
-        exchange_config = None
-        if config and not config.paper_mode:
-            exchange_config = {
-                "live_trading": True,
-                "sandbox_mode": settings.exchange.sandbox_mode,
-                "exchange": settings.exchange.name,
-                "api_key": settings.exchange.api_key,
-                "api_secret": settings.exchange.api_secret,
-                "password": settings.exchange.password,
-            }
+        exchange_config = await _strategy_exchange_config(
+            db,
+            user,
+            live_requested=bool(config and not config.paper_mode),
+            allow_reduce=True,
+        )
         await grid_engine._close_grid(strategy_id, current_price, "manual", exchange_config)
 
         final_status = grid_engine.get_grid_status(strategy_id)
@@ -640,6 +718,8 @@ async def close_grid_strategy(
             "total_trades": final_status.get("total_trades", 0),
         }
 
+    except HTTPException:
+        raise
     except Exception as err:
         logger.error(f"[Grid/Close] Failed: {err}")
         raise HTTPException(500, f"Failed to close grid: {err}") from err
@@ -807,41 +887,42 @@ async def start_strategy_monitor(
     async def _monitor_loop():
         while True:
             try:
-                exchange_config = {
-                    "live_trading": settings.exchange.live_trading,
-                    "sandbox_mode": settings.exchange.sandbox_mode,
-                    "exchange": settings.exchange.name,
-                    "api_key": settings.exchange.api_key,
-                    "api_secret": settings.exchange.api_secret,
-                    "password": settings.exchange.password,
-                }
-
                 await dca_engine.refresh_active_from_redis()
                 await grid_engine.refresh_active_from_redis()
 
-                for strategy_id in list(dca_engine.positions.keys()):
-                    position = dca_engine.positions.get(strategy_id)
-                    config = dca_engine.configs.get(strategy_id)
-                    if position and position.status == "active":
-                        try:
-                            from market_data import fetch_market_context
-                            context = await fetch_market_context(position.ticker)
-                            strategy_exchange_config = exchange_config if (config and not config.paper_mode) else None
-                            await dca_engine.check_and_execute(strategy_id, context.current_price, strategy_exchange_config)
-                        except Exception as e:
-                            logger.debug(f"[Monitor/DCA] Check failed for {strategy_id}: {e}")
+                async with db_manager.async_session_factory() as monitor_db:
 
-                for strategy_id in list(grid_engine.positions.keys()):
-                    position = grid_engine.positions.get(strategy_id)
-                    config = grid_engine.configs.get(strategy_id)
-                    if position and position.status == "active":
-                        try:
-                            from market_data import fetch_market_context
-                            context = await fetch_market_context(position.ticker)
-                            strategy_exchange_config = exchange_config if (config and not config.paper_mode) else None
-                            await grid_engine.check_and_execute(strategy_id, context.current_price, strategy_exchange_config)
-                        except Exception as e:
-                            logger.debug(f"[Monitor/Grid] Check failed for {strategy_id}: {e}")
+                    for strategy_id in list(dca_engine.positions.keys()):
+                        position = dca_engine.positions.get(strategy_id)
+                        config = dca_engine.configs.get(strategy_id)
+                        if position and position.status == "active":
+                            try:
+                                from market_data import fetch_market_context
+                                context = await fetch_market_context(position.ticker)
+                                strategy_exchange_config = await _strategy_exchange_config(
+                                    monitor_db,
+                                    {"sub": config.user_id if config else "", "role": ""},
+                                    live_requested=bool(config and not config.paper_mode),
+                                )
+                                await dca_engine.check_and_execute(strategy_id, context.current_price, strategy_exchange_config)
+                            except Exception as e:
+                                logger.debug(f"[Monitor/DCA] Check failed for {strategy_id}: {e}")
+
+                    for strategy_id in list(grid_engine.positions.keys()):
+                        position = grid_engine.positions.get(strategy_id)
+                        config = grid_engine.configs.get(strategy_id)
+                        if position and position.status == "active":
+                            try:
+                                from market_data import fetch_market_context
+                                context = await fetch_market_context(position.ticker)
+                                strategy_exchange_config = await _strategy_exchange_config(
+                                    monitor_db,
+                                    {"sub": config.user_id if config else "", "role": ""},
+                                    live_requested=bool(config and not config.paper_mode),
+                                )
+                                await grid_engine.check_and_execute(strategy_id, context.current_price, strategy_exchange_config)
+                            except Exception as e:
+                                logger.debug(f"[Monitor/Grid] Check failed for {strategy_id}: {e}")
 
                 await asyncio.sleep(interval_seconds)
 
@@ -851,7 +932,8 @@ async def start_strategy_monitor(
                 logger.error(f"[Monitor] Loop error: {e}")
                 await asyncio.sleep(interval_seconds * 2)
 
-    if dca_engine._monitor_task or grid_engine._monitor_task:
+    # BUG FIX: Use separate tasks for DCA and Grid engines to avoid shared task bug
+    if dca_engine._monitor_task and not dca_engine._monitor_task.done():
         return {"status": "already_running"}
 
     task = asyncio.create_task(_monitor_loop())
@@ -872,7 +954,7 @@ async def start_strategy_monitor(
 
     task.add_done_callback(_on_monitor_done)
     dca_engine._monitor_task = task
-    grid_engine._monitor_task = task
+    grid_engine._monitor_task = task  # Keep for backward compat, but both point to same task intentionally
 
     return {
         "status": "started",

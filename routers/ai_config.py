@@ -3,6 +3,7 @@ QuantPilot AI - AI Configuration Router
 Admin endpoints for AI provider catalog and experimental voting settings.
 """
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -14,6 +15,39 @@ from core.config import settings
 from core.database import get_db, set_admin_setting
 
 router = APIRouter(prefix="/api/admin/ai", tags=["ai-config"])
+
+
+def _validate_api_key_format(key: str, provider: str) -> tuple[bool, str]:
+    """Validate AI API key format before storing.
+
+    Returns (is_valid, error_message).
+    """
+    if not key or not key.strip():
+        return False, "API key cannot be empty"
+
+    key = key.strip()
+
+    # Minimum length check (most API keys are at least 20 chars)
+    if len(key) < 20:
+        return False, f"API key too short ({len(key)} chars). Expected at least 20 characters."
+
+    # Check for common placeholder patterns
+    placeholders = {
+        "your-api-key", "your_api_key", "api-key-here", "api_key_here",
+        "replace-with-your-key", "sk-xxx", "sk-placeholder",
+    }
+    if key.lower() in placeholders:
+        return False, "API key appears to be a placeholder value"
+
+    # Provider-specific format validation
+    if provider == "openai" and not key.startswith(("sk-", "sk-proj-")):
+        return False, "OpenAI API key should start with 'sk-' or 'sk-proj-'"
+    if provider == "anthropic" and not key.startswith(("sk-ant-", "xai-")):
+        return False, "Anthropic API key should start with 'sk-ant-'"
+    if provider == "deepseek" and not key.startswith(("sk-", "ds-")):
+        return False, "DeepSeek API key format appears invalid"
+
+    return True, ""
 
 
 def _parse_model_id(model_id: str) -> tuple[str, str]:
@@ -124,17 +158,17 @@ async def update_voting_config(
     Update stored voting configuration.
 
     Model ID format (use slash separator):
-    - 'openai/gpt-5.5' - OpenAI GPT-5.5 (flagship)
-    - 'openai/gpt-5.4' - OpenAI GPT-5.4
-    - 'openai/gpt-5.4-mini' - OpenAI GPT-5.4 Mini
-    - 'anthropic/claude-opus-4-7' - Anthropic Claude Opus 4.7 (most capable)
-    - 'anthropic/claude-sonnet-4-6' - Anthropic Claude Sonnet 4.6
-    - 'anthropic/claude-haiku-4-5' - Anthropic Claude Haiku 4.5
-    - 'deepseek/deepseek-v4-pro' - DeepSeek V4 Pro
-    - 'deepseek/deepseek-v4-flash' - DeepSeek V4 Flash
-    - 'openrouter/openai/gpt-5.5' - GPT-5.5 via OpenRouter
-    - 'openrouter/anthropic/claude-opus-4-7' - Claude Opus 4.7 via OpenRouter
-    - 'openrouter/google/gemini-pro-1.5' - Gemini via OpenRouter
+    - 'openai/gpt-4o' - OpenAI GPT-4o (flagship)
+    - 'openai/gpt-4o-mini' - OpenAI GPT-4o Mini
+    - 'openai/gpt-4-turbo' - OpenAI GPT-4 Turbo
+    - 'anthropic/claude-3-opus-20240229' - Anthropic Claude 3 Opus (most capable)
+    - 'anthropic/claude-3-sonnet-20240229' - Anthropic Claude 3 Sonnet
+    - 'anthropic/claude-3-haiku-20240307' - Anthropic Claude 3 Haiku
+    - 'deepseek/deepseek-chat' - DeepSeek Chat
+    - 'deepseek/deepseek-coder' - DeepSeek Coder
+    - 'openrouter/openai/gpt-4o' - GPT-4o via OpenRouter
+    - 'openrouter/anthropic/claude-3-opus-20240229' - Claude 3 Opus via OpenRouter
+    - 'openrouter/google/gemini-1.5-pro-latest' - Gemini via OpenRouter
     - 'openrouter/meta-llama/llama-3.1-70b-instruct' - Llama via OpenRouter
     - 'openrouter/mistralai/mistral-large' - Mistral via OpenRouter
     - 'openrouter/qwen/qwen-2.5-72b-instruct' - Qwen via OpenRouter
@@ -148,7 +182,7 @@ async def update_voting_config(
     - **consensus**: Only proceed if majority (>50%) votes execute
     - **best_confidence**: Take result from highest confidence model
 
-    Example weights: {"openai/gpt-5.5": 0.4, "deepseek/deepseek-v4-pro": 0.3, "anthropic/claude-opus-4-7": 0.3}
+    Example weights: {"openai/gpt-4o": 0.4, "deepseek/deepseek-chat": 0.3, "anthropic/claude-3-opus-20240229": 0.3}
     """
     valid_models = []
     for model_id in req.models:
@@ -279,12 +313,12 @@ async def update_provider_config(
     Update AI provider configuration.
 
     OpenRouter provider uses OpenAI-compatible model IDs through a single API:
-    - OpenAI: openai/gpt-5.5, openai/gpt-5.4-mini
-    - Anthropic: anthropic/claude-opus-4-7, anthropic/claude-sonnet-4-6
-    - Google: google/gemini-pro-1.5
+    - OpenAI: openai/gpt-4o, openai/gpt-4o-mini
+    - Anthropic: anthropic/claude-3-opus-20240229, anthropic/claude-3-sonnet-20240229
+    - Google: google/gemini-1.5-pro-latest
     - Meta: meta-llama/llama-3.1-70b-instruct
     - Mistral: mistralai/mistral-large
-    - DeepSeek: deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash
+    - DeepSeek: deepseek/deepseek-chat, deepseek/deepseek-coder
     - Qwen: qwen/qwen-2.5-72b-instruct
 
     This endpoint configures provider routing; execution still follows the selected primary provider.
@@ -298,30 +332,46 @@ async def update_provider_config(
 
     # Update provider-specific settings
     if req.openai_api_key:
+        valid, err = _validate_api_key_format(req.openai_api_key, "openai")
+        if not valid:
+            raise HTTPException(400, f"OpenAI API key validation failed: {err}")
         settings.ai.openai_api_key = req.openai_api_key
-        await set_admin_setting(db, "openai_api_key", req.openai_api_key)
+        from core.security import encrypt_value
+        await set_admin_setting(db, "openai_api_key", encrypt_value(req.openai_api_key))
     if req.openai_model:
         settings.ai.openai_model = req.openai_model
         await set_admin_setting(db, "openai_model", req.openai_model)
 
     if req.anthropic_api_key:
+        valid, err = _validate_api_key_format(req.anthropic_api_key, "anthropic")
+        if not valid:
+            raise HTTPException(400, f"Anthropic API key validation failed: {err}")
         settings.ai.anthropic_api_key = req.anthropic_api_key
-        await set_admin_setting(db, "anthropic_api_key", req.anthropic_api_key)
+        from core.security import encrypt_value
+        await set_admin_setting(db, "anthropic_api_key", encrypt_value(req.anthropic_api_key))
     if req.anthropic_model:
         settings.ai.anthropic_model = req.anthropic_model
         await set_admin_setting(db, "anthropic_model", req.anthropic_model)
 
     if req.deepseek_api_key:
+        valid, err = _validate_api_key_format(req.deepseek_api_key, "deepseek")
+        if not valid:
+            raise HTTPException(400, f"DeepSeek API key validation failed: {err}")
         settings.ai.deepseek_api_key = req.deepseek_api_key
-        await set_admin_setting(db, "deepseek_api_key", req.deepseek_api_key)
+        from core.security import encrypt_value
+        await set_admin_setting(db, "deepseek_api_key", encrypt_value(req.deepseek_api_key))
     if req.deepseek_model:
         settings.ai.deepseek_model = req.deepseek_model
         await set_admin_setting(db, "deepseek_model", req.deepseek_model)
 
     # Mistral
     if req.mistral_api_key:
+        valid, err = _validate_api_key_format(req.mistral_api_key, "mistral")
+        if not valid:
+            raise HTTPException(400, f"Mistral API key validation failed: {err}")
         settings.ai.mistral_api_key = req.mistral_api_key
-        await set_admin_setting(db, "mistral_api_key", req.mistral_api_key)
+        from core.security import encrypt_value
+        await set_admin_setting(db, "mistral_api_key", encrypt_value(req.mistral_api_key))
     if req.mistral_model:
         settings.ai.mistral_model = req.mistral_model
         await set_admin_setting(db, "mistral_model", req.mistral_model)
@@ -331,8 +381,12 @@ async def update_provider_config(
         settings.ai.openrouter_enabled = req.openrouter_enabled
         await set_admin_setting(db, "openrouter_enabled", json.dumps(req.openrouter_enabled))
     if req.openrouter_api_key:
+        valid, err = _validate_api_key_format(req.openrouter_api_key, "openrouter")
+        if not valid:
+            raise HTTPException(400, f"OpenRouter API key validation failed: {err}")
         settings.ai.openrouter_api_key = req.openrouter_api_key
-        await set_admin_setting(db, "openrouter_api_key", req.openrouter_api_key)
+        from core.security import encrypt_value
+        await set_admin_setting(db, "openrouter_api_key", encrypt_value(req.openrouter_api_key))
     if req.openrouter_model:
         settings.ai.openrouter_model = req.openrouter_model
         await set_admin_setting(db, "openrouter_model", req.openrouter_model)
@@ -345,12 +399,17 @@ async def update_provider_config(
         settings.ai.custom_provider_name = req.custom_provider_name
         await set_admin_setting(db, "custom_ai_provider_name", req.custom_provider_name)
     if req.custom_provider_api_key:
+        if len(req.custom_provider_api_key.strip()) < 10:
+            raise HTTPException(400, "Custom provider API key too short (minimum 10 characters)")
         settings.ai.custom_provider_api_key = req.custom_provider_api_key
-        await set_admin_setting(db, "custom_ai_api_key", req.custom_provider_api_key)
+        from core.security import encrypt_value
+        await set_admin_setting(db, "custom_ai_api_key", encrypt_value(req.custom_provider_api_key))
     if req.custom_provider_model:
         settings.ai.custom_provider_model = req.custom_provider_model
         await set_admin_setting(db, "custom_ai_model", req.custom_provider_model)
     if req.custom_provider_api_url:
+        if req.custom_provider_api_url and not re.match(r"^https?://", req.custom_provider_api_url):
+            raise HTTPException(400, "Custom provider API URL must start with http:// or https://")
         settings.ai.custom_provider_api_url = req.custom_provider_api_url
         await set_admin_setting(db, "custom_ai_api_url", req.custom_provider_api_url)
 
@@ -385,14 +444,14 @@ async def get_available_models(
     return {
         "providers": settings.ai.available_models,
         "openrouter_popular": [
-            {"id": "openai/gpt-5.5", "name": "GPT-5.5", "provider": "OpenAI", "pricing": "OpenRouter route"},
-            {"id": "openai/gpt-5.4-mini", "name": "GPT-5.4 Mini", "provider": "OpenAI", "pricing": "OpenRouter route"},
-            {"id": "anthropic/claude-opus-4-7", "name": "Claude Opus 4.7", "provider": "Anthropic", "pricing": "OpenRouter route"},
-            {"id": "anthropic/claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "provider": "Anthropic", "pricing": "OpenRouter route"},
-            {"id": "google/gemini-pro-1.5", "name": "Gemini Pro 1.5", "provider": "Google", "pricing": "OpenRouter route"},
+            {"id": "openai/gpt-4o", "name": "GPT-4o", "provider": "OpenAI", "pricing": "OpenRouter route"},
+            {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "provider": "OpenAI", "pricing": "OpenRouter route"},
+            {"id": "anthropic/claude-3-opus-20240229", "name": "Claude 3 Opus", "provider": "Anthropic", "pricing": "OpenRouter route"},
+            {"id": "anthropic/claude-3-sonnet-20240229", "name": "Claude 3 Sonnet", "provider": "Anthropic", "pricing": "OpenRouter route"},
+            {"id": "google/gemini-1.5-pro-latest", "name": "Gemini 1.5 Pro", "provider": "Google", "pricing": "OpenRouter route"},
             {"id": "meta-llama/llama-3.1-70b-instruct", "name": "Llama 3.1 70B", "provider": "Meta", "pricing": "OpenRouter route"},
             {"id": "mistralai/mistral-large", "name": "Mistral Large", "provider": "Mistral", "pricing": "OpenRouter route"},
-            {"id": "deepseek/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "provider": "DeepSeek", "pricing": "OpenRouter route"},
+            {"id": "deepseek/deepseek-chat", "name": "DeepSeek Chat", "provider": "DeepSeek", "pricing": "OpenRouter route"},
             {"id": "qwen/qwen-2.5-72b-instruct", "name": "Qwen 2.5 72B", "provider": "Alibaba", "pricing": "OpenRouter route"},
         ],
         "description": """

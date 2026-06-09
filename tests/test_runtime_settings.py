@@ -41,8 +41,8 @@ def test_runtime_status_reports_provider_specific_ai_keys(monkeypatch):
 
 
 def test_apply_runtime_settings_allows_empty_voting_collections(monkeypatch):
-    monkeypatch.setattr(runtime_settings.settings.ai, "voting_models", ["openai/gpt-5.5"])
-    monkeypatch.setattr(runtime_settings.settings.ai, "voting_weights", {"openai/gpt-5.5": 1.0})
+    monkeypatch.setattr(runtime_settings.settings.ai, "voting_models", ["openai/gpt-4o"])
+    monkeypatch.setattr(runtime_settings.settings.ai, "voting_weights", {"openai/gpt-4o": 1.0})
     monkeypatch.setattr(runtime_settings.settings.ai, "voting_strategy", "weighted")
 
     runtime_settings.apply_runtime_settings(
@@ -70,15 +70,15 @@ async def test_save_ai_settings_allows_clearing_strings_and_voting(monkeypatch):
     monkeypatch.setattr(runtime_settings.settings.ai, "custom_provider_name", "custom")
     monkeypatch.setattr(runtime_settings.settings.ai, "custom_provider_model", "old-model")
     monkeypatch.setattr(runtime_settings.settings.ai, "custom_provider_api_url", "https://old.example")
-    monkeypatch.setattr(runtime_settings.settings.ai, "openrouter_model", "openai/gpt-5.5")
+    monkeypatch.setattr(runtime_settings.settings.ai, "openrouter_model", "openai/gpt-4o")
     monkeypatch.setattr(runtime_settings.settings.ai, "openrouter_site_url", "https://old.site")
     monkeypatch.setattr(runtime_settings.settings.ai, "openrouter_app_name", "Old App")
     monkeypatch.setattr(runtime_settings.settings.ai, "mistral_model", "mistral-large-latest")
-    monkeypatch.setattr(runtime_settings.settings.ai, "openai_model", "gpt-5.5")
-    monkeypatch.setattr(runtime_settings.settings.ai, "anthropic_model", "claude-opus-4-7")
-    monkeypatch.setattr(runtime_settings.settings.ai, "deepseek_model", "deepseek-v4-pro")
-    monkeypatch.setattr(runtime_settings.settings.ai, "voting_models", ["openai/gpt-5.5"])
-    monkeypatch.setattr(runtime_settings.settings.ai, "voting_weights", {"openai/gpt-5.5": 1.0})
+    monkeypatch.setattr(runtime_settings.settings.ai, "openai_model", "gpt-4o")
+    monkeypatch.setattr(runtime_settings.settings.ai, "anthropic_model", "claude-3-opus-20240229")
+    monkeypatch.setattr(runtime_settings.settings.ai, "deepseek_model", "deepseek-chat")
+    monkeypatch.setattr(runtime_settings.settings.ai, "voting_models", ["openai/gpt-4o"])
+    monkeypatch.setattr(runtime_settings.settings.ai, "voting_weights", {"openai/gpt-4o": 1.0})
 
     monkeypatch.setattr(runtime_settings, "_load_encrypted_dict", AsyncMock(return_value={}))
     monkeypatch.setattr(runtime_settings, "_save_encrypted_dict", AsyncMock())
@@ -233,3 +233,30 @@ async def test_apply_persisted_admin_settings_reloads_prefilter_thresholds(monke
 
     assert thresholds.get("min_pass_score") == 65.0
     assert thresholds.get("cooldown_seconds") == 120
+
+
+@pytest.mark.asyncio
+async def test_apply_persisted_admin_settings_decrypts_provider_keys(monkeypatch):
+    from core.security import encrypt_value
+
+    class _FakeSession:
+        async def execute(self, statement):
+            key = statement.compile().params.get("key_1")
+            value = setting_store.get(key)
+
+            class _Result:
+                def scalar_one_or_none(self_nonlocal):
+                    if value is None:
+                        return None
+                    return type("_Setting", (), {"value": value})()
+
+            return _Result()
+
+    setting_store = {
+        "openai_api_key": encrypt_value("sk-runtime-test-key"),
+    }
+    monkeypatch.setattr(runtime_settings.settings.ai, "openai_api_key", "")
+
+    await runtime_settings.apply_persisted_admin_settings(_FakeSession())
+
+    assert runtime_settings.settings.ai.openai_api_key == "sk-runtime-test-key"

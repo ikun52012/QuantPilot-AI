@@ -25,7 +25,7 @@ from models import TrailingStopMode as _TrailingStopMode
 TrailingStopMode = _TrailingStopMode
 
 # Retry configuration for AI API calls
-_AI_MAX_RETRIES = 3
+_AI_MAX_RETRIES = max(1, int(settings.ai.max_retries))
 _AI_BASE_DELAY = 1.0  # seconds; doubled each attempt
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _AI_TIMEOUT = httpx.Timeout(
@@ -151,7 +151,12 @@ async def _get_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, cache_key
                 logger.debug(f"[SMC_CACHE] Hit for {ticker}:{timeframe} (age={age:.1f}s, ttl={ttl}s)")
                 return smc_dict
 
-    redis_payload = await redis_get_json(_redis_cache_key("smc", cache_key))
+    try:
+        redis_payload = await redis_get_json(_redis_cache_key("smc", cache_key))
+    except Exception as exc:
+        logger.warning(f"[SMC_CACHE] Redis read failed, falling back to None: {exc}")
+        redis_payload = None
+
     if isinstance(redis_payload, dict) and isinstance(redis_payload.get("value"), dict):
         smc_dict = redis_payload["value"]
         ttl = float(redis_payload.get("ttl") or _SMC_CACHE_BASE_TTL)
@@ -181,22 +186,31 @@ async def _set_cached_smc(ticker: str, timeframe: str, ohlcv_sig: str, smc_ctx: 
         "timing_recommendation": smc_ctx.timing_recommendation,
     }
 
-    async with distributed_lock(f"ai:smc:{cache_key}", ttl_seconds=10, blocking_timeout_seconds=2):
-        lock = await _get_smc_cache_lock()  # BUG-1 FIX: Lazy init
+    try:
+        async with distributed_lock(f"ai:smc:{cache_key}", ttl_seconds=10, blocking_timeout_seconds=2):
+            lock = await _get_smc_cache_lock()  # BUG-1 FIX: Lazy init
+            async with lock:
+                # Enforce max size by removing least-recently-used entries (OrderedDict LRU)
+                while len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
+                    _SMC_CACHE.popitem(last=False)
+
+                _SMC_CACHE[cache_key] = (_time.monotonic(), ttl, smc_dict)
+                _SMC_CACHE.move_to_end(cache_key)
+                logger.debug(f"[SMC_CACHE] Stored for {ticker}:{timeframe} (ttl={ttl}s)")
+
+            await redis_set_json(
+                _redis_cache_key("smc", cache_key),
+                {"value": smc_dict, "ttl": ttl},
+                ttl_seconds=max(1, int(ttl)),
+            )
+    except Exception as exc:
+        logger.warning(f"[SMC_CACHE] Redis operations failed, fell back to memory cache: {exc}")
+        lock = await _get_smc_cache_lock()
         async with lock:
-            # Enforce max size by removing least-recently-used entries (OrderedDict LRU)
             while len(_SMC_CACHE) >= _SMC_CACHE_MAX_SIZE:
                 _SMC_CACHE.popitem(last=False)
-
             _SMC_CACHE[cache_key] = (_time.monotonic(), ttl, smc_dict)
             _SMC_CACHE.move_to_end(cache_key)
-            logger.debug(f"[SMC_CACHE] Stored for {ticker}:{timeframe} (ttl={ttl}s)")
-
-        await redis_set_json(
-            _redis_cache_key("smc", cache_key),
-            {"value": smc_dict, "ttl": ttl},
-            ttl_seconds=max(1, int(ttl)),
-        )
 
 
 def _reconstruct_smc_context(smc_dict: dict[str, Any], timeframe: str) -> Any:
@@ -329,12 +343,13 @@ async def _get_dynamic_cache_ttl(ticker: str) -> float:
         volatility = _VOLATILITY_TRACKER.get(ticker, 0.0)
 
     if volatility == 0.0:
-        redis_payload = await redis_get_json(make_key("ai", "volatility", ticker))
-        if isinstance(redis_payload, dict):
-            try:
+        try:
+            redis_payload = await redis_get_json(make_key("ai", "volatility", ticker))
+            if isinstance(redis_payload, dict):
                 volatility = float(redis_payload.get("volatility_pct") or 0.0)
-            except (TypeError, ValueError):
-                volatility = 0.0
+        except Exception as exc:
+            logger.warning(f"[AI/Cache] Failed to fetch volatility from Redis for {ticker}, falling back to default: {exc}")
+            volatility = 0.0
 
     base_ttl = settings.ai.dynamic_cache_ttl_base
 
@@ -422,20 +437,25 @@ async def _get_cached_analysis(
             timestamp, ttl, analysis = entry
             if (_time.monotonic() - timestamp) < ttl:
                 _AI_CACHE.move_to_end(key)  # LRU: mark as recently used
-                return analysis
+                return analysis.model_copy(deep=True)
 
-    redis_payload = await redis_get_json(_redis_cache_key("analysis", key))
+    try:
+        redis_payload = await redis_get_json(_redis_cache_key("analysis", key))
+    except Exception as exc:
+        logger.warning(f"[AI/Cache] Redis read failed, falling back to None: {exc}")
+        redis_payload = None
+
     if isinstance(redis_payload, dict) and isinstance(redis_payload.get("analysis"), dict):
         analysis = _analysis_from_cache_dict(redis_payload["analysis"])
         if analysis is not None:
             ttl = float(redis_payload.get("ttl") or _AI_CACHE_BASE_TTL)
             async with lock:
-                _AI_CACHE[key] = (_time.monotonic(), ttl, analysis)
+                _AI_CACHE[key] = (_time.monotonic(), ttl, analysis.model_copy(deep=True))
                 _AI_CACHE.move_to_end(key)
                 while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:
                     _AI_CACHE.popitem(last=False)
             logger.debug(f"[AI/Cache] Redis hit for {ticker}:{direction}")
-            return analysis
+            return analysis.model_copy(deep=True)
     return None
 
 
@@ -453,26 +473,39 @@ async def _set_cached_analysis(
     key = _ai_cache_key(ticker, direction, price_bucket, timeframe, config_signature, ohlcv_signature, user_id)
     ttl = await _get_dynamic_cache_ttl(ticker)
 
-    async with distributed_lock(f"ai:analysis:{key}", ttl_seconds=10, blocking_timeout_seconds=2):
-        lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
-        async with lock:
-            _AI_CACHE[key] = (_time.monotonic(), ttl, analysis)
-            _AI_CACHE.move_to_end(key)  # LRU: mark as most recently set
+    try:
+        async with distributed_lock(f"ai:analysis:{key}", ttl_seconds=10, blocking_timeout_seconds=2):
+            lock = await _get_ai_cache_lock()  # BUG-1 FIX: Lazy init
+            async with lock:
+                _AI_CACHE[key] = (_time.monotonic(), ttl, analysis.model_copy(deep=True))
+                _AI_CACHE.move_to_end(key)  # LRU: mark as most recently set
 
+                now = _time.monotonic()
+                stale = [k for k, (ts, t, _) in _AI_CACHE.items() if now - ts > t]
+                for k in stale:
+                    _AI_CACHE.pop(k, None)
+
+                # LRU eviction: remove least-recently-used entries
+                while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:
+                    _AI_CACHE.popitem(last=False)
+
+            await redis_set_json(
+                _redis_cache_key("analysis", key),
+                {"analysis": _analysis_to_cache_dict(analysis), "ttl": ttl},
+                ttl_seconds=max(1, int(ttl)),
+            )
+    except Exception as exc:
+        logger.warning(f"[AI/Cache] Redis operations failed, fell back to memory cache: {exc}")
+        lock = await _get_ai_cache_lock()
+        async with lock:
+            _AI_CACHE[key] = (_time.monotonic(), ttl, analysis.model_copy(deep=True))
+            _AI_CACHE.move_to_end(key)
             now = _time.monotonic()
             stale = [k for k, (ts, t, _) in _AI_CACHE.items() if now - ts > t]
             for k in stale:
                 _AI_CACHE.pop(k, None)
-
-            # LRU eviction: remove least-recently-used entries
             while len(_AI_CACHE) > _AI_CACHE_MAX_SIZE:
                 _AI_CACHE.popitem(last=False)
-
-        await redis_set_json(
-            _redis_cache_key("analysis", key),
-            {"analysis": _analysis_to_cache_dict(analysis), "ttl": ttl},
-            ttl_seconds=max(1, int(ttl)),
-        )
 
 
 # ─────────────────────────────────────────────
@@ -1160,12 +1193,12 @@ async def _with_retry(coro_factory: Callable[[], Awaitable[str]], label: str) ->
                     await asyncio.sleep(delay)
                 else:
                     raise
-            except httpx.NetworkError as exc:
+            except (httpx.NetworkError, httpx.TimeoutException) as exc:
                 last_exc = exc
                 if attempt < _AI_MAX_RETRIES - 1:
                     delay = _AI_BASE_DELAY * (2 ** attempt)
                     logger.warning(
-                        f"[AI/{label}] Network error, "
+                        f"[AI/{label}] Network/timeout error, "
                         f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_AI_MAX_RETRIES})"
                     )
                     await asyncio.sleep(delay)
@@ -1802,10 +1835,12 @@ async def _aggregate_voting_results_async(
                 final_rec = max(non_execute_votes, key=lambda key: non_execute_votes[key])
             else:
                 final_rec = "hold"
+            if final_rec == "modify":
+                final_rec = "reject"
             best_idx = max(range(len(analyses)), key=lambda i: analyses[i].confidence)
             result = analyses[best_idx].model_copy(deep=True)
             result.recommendation = final_rec
-            if final_rec not in {"execute", "modify"}:
+            if final_rec != "execute":
                 result.suggested_entry = None
                 result.suggested_stop_loss = None
                 result.suggested_take_profit = None
@@ -2004,6 +2039,22 @@ async def analyze_signal(
     system_prompt = _get_effective_system_prompt(user_settings)
     user_prompt = _build_user_prompt(signal, market, smc_text, user_settings)
 
+    def _handle_fallback(error_msg: str) -> AIAnalysis:
+        if settings.ai.auto_fallback_to_local:
+            logger.warning(f"[AI] AI analysis failed ({error_msg}). Falling back to local rule-based analysis...")
+            try:
+                raw_local = _local_rule_analysis(system_prompt, user_prompt)
+                local_parsed = _parse_response(raw_local)
+                if not local_parsed.warnings:
+                    local_parsed.warnings = []
+                local_parsed.warnings.append(f"AI fallback triggered: {error_msg}")
+                return validate_ai_analysis_against_signal(signal, market, local_parsed, user_settings)
+            except Exception as fallback_exc:
+                logger.error(f"[AI] Local rule fallback failed: {fallback_exc}")
+                return _fallback_analysis(f"AI error: {error_msg}, local fallback error: {fallback_exc}")
+        else:
+            return _fallback_analysis(error_msg)
+
     if settings.ai.voting_enabled and settings.ai.voting_models:
         logger.info(
             f"[AI/Voting] Starting multi-model voting for {signal.ticker} {signal.direction.value}: "
@@ -2040,9 +2091,16 @@ async def analyze_signal(
                 except Exception as e:
                     logger.warning(f"[AI/Voting] Failed to parse {model_id} response: {e}")
 
+            failed_count = len(settings.ai.voting_models) - len(valid_results)
+            if failed_count > 0 and len(valid_results) > 0:
+                logger.warning(
+                    f"[AI/Voting] Partial voting failure: {failed_count} of {len(settings.ai.voting_models)} "
+                    f"models failed. Proceeding with remaining {len(valid_results)} successful models."
+                )
+
             if not valid_results:
                 logger.error("[AI/Voting] All voting models failed")
-                return _fallback_analysis("All voting models failed")
+                return _handle_fallback("All voting models failed")
 
             final_analysis = await _aggregate_voting_results_async(
                 valid_results,
@@ -2065,10 +2123,10 @@ async def analyze_signal(
 
         except TimeoutError:
             logger.error(f"[AI/Voting] Voting timed out after {_voting_timeout}s")
-            return _fallback_analysis(f"Voting timed out after {_voting_timeout}s")
+            return _handle_fallback(f"Voting timed out after {_voting_timeout}s")
         except Exception as e:
             logger.error(f"[AI/Voting] Voting failed: {e}")
-            return _fallback_analysis(f"Voting error: {e}")
+            return _handle_fallback(f"Voting error: {e}")
 
     provider = settings.ai.provider.lower()
     logger.info(f"[AI] Analyzing {signal.ticker} {signal.direction.value} via {provider}...")
@@ -2112,10 +2170,10 @@ async def analyze_signal(
 
     except httpx.HTTPStatusError as e:
         logger.error(f"[AI] API error: {e.response.status_code} - {e.response.text}")
-        return _fallback_analysis(f"API error: {e.response.status_code}")
+        return _handle_fallback(f"API error: {e.response.status_code}")
     except Exception as e:
         logger.error(f"[AI] Analysis failed: {e}")
-        return _fallback_analysis(str(e))
+        return _handle_fallback(str(e))
 
 
 def _parse_response(raw: str) -> AIAnalysis:
@@ -2263,10 +2321,10 @@ def _parse_response(raw: str) -> AIAnalysis:
             suggested_tp2=_optional_float(data.get("suggested_tp2")),
             suggested_tp3=_optional_float(data.get("suggested_tp3")),
             suggested_tp4=_optional_float(data.get("suggested_tp4")),
-            tp1_qty_pct=_clamp(_float_or_default(data.get("tp1_qty_pct", 25.0), 25.0), 0.0, 100.0),
-            tp2_qty_pct=_clamp(_float_or_default(data.get("tp2_qty_pct", 25.0), 25.0), 0.0, 100.0),
-            tp3_qty_pct=_clamp(_float_or_default(data.get("tp3_qty_pct", 25.0), 25.0), 0.0, 100.0),
-            tp4_qty_pct=_clamp(_float_or_default(data.get("tp4_qty_pct", 25.0), 25.0), 0.0, 100.0),
+            tp1_qty_pct=tp_qty_pcts[0],
+            tp2_qty_pct=tp_qty_pcts[1],
+            tp3_qty_pct=tp_qty_pcts[2],
+            tp4_qty_pct=tp_qty_pcts[3],
             position_size_pct=position_size_pct,
             recommended_leverage=recommended_leverage,
             risk_score=risk_score,

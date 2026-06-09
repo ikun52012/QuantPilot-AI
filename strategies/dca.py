@@ -4,6 +4,7 @@ Manages position averaging down/up with configurable parameters.
 Enhanced with live exchange execution support.
 """
 import asyncio
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -182,10 +183,10 @@ class DCAEngine:
             return
         try:
             loop = asyncio.get_running_loop()
+            loop.create_task(self.sync_position_state(position_id))
         except RuntimeError:
-            asyncio.run(self.sync_position_state(position_id))
-            return
-        loop.create_task(self.sync_position_state(position_id))
+            # No running event loop - log warning instead of creating conflicting loop
+            logger.warning(f"[DCA] Cannot sync state: no running event loop for position {position_id}")
 
     async def sync_position_state(self, position_id: str) -> bool:
         """Persist latest local DCA state into Redis hashes."""
@@ -222,7 +223,8 @@ class DCAEngine:
 
     def _ensure_strategy_id(self, config: DCAConfig) -> None:
         if not config.strategy_id:
-            config.strategy_id = f"dca_{config.ticker}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            # BUG FIX: Use UTC time to avoid timezone collisions
+            config.strategy_id = f"dca_{config.ticker}_{utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     def _build_position(self, config: DCAConfig) -> DCAPosition:
         return DCAPosition(
@@ -281,17 +283,23 @@ class DCAEngine:
         current_price: float,
         exchange_config: dict | None = None,
     ) -> DCAPosition:
+        """Synchronous wrapper for creating a DCA position.
+
+        P2-FIX: Removed asyncio.run() to avoid event loop conflicts.
+        Use create_position_async() instead for live exchange execution.
+        """
         if config.paper_mode:
             position = self._create_position_paper(config, current_price)
             self._schedule_state_sync(position.config_id)
             return position
 
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self.create_position_async(config, current_price, exchange_config))
-
-        raise RuntimeError("Use create_position_async() for live exchange execution")
+        # P2-FIX: Do not attempt to create a new event loop here.
+        # This can cause RuntimeError in environments with existing event loops
+        # (e.g., APScheduler async jobs, Jupyter notebooks, etc.)
+        raise RuntimeError(
+            "Live DCA position creation requires an async context. "
+            "Use create_position_async() instead of create_position() for live exchange execution."
+        )
 
     async def create_position_async(
         self,
@@ -305,10 +313,36 @@ class DCAEngine:
             return position
 
         self._ensure_strategy_id(config)
-        async with distributed_lock(f"dca:create:{config.user_id or 'global'}:{config.ticker}:{config.direction}", ttl_seconds=45):
+        async with distributed_lock(
+            f"dca:create:{config.user_id or 'global'}:{config.ticker}:{config.direction}",
+            ttl_seconds=300,
+            allow_local_fallback=config.paper_mode,
+        ):
             position = self._build_position(config)
 
             initial_qty = self._calculate_initial_quantity(config, current_price)
+
+            # Pre-validate size and cost against exchange limits
+            exchange_name = str((exchange_config or {}).get("name") or settings.exchange.name or "").lower().strip()
+            market_type = str((exchange_config or {}).get("market_type") or settings.exchange.market_type or "contract").lower().strip()
+            try:
+                from exchange import get_market_limits
+                limits = await asyncio.to_thread(get_market_limits, exchange_name, config.ticker, market_type)
+                if limits:
+                    min_amount = float(limits.get("min_amount") or 0.0)
+                    min_cost = float(limits.get("min_cost") or 0.0)
+                    contract_size = float(limits.get("contract_size") or 1.0)
+                    initial_cost = initial_qty * current_price * contract_size
+                    if min_amount > 0 and initial_qty < min_amount:
+                        logger.warning(f"[DCA] Initial quantity {initial_qty} below exchange minimum {min_amount} for {config.ticker}")
+                        raise ValueError(f"size_below_exchange_minimum: {initial_qty} < {min_amount}")
+                    if min_cost > 0 and initial_cost < min_cost:
+                        logger.warning(f"[DCA] Initial cost {initial_cost} below exchange minimum {min_cost} for {config.ticker}")
+                        raise ValueError(f"cost_below_exchange_minimum: {initial_cost} < {min_cost}")
+            except ValueError:
+                raise
+            except Exception as e:
+                logger.warning(f"[DCA] Exchange limit pre-validation check failed or skipped: {e}")
 
             try:
                 from exchange import execute_trade
@@ -324,16 +358,20 @@ class DCAEngine:
                     take_profit=self._calculate_take_profit_price(config, current_price, direction),
                     reason="DCA initial entry",
                     order_type="market",
+                    idempotency_key=f"dca:{config.strategy_id}:entry:1",
                 )
 
                 order_result = await execute_trade(decision, exchange_config)
 
-                if order_result.get("status") in ["filled", "simulated"]:
+                if order_result.get("status") in ["filled", "partial", "simulated"]:
                     filled_price = float(order_result.get("entry_price") or current_price)
-                    filled_capital = initial_qty * filled_price
+                    filled_qty = float(order_result.get("filled_quantity") or order_result.get("quantity") or initial_qty)
+                    if filled_qty <= 0:
+                        raise Exception("Exchange returned zero filled quantity")
+                    filled_capital = filled_qty * filled_price
                     entry = DCAEntry(
                         entry_price=filled_price,
-                        quantity=initial_qty,
+                        quantity=filled_qty,
                         capital_usdt=filled_capital,
                         entry_time=utcnow(),
                         entry_idx=1,
@@ -451,7 +489,11 @@ class DCAEngine:
         if not config:
             return {"action": "error", "reason": "Config not found"}
 
-        async with distributed_lock(self._position_lock_name(position_id, position, config), ttl_seconds=45):
+        async with distributed_lock(
+            self._position_lock_name(position_id, position, config),
+            ttl_seconds=300,
+            allow_local_fallback=config.paper_mode,
+        ):
             await self.load_position_state(position_id, refresh=True)
             position = self.positions[position_id]
             config = self.configs.get(position_id)
@@ -566,6 +608,26 @@ class DCAEngine:
         )
 
         if not config.paper_mode:
+            # Pre-validate size and cost against exchange limits
+            exchange_name = str((exchange_config or {}).get("name") or settings.exchange.name or "").lower().strip()
+            market_type = str((exchange_config or {}).get("market_type") or settings.exchange.market_type or "contract").lower().strip()
+            try:
+                from exchange import get_market_limits
+                limits = await asyncio.to_thread(get_market_limits, exchange_name, config.ticker, market_type)
+                if limits:
+                    min_amount = float(limits.get("min_amount") or 0.0)
+                    min_cost = float(limits.get("min_cost") or 0.0)
+                    contract_size = float(limits.get("contract_size") or 1.0)
+                    entry_cost = new_quantity * current_price * contract_size
+                    if (min_amount > 0 and new_quantity < min_amount) or (min_cost > 0 and entry_cost < min_cost):
+                        logger.warning(
+                            f"[DCA] Next entry #{new_entry_idx} for {config.ticker} below exchange requirements. "
+                            f"size={new_quantity:.6f} (min={min_amount}), cost={entry_cost:.2f} (min={min_cost}). Aborting entry."
+                        )
+                        return {"success": False, "reason": "size_below_exchange_minimum"}
+            except Exception as e:
+                logger.warning(f"[DCA] Exchange limits fetch failed during pre-validation: {e}")
+
             try:
                 from exchange import execute_trade
 
@@ -580,11 +642,21 @@ class DCAEngine:
                     take_profit=self._calculate_take_profit_price(config, position.average_entry_price, direction),
                     reason=f"DCA entry #{new_entry_idx}",
                     order_type="market",
+                    idempotency_key=f"dca:{position_id}:entry:{new_entry_idx}",
                 )
 
                 order_result = await execute_trade(decision, exchange_config)
 
-                if order_result.get("status") in ["filled", "simulated"]:
+                if order_result.get("status") in ["filled", "partial", "simulated"]:
+                    filled_price = float(order_result.get("entry_price") or current_price)
+                    filled_qty = float(order_result.get("filled_quantity") or order_result.get("quantity") or new_quantity)
+                    if filled_qty <= 0:
+                        raise Exception("Exchange returned zero filled quantity")
+                    new_capital = filled_qty * filled_price
+                    entry.entry_price = filled_price
+                    entry.quantity = filled_qty
+                    entry.capital_usdt = new_capital
+                    entry.fees_usdt = new_capital * config.fee_pct / 100
                     entry.order_id = order_result.get("order_id", "")
                     logger.info(f"[DCA] Placed DCA entry #{new_entry_idx}: {order_result.get('order_id')}")
                 else:
@@ -599,8 +671,8 @@ class DCAEngine:
             logger.info(f"[DCA] Paper mode - simulated DCA entry #{new_entry_idx}")
 
         position.entries.append(entry)
-        position.total_quantity += new_quantity
-        position.total_capital_usdt += new_capital
+        position.total_quantity += entry.quantity
+        position.total_capital_usdt += entry.capital_usdt
         position.entries_remaining = max(0, position.entries_remaining - 1)
 
         total_qty = position.total_quantity
@@ -613,11 +685,11 @@ class DCAEngine:
 
         position.updated_at = utcnow()
 
-        logger.info(f"[DCA] Added entry #{new_entry_idx} for {position.ticker}: price={current_price}, qty={new_quantity}, avg_entry={weighted_avg:.4f}")
+        logger.info(f"[DCA] Added entry #{new_entry_idx} for {position.ticker}: price={entry.entry_price}, qty={entry.quantity}, avg_entry={weighted_avg:.4f}")
 
         await self.sync_position_state(position_id)
 
-        return {"success": True, "entry_idx": new_entry_idx, "quantity": new_quantity, "average_entry": weighted_avg}
+        return {"success": True, "entry_idx": new_entry_idx, "quantity": entry.quantity, "average_entry": weighted_avg}
 
     def _update_pnl(self, position: DCAPosition) -> None:
         if position.direction == "long":
@@ -647,6 +719,7 @@ class DCAEngine:
                     quantity=position.total_quantity,
                     reason=f"DCA close: {reason}",
                     order_type="market",
+                    idempotency_key=f"dca:{position_id}:close:{reason}",
                 )
 
                 order_result = await execute_trade(decision, exchange_config)
@@ -654,6 +727,11 @@ class DCAEngine:
                 if order_result.get("status") in ["closed", "filled", "simulated"]:
                     logger.info(f"[DCA] Closed position via exchange: {order_result.get('order_id')}")
                     close_confirmed = True
+                elif order_result.get("status") == "partial_closed":
+                    logger.error(f"[DCA] Close only partially filled; keeping position active: {order_result}")
+                    position.updated_at = utcnow()
+                    await self.sync_position_state(position_id)
+                    raise RuntimeError("DCA exchange close was partial; keeping position active")
                 else:
                     logger.error(f"[DCA] Failed to close position: {order_result}")
 

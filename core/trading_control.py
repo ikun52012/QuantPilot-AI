@@ -2,6 +2,7 @@
 import json
 
 from fastapi import HTTPException
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_admin_setting, set_admin_setting
@@ -27,7 +28,8 @@ async def get_trading_control_state(session: AsyncSession) -> dict:
     """Return current global trading control state."""
     mode = await get_admin_setting(session, TRADING_CONTROL_MODE_KEY, "enabled")
     if mode not in TRADING_MODES:
-        mode = "enabled"
+        logger.error(f"[TradingControl] Unknown persisted trading mode {mode!r}; failing closed as emergency_stop")
+        mode = "emergency_stop"
 
     reason = await get_admin_setting(session, TRADING_CONTROL_REASON_KEY, "")
     updated_by = await get_admin_setting(session, TRADING_CONTROL_UPDATED_BY_KEY, "")

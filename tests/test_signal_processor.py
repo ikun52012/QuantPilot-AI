@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import pre_filter
+import services.signal_processor as signal_processor_module
 from core.database import PositionModel
 from core.utils.datetime import utcnow
 from models import AIAnalysis, MarketContext, PreFilterResult, SignalDirection, TradeDecision, TradingViewSignal
@@ -60,6 +61,50 @@ class TestWebhookFingerprint:
         fp1 = compute_webhook_fingerprint(body1)
         fp2 = compute_webhook_fingerprint(body2)
         assert fp1 == fp2
+
+
+class TestSignalProcessorConfigParsing:
+    def test_live_trading_requested_parses_string_booleans(self):
+        assert SignalProcessor._live_trading_requested({"exchange": {"live_trading": "false"}}) is False
+        assert SignalProcessor._live_trading_requested({"exchange": {"live_trading": "true"}}) is True
+        assert SignalProcessor._live_trading_requested({}, user_id="user-1") is False
+
+    def test_block_live_risk_errors_parses_string_booleans(self):
+        assert SignalProcessor._block_live_risk_check_errors({"risk": {"block_live_on_risk_check_error": "false"}}) is False
+        assert SignalProcessor._block_live_risk_check_errors({"risk": {"block_live_on_risk_check_error": "true"}}) is True
+
+
+@pytest.mark.asyncio
+async def test_process_webhook_releases_queue_slot_on_ticker_lock_timeout(monkeypatch):
+    signal_processor_module._TICKER_PENDING.clear()
+    signal_processor_module._TICKER_LOCKS.clear()
+    monkeypatch.setattr(signal_processor_module.settings.ai, "batch_signals_enabled", False)
+    monkeypatch.setattr(signal_processor_module, "_TICKER_LOCK_TIMEOUT_SECONDS", 0.01)
+
+    signal = TradingViewSignal(
+        secret="test",
+        ticker="BTCUSDT",
+        direction=SignalDirection.LONG,
+        price=50000.0,
+        timeframe="60",
+    )
+    lock = await signal_processor_module._ticker_lock(signal.ticker, None)
+    await lock.acquire()
+
+    try:
+        processor = SignalProcessor(session=AsyncMock())
+        processor._mark_reserved_event_by_id = AsyncMock()
+        with patch("services.signal_processor._prefetch_market_data_async", new=AsyncMock(return_value=None)):
+            result = await processor.process_webhook(signal, raw_body=signal.model_dump())
+
+        assert result["status"] == "error"
+        assert signal_processor_module._TICKER_PENDING.get("admin:BTCUSDT", 0) == 0
+        processor._mark_reserved_event_by_id.assert_awaited_once()
+    finally:
+        if lock.locked():
+            lock.release()
+        signal_processor_module._TICKER_PENDING.clear()
+        signal_processor_module._TICKER_LOCKS.clear()
 
 
 class TestSignalProcessorBuildDecision:
@@ -213,6 +258,32 @@ class TestSignalProcessorBuildDecision:
         assert decision.execute is True
         assert decision.stop_loss == 49000
         assert len(decision.take_profit_levels) > 0
+
+    def test_close_signal_does_not_calculate_entry_size(self, processor, sample_market):
+        signal = TradingViewSignal(
+            secret="test",
+            ticker="BTCUSDT",
+            exchange="BINANCE",
+            direction=SignalDirection.CLOSE_LONG,
+            price=50000.0,
+            timeframe="60",
+            strategy="test",
+            message="",
+        )
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="execute",
+            reasoning="Close setup",
+            suggested_stop_loss=49000,
+            suggested_tp1=51500,
+        )
+
+        decision = processor._build_trade_decision(signal, analysis, sample_market, "user1", {})
+
+        assert decision.execute is True
+        assert decision.quantity is None
+        assert decision.order_type == "market"
+        assert decision.take_profit_levels == []
 
     def test_scanner_tightens_far_tp_and_enables_pre_tp_trailing(self, processor):
         signal = TradingViewSignal(

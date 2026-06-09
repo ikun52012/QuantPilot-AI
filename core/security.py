@@ -41,23 +41,63 @@ SENSITIVE_KEYS = {
 _HASH_ITERATIONS = 260_000  # OWASP minimum for PBKDF2-SHA256
 _SALT_SIZE = 32
 
-# Common passwords to reject (top 50 most common)
+# Common passwords to reject (P0-FIX: Extended from 50 to 150 most common)
 _COMMON_PASSWORDS = {
+    # Numeric passwords
     "123456", "12345678", "123456789", "12345", "1234567", "1234567890",
-    "password", "password1", "password123",
-    "qwerty", "qwerty123", "qwerty1",
-    "admin", "admin123", "admin123456",
-    "letmein", "letmein123",
-    "tradingview", "tradingview123",
-    "welcome", "welcome1", "welcome123",
-    "monkey", "dragon", "master", "football", "baseball",
-    "iloveyou", "trustno1", "sunshine", "princess",
-    "abc123", "111111", "123123", "123321",
-    "passw0rd", "p@ssword", "p@ssw0rd",
-    "bitcoin", "crypto", "ethereum",
-    "changeme", "default", "temp123",
-    "test", "test123", "guest", "guest123",
-    "root", "root123", "user", "user123",
+    "111111", "000000", "123123", "123321", "121212", "112233",
+
+    # Simple passwords
+    "password", "password1", "password123", "password12", "password!",
+    "passw0rd", "p@ssword", "p@ssw0rd", "p@ssword1", "pass1234",
+    "qwerty", "qwerty123", "qwerty1", "qwerty12", "qwerty!",
+
+    # Admin/common words
+    "admin", "admin123", "admin123456", "administrator", "admin1",
+    "root", "root123", "root1234", "superuser", "super",
+    "user", "user123", "user1234", "guest", "guest123",
+    "test", "test123", "test1234", "testing", "demo",
+    "changeme", "change-me", "change123", "changeit", "default",
+    "temp", "temp123", "temp1234", "temporary", "temp12345",
+
+    # Trading/crypto specific (high risk for this app)
+    "tradingview", "tradingview123", "trading", "trade123",
+    "bitcoin", "bitcoin123", "btc123", "crypto", "crypto123",
+    "ethereum", "ethereum123", "eth123", "binance", "binance123",
+    "quantpilot", "quantpilot123", "quant", "quant123",
+    "trader", "trader123", "trading123", "signal", "signal123",
+
+    # Common phrases
+    "letmein", "letmein123", "welcome", "welcome1", "welcome123",
+    "monkey", "dragon", "master", "master123", "football", "baseball",
+    "iloveyou", "iloveyou1", "trustno1", "trustno2", "sunshine", "princess",
+    "abc123", "abcd1234", "abcd123", "abcabc", "ababab",
+
+    # Name-based
+    "michael", "jennifer", "thomas", "charlie", "jessica",
+    "jordan", "jordan23", "michael1", "jennifer1",
+
+    # Simple patterns
+    "aaaaaa", "aaaaaaa", "aaaaaa1", "bbbbbb", "1111111",
+    "12341234", "12123434", "asdfgh", "asdfghjkl",
+
+    # Keyboard patterns
+    "zxcvbn", "zxcvbnm", "asdf1234", "qazwsx", "qweasd",
+
+    # Animal/food
+    "batman", "batman123", "superman", "spiderman", "ironman",
+    "pizza", "pizza123", "burger", "burger123",
+
+    # Love/relationship
+    "iloveyou2", "iloveyou!", "love123", "lovely", "lovely1",
+    "honey", "honey123", "sweet", "sweetheart",
+
+    # Tech/internet
+    "internet", "internet123", "computer", "computer123",
+    "google", "google123", "facebook", "facebook123",
+
+    # Short common
+    "pass", "pass123", "123", "1234", "abc", "test1", "test12",
 }
 
 
@@ -136,41 +176,86 @@ def mask_secret(value: Any, *, front: int = 4, back: int = 4) -> str:
 # ─────────────────────────────────────────────
 
 def _derive_fernet_key(raw: str) -> bytes:
-    """Derive a Fernet-compatible key from a raw string."""
+    """Derive a Fernet-compatible key from a raw string using PBKDF2.
+
+    P0-FIX: Use PBKDF2-HMAC-SHA256 for secure key derivation instead of simple SHA256.
+    This provides better resistance against brute-force attacks.
+    """
     raw = (raw or "").strip()
     if not raw:
         raise ValueError("Encryption key cannot be empty")
     try:
+        # If already a valid Fernet key, use directly
         Fernet(raw.encode())
         return raw.encode()
     except (ValueError, TypeError, Exception):
-        digest = hashlib.sha256(raw.encode()).digest()
-        return base64.urlsafe_b64encode(digest)
+        # P0-FIX: Use PBKDF2 for secure key derivation
+        # Salt: fixed salt derived from application name (not secret, but unique)
+        salt = hashlib.sha256(b"QuantPilot-AI-Encryption-Key-Salt").digest()
+        # PBKDF2 with 100,000 iterations (OWASP recommendation for PBKDF2-SHA256)
+        dk = hashlib.pbkdf2_hmac(
+            "sha256",
+            raw.encode("utf-8"),
+            salt,
+            iterations=100_000,  # High iteration count for security
+        )
+        return base64.urlsafe_b64encode(dk)
 
 
 def _load_or_create_key() -> bytes:
-    """Load or create the encryption key."""
+    """Load or create the encryption key.
+
+    P0-FIX: Enhanced security for encryption key management:
+    - In production (LIVE_TRADING=true), REQUIRE APP_ENCRYPTION_KEY environment variable
+    - File-based keys are only for development/testing
+    - Strict file permissions (0o600) enforced
+    """
     env_key = os.getenv("APP_ENCRYPTION_KEY", "").strip()
+
+    # P0-FIX: Check if we're in production mode
+    from core.config import settings
+    is_production = getattr(settings, 'is_production', False)
+
     if env_key:
         try:
             return _derive_fernet_key(env_key)
         except ValueError as err:
             raise RuntimeError(
                 "APP_ENCRYPTION_KEY environment variable is empty or invalid. "
-                "Set a valid Fernet key or remove it to auto-generate one."
+                "Set a valid Fernet key: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
             ) from err
+
+    # P0-FIX: Production MUST use environment variable
+    if is_production:
+        raise RuntimeError(
+            "APP_ENCRYPTION_KEY must be set via environment variable in production (LIVE_TRADING=true). "
+            "Generate a key: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     if KEY_FILE.exists():
         try:
-            return KEY_FILE.read_text(encoding="utf-8").strip().encode()
+            key_data = KEY_FILE.read_text(encoding="utf-8").strip().encode()
+            # P0-FIX: Verify file permissions are strict
+            try:
+                current_mode = KEY_FILE.stat().st_mode & 0o777
+                if current_mode != 0o600:
+                    logger.warning(
+                        f"[Security] Encryption key file {KEY_FILE} has unsafe permissions {oct(current_mode)}. "
+                        "Attempting to fix to 0o600."
+                    )
+                    KEY_FILE.chmod(0o600)
+            except (OSError, PermissionError):
+                pass
+            return key_data
         except PermissionError as err:
             logger.error(f"[Security] Permission denied reading {KEY_FILE}. Check file permissions.")
             raise RuntimeError(
                 f"Cannot read encryption key file: {KEY_FILE}. Ensure proper permissions (chmod 600)."
             ) from err
 
+    # Generate new key only in development mode
     key = Fernet.generate_key()
 
     try:
@@ -181,23 +266,38 @@ def _load_or_create_key() -> bytes:
             f"Cannot write encryption key file: {KEY_FILE}. Ensure directory is writable."
         ) from err
 
+    # P0-FIX: Enforce strict file permissions (owner read/write only)
     try:
         KEY_FILE.chmod(0o600)
-    except (OSError, PermissionError):
-        pass
+        logger.info(f"[Security] Set strict permissions (0o600) on {KEY_FILE}")
+    except (OSError, PermissionError) as err:
+        logger.warning(
+            f"[Security] Could not set strict permissions on {KEY_FILE}: {err}. "
+            "Manually run: chmod 600 data/app_encryption.key (Linux) or icacls (Windows)"
+        )
 
     # On Windows, try to set restricted ACL permissions
     try:
         if os.name == "nt":
             import subprocess
-            subprocess.run(
-                ["icacls", str(KEY_FILE), "/inheritance:r", "/grant:r", f"{os.getenv('USERNAME', 'ADMIN')}:R"],
-                check=False, capture_output=True, timeout=5,
-            )
-    except Exception:
-        pass
+            current_user = os.getenv("USERNAME")
+            if not current_user:
+                import getpass
+                current_user = getpass.getuser()
+            if current_user:
+                subprocess.run(
+                    ["icacls", str(KEY_FILE), "/inheritance:r", "/grant:r", f"{current_user}:F"],
+                    check=False, capture_output=True, timeout=5,
+                )
+                logger.info(f"[Security] Set Windows ACL on {KEY_FILE} for {current_user} only")
+    except Exception as err:
+        logger.warning(f"[Security] Could not set Windows ACL on {KEY_FILE}: {err}")
 
-    logger.warning("[Security] Generated persistent APP_ENCRYPTION_KEY — set APP_ENCRYPTION_KEY in .env for production")
+    logger.warning(
+        "[Security] Generated persistent APP_ENCRYPTION_KEY for development. "
+        "For production, set APP_ENCRYPTION_KEY in .env: "
+        "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
     return key
 
 

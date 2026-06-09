@@ -23,7 +23,7 @@ COMPOSE_FILE = BASE_DIR / "docker-compose.yml"
 ENV_FILE = BASE_DIR / ".env"
 COMPOSE_PROJECT = os.getenv("COMPOSE_PROJECT_NAME", "quantpilot-ai")
 TARGET_SERVICE = os.getenv("UPDATE_TARGET_SERVICE", "signal-server")
-TARGET_IMAGE = os.getenv("UPDATE_TARGET_IMAGE", "ghcr.io/ikun52012/quantpilot-ai:v5.5.0")
+TARGET_IMAGE = os.getenv("UPDATE_TARGET_IMAGE", "ghcr.io/ikun52012/quantpilot-ai:v5.5.1")
 HEALTH_INTERVAL = int(os.getenv("UPDATER_HEARTBEAT_SECS", "10"))
 ROLLOUT_TIMEOUT_SECS = int(os.getenv("UPDATER_ROLLOUT_TIMEOUT_SECS", "180"))
 TARGET_HEALTH_URL = os.getenv("UPDATE_TARGET_HEALTH_URL", "http://127.0.0.1:8000/health")
@@ -145,6 +145,15 @@ def process_request(path: Path) -> None:
             append_log(payload, f"Refusing unsafe target image: {target_image or '<empty>'}")
             payload["status"] = "failed"
             payload["message"] = "Updater requires an explicit image tag"
+            write_json(status_path, payload)
+            return
+
+        # BUG FIX: Validate target_image against allowed registry to prevent injection
+        ALLOWED_REGISTRIES = ("ghcr.io/ikun52012/", "docker.io/ikun52012/", "ikun52012/")
+        if not any(target_image.startswith(reg) for reg in ALLOWED_REGISTRIES):
+            append_log(payload, f"Refusing image from unauthorized registry: {target_image}")
+            payload["status"] = "failed"
+            payload["message"] = f"Image must be from authorized registry: {', '.join(ALLOWED_REGISTRIES)}"
             write_json(status_path, payload)
             return
 

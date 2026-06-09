@@ -22,29 +22,29 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastapi>=0.115.0,<1.0",
-    "uvicorn[standard]>=0.30.0,<1.0",
+    "fastapi>=0.136.0,<1.0",
+    "uvicorn[standard]>=0.46.0,<1.0",
     "httpx>=0.27.0,<1.0",
     "python-dotenv>=1.0.0,<2.0",
-    "pydantic>=2.9.0,<3.0",
-    "pydantic-settings>=2.5.0,<3.0",
-    "ccxt==4.5.54",
+    "pydantic>=2.13.0,<3.0",
+    "pydantic-settings>=2.14.0,<3.0",
+    "ccxt>=4.5.54,<5.0",
     "apscheduler>=3.10.0,<4.0",
-    "aiofiles>=23.2.0,<25.0",
+    "aiofiles>=24.1.0,<26.0",
     "loguru>=0.7.0,<1.0",
-    "cryptography>=42.0.0,<45.0",
-    "PyJWT>=2.9.0,<3.0",
+    "cryptography>=47.0.0,<50.0",
+    "PyJWT>=2.12.0,<3.0",
     "pyotp>=2.9.0,<3.0",
-    "qrcode[pil]>=7.4.0,<8.0",
-    "asyncpg>=0.29.0,<1.0",
-    "aiosqlite>=0.20.0,<1.0",
-    "sqlalchemy[asyncio]>=2.0.0,<3.0",
-    "greenlet>=3.0.0,<4.0",
-    "alembic>=1.13.0,<2.0",
-    "redis>=5.0.0,<6.0",
-    "hiredis>=2.3.0; sys_platform != 'win32'",
-    "prometheus-client>=0.20.0,<1.0",
-    "yfinance>=0.2.0,<1.0",
+    "qrcode[pil]>=7.4.0,<9.0",
+    "asyncpg>=0.30.0,<1.0",
+    "aiosqlite>=0.21.0,<1.0",
+    "sqlalchemy[asyncio]>=2.0.49,<3.0",
+    "greenlet>=3.1.0,<4.0",
+    "alembic>=1.14.0,<2.0",
+    "redis>=5.2.0,<8.0",
+    "hiredis>=3.0.0; sys_platform != 'win32'",
+    "prometheus-client>=0.21.0,<1.0",
+    "yfinance>=0.2.50,<1.0",
 ]
 
 [project.optional-dependencies]
@@ -93,3 +93,8 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
 ]
+# P4-FIX: Enforce minimum coverage threshold so CI fails when coverage drops.
+# Set conservative initial value; raise as coverage improves.
+fail_under = 30
+show_missing = true
+skip_covered = false

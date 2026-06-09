@@ -129,9 +129,8 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
     DEPRECATED: Use log_trade_async() instead.
 
     When called from outside an event loop, runs log_trade_async via asyncio.run().
-    When called from inside an event loop, spawns a daemon thread with its own
-    event loop to avoid nested-loop deadlocks.  The coroutine is *not* awaited,
-    so the returned trade_id is a best-effort placeholder.
+    When called from inside an event loop, schedules the coroutine as a background task
+    to avoid blocking the event loop.
     """
     warnings.warn(
         "log_trade() is deprecated and will be removed in v5.0. Use log_trade_async() instead.",
@@ -140,39 +139,18 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
     )
 
     try:
-        _asyncio.get_running_loop()
+        loop = _asyncio.get_running_loop()
+        # We are inside a running event loop; schedule as a background task
+        # instead of spawning a blocking thread
+        task = loop.create_task(log_trade_async(decision, order_result, user_id))
+        task.add_done_callback(
+            lambda t: logger.warning(f"[TradeLog] Background trade logging failed: {t.exception()}")
+            if t.exception() else None
+        )
+        return str(uuid.uuid4())  # Best-effort placeholder
     except RuntimeError:
         # No running event loop — safe to run synchronously
         return _asyncio.run(log_trade_async(decision, order_result, user_id))
-
-    # We are inside a running event loop; schedule the coroutine on a
-    # background thread and return a placeholder id so we never block
-    # the main async context.
-    result_container: dict[str, str] = {}
-    error_container: dict[str, Exception] = {}
-
-    def _runner() -> None:
-        try:
-            result_container["trade_id"] = _asyncio.run(
-                log_trade_async(decision, order_result, user_id)
-            )
-        except Exception as exc:
-            error_container["error"] = exc
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    thread.join(timeout=30)
-
-    if thread.is_alive():
-        logger.warning("[TradeLog] log_trade() thread timed out — trade logging in progress, will complete asynchronously")
-        return str(uuid.uuid4())
-
-    if "error" in error_container:
-        logger.warning(f"[TradeLog] log_trade() failed: {error_container['error']}")
-        return str(uuid.uuid4())
-
-    trade_id = result_container.get("trade_id")
-    return trade_id if trade_id is not None else str(uuid.uuid4())
 
 
 def get_today_trades(user_id: str | None = None) -> list[dict]:

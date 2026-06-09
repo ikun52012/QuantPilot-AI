@@ -5314,7 +5314,13 @@ function renderSocialFeed(signals) {
         el.innerHTML = `<div class="empty-state">${escapeHtml(t('pages.social.no_signals', 'No shared signals yet'))}</div>`;
         return;
     }
-    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('common.ticker', 'Ticker'))}</th><th>${escapeHtml(t('common.direction', 'Direction'))}</th><th>${escapeHtml(t('trading.entry', 'Entry'))}</th><th>${escapeHtml(t('common.confidence', 'Confidence'))}</th><th>${escapeHtml(t('pages.social.provider', 'Provider'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${signals.map(s => `<tr><td><strong>${escapeHtml(s.ticker)}</strong></td><td><span class="badge badge-${safeClassToken(s.direction)}">${escapeHtml(t(`trading.${s.direction}`, s.direction))}</span></td><td>$${formatNum(s.entry_price)}</td><td>${Math.round(Number(s.confidence || 0) * 100)}%</td><td>${escapeHtml(s.username || '--')}</td><td><div class="admin-actions"><button class="btn btn-sm btn-primary" onclick="subscribeSocialSignal('${escapeJsSingle(s.signal_id)}')">${escapeHtml(t('actions.subscribe', 'Subscribe'))}</button><button class="btn btn-sm btn-secondary" onclick="followSignalUser('${escapeJsSingle(s.username || '')}')">${escapeHtml(t('actions.follow', 'Follow'))}</button></div></td></tr>`).join('')}</tbody></table></div>`;
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('common.ticker', 'Ticker'))}</th><th>${escapeHtml(t('common.direction', 'Direction'))}</th><th>${escapeHtml(t('trading.entry', 'Entry'))}</th><th>${escapeHtml(t('common.confidence', 'Confidence'))}</th><th>${escapeHtml(t('pages.social.provider', 'Provider'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${signals.map(s => `<tr><td><strong>${escapeHtml(s.ticker)}</strong></td><td><span class="badge badge-${safeClassToken(s.direction)}">${escapeHtml(t(`trading.${s.direction}`, s.direction))}</span></td><td>$${formatNum(s.entry_price)}</td><td>${Math.round(Number(s.confidence || 0) * 100)}%</td><td>${escapeHtml(s.username || '--')}</td><td><div class="admin-actions"><button class="btn btn-sm btn-primary js-social-subscribe" data-signal-id="${escapeHtml(s.signal_id)}">${escapeHtml(t('actions.subscribe', 'Subscribe'))}</button><button class="btn btn-sm btn-secondary js-social-follow" data-username="${escapeHtml(s.username || '')}">${escapeHtml(t('actions.follow', 'Follow'))}</button></div></td></tr>`).join('')}</tbody></table></div>`;
+    el.querySelectorAll('.js-social-subscribe').forEach(btn => {
+        btn.addEventListener('click', () => subscribeSocialSignal(btn.dataset.signalId || ''));
+    });
+    el.querySelectorAll('.js-social-follow').forEach(btn => {
+        btn.addEventListener('click', () => followSignalUser(btn.dataset.username || ''));
+    });
 }
 
 function renderSocialSubscriptions(subs) {
@@ -5324,7 +5330,10 @@ function renderSocialSubscriptions(subs) {
         el.innerHTML = `<div class="empty-state">${escapeHtml(t('pages.social.no_subscriptions', 'No signal subscriptions'))}</div>`;
         return;
     }
-    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('pages.social.signal', 'Signal'))}</th><th>${escapeHtml(t('pages.social.auto_execute', 'Auto Execute'))}</th><th>${escapeHtml(t('pages.social.max_position', 'Max Position'))}</th><th>${escapeHtml(t('pages.social.subscribed', 'Subscribed'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${subs.map(s => `<tr><td><code>${escapeHtml(s.signal_id)}</code></td><td>${s.auto_execute ? t('common.yes', 'Yes') : t('common.no', 'No')}</td><td>${formatNum(s.max_position_pct)}%</td><td>${escapeHtml(formatDateTime(s.subscribed_at))}</td><td><button class="btn btn-sm btn-danger" onclick="unsubscribeSocialSignal('${escapeJsSingle(s.signal_id)}')">${escapeHtml(t('actions.unsubscribe', 'Unsubscribe'))}</button></td></tr>`).join('')}</tbody></table></div>`;
+    el.innerHTML = `<div class="table-wrapper"><table class="data-table"><thead><tr><th>${escapeHtml(t('pages.social.signal', 'Signal'))}</th><th>${escapeHtml(t('pages.social.auto_execute', 'Auto Execute'))}</th><th>${escapeHtml(t('pages.social.max_position', 'Max Position'))}</th><th>${escapeHtml(t('pages.social.subscribed', 'Subscribed'))}</th><th>${escapeHtml(t('common.actions', 'Actions'))}</th></tr></thead><tbody>${subs.map(s => `<tr><td><code>${escapeHtml(s.signal_id)}</code></td><td>${s.auto_execute ? t('common.yes', 'Yes') : t('common.no', 'No')}</td><td>${formatNum(s.max_position_pct)}%</td><td>${escapeHtml(formatDateTime(s.subscribed_at))}</td><td><button class="btn btn-sm btn-danger js-social-unsubscribe" data-signal-id="${escapeHtml(s.signal_id)}">${escapeHtml(t('actions.unsubscribe', 'Unsubscribe'))}</button></td></tr>`).join('')}</tbody></table></div>`;
+    el.querySelectorAll('.js-social-unsubscribe').forEach(btn => {
+        btn.addEventListener('click', () => unsubscribeSocialSignal(btn.dataset.signalId || ''));
+    });
 }
 
 function renderSocialLeaderboard(rows) {

@@ -2,11 +2,12 @@
 Signal Server - Authentication Router
 User registration, login, session management, and 2FA (TOTP).
 """
+import re
 from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +46,14 @@ class RegisterRequest(BaseModel):
     email: str = Field(min_length=5, max_length=254)
     password: str = Field(min_length=8, max_length=256)
     invite_code: str = Field(default="", max_length=80)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        username = str(value or "").lower().strip()
+        if not re.fullmatch(r"[a-z0-9_]{3,32}", username):
+            raise ValueError("Username may only contain lowercase letters, numbers, and underscores")
+        return username
 
 
 class LoginRequest(BaseModel):
@@ -220,8 +229,10 @@ async def login(
                 logger.info(f"[Auth] User logged in with 2FA (inline): {username}")
                 # P0-FIX: Clear only 2FA counters after successful 2FA verification
                 record_successful_2fa(ip)
+                requires_password_change = getattr(user, "password_changed_at", None) is None
                 return {
                     "token": token,
+                    "requires_password_change": requires_password_change,
                     "user": {
                         "id": user.id,
                         "username": user.username,
@@ -279,8 +290,12 @@ async def login(
     logger.info(f"[Auth] User logged in: {username}")
     record_successful_login(ip)
 
+    # P2-FIX: Check if password was admin-reset and requires change
+    requires_password_change = getattr(user, "password_changed_at", None) is None
+
     return {
         "token": token,
+        "requires_password_change": requires_password_change,
         "user": {
             "id": user.id,
             "username": user.username,
@@ -441,6 +456,7 @@ async def enable_2fa(
 
     db_user.totp_enabled = True
     db_user.totp_recovery_codes_json = json.dumps(hashed_codes)
+    db_user.token_version = int(db_user.token_version or 0) + 1
 
     logger.info(f"[Auth] 2FA enabled for user: {db_user.username}")
 
@@ -470,6 +486,7 @@ async def disable_2fa(
     db_user.totp_enabled = False
     db_user.totp_secret = ""
     db_user.totp_recovery_codes_json = "[]"
+    db_user.token_version = int(db_user.token_version or 0) + 1
 
     logger.info(f"[Auth] 2FA disabled for user: {db_user.username}")
 

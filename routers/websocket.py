@@ -26,6 +26,9 @@ _WS_CONNECTION_COOLDOWN = 60
 _WS_AUTH_TIMEOUT_SECS = 5.0
 _WS_RECONNECT_DELAY_SECS = 1.0
 _WS_MAX_RECONNECT_ATTEMPTS = 5
+_WS_CONNECTION_TIMEOUT_SECS = 300.0  # 5 minutes connection timeout
+_WS_PING_INTERVAL_SECS = 30.0  # Ping every 30 seconds
+_WS_PING_TIMEOUT_SECS = 10.0  # Ping timeout
 _ws_connection_times: dict[str, list[float]] = defaultdict(list)
 _ws_reconnect_counts: dict[str, int] = defaultdict(int)
 
@@ -35,6 +38,18 @@ _price_cache: dict[str, dict] = {}
 _price_cache_lock = asyncio.Lock()
 _price_cache_task: asyncio.Task | None = None
 _PRICE_CACHE_UPDATE_INTERVAL = 5  # seconds
+
+# BUG FIX: Strong reference set for WebSocket tasks to prevent GC
+_WS_TASKS: set[asyncio.Task] = set()
+
+
+def cancel_price_cache_task() -> None:
+    """Cancel the shared price cache background task on application shutdown."""
+    global _price_cache_task
+    if _price_cache_task and not _price_cache_task.done():
+        _price_cache_task.cancel()
+        _price_cache_task = None
+    _price_cache.clear()
 
 
 def _verify_ws_token_or_none(token: str) -> dict | None:
@@ -78,11 +93,22 @@ async def _authenticate_ws_user_or_none(token: str, require_admin_role: bool = F
 
 
 def _extract_ws_token(websocket: WebSocket) -> str:
-    """Prefer explicit token param, but allow browser cookie auth for same-origin sockets."""
-    token = websocket.query_params.get("token")
+    """P0-FIX: Prefer cookie authentication to avoid token exposure in URL/logs.
+
+    Query parameter token is deprecated and will be removed in future versions.
+    For browser clients, use cookie authentication (same-origin).
+    For programmatic clients, pass token via Authorization header pattern.
+    """
+    token = websocket.cookies.get(AUTH_COOKIE_NAME, "")
     if token:
         return token
-    return websocket.cookies.get(AUTH_COOKIE_NAME, "")
+
+    logger.warning(
+        "[WebSocket] No authentication cookie found. "
+        "Query parameter tokens are no longer supported for security reasons. "
+        "Please authenticate via the login endpoint first."
+    )
+    return ""
 
 
 def _validate_ws_origin(websocket: WebSocket) -> bool:
@@ -318,54 +344,83 @@ async def websocket_positions(websocket: WebSocket):
             "message": "WebSocket connected successfully",
         }, websocket)
 
+        last_activity = time.time()
+        connection_timeout = _WS_CONNECTION_TIMEOUT_SECS
+
         while True:
-            data = await websocket.receive_text()
-
             try:
-                message = json.loads(data)
-                msg_type = message.get("type", "unknown")
-
-                if msg_type == "ping":
-                    await manager.send_personal({
-                        "type": "pong",
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }, websocket)
-
-                elif msg_type == "subscribe":
-                    channels = message.get("channels", ["positions"])
-                    await manager.send_personal({
-                        "type": "subscribed",
-                        "channels": channels,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }, websocket)
-
-                elif msg_type == "unsubscribe":
-                    channels = message.get("channels", [])
-                    await manager.send_personal({
-                        "type": "unsubscribed",
-                        "channels": channels,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }, websocket)
-
-                elif msg_type == "get_positions":
-                    positions = await _fetch_user_positions(user_id)
-                    await manager.send_personal({
-                        "type": "positions_list",
-                        "positions": positions,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }, websocket)
-
-                else:
+                # Check for connection timeout
+                if time.time() - last_activity > connection_timeout:
+                    logger.warning(f"[WebSocket] Connection timeout for user {user_id}")
                     await manager.send_personal({
                         "type": "error",
-                        "message": f"Unknown message type: {msg_type}",
+                        "message": "Connection timeout - no activity",
+                    }, websocket)
+                    break
+
+                # Use timeout for receive_text to enable ping checks
+                data = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=_WS_PING_INTERVAL_SECS
+                )
+                last_activity = time.time()
+
+                try:
+                    message = json.loads(data)
+                    msg_type = message.get("type", "unknown")
+
+                    if msg_type == "ping":
+                        await manager.send_personal({
+                            "type": "pong",
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }, websocket)
+
+                    elif msg_type == "subscribe":
+                        channels = message.get("channels", ["positions"])
+                        await manager.send_personal({
+                            "type": "subscribed",
+                            "channels": channels,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }, websocket)
+
+                    elif msg_type == "unsubscribe":
+                        channels = message.get("channels", [])
+                        await manager.send_personal({
+                            "type": "unsubscribed",
+                            "channels": channels,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }, websocket)
+
+                    elif msg_type == "get_positions":
+                        positions = await _fetch_user_positions(user_id)
+                        await manager.send_personal({
+                            "type": "positions_list",
+                            "positions": positions,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }, websocket)
+
+                    else:
+                        await manager.send_personal({
+                            "type": "error",
+                            "message": f"Unknown message type: {msg_type}",
+                        }, websocket)
+
+                except json.JSONDecodeError:
+                    await manager.send_personal({
+                        "type": "error",
+                        "message": "Invalid JSON format",
                     }, websocket)
 
-            except json.JSONDecodeError:
-                await manager.send_personal({
-                    "type": "error",
-                    "message": "Invalid JSON format",
-                }, websocket)
+            except TimeoutError:
+                # Send ping to check connection
+                try:
+                    await manager.send_personal({
+                        "type": "ping",
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }, websocket)
+                except Exception:
+                    logger.warning(f"[WebSocket] Ping failed for user {user_id}, connection may be dead")
+                    break
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
@@ -414,53 +469,81 @@ async def websocket_prices(websocket: WebSocket):
         }, websocket)
 
         price_task = None
+        last_activity = time.time()
+        connection_timeout = _WS_CONNECTION_TIMEOUT_SECS
 
         try:
             while True:
-                data = await websocket.receive_text()
-
                 try:
-                    message = json.loads(data)
-                    msg_type = message.get("type")
+                    # Check for connection timeout
+                    if time.time() - last_activity > connection_timeout:
+                        logger.warning(f"[WebSocket] Price connection timeout for user {user_id}")
+                        break
 
-                    if msg_type == "subscribe_tickers":
-                        tickers = _normalize_price_tickers(message.get("tickers", []))
-                        subscribed_tickers.update(tickers)
-                        manager.set_price_subscriptions(websocket, subscribed_tickers)
+                    # Use timeout for receive_text
+                    data = await asyncio.wait_for(
+                        websocket.receive_text(),
+                        timeout=_WS_PING_INTERVAL_SECS
+                    )
+                    last_activity = time.time()
 
-                        if subscribed_tickers and not price_task:
-                            price_task = asyncio.create_task(
-                                _stream_prices(websocket, subscribed_tickers)
-                            )
+                    try:
+                        message = json.loads(data)
+                        msg_type = message.get("type")
 
+                        if msg_type == "subscribe_tickers":
+                            tickers = _normalize_price_tickers(message.get("tickers", []))
+                            subscribed_tickers.update(tickers)
+                            manager.set_price_subscriptions(websocket, subscribed_tickers)
+
+                            if subscribed_tickers and not price_task:
+                                price_task = asyncio.create_task(
+                                    _stream_prices(websocket, subscribed_tickers)
+                                )
+                                # BUG FIX: Add strong reference to prevent GC
+                                _WS_TASKS.add(price_task)
+                                price_task.add_done_callback(_WS_TASKS.discard)
+
+                            await manager.send_personal({
+                                "type": "subscribed_tickers",
+                                "tickers": list(subscribed_tickers),
+                            }, websocket)
+
+                        elif msg_type == "unsubscribe_tickers":
+                            tickers = _normalize_price_tickers(message.get("tickers", []))
+                            subscribed_tickers.difference_update(tickers)
+                            manager.set_price_subscriptions(websocket, subscribed_tickers)
+
+                            if not subscribed_tickers and price_task:
+                                price_task.cancel()
+                                try:
+                                    await price_task
+                                except asyncio.CancelledError:
+                                    pass
+                                price_task = None
+
+                            await manager.send_personal({
+                                "type": "unsubscribed_tickers",
+                                "tickers": list(subscribed_tickers),
+                            }, websocket)
+
+                        elif msg_type == "ping":
+                            await manager.send_personal({"type": "pong"}, websocket)
+
+                    except json.JSONDecodeError:
+                        pass
+
+                except TimeoutError:
+                    # Send ping to check connection
+                    try:
                         await manager.send_personal({
-                            "type": "subscribed_tickers",
-                            "tickers": list(subscribed_tickers),
+                            "type": "ping",
+                            "timestamp": datetime.now(UTC).isoformat(),
                         }, websocket)
+                    except Exception:
+                        logger.warning(f"[WebSocket] Price ping failed for user {user_id}, connection may be dead")
+                        break
 
-                    elif msg_type == "unsubscribe_tickers":
-                        tickers = _normalize_price_tickers(message.get("tickers", []))
-                        subscribed_tickers.difference_update(tickers)
-                        manager.set_price_subscriptions(websocket, subscribed_tickers)
-
-                        if not subscribed_tickers and price_task:
-                            price_task.cancel()
-                            try:
-                                await price_task
-                            except asyncio.CancelledError:
-                                pass
-                            price_task = None
-
-                        await manager.send_personal({
-                            "type": "unsubscribed_tickers",
-                            "tickers": list(subscribed_tickers),
-                        }, websocket)
-
-                    elif msg_type == "ping":
-                        await manager.send_personal({"type": "pong"}, websocket)
-
-                except json.JSONDecodeError:
-                    pass
         finally:
             manager.set_price_subscriptions(websocket, set())
             if price_task:
@@ -517,27 +600,55 @@ async def websocket_system(websocket: WebSocket):
         }, websocket)
 
         status_task = asyncio.create_task(_stream_system_status(websocket))
+        # BUG FIX: Add strong reference to prevent GC
+        _WS_TASKS.add(status_task)
+        status_task.add_done_callback(_WS_TASKS.discard)
+
+        last_activity = time.time()
+        connection_timeout = _WS_CONNECTION_TIMEOUT_SECS
 
         try:
             while True:
-                data = await websocket.receive_text()
-
                 try:
-                    message = json.loads(data)
-                    msg_type = message.get("type")
+                    # Check for connection timeout
+                    if time.time() - last_activity > connection_timeout:
+                        logger.warning(f"[WebSocket] System connection timeout for user {user_id}")
+                        break
 
-                    if msg_type == "ping":
-                        await manager.send_personal({"type": "pong"}, websocket)
+                    # Use timeout for receive_text
+                    data = await asyncio.wait_for(
+                        websocket.receive_text(),
+                        timeout=_WS_PING_INTERVAL_SECS
+                    )
+                    last_activity = time.time()
 
-                    elif msg_type == "get_stats":
-                        stats = await _fetch_system_stats()
+                    try:
+                        message = json.loads(data)
+                        msg_type = message.get("type")
+
+                        if msg_type == "ping":
+                            await manager.send_personal({"type": "pong"}, websocket)
+
+                        elif msg_type == "get_stats":
+                            stats = await _fetch_system_stats()
+                            await manager.send_personal({
+                                "type": "system_stats",
+                                **stats,
+                            }, websocket)
+
+                    except json.JSONDecodeError:
+                        pass
+
+                except TimeoutError:
+                    # Send ping to check connection
+                    try:
                         await manager.send_personal({
-                            "type": "system_stats",
-                            **stats,
+                            "type": "ping",
+                            "timestamp": datetime.now(UTC).isoformat(),
                         }, websocket)
-
-                except json.JSONDecodeError:
-                    pass
+                    except Exception:
+                        logger.warning(f"[WebSocket] System ping failed for user {user_id}, connection may be dead")
+                        break
 
         finally:
             status_task.cancel()

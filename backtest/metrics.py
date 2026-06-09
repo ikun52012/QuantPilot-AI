@@ -104,7 +104,8 @@ class PerformanceMetrics:
 
         total_wins_usdt = sum(t.pnl_usdt for t in wins) if wins else 0
         total_losses_usdt = abs(sum(t.pnl_usdt for t in losses)) if losses else 0
-        result.profit_factor = total_wins_usdt / total_losses_usdt if total_losses_usdt > 0 else float('inf')
+        # BUG FIX: Return finite value instead of inf for JSON serialization
+        result.profit_factor = total_wins_usdt / total_losses_usdt if total_losses_usdt > 0 else 999999.0
 
         result.expectancy = (result.win_rate / 100 * result.avg_win_pct) - ((100 - result.win_rate) / 100 * abs(result.avg_loss_pct)) if result.total_trades > 0 else 0
 

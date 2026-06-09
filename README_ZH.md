@@ -3,7 +3,7 @@
 <div align="center">
 
 ![System Status](https://img.shields.io/badge/status-active-success?style=for-the-badge&logo=statuspage&logoColor=white)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=for-the-badge&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=for-the-badge&logo=fastapi&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
@@ -142,7 +142,7 @@ graph TD
 ## 🚀 快速开始
 
 ### 1. 环境依赖
-- **Python 3.10+ 64-bit** (强烈推荐使用 **Python 3.12 64-bit**，避免使用 32-bit Windows Python，否则 `ccxt` 等底层交易依赖可能无法成功编译)。
+- **Python 3.11+ 64-bit** (强烈推荐使用 **Python 3.12 64-bit**，避免使用 32-bit Windows Python，否则 `ccxt` 等底层交易依赖可能无法成功编译)。
 - **Docker & Docker Compose** (生产部署推荐)。
 - TradingView 账户 (免费版及以上皆可)。
 

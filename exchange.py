@@ -10,15 +10,18 @@ import inspect
 import math
 import threading as _threading
 import time
+import uuid
 from typing import Any
 
 from loguru import logger
 
 from core.config import settings
+from core.utils.common import safe_bool as _safe_bool_common
 from core.utils.common import safe_float as _safe_float_common
 from models import SignalDirection, TradeDecision, TrailingStopMode
 
 safe_float = _safe_float_common
+safe_bool = _safe_bool_common
 
 # P0-FIX: Leverage retry configuration
 _LEVERAGE_MAX_RETRIES = 3
@@ -28,6 +31,8 @@ _OKX_LEVERAGE_ERROR_CODES = ["11045", "51000", "51020"]
 _MARKET_MAX_LEVERAGE_CACHE: dict[str, tuple[float, float]] = {}  # key: "exchange_id:symbol" -> (max_leverage, cached_at_timestamp)
 _MARKET_MAX_LEVERAGE_TTL = 3600.0  # Cache leverage for 1 hour
 _MARKET_MAX_LEVERAGE_LOCK = _threading.Lock()
+_MARKET_MAX_LEVERAGE_CLEANUP_INTERVAL = 7200.0  # Cleanup expired entries every 2 hours
+_last_leverage_cleanup: float = 0.0  # P1-FIX: Track last cleanup time
 _EXCHANGE_IDLE_CLEANUP_SECS = 1800.0  # Clean up idle connections after 30 minutes
 _CLOSE_VERIFY_ATTEMPTS = 5
 _CLOSE_VERIFY_DELAY_SECS = 0.75
@@ -329,6 +334,7 @@ async def _create_exchange_order(
     params: dict[str, Any] | None = None,
     position_side: str | None = None,
     allow_amount_increase: bool = True,
+    client_order_id: str | None = None,
 ) -> dict:
     """Create an exchange order with small exchange-specific retries.
 
@@ -352,6 +358,9 @@ async def _create_exchange_order(
     exchange_id = _exchange_id(exchange)
     errors: list[str] = []
     for attempt_params in _order_create_attempts(exchange, side, params, position_side):
+        if client_order_id:
+            attempt_params = dict(attempt_params) if attempt_params else {}
+            attempt_params["clientOrderId"] = client_order_id
         start = time.time()
         try:
             if price is None:
@@ -495,6 +504,8 @@ def _validate_and_adjust_amount(exchange, symbol: str, amount: float, allow_incr
         logger.debug(f"[Exchange] Amount validation: {symbol} adjusted={amount}, min={min_amount}, max={max_amount}")
         return amount
 
+    except ValueError:
+        raise
     except Exception as e:
         logger.warning(f"[Exchange] Could not validate amount for {symbol}: {e}")
         return amount
@@ -1215,11 +1226,24 @@ async def _fetch_market_max_leverage(exchange, symbol: str) -> float | None:
     """Query the exchange for the maximum allowed leverage for this symbol.
 
     Uses TTL-based caching with thread-safe access.
+    P1-FIX: Periodic cleanup of expired entries to prevent memory leak.
     Returns None if the exchange doesn't expose leverage limits.
     """
+    global _last_leverage_cleanup
     exchange_id = str(getattr(exchange, "id", "") or "").lower().strip()
     cache_key = f"{exchange_id}:{symbol}"
     now = time.time()
+
+    # P1-FIX: Periodic cleanup of expired entries
+    if now - _last_leverage_cleanup > _MARKET_MAX_LEVERAGE_CLEANUP_INTERVAL:
+        with _MARKET_MAX_LEVERAGE_LOCK:
+            expired_keys = [
+                k for k, (v, t) in _MARKET_MAX_LEVERAGE_CACHE.items()
+                if now - t >= _MARKET_MAX_LEVERAGE_TTL
+            ]
+            for k in expired_keys:
+                _MARKET_MAX_LEVERAGE_CACHE.pop(k, None)
+            _last_leverage_cleanup = now
 
     with _MARKET_MAX_LEVERAGE_LOCK:
         cached = _MARKET_MAX_LEVERAGE_CACHE.get(cache_key)
@@ -1282,12 +1306,19 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         return {"status": "skipped", "reason": decision.reason}
 
     exchange_config = exchange_config or {}
-    live_trading = bool(exchange_config.get("live_trading", settings.exchange.live_trading))
-    sandbox_mode = bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode))
+    live_trading = safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False)
+    sandbox_mode = safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False)
+    is_close_order = decision.direction in {SignalDirection.CLOSE_LONG, SignalDirection.CLOSE_SHORT}
 
     if not live_trading:
         logger.warning("[Exchange] 🔶 PAPER TRADING MODE - not sending real orders")
         return _simulate_order(decision, exchange_config)
+
+    if not safe_bool(settings.exchange.live_trading, False) and not is_close_order:
+        return {
+            "status": "rejected",
+            "reason": "Global LIVE_TRADING=false blocks live entry orders",
+        }
 
     if not _CCXT_AVAILABLE:
         return {
@@ -1323,7 +1354,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
     elif decision.direction in [SignalDirection.SHORT, SignalDirection.CLOSE_SHORT]:
         leverage_position_side = "short"
     try:
-        leverage = _effective_order_leverage(decision, exchange_config)
+        leverage = None if is_close_order else _effective_order_leverage(decision, exchange_config)
         if leverage:
             # P2-FIX: Cap leverage to exchange's actual max for this symbol
             market_max = await _fetch_market_max_leverage(exchange, symbol)
@@ -1366,14 +1397,32 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                 leverage_changed = True
                 logger.info(f"[Exchange] Leverage set: {symbol} {leverage}x")
 
+        if decision.idempotency_key:
+            digest = _hashlib.sha256(str(decision.idempotency_key).encode("utf-8")).hexdigest()[:24]
+            client_order_id = f"qp_{digest}"
+        else:
+            client_order_id = f"qp_{uuid.uuid4().hex[:16]}"
+
         if decision.direction in [SignalDirection.LONG]:
             side = "buy"
         elif decision.direction in [SignalDirection.SHORT]:
             side = "sell"
         elif decision.direction == SignalDirection.CLOSE_LONG:
-            return await _close_position(exchange, symbol, position_side="long")
+            return await _close_position(
+                exchange,
+                symbol,
+                position_side="long",
+                close_quantity=decision.quantity if decision.quantity and decision.quantity > 0 else None,
+                client_order_id=client_order_id,
+            )
         elif decision.direction == SignalDirection.CLOSE_SHORT:
-            return await _close_position(exchange, symbol, position_side="short")
+            return await _close_position(
+                exchange,
+                symbol,
+                position_side="short",
+                close_quantity=decision.quantity if decision.quantity and decision.quantity > 0 else None,
+                client_order_id=client_order_id,
+            )
         else:
             return {"status": "error", "reason": f"Unknown direction: {decision.direction}"}
 
@@ -1398,6 +1447,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     amount=decision.quantity,
                     price=decision.entry_price,
                     allow_amount_increase=False,
+                    client_order_id=client_order_id,
                 )
             else:
                 logger.info(f"[Exchange] Placing {side} MARKET order: {symbol} qty={decision.quantity}")
@@ -1408,6 +1458,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     side=side,
                     amount=decision.quantity,
                     allow_amount_increase=False,
+                    client_order_id=client_order_id,
                 )
         except (ccxt.BaseError, Exception) as order_exc:
             logger.error(f"[Exchange] Order placement failed for {symbol}: {order_exc}")
@@ -1541,6 +1592,7 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
         result = {
             "status": result_status,
             "order_id": order_id,
+            "client_order_id": client_order_id,
             "symbol": symbol,
             "side": side,
             "quantity": actual_filled_qty if actual_filled_qty > 0 else submitted_qty,
@@ -1684,6 +1736,23 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                     except Exception as cancel_err:
                         logger.warning(f"[Exchange] Failed to cancel unfilled entry portion: {cancel_err}")
 
+                protective_order_ids: list[str] = []
+                if result.get("stop_loss_order_id"):
+                    protective_order_ids.append(str(result.get("stop_loss_order_id")))
+                if result.get("take_profit_order_id"):
+                    protective_order_ids.append(str(result.get("take_profit_order_id")))
+                for tp_order in result.get("take_profit_orders") or []:
+                    if isinstance(tp_order, dict) and tp_order.get("order_id"):
+                        protective_order_ids.append(str(tp_order.get("order_id")))
+                rollback_cancel_results = []
+                for protective_order_id in dict.fromkeys(protective_order_ids):
+                    cancel_result = await _cancel_exchange_order(exchange, symbol, protective_order_id)
+                    rollback_cancel_results.append(cancel_result)
+                    if cancel_result.get("status") == "error":
+                        logger.error(
+                            f"[Exchange] Failed to cancel stale protective order {protective_order_id}: {cancel_result}"
+                        )
+
                 logger.warning(
                     f"[Exchange] Protection orders failed for filled entry. "
                     f"Closing position {symbol} for safety. Errors: {protection_errors}"
@@ -1701,24 +1770,28 @@ async def execute_trade(decision: TradeDecision, exchange_config: dict | None = 
                             "close_order_id": close_result.get("order_id"),
                             "exit_price": close_result.get("exit_price"),
                             "protection_errors": protection_errors,
+                            "protective_cancel_results": rollback_cancel_results,
                             "rollback_success": True,
                         }
                     else:
                         logger.error(f"[Exchange] CRITICAL: Failed to rollback unprotected position: {close_result}")
                         result["status"] = "partial_protection"
                         result["protection_errors"] = protection_errors
+                        result["protective_cancel_results"] = rollback_cancel_results
                         result["warning"] = "CRITICAL: Position opened but SL/TP failed - MANUAL STOP LOSS REQUIRED"
                         return result
                 except ccxt.BaseError as rollback_err:
                     logger.error(f"[Exchange] CRITICAL: Rollback exception: {rollback_err}")
                     result["status"] = "partial_protection"
                     result["protection_errors"] = protection_errors
+                    result["protective_cancel_results"] = rollback_cancel_results
                     result["warning"] = "CRITICAL: Rollback failed - MANUAL STOP LOSS REQUIRED"
                     return result
                 except Exception as rollback_err:
                     logger.error(f"[Exchange] CRITICAL: Unexpected rollback exception: {rollback_err}")
                     result["status"] = "partial_protection"
                     result["protection_errors"] = protection_errors
+                    result["protective_cancel_results"] = rollback_cancel_results
                     result["warning"] = "CRITICAL: Rollback failed - MANUAL STOP LOSS REQUIRED"
                     return result
             else:
@@ -1905,6 +1978,7 @@ async def _create_conditional_order(exchange, symbol: str, kind: str, side: str,
                 amount=amount,
                 params=params,
                 position_side=position_side,
+                allow_amount_increase=False,
             )
         except ccxt.BaseError as exc:
             errors.append(f"{order_type}: {exc}")
@@ -1944,7 +2018,7 @@ async def cancel_order(order_id: str, ticker: str, exchange_config: dict | None 
     exchange_config = exchange_config or {}
     if not order_id:
         return {"status": "skipped", "order_id": "", "ticker": ticker}
-    if not exchange_config.get("live_trading", settings.exchange.live_trading):
+    if not safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False):
         return {"status": "simulated", "order_id": order_id, "ticker": ticker}
 
     exchange = _get_or_create_exchange(
@@ -1953,7 +2027,7 @@ async def cancel_order(order_id: str, ticker: str, exchange_config: dict | None 
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -1983,7 +2057,7 @@ async def place_protective_stop(
 ) -> dict:
     """Place a reduce-only protective stop for an already-open monitored position."""
     exchange_config = exchange_config or {}
-    if not exchange_config.get("live_trading", settings.exchange.live_trading):
+    if not safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False):
         return {"status": "simulated", "stop_price": stop_price}
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
@@ -1991,7 +2065,7 @@ async def place_protective_stop(
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -2122,7 +2196,14 @@ async def _verify_position_close(
     }
 
 
-async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: str | None = None, close_quantity: float | None = None, max_retries: int = 3) -> dict:
+async def _close_position(
+    exchange: ccxt.Exchange,
+    symbol: str,
+    position_side: str | None = None,
+    close_quantity: float | None = None,
+    max_retries: int = 3,
+    client_order_id: str | None = None,
+) -> dict:
     """Close an existing position with retry logic.
 
     Args:
@@ -2167,6 +2248,7 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                     params={"reduceOnly": True},
                     position_side=pos_side if pos_side else None,
                     allow_amount_increase=False,
+                    client_order_id=(f"{client_order_id}_{attempt}" if client_order_id and attempt > 1 else client_order_id),
                 )
                 order_id = str(order.get("id") or "")
                 if order_id:
@@ -2178,7 +2260,10 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                     result = {
                         "status": "closed",
                         "order_id": order.get("id"),
+                        "client_order_id": client_order_id,
                         "exit_price": exit_price,
+                        "closed_quantity": amount,
+                        "requested_close_quantity": close_quantity,
                         "position_side": pos_side,
                         "remaining_contracts": 0.0,
                         "close_verification": verify,
@@ -2195,7 +2280,10 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                         "status": "partial_closed",
                         "reason": reason,
                         "order_id": order.get("id"),
+                        "client_order_id": client_order_id,
                         "exit_price": exit_price,
+                        "closed_quantity": amount,
+                        "requested_close_quantity": close_quantity,
                         "position_side": pos_side,
                         "remaining_contracts": remaining,
                         "close_verification": verify,
@@ -2210,7 +2298,10 @@ async def _close_position(exchange: ccxt.Exchange, symbol: str, position_side: s
                     "status": "close_unconfirmed",
                     "reason": reason,
                     "order_id": order.get("id"),
+                    "client_order_id": client_order_id,
                     "exit_price": exit_price,
+                    "closed_quantity": amount,
+                    "requested_close_quantity": close_quantity,
                     "position_side": pos_side,
                     "remaining_contracts": remaining,
                     "close_verification": verify,
@@ -2388,7 +2479,7 @@ def _simulate_order(decision: TradeDecision, exchange_config: dict | None = None
 async def get_account_balance(exchange_config: dict | None = None) -> dict:
     """Fetch account balance from exchange."""
     exchange_config = exchange_config or {}
-    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+    if not safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False):
         return {
             "mode": "paper",
             "quote": "USDT",
@@ -2405,7 +2496,7 @@ async def get_account_balance(exchange_config: dict | None = None) -> dict:
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -2432,7 +2523,7 @@ async def get_account_balance(exchange_config: dict | None = None) -> dict:
 async def get_balance(exchange_config: dict | None = None) -> dict:
     """Fetch account balance from exchange."""
     exchange_config = exchange_config or {}
-    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+    if not safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False):
         return {
             "mode": "paper",
             "total": {"USDT": settings.risk.account_equity_usdt},
@@ -2445,7 +2536,7 @@ async def get_balance(exchange_config: dict | None = None) -> dict:
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -2472,8 +2563,8 @@ async def get_ticker(symbol: str, exchange_config: dict | None = None) -> dict:
         api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
-        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -2510,8 +2601,8 @@ async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config:
         api_key=_credential_from_exchange_config(exchange_config, "api_key", settings.exchange.api_key),
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
-        live=bool(exchange_config.get("live_trading", settings.exchange.live_trading)),
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        live=safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -2545,7 +2636,7 @@ async def get_latest_candle(symbol: str, timeframe: str = "1m", exchange_config:
 async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
     """Fetch open positions from exchange."""
     exchange_config = exchange_config or {}
-    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+    if not safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False):
         return []
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
@@ -2553,7 +2644,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -2562,9 +2653,10 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
         result = []
         for pos in positions:
             try:
-                contracts = float(pos.get('contracts') or 0)
+                raw_contracts = float(pos.get('contracts') or 0)
             except (TypeError, ValueError):
-                contracts = 0.0
+                raw_contracts = 0.0
+            contracts = abs(raw_contracts)
             if contracts != 0:
                 unrealized_pnl = pos.get('unrealizedPnl')
                 notional = pos.get('notional')
@@ -2579,7 +2671,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
                         entry = float(entry_price)
                         mark = float(mark_price)
                         if entry > 0 and mark > 0:
-                            side = str(pos.get('side') or '').lower()
+                            side = _normalized_position_side(pos, raw_contracts)
                             if side == 'long':
                                 percentage = ((mark - entry) / entry) * 100
                             elif side == 'short':
@@ -2597,7 +2689,7 @@ async def get_open_positions(exchange_config: dict | None = None) -> list[dict]:
                         percentage = None
                 result.append({
                     "symbol": pos.get('symbol'),
-                    "side": pos.get('side'),
+                    "side": _normalized_position_side(pos, raw_contracts),
                     "contracts": contracts,
                     "entryPrice": pos.get('entryPrice'),
                     "entry_price": pos.get('entryPrice'),
@@ -2628,7 +2720,7 @@ async def fetch_single_position(ticker: str, exchange_config: dict | None = None
     Returns the position dict if found, None if not found or on error.
     """
     exchange_config = exchange_config or {}
-    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+    if not safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False):
         return None
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
@@ -2636,7 +2728,7 @@ async def fetch_single_position(ticker: str, exchange_config: dict | None = None
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -2647,13 +2739,14 @@ async def fetch_single_position(ticker: str, exchange_config: dict | None = None
         ticker_key = _psk(ticker)
         for pos in positions:
             try:
-                contracts = float(pos.get('contracts') or 0)
+                raw_contracts = float(pos.get('contracts') or 0)
             except (TypeError, ValueError):
-                contracts = 0.0
+                raw_contracts = 0.0
+            contracts = abs(raw_contracts)
             if contracts != 0 and _psk(pos.get('symbol', '')) == ticker_key:
                 return {
                     "symbol": pos.get('symbol'),
-                    "side": pos.get('side'),
+                    "side": _normalized_position_side(pos, raw_contracts),
                     "contracts": contracts,
                     "entryPrice": pos.get('entryPrice'),
                     "entry_price": pos.get('entryPrice'),
@@ -2794,7 +2887,7 @@ async def _fetch_okx_open_algo_orders(exchange: ccxt.Exchange, resolved_symbol: 
 async def get_open_orders(symbol: str | None = None, exchange_config: dict | None = None) -> list[dict]:
     """Fetch open/pending orders from exchange."""
     exchange_config = exchange_config or {}
-    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+    if not safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False):
         return []
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
@@ -2802,7 +2895,7 @@ async def get_open_orders(symbol: str | None = None, exchange_config: dict | Non
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )
@@ -2839,7 +2932,7 @@ async def get_open_orders(symbol: str | None = None, exchange_config: dict | Non
 async def get_recent_orders(symbol: str | None = None, limit: int = 50, exchange_config: dict | None = None) -> list[dict]:
     """Fetch recent closed orders from exchange."""
     exchange_config = exchange_config or {}
-    if not bool(exchange_config.get("live_trading", settings.exchange.live_trading)):
+    if not safe_bool(exchange_config.get("live_trading", settings.exchange.live_trading), False):
         return []
     exchange = _get_or_create_exchange(
         exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
@@ -2847,7 +2940,7 @@ async def get_recent_orders(symbol: str | None = None, limit: int = 50, exchange
         api_secret=_credential_from_exchange_config(exchange_config, "api_secret", settings.exchange.api_secret),
         password=_credential_from_exchange_config(exchange_config, "password", settings.exchange.password),
         live=True,
-        sandbox=bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode)),
+        sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
         market_type=exchange_config.get("market_type") or settings.exchange.market_type,
         margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
     )

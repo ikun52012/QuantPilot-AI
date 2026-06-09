@@ -3,7 +3,7 @@
 <div align="center">
 
 ![System Status](https://img.shields.io/badge/status-active-success?style=for-the-badge&logo=statuspage&logoColor=white)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=for-the-badge&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=for-the-badge&logo=fastapi&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)
@@ -137,7 +137,7 @@ graph TD
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
-- **Python 3.10+ 64-bit** (Python 3.12 64-bit is strongly recommended to compile CCXT and other native exchange libraries successfully; avoid 32-bit Windows Python).
+- **Python 3.11+ 64-bit** (Python 3.12 64-bit is strongly recommended to compile CCXT and other native exchange libraries successfully; avoid 32-bit Windows Python).
 - **Docker & Docker Compose** (Recommended for production).
 - TradingView account (free or paid).
 

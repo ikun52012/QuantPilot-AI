@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import Mock
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -13,17 +14,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 pytest_plugins = ('pytest_asyncio',)
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for async tests."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+# P4-FIX: Removed session-scoped event_loop fixture - it conflicts with
+# pytest-asyncio's default function-scoped loop and causes test isolation issues.
+# Use pytest-asyncio's default loop per-test which is safer.
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture
 async def db_engine():
-    """Create test database engine."""
+    """Create test database engine.
+
+    P4-FIX: Changed from session-scope to function-scope to be compatible
+    with pytest-asyncio's default event loop scope. Each test now gets a
+    fresh in-memory database for full isolation.
+    """
     from core.database import Base, db_manager
 
     # Use in-memory SQLite for tests
@@ -59,7 +62,7 @@ async def db_engine():
     await engine.dispose()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def db_session(db_engine):
     """Create test database session."""
     from core.database import db_manager
@@ -121,20 +124,22 @@ async def client(db_engine):
 @pytest.fixture
 def test_user_data():
     """Test user data fixture."""
+    import secrets
     return {
         "username": "testuser",
         "email": "test@example.com",
-        "password": "Str0ng!Pass#2024",
+        "password": f"T{secrets.token_urlsafe(16)}!1",
     }
 
 
 @pytest.fixture
 def test_admin_data():
     """Test admin data fixture."""
+    import secrets
     return {
         "username": "admin",
         "email": "admin@example.com",
-        "password": "AdminPass123!@#",
+        "password": f"A{secrets.token_urlsafe(16)}!1",
     }
 
 

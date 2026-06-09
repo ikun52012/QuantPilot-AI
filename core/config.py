@@ -85,6 +85,7 @@ class AIConfig(BaseModel):
     prefetch_market_data: bool = True
     websocket_market_data_enabled: bool = False
     voting_enabled: bool = False
+    auto_fallback_to_local: bool = True
     voting_models: list[str] = Field(default_factory=list)
     voting_weights: dict[str, float] = Field(default_factory=dict)
     voting_strategy: str = "weighted"
@@ -158,6 +159,7 @@ class AIConfig(BaseModel):
             voting_models=_json_env("AI_VOTING_MODELS", []),
             voting_weights=_json_env("AI_VOTING_WEIGHTS", {}),
             voting_strategy=os.getenv("AI_VOTING_STRATEGY", "weighted"),
+            auto_fallback_to_local=os.getenv("AI_AUTO_FALLBACK_TO_LOCAL", "true").lower() == "true",
         )
 
 
@@ -553,6 +555,7 @@ class ScannerConfig(BaseModel):
     adaptive_cooldown_base_secs: int = 300
     adaptive_cooldown_multiplier: float = 2.0
     learning_enabled: bool = True
+    learning_refresh_interval_secs: int = 3600
     outcome_lookback_days: int = 30
     outcome_max_sync_positions: int = 50
     outcome_path_metrics_enabled: bool = True
@@ -708,6 +711,7 @@ class ScannerConfig(BaseModel):
             adaptive_cooldown_base_secs=max(0, int(os.getenv("SCANNER_ADAPTIVE_COOLDOWN_BASE_SECS", "300"))),
             adaptive_cooldown_multiplier=max(1.0, float(os.getenv("SCANNER_ADAPTIVE_COOLDOWN_MULTIPLIER", "2"))),
             learning_enabled=os.getenv("SCANNER_LEARNING_ENABLED", "true").lower() == "true",
+            learning_refresh_interval_secs=int(os.getenv("SCANNER_LEARNING_REFRESH_INTERVAL_SECS", "3600")),
             outcome_lookback_days=max(1, int(os.getenv("SCANNER_OUTCOME_LOOKBACK_DAYS", "30"))),
             outcome_max_sync_positions=max(1, int(os.getenv("SCANNER_OUTCOME_MAX_SYNC_POSITIONS", "50"))),
             outcome_path_metrics_enabled=os.getenv("SCANNER_OUTCOME_PATH_METRICS_ENABLED", "true").lower() == "true",
@@ -760,7 +764,7 @@ class Settings(BaseModel):
 
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
-    jwt_expiry_hours: int = 24
+    jwt_expiry_hours: int = 4
     cookie_secure: str = "auto"
 
     app_encryption_key: str = ""
@@ -810,7 +814,10 @@ class Settings(BaseModel):
         }
 
         if not self.default_admin_password:
-            warnings.append("DEFAULT_ADMIN_PASSWORD is empty — a random password will be generated on first boot. Set a strong password in your .env file.")
+            warnings.append(
+                "DEFAULT_ADMIN_PASSWORD is empty; a random bootstrap admin password will be generated on first boot. "
+                "Set a strong password in your .env file."
+            )
         elif self.default_admin_password.lower() in WEAK_PASSWORDS:
             warnings.append("DEFAULT_ADMIN_PASSWORD uses a weak default value. Change it before deployment!")
 
@@ -885,6 +892,7 @@ class Settings(BaseModel):
             debug=os.getenv("DEBUG", "false").lower() == "true",
             json_logs=os.getenv("JSON_LOGS", "false").lower() == "true",
             jwt_secret=os.getenv("JWT_SECRET", ""),
+            jwt_expiry_hours=int(os.getenv("JWT_EXPIRY_HOURS", "4")),
             cookie_secure=os.getenv("COOKIE_SECURE", "auto"),
             app_encryption_key=os.getenv("APP_ENCRYPTION_KEY", ""),
             default_admin_username=os.getenv("DEFAULT_ADMIN_USERNAME", "admin"),

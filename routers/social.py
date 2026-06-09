@@ -2,12 +2,13 @@
 Social Signals Router - Community signal sharing.
 Allows users to share and subscribe to trading signals.
 """
+import asyncio
 import json
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,16 +30,18 @@ class SharedSignal(BaseModel):
     confidence: float = 0.0
     strategy_name: str = ""
 
-    @staticmethod
-    def _validate_ticker(v: str) -> str:
+    @field_validator("ticker")
+    @classmethod
+    def _validate_ticker(cls, v: str) -> str:
         import re
         normalized = v.upper().strip()
         if not re.match(r"^[A-Z0-9/:._-]{1,40}$", normalized):
             raise ValueError("Invalid ticker format")
         return normalized
 
-    @staticmethod
-    def _validate_direction(v: str) -> str:
+    @field_validator("direction")
+    @classmethod
+    def _validate_direction(cls, v: str) -> str:
         normalized = v.lower().strip()
         if normalized not in ("long", "short"):
             raise ValueError("Direction must be 'long' or 'short'")
@@ -55,6 +58,7 @@ _SHARED_SIGNALS = {}
 _SIGNAL_SUBSCRIPTIONS = {}
 _USER_FOLLOWERS: dict[str, list[str]] = {}
 _SIGNAL_STATS = {}
+_SOCIAL_LOCK = asyncio.Lock()  # Protect concurrent access to module-level dicts
 
 
 def _user_id(user: dict) -> str:
@@ -127,7 +131,7 @@ async def share_signal(
 ):
     """Share a trading signal to community."""
     user_id = _user_id(user)
-    signal_id = f"sig_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{user_id}"
+    signal_id = f"sig_{utcnow().strftime('%Y%m%d%H%M%S%f')}_{user_id}"
 
     shared = {
         "signal_id": signal_id,
@@ -149,14 +153,15 @@ async def share_signal(
         "is_private": False,
     }
 
-    _SHARED_SIGNALS[signal_id] = shared
-    _SIGNAL_STATS[signal_id] = {
-        "views": 0,
-        "subscriptions": 0,
-        "executions": 0,
-        "successful": 0,
-        "failed": 0,
-    }
+    async with _SOCIAL_LOCK:
+        _SHARED_SIGNALS[signal_id] = shared
+        _SIGNAL_STATS[signal_id] = {
+            "views": 0,
+            "subscriptions": 0,
+            "executions": 0,
+            "successful": 0,
+            "failed": 0,
+        }
 
     db.add(SharedSignalModel(
         id=signal_id,
@@ -388,7 +393,7 @@ async def get_user_shared_signals(
     )
     rows = result.scalars().all()
     user_signals = [_signal_to_dict(row) for row in rows]
-    author_id = str(user_signals[0].get("user_id") or "") if user_signals else ""
+    author_id = str(user_signals[0]["user_id"] or "") if user_signals else ""
 
     return {
         "username": username,

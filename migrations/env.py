@@ -3,9 +3,11 @@ import asyncio
 import os
 import sys
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
 from sqlalchemy import pool
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -21,6 +23,16 @@ if config.config_file_name is not None:
 config.set_main_option("sqlalchemy.url", settings.database.url.replace("%", "%%"))
 
 target_metadata = Base.metadata
+
+
+def _ensure_sqlite_parent_dir() -> None:
+    try:
+        url = make_url(settings.database.url)
+    except Exception:
+        return
+    if not url.drivername.startswith("sqlite") or not url.database or url.database == ":memory:":
+        return
+    Path(url.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
 
 def run_migrations_offline():
@@ -45,6 +57,7 @@ def do_run_migrations(connection):
 
 async def run_async_migrations():
     """Run migrations through SQLAlchemy's async engine."""
+    _ensure_sqlite_parent_dir()
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

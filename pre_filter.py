@@ -20,6 +20,7 @@ import threading
 import time
 from collections import deque
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -78,8 +79,12 @@ def _load_filter_stats() -> dict[str, dict[str, int]]:
 def _save_filter_stats(stats: dict[str, dict[str, int]]) -> None:
     try:
         os.makedirs("data", exist_ok=True)
-        with open(_STATS_FILE, "w", encoding="utf-8") as f:
+        stats_file = Path(_STATS_FILE)
+        # Write with atomic swap to prevent corruption
+        tmp_file = stats_file.with_suffix(".tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(stats, f, indent=2)
+        tmp_file.replace(stats_file)
     except (OSError, PermissionError, TypeError, ValueError):
         pass
 
@@ -479,8 +484,9 @@ async def update_daily_pnl(pnl: float):
         _daily_pnl += float(pnl or 0)
 
 
-# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Helper Functions (cooldown, saturation, block rate, circuit breaker)
-# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+# ════════════════════════════════════════════════════════════════════════════════
+# Helper Functions (cooldown, saturation, block rate, circuit breaker)
+# ════════════════════════════════════════════════════════════════════════════════
 async def _check_cooldown(signal: TradingViewSignal, cooldown_seconds: int = 300, user_id: str | None = None) -> bool:
     """Check if we received a similar signal recently (O(1) bucketed)."""
     cutoff = utcnow() - timedelta(seconds=cooldown_seconds)
@@ -675,6 +681,7 @@ async def _check_position_concentration(
     ticker_key: str,
     signal: TradingViewSignal,
     thresholds: FilterThresholds,
+    user_id: str | None = None,
     db_session=None,
 ) -> tuple[bool, dict[str, Any]]:
     """Check if too many positions are already open in the same direction."""
@@ -693,6 +700,10 @@ async def _check_position_concentration(
         from core.database import PositionModel
 
         stmt = select(PositionModel).where(PositionModel.status.in_(["open", "pending"]))
+        if user_id:
+            stmt = stmt.where(PositionModel.user_id == user_id)
+        else:
+            stmt = stmt.where(PositionModel.user_id.is_(None))
         result_set = await db_session.execute(stmt)
         positions = list(result_set.scalars().all())
 
@@ -722,14 +733,15 @@ async def _check_position_concentration(
         logger.debug(f"[PreFilter] Position concentration check skipped: {e}")
         result["note"] = f"Skip: {e}"
     except Exception as e:
-        logger.debug(f"[PreFilter] Position concentration check error: {e}")
+        logger.warning(f"[PreFilter] Position concentration check unexpected error: {e}")
         result["note"] = f"Error: {e}"
 
     return True, result
 
 
-# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# Main Pre-Filter Engine
-# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+# ════════════════════════════════════════════════════════════════════════════════
+# Main Pre-Filter Engine
+# ════════════════════════════════════════════════════════════════════════════════
 async def count_today_executed_trades_async(user_id: str | None = None) -> int:
     """Count today's executed trades from the async database.
 
@@ -749,10 +761,16 @@ async def count_today_executed_trades_async(user_id: str | None = None) -> int:
             f"User={user_id}, error={e}. BLOCKING trade to prevent limit bypass."
         )
         return 999999
-    except Exception as e:
+    except (OSError, ConnectionError, TimeoutError) as e:
         logger.error(
-            f"[PreFilter] CRITICAL: Unexpected error in daily trade count. "
+            f"[PreFilter] CRITICAL: Network error in daily trade count. "
             f"User={user_id}, error={e}. BLOCKING trade to prevent limit bypass."
+        )
+        return 999999
+    except Exception:
+        logger.exception(
+            f"[PreFilter] CRITICAL: Unexpected error in daily trade count. "
+            f"User={user_id}. BLOCKING trade to prevent limit bypass."
         )
         return 999999
 
@@ -792,10 +810,10 @@ async def run_pre_filter_async(
     # 鈹€鈹€ v5.2: Pipeline latency tracking 鈹€鈹€
     _pipeline_start = time.perf_counter()
 
-    # 鈹€鈹€ v5.2: Evaluate past blocked signal outcomes 鈹€鈹€
+    # ═══ v5.2: Evaluate past blocked signal outcomes ═══
     try:
         evaluate_blocked_outcomes(current_prices={ticker_key: market.current_price} if market.current_price > 0 else None)
-    except Exception:
+    except (ValueError, TypeError, KeyError, NameError):
         pass  # Never let feedback loop affect trade decisions
 
     async def record_filter_block(check_name: str) -> None:
@@ -898,9 +916,7 @@ async def run_pre_filter_async(
         recent_results = await get_recent_trade_results_async(limit=5, user_id=user_id, ticker=ticker)
     except asyncio.CancelledError:
         raise
-    except (SQLAlchemyError, ConnectionError, TimeoutError, OSError, ValueError, TypeError):
-        recent_results = []
-    except Exception:
+    except (SQLAlchemyError, ConnectionError, TimeoutError, OSError, ValueError, TypeError, AttributeError):
         recent_results = []
 
     if dynamic_enabled and recent_results:
@@ -1056,8 +1072,10 @@ async def run_pre_filter_async(
             if not vwap_ok:
                 soft_fail_reasons.append(f"VWAP deviation {vwap_dev:.2f}% {vwap_dir} (soft fail)")
                 checks["vwap_deviation"]["soft_fail"] = True
-        except Exception:
-            checks["vwap_deviation"] = {"passed": True, "note": "VWAP calculation skip"}
+        except (ImportError, ModuleNotFoundError, NameError):
+            checks["vwap_deviation"] = {"passed": True, "note": "VWAP module not available"}
+        except (ValueError, TypeError, ZeroDivisionError, IndexError, KeyError):
+            checks["vwap_deviation"] = {"passed": True, "note": "VWAP calculation error"}
     else:
         checks["vwap_deviation"] = {"passed": True, "missing_data": True, "note": "Need 24 1h candles for VWAP"}
         if len(ohlcv_1h_vwap) < 24:
@@ -1820,7 +1838,7 @@ async def run_pre_filter_async(
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     # 鈹€鈹€ Check 37: Position concentration / portfolio heat 鈹€鈹€
     conc_ok, conc_data = await _check_position_concentration(
-        ticker_key, signal, thresholds, db_session=db_session
+        ticker_key, signal, thresholds, user_id=user_id, db_session=db_session
     )
     checks["position_concentration"] = {
         "passed": conc_ok,
@@ -1941,9 +1959,9 @@ async def run_pre_filter_async(
 
 # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# v5.2 鈥?Filter Performance Feedback Loop
 # Tracks per-check precision by evaluating blocked signal outcomes.
-# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-# TODO: These locks are used in synchronous helper functions. In a full async refactor,
+# PERF-OPTIMIZATION: These locks are used in synchronous helper functions. In a full async refactor,
 # they should be converted to asyncio.Lock and the functions made async.
+# NOTE: Current implementation is thread-safe for the existing sync usage pattern.
 _PERF_LOCK = threading.RLock()
 _OUTCOME_WINDOW_SECONDS = 3600  # Check outcomes after 1 hour
 _MAX_PENDING_OUTCOMES = 500
@@ -1956,7 +1974,7 @@ _PERFORMANCE_FILE = "data/filter_performance.json"
 def _load_performance() -> dict[str, dict[str, float]]:
     try:
         if os.path.exists(_PERFORMANCE_FILE):
-            with open(_PERFORMANCE_FILE) as f:
+            with open(_PERFORMANCE_FILE, encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
                     return {
@@ -1973,8 +1991,12 @@ def _load_performance() -> dict[str, dict[str, float]]:
 def _save_performance(perf: dict) -> None:
     try:
         os.makedirs("data", exist_ok=True)
-        with open(_PERFORMANCE_FILE, "w") as f:
+        perf_file = Path(_PERFORMANCE_FILE)
+        # Write with atomic swap to prevent corruption
+        tmp_file = perf_file.with_suffix(".tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(perf, f, indent=2)
+        tmp_file.replace(perf_file)
     except (OSError, PermissionError):
         pass
 
@@ -2147,9 +2169,9 @@ def reset_check_performance() -> None:
 
 # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?# v5.2 鈥?Prefilter Latency Monitor with Degradation
 # Tracks per-check timing and auto-degrades slow checks.
-# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-# TODO: This lock is used in synchronous helper functions. In a full async refactor,
+# PERF-OPTIMIZATION: This lock is used in synchronous helper functions. In a full async refactor,
 # it should be converted to asyncio.Lock and the functions made async.
+# NOTE: Current implementation is thread-safe for the existing sync usage pattern.
 _LATENCY_LOCK = threading.RLock()
 _check_latency: dict[str, deque[float]] = {}  # check_name -> deque of recent durations
 _LATENCY_WINDOW_SIZE = 20
@@ -2179,7 +2201,8 @@ class PrefilterTimer:
 
     async def __aexit__(self, *args):
         duration = time.perf_counter() - self._start
-        _record_check_latency(self._name, duration)
+        # Run sync function in thread pool to avoid blocking event loop
+        await asyncio.get_event_loop().run_in_executor(None, _record_check_latency, self._name, duration)
 
 
 def _record_check_latency(check_name: str, duration_secs: float) -> None:

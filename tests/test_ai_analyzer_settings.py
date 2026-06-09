@@ -231,13 +231,13 @@ async def test_deepseek_call_requests_json_output(monkeypatch):
             return FakeResponse()
 
     monkeypatch.setattr(settings.ai, "deepseek_api_key", "deepseek-key")
-    monkeypatch.setattr(settings.ai, "deepseek_model", "deepseek-v4-pro")
+    monkeypatch.setattr(settings.ai, "deepseek_model", "deepseek-chat")
     monkeypatch.setattr("ai_analyzer.httpx.AsyncClient", FakeAsyncClient)
 
     raw = await _call_deepseek("Return JSON only.", "Analyze this signal.")
 
     assert raw == '{"recommendation":"hold"}'
-    assert captured_payload["model"] == "deepseek-v4-pro"
+    assert captured_payload["model"] == "deepseek-chat"
     assert captured_payload["response_format"] == {"type": "json_object"}
 
 
@@ -255,7 +255,10 @@ async def test_ai_cache_isolated_by_effective_settings():
 
     await _set_cached_analysis("BTCUSDT", "long", analysis, "50000.00", "60", sig_one)
 
-    assert await _get_cached_analysis("BTCUSDT", "long", "50000.00", "60", sig_one) is analysis
+    cached = await _get_cached_analysis("BTCUSDT", "long", "50000.00", "60", sig_one)
+
+    assert cached == analysis
+    assert cached is not analysis
     assert await _get_cached_analysis("BTCUSDT", "long", "50000.00", "60", sig_two) is None
 
 

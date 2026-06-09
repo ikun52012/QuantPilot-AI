@@ -85,7 +85,7 @@ async def get_chart_ohlcv(
         raise
     except Exception as err:
         logger.error(f"[Chart] Failed to get OHLCV: {err}")
-        raise HTTPException(500, f"Chart data error: {err}") from err
+        raise HTTPException(500, "Chart data error") from err
 
 
 @router.get("/realtime/{ticker}")
@@ -110,7 +110,7 @@ async def get_realtime_price(
 
     except Exception as err:
         logger.error(f"[Chart] Failed to get realtime price: {err}")
-        raise HTTPException(500, f"Realtime error: {err}") from err
+        raise HTTPException(500, "Realtime error") from err
 
 
 @router.get("/indicators/{ticker}")
@@ -142,7 +142,7 @@ async def get_chart_indicators(
 
     except Exception as err:
         logger.error(f"[Chart] Failed to get indicators: {err}")
-        raise HTTPException(500, f"Indicators error: {err}") from err
+        raise HTTPException(500, "Indicators error") from err
 
 
 @router.get("/positions/{ticker}")
@@ -156,12 +156,12 @@ async def get_position_markers(
     try:
         user_id = user.get("sub") or user.get("id")
 
+        target_key = position_symbol_key(ticker)
         result = await db.execute(
             select(PositionModel)
             .where(PositionModel.user_id == user_id)
             .where(PositionModel.status == "open")
         )
-        target_key = position_symbol_key(ticker)
         positions = [
             pos for pos in result.scalars().all()
             if position_symbol_key(pos.ticker) == target_key
@@ -186,7 +186,7 @@ async def get_position_markers(
 
     except Exception as err:
         logger.error(f"[Chart] Failed to get position markers: {err}")
-        raise HTTPException(500, f"Markers error: {err}") from err
+        raise HTTPException(500, "Markers error") from err
 
 
 @router.get("/signals/{ticker}")
@@ -239,7 +239,7 @@ async def get_signal_markers(
 
     except Exception as err:
         logger.error(f"[Chart] Failed to get signal markers: {err}")
-        raise HTTPException(500, f"Signal markers error: {err}") from err
+        raise HTTPException(500, "Signal markers error") from err
 
 
 @router.get("/config")

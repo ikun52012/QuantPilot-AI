@@ -91,7 +91,10 @@ class ScannerBacktester:
         self.simulation_bars = simulation_bars
         self.min_score_threshold = min_score_threshold
         self._results: list[BacktestResult] = []
-        self._engine = DEFAULT_ENGINE
+        self._engine = ScoringEngine(
+            rules=[ScoringRule.from_dict(rule) for rule in DEFAULT_ENGINE.get_rules()],
+            weights=dict(DEFAULT_ENGINE.weights),
+        )
 
     async def run_backtest(
         self,
@@ -104,18 +107,19 @@ class ScannerBacktester:
         """Run backtest for given symbols and return summary."""
         run_id = uuid.uuid4().hex[:12]
         timeframes = timeframes or list(settings.scanner.timeframes)
-        min_score = min_score_override or self.min_score_threshold
+        min_score = min_score_override if min_score_override is not None else self.min_score_threshold
 
-        if rules_override:
-            self._engine = ScoringEngine(rules=rules_override, weights=weights_override or {})
-        elif weights_override:
-            self._engine.set_weights(weights_override)
+        rules = rules_override or [ScoringRule.from_dict(rule) for rule in DEFAULT_ENGINE.get_rules()]
+        weights = dict(DEFAULT_ENGINE.weights)
+        if weights_override:
+            weights.update(weights_override)
+        self._engine = ScoringEngine(rules=rules, weights=weights)
 
         self._results = []
 
         for symbol in symbols:
             try:
-                bundle = await self.provider.get_bundle(symbol, timeframes, use_cache=False)
+                bundle = await self.provider.get_bundle(symbol, timeframes)
             except Exception as exc:
                 logger.warning(f"[Backtest] Failed to fetch bundle for {symbol}: {exc}")
                 continue

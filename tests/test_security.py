@@ -5,6 +5,9 @@ import shutil
 import uuid
 from pathlib import Path
 
+import pytest
+
+from core.config import Settings
 from core.database import (
     _generate_bootstrap_admin_password,
     _load_or_create_bootstrap_admin_password,
@@ -182,3 +185,12 @@ class TestBootstrapAdminPassword:
             assert "password=" in path.read_text(encoding="utf-8")
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    def test_blank_default_admin_password_is_not_filled_by_config(self, monkeypatch):
+        monkeypatch.setenv("LIVE_TRADING", "false")
+        monkeypatch.delenv("DEFAULT_ADMIN_PASSWORD", raising=False)
+
+        with pytest.warns(UserWarning, match="bootstrap admin password"):
+            config = Settings.from_env()
+
+        assert config.default_admin_password == ""

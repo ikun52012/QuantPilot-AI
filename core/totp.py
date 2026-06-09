@@ -83,11 +83,15 @@ def verify_totp_code(secret: str, code: str) -> bool:
 # ─────────────────────────────────────────────
 
 def generate_recovery_codes(count: int = 8) -> list[str]:
-    """Generate a set of one-time recovery codes."""
+    """Generate a set of one-time recovery codes.
+
+    P2-FIX: Increased from 8 to 16 hex characters (64 bits of entropy)
+    to prevent brute-force attacks.
+    """
     codes = []
     for _ in range(count):
-        raw = secrets.token_hex(4)  # 8 hex chars
-        codes.append(f"{raw[:4]}-{raw[4:]}".upper())
+        raw = secrets.token_hex(8)  # 16 hex chars (64 bits of entropy)
+        codes.append(f"{raw[:4]}-{raw[4:8]}-{raw[8:12]}-{raw[12:]}".upper())
     return codes
 
 

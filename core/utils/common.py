@@ -13,7 +13,10 @@ from typing import Any, TypeVar
 T = TypeVar('T')
 
 SENSITIVE_LOG_RE = re.compile(
-    r"(?i)(api[_-]?key|api[_-]?secret|secret|password|token)(['\"]?\s*[:=]\s*['\"]?)[^,'\"\s}]+"
+    r'(?i)(api_key|api_secret|secret|password|token|bearer|jwt|webhook|encryption|totp'
+    r'|openai_api_key|anthropic_api_key|deepseek_api_key|mistral_api_key|openrouter_api_key'
+    r'|exchange_api_key|exchange_api_secret|telegram_bot_token|private_key)\s*[=:]\s*["\']?([^"\'\s]{4,})',
+    flags=re.IGNORECASE,
 )
 
 
@@ -436,6 +439,9 @@ def debounce_async(func: Callable[..., Any], delay: float) -> Callable[..., Any]
     """
     Create async debounced version of function.
 
+    P2-FIX: Corrected debounce logic to properly cancel pending tasks
+    and schedule new ones.
+
     Args:
         func: Function to debounce
         delay: Delay in seconds
@@ -448,10 +454,19 @@ def debounce_async(func: Callable[..., Any], delay: float) -> Callable[..., Any]
 
     async def debounced(*args: Any, **kwargs: Any) -> Any:
         nonlocal task
-        if task:
+        if task and not task.done():
             task.cancel()
-        await asyncio.sleep(delay)
-        return await func(*args, **kwargs)
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        async def _run():
+            await asyncio.sleep(delay)
+            return await func(*args, **kwargs)
+
+        task = asyncio.create_task(_run())
+        return await task
 
     return debounced
 

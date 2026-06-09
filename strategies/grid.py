@@ -4,6 +4,7 @@ Manages automated buy/sell orders within a price range.
 Enhanced with live exchange execution support.
 """
 import asyncio
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -19,6 +20,7 @@ from core.redis_coordination import (
     redis_hgetall_json,
     redis_hset_json,
 )
+from core.utils.common import safe_bool, safe_float
 from core.utils.datetime import utcnow
 from models import SignalDirection, TradeDecision
 
@@ -60,6 +62,7 @@ class GridConfig:
     spacing_mode: str = "arithmetic"
     leverage: float = 1.0
     fee_pct: float = 0.04
+    slippage_pct: float = 0.05
     stop_loss_pct: float = 0.0
     take_profit_pct: float = 0.0
     cooldown_seconds: int = 30
@@ -72,6 +75,7 @@ class GridConfig:
     enabled: bool = True
     paper_mode: bool = True
     mode: str = "neutral"
+    direction: str = "neutral"
 
 
 @dataclass
@@ -88,6 +92,8 @@ class GridLevel:
     grid_index: int | None = None
     pair_level: float | None = None
     exchange_order_status: str = ""
+    take_profit_order_id: str = ""
+    stop_loss_order_id: str = ""
 
 
 @dataclass
@@ -180,10 +186,10 @@ class GridEngine:
             return
         try:
             loop = asyncio.get_running_loop()
+            loop.create_task(self.sync_position_state(position_id))
         except RuntimeError:
-            asyncio.run(self.sync_position_state(position_id))
-            return
-        loop.create_task(self.sync_position_state(position_id))
+            # No running event loop - log warning instead of creating conflicting loop
+            logger.warning(f"[Grid] Cannot sync state: no running event loop for position {position_id}")
 
     async def sync_position_state(self, position_id: str) -> bool:
         """Persist latest local Grid state into Redis hashes."""
@@ -220,11 +226,163 @@ class GridEngine:
 
     def _ensure_strategy_id(self, config: GridConfig) -> None:
         if not config.strategy_id:
-            config.strategy_id = f"grid_{config.ticker}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            # BUG FIX: Use UTC time to avoid timezone collisions
+            config.strategy_id = f"grid_{config.ticker}_{utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     @staticmethod
     def _is_live_limit_level(level: GridLevel, config: GridConfig) -> bool:
-        return (not config.paper_mode) and bool(level.order_id) and str(level.exchange_order_status or "").lower() in {"open", "new", "pending"}
+        return (not config.paper_mode) and bool(level.order_id)
+
+    async def _confirm_live_limit_fill(
+        self,
+        level: GridLevel,
+        config: GridConfig,
+        exchange_config: dict | None,
+    ) -> dict:
+        if not level.order_id or not exchange_config:
+            return {"filled": False, "reason": "missing order or exchange config"}
+        try:
+            from exchange import get_recent_orders
+
+            orders = await get_recent_orders(config.ticker, 50, exchange_config)
+        except Exception as exc:
+            logger.warning(f"[Grid] Could not verify live limit order {level.order_id}: {exc}")
+            return {"filled": False, "reason": str(exc)}
+
+        order = next((item for item in orders if str(item.get("id") or "") == str(level.order_id)), None)
+        if not order:
+            return {"filled": False, "reason": "order not found in recent orders"}
+        status = str(order.get("status") or "").lower()
+        level.exchange_order_status = status or level.exchange_order_status
+        if status in {"canceled", "cancelled", "expired", "rejected"}:
+            return {"filled": False, "failed": True, "reason": f"order {status}"}
+        filled_qty = float(order.get("filled") or 0)
+        if status not in {"closed", "filled"} or filled_qty <= 0:
+            return {"filled": False, "reason": f"order still {status or 'unknown'}"}
+        return {
+            "filled": True,
+            "price": float(order.get("average") or order.get("price") or level.price),
+            "quantity": filled_qty,
+            "status": status,
+        }
+
+    async def _place_live_fill_protection(
+        self,
+        level: GridLevel,
+        config: GridConfig,
+        exchange_config: dict | None,
+        fill_price: float,
+    ) -> dict:
+        if not exchange_config or not safe_bool(exchange_config.get("live_trading"), False):
+            return {"status": "skipped", "reason": "not live"}
+        if level.stop_loss_order_id or level.take_profit_order_id:
+            return {"status": "skipped", "reason": "protection already placed"}
+
+        stop_loss = self._calculate_grid_stop_loss(config, fill_price, level.side)
+        take_profit = self._calculate_grid_take_profit(config, fill_price, level.side)
+        if not stop_loss and not take_profit:
+            return {"status": "skipped", "reason": "no protection configured"}
+
+        from exchange import _create_conditional_order, _get_or_create_exchange, _resolve_symbol
+
+        exchange = _get_or_create_exchange(
+            exchange_id=exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name,
+            api_key=exchange_config.get("api_key") or "",
+            api_secret=exchange_config.get("api_secret") or "",
+            password=exchange_config.get("password") or "",
+            live=True,
+            sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
+            market_type=exchange_config.get("market_type") or settings.exchange.market_type,
+            margin_mode=exchange_config.get("margin_mode") or settings.risk.margin_mode,
+        )
+        symbol = await asyncio.to_thread(
+            _resolve_symbol,
+            exchange,
+            config.ticker,
+            exchange_config.get("market_type") or settings.exchange.market_type,
+        )
+        close_side = "sell" if level.side == "buy" else "buy"
+        position_side = "long" if level.side == "buy" else "short"
+        result = {"status": "placed"}
+        if stop_loss:
+            sl_order = await _create_conditional_order(
+                exchange, symbol, "stop_loss", close_side, level.quantity, stop_loss, position_side
+            )
+            level.stop_loss_order_id = str(sl_order.get("id") or "")
+            result["stop_loss_order_id"] = level.stop_loss_order_id
+        if take_profit:
+            tp_order = await _create_conditional_order(
+                exchange, symbol, "take_profit", close_side, level.quantity, take_profit, position_side
+            )
+            level.take_profit_order_id = str(tp_order.get("id") or "")
+            result["take_profit_order_id"] = level.take_profit_order_id
+        return result
+
+    async def _fail_safe_close_unprotected_level(
+        self,
+        position_id: str,
+        level: GridLevel,
+        config: GridConfig,
+        exchange_config: dict | None,
+    ) -> dict:
+        if not exchange_config or not safe_bool(exchange_config.get("live_trading"), False):
+            return {"status": "skipped", "closed": False, "reason": "not live"}
+
+        cancelled_orders = []
+        cancel_failures = []
+        try:
+            from exchange import cancel_order
+
+            for attr in ("stop_loss_order_id", "take_profit_order_id"):
+                order_id = str(getattr(level, attr) or "")
+                if not order_id:
+                    continue
+                try:
+                    await cancel_order(order_id, config.ticker, exchange_config)
+                    setattr(level, attr, "")
+                    cancelled_orders.append(order_id)
+                except Exception as exc:
+                    cancel_failures.append({"order_id": order_id, "reason": str(exc)})
+        except Exception as exc:
+            cancel_failures.append({"reason": str(exc)})
+
+        try:
+            from exchange import execute_trade
+
+            close_direction = SignalDirection.CLOSE_LONG if level.side == "buy" else SignalDirection.CLOSE_SHORT
+            decision = TradeDecision(
+                execute=True,
+                direction=close_direction,
+                ticker=config.ticker,
+                quantity=level.quantity,
+                reason="Grid live fill protection failed; closing unprotected level",
+                order_type="market",
+                idempotency_key=f"grid:{position_id}:level:{level.grid_index or level.price}:{level.side}:protection-fail-close",
+            )
+            result = await execute_trade(decision, exchange_config)
+        except Exception as exc:
+            result = {"status": "error", "reason": str(exc)}
+
+        status = str(result.get("status") or "").lower()
+        closed_quantity = safe_float(
+            result.get("closed_quantity") or result.get("filled_quantity") or result.get("quantity") or 0
+        )
+        min_close_quantity = max(level.quantity * 0.999, 0.0)
+        closed = (
+            status in {"closed", "filled", "simulated"}
+            and (closed_quantity <= 0 or closed_quantity >= min_close_quantity)
+        ) or (status == "partial_closed" and closed_quantity >= min_close_quantity)
+        return {
+            "status": status or "unknown",
+            "closed": closed,
+            "order_id": result.get("order_id"),
+            "exit_price": result.get("exit_price") or result.get("entry_price"),
+            "closed_quantity": closed_quantity,
+            "cancelled_orders": cancelled_orders,
+            "cancel_failures": cancel_failures,
+            "reason": result.get("reason"),
+            "raw": result,
+        }
 
     def _initialize_grid_position(self, config: GridConfig, current_price: float) -> GridPosition:
         self._ensure_strategy_id(config)
@@ -262,6 +420,11 @@ class GridEngine:
         current_price: float,
         exchange_config: dict | None = None,
     ) -> GridPosition:
+        """Synchronous wrapper for creating a grid position.
+
+        P2-FIX: Removed asyncio.run() to avoid event loop conflicts.
+        Use create_grid_async() instead for live exchange execution.
+        """
         if config.paper_mode:
             position = self._initialize_grid_position(config, current_price)
             logger.info(f"[Grid] Paper mode - simulated grid creation with {len(position.grid_levels)} levels")
@@ -269,12 +432,13 @@ class GridEngine:
             self._schedule_state_sync(position.config_id)
             return position
 
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self.create_grid_async(config, current_price, exchange_config))
-
-        raise RuntimeError("Use create_grid_async() for live exchange execution")
+        # P2-FIX: Do not attempt to create a new event loop here.
+        # This can cause RuntimeError in environments with existing event loops
+        # (e.g., APScheduler async jobs, Jupyter notebooks, etc.)
+        raise RuntimeError(
+            "Live grid creation requires an async context. "
+            "Use create_grid_async() instead of create_grid() for live exchange execution."
+        )
 
     async def create_grid_async(
         self,
@@ -289,13 +453,17 @@ class GridEngine:
             await self.sync_position_state(position.config_id)
             return position
 
-        async with distributed_lock(f"grid:create:{config.user_id or 'global'}:{config.ticker}", ttl_seconds=60):
+        async with distributed_lock(
+            f"grid:create:{config.user_id or 'global'}:{config.ticker}",
+            ttl_seconds=300,
+            allow_local_fallback=config.paper_mode,
+        ):
             position = self._initialize_grid_position(config, current_price)
 
             try:
                 from exchange import execute_trade
 
-                for level in position.grid_levels:
+                for index, level in enumerate(position.grid_levels, start=1):
                     if level.status != "pending":
                         continue
 
@@ -310,6 +478,7 @@ class GridEngine:
                         take_profit=self._calculate_grid_take_profit(config, level.price, level.side),
                         reason=f"Grid {level.side} at {level.price}",
                         order_type="limit",
+                        idempotency_key=f"grid:{position.config_id}:level:{index}:open",
                     )
 
                     order_result = await execute_trade(decision, exchange_config)
@@ -430,7 +599,11 @@ class GridEngine:
         if not config:
             return {"action": "error", "reason": "Config not found"}
 
-        async with distributed_lock(self._position_lock_name(position_id, position, config), ttl_seconds=60):
+        async with distributed_lock(
+            self._position_lock_name(position_id, position, config),
+            ttl_seconds=300,
+            allow_local_fallback=config.paper_mode,
+        ):
             await self.load_position_state(position_id, refresh=True)
             position = self.positions[position_id]
             config = self.configs.get(position_id)
@@ -450,6 +623,12 @@ class GridEngine:
                     return {"action": "close", "reason": "price_out_of_range"}
 
             triggered_levels = self._find_triggered_levels(position, current_price)
+            if not config.paper_mode:
+                seen_level_ids = {id(level) for level in triggered_levels}
+                for level in position.grid_levels:
+                    if level.status == "pending" and level.order_id and id(level) not in seen_level_ids:
+                        triggered_levels.append(level)
+                        seen_level_ids.add(id(level))
 
             for level in triggered_levels:
                 trade_result = await self._execute_grid_level(position_id, level, current_price, config, exchange_config)
@@ -493,17 +672,59 @@ class GridEngine:
     ) -> dict:
         position = self.positions[position_id]
 
-        fees = level.quantity * fill_price * config.fee_pct / 100
-        level.fees_usdt = fees
-        level.filled_at = utcnow()
-        level.filled_price = fill_price
-        level.status = "filled"
-
         pnl = 0.0
+        protection_result = {}
 
         if not config.paper_mode:
             if self._is_live_limit_level(level, config):
-                logger.info(f"[Grid] Exchange limit order already filled for {config.ticker} @ {fill_price}; skipping duplicate market order")
+                fill_state = await self._confirm_live_limit_fill(level, config, exchange_config)
+                if not fill_state.get("filled"):
+                    if fill_state.get("failed"):
+                        level.status = "error"
+                    logger.info(f"[Grid] Live limit order {level.order_id} not filled yet: {fill_state.get('reason')}")
+                    return {"success": False, "reason": fill_state.get("reason") or "Live limit order not filled"}
+                fill_price = float(fill_state.get("price") or fill_price)
+                level.quantity = float(fill_state.get("quantity") or level.quantity)
+                level.exchange_order_status = str(fill_state.get("status") or "filled")
+                logger.info(f"[Grid] Confirmed exchange limit fill for {config.ticker} @ {fill_price}")
+                try:
+                    protection_result = await self._place_live_fill_protection(level, config, exchange_config, fill_price)
+                except Exception as exc:
+                    protection_result = {"status": "error", "reason": str(exc)}
+                    logger.error(f"[Grid] Failed to place protection for live fill {level.order_id}: {exc}")
+                if protection_result.get("status") == "error":
+                    fail_safe_close = await self._fail_safe_close_unprotected_level(position_id, level, config, exchange_config)
+                    protection_result["fail_safe_close"] = fail_safe_close
+                    if fail_safe_close.get("closed"):
+                        fees = level.quantity * fill_price * config.fee_pct / 100
+                        exit_price = safe_float(fail_safe_close.get("exit_price"), fill_price) or fill_price
+                        if level.side == "buy":
+                            pnl = (exit_price - fill_price) * level.quantity
+                        else:
+                            pnl = (fill_price - exit_price) * level.quantity
+                        pnl -= fees
+                        level.fees_usdt = fees
+                        level.filled_at = utcnow()
+                        level.filled_price = fill_price
+                        level.status = "closed"
+                        level.exchange_order_status = "protection_failed_closed"
+                        level.pnl_usdt = pnl
+                        position.total_fees_usdt += fees
+                        position.realized_pnl_usdt += pnl
+                        position.total_trades += 1
+                        await self.sync_position_state(position_id)
+                        return {
+                            "success": True,
+                            "closed_fail_safe": True,
+                            "side": level.side,
+                            "price": fill_price,
+                            "quantity": level.quantity,
+                            "pnl_usdt": pnl,
+                            "fees": fees,
+                            "level_price": level.price,
+                            "protection": protection_result,
+                        }
+                    logger.error(f"[Grid] Fail-safe close did not fully close unprotected live fill: {fail_safe_close}")
             else:
                 try:
                     from exchange import execute_trade
@@ -517,19 +738,34 @@ class GridEngine:
                         quantity=level.quantity,
                         reason=f"Grid {level.side} filled at {fill_price}",
                         order_type="market",
+                        idempotency_key=f"grid:{position_id}:level:{level.price}:{level.side}:market",
                     )
 
                     order_result = await execute_trade(decision, exchange_config)
 
-                    if order_result.get("status") in ["filled", "simulated"]:
+                    if order_result.get("status") in ["filled", "partial", "simulated"]:
+                        actual_price = float(order_result.get("entry_price") or fill_price)
+                        actual_qty = float(order_result.get("filled_quantity") or order_result.get("quantity") or level.quantity)
+                        if actual_qty <= 0:
+                            return {"success": False, "reason": "Exchange returned zero filled quantity"}
+                        fill_price = actual_price
+                        level.quantity = actual_qty
                         level.order_id = order_result.get("order_id", "")
                         level.exchange_order_status = str(order_result.get("exchange_order_status") or order_result.get("status") or "")
                         logger.info(f"[Grid] Executed grid trade: {order_result.get('order_id')}")
                     else:
                         logger.error(f"[Grid] Failed to execute grid trade: {order_result}")
+                        return {"success": False, "reason": order_result.get("reason") or "Exchange execution failed"}
 
                 except Exception as e:
                     logger.error(f"[Grid] Exchange execution failed: {e}")
+                    return {"success": False, "reason": str(e)}
+
+        fees = level.quantity * fill_price * config.fee_pct / 100
+        level.fees_usdt = fees
+        level.filled_at = utcnow()
+        level.filled_price = fill_price
+        level.status = "filled"
 
         pair_level = self._find_pair_level(position, level)
 
@@ -569,7 +805,7 @@ class GridEngine:
 
         await self.sync_position_state(position_id)
 
-        return {
+        result = {
             "success": True,
             "side": level.side,
             "price": fill_price,
@@ -578,8 +814,16 @@ class GridEngine:
             "fees": fees,
             "level_price": level.price,
         }
+        if protection_result:
+            result["protection"] = protection_result
+        return result
 
     def _find_pair_level(self, position: GridPosition, filled_level: GridLevel) -> GridLevel | None:
+        """Find a pair level for the filled level using FIFO (first-in-first-out) principle.
+
+        P2-FIX: Changed from price-optimized pairing to FIFO pairing.
+        FIFO is the standard accounting method and ensures correct PnL calculations.
+        """
         if filled_level.filled_at is None:
             return None
         if filled_level.pair_level is not None:
@@ -603,24 +847,19 @@ class GridEngine:
 
             if filled_level.side == "buy" and level.side == "sell":
                 if level.filled_price > filled_price:
-                    candidate_pairs.append((level, level.filled_price))
+                    candidate_pairs.append((level, level.filled_at))
             elif filled_level.side == "sell" and level.side == "buy":
                 if level.filled_price < filled_price:
-                    candidate_pairs.append((level, level.filled_price))
+                    candidate_pairs.append((level, level.filled_at))
 
         if not candidate_pairs:
             return None
 
-        if filled_level.side == "buy":
-            candidate_pairs.sort(key=lambda x: x[1])
-            paired = candidate_pairs[0][0]
-            paired.pair_level = filled_level.price
-            return paired
-        else:
-            candidate_pairs.sort(key=lambda x: x[1], reverse=True)
-            paired = candidate_pairs[0][0]
-            paired.pair_level = filled_level.price
-            return paired
+        # P2-FIX: Use FIFO pairing (earliest filled time first) instead of price optimization
+        candidate_pairs.sort(key=lambda x: x[1])
+        paired = candidate_pairs[0][0]
+        paired.pair_level = filled_level.price
+        return paired
 
     def _update_pnl(self, position: GridPosition, current_price: float) -> None:
         unrealized = 0.0
@@ -641,12 +880,25 @@ class GridEngine:
         if len(pending_buys) < config.grid_count // 4:
             new_upper = position.upper_price * (1 + config.grid_spacing_pct / 100)
 
-            new_levels = self._calculate_grid_levels(GridConfig(
+            # BUG FIX: Copy all relevant config fields from original config
+            new_config = GridConfig(
+                ticker=config.ticker,
+                direction=config.direction,
+                spacing_mode=config.spacing_mode,
+                leverage=config.leverage,
+                fee_pct=config.fee_pct,
+                slippage_pct=config.slippage_pct,
+                paper_mode=config.paper_mode,
                 upper_price=new_upper,
                 lower_price=position.lower_price,
                 grid_count=config.grid_count // 2,
                 total_capital_usdt=config.total_capital_usdt * 0.2,
-            ), current_price)
+                grid_spacing_pct=config.grid_spacing_pct,
+                take_profit_pct=config.take_profit_pct,
+                stop_loss_pct=config.stop_loss_pct,
+                max_open_orders=config.max_open_orders,
+            )
+            new_levels = self._calculate_grid_levels(new_config, current_price)
 
             for level in new_levels:
                 if level.side == "buy" and level.price > position.upper_price:
@@ -695,10 +947,14 @@ class GridEngine:
                         quantity=abs(net_quantity),
                         reason=f"Grid close net exposure: {reason}",
                         order_type="market",
+                        idempotency_key=f"grid:{position_id}:close:{reason}",
                     )
                     order_result = await execute_trade(decision, exchange_config)
                     if order_result.get("status") in ["closed", "filled", "simulated"]:
                         logger.info(f"[Grid] Closed net grid exposure via exchange: {order_result.get('order_id')}")
+                    elif order_result.get("status") == "partial_closed":
+                        logger.error(f"[Grid] Net exposure close only partially filled: {order_result}")
+                        close_confirmed = False
                     else:
                         logger.error(f"[Grid] Failed to close net grid exposure: {order_result}")
                         close_confirmed = False

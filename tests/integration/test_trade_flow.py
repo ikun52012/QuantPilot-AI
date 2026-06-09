@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from core.config import settings
 from exchange import execute_trade
 from models import AIAnalysis, MarketContext, SignalDirection, TradeDecision, TradingViewSignal
 
@@ -85,8 +86,10 @@ class TestTradeFlowIntegration:
                 assert "symbol" in result
                 assert "quantity" in result
 
-    async def test_full_trade_pipeline_live_mode_mock_exchange(self, full_signal):
+    async def test_full_trade_pipeline_live_mode_mock_exchange(self, full_signal, monkeypatch):
         """Test complete trade pipeline with mocked exchange."""
+        monkeypatch.setattr(settings.exchange, "live_trading", True)
+
         # Mock exchange creation
         mock_exchange = Mock()
         mock_exchange.id = "binance"
@@ -132,8 +135,10 @@ class TestTradeFlowIntegration:
                         assert mock_exchange.create_order.called
                         assert result.get("order_id") or result.get("status")
 
-    async def test_trade_flow_with_leverage_failure_abort(self, full_signal):
+    async def test_trade_flow_with_leverage_failure_abort(self, full_signal, monkeypatch):
         """Test trade aborts when leverage setup fails for high leverage."""
+        monkeypatch.setattr(settings.exchange, "live_trading", True)
+
         mock_exchange = Mock()
         mock_exchange.id = "binance"
 

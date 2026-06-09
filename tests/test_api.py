@@ -577,7 +577,7 @@ class TestUserEndpoints:
                 "api_key": "deepseek-key",
                 "temperature": 0.3,
                 "max_tokens": 1000,
-                "deepseek_model": "deepseek-v4-pro",
+                "deepseek_model": "deepseek-chat",
             },
         )
         assert ai_response.status_code == 200
