@@ -1,6 +1,6 @@
 """Widen remaining runtime columns to match ORM metadata.
 
-Revision ID: 008_widen_remaining_runtime_columns
+Revision ID: 008_widen_runtime_columns
 Revises: 007_runtime_schema_alignment
 Create Date: 2026-06-07
 """
@@ -8,7 +8,7 @@ Create Date: 2026-06-07
 import sqlalchemy as sa
 from alembic import op
 
-revision = "008_widen_remaining_runtime_columns"
+revision = "008_widen_runtime_columns"
 down_revision = "007_runtime_schema_alignment"
 branch_labels = None
 depends_on = None
