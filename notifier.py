@@ -128,10 +128,7 @@ async def send_telegram(text: str):
         logger.warning("[Telegram] Invalid bot token format, skipping")
         return
 
-    # P2-FIX: Build URL safely using urllib to handle special characters
-    from urllib.parse import quote
-    safe_token = quote(bot_token, safe="")
-    url = f"https://api.telegram.org/bot{safe_token}/sendMessage"
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
     for attempt in range(_TELEGRAM_MAX_RETRIES + 1):
         try:
@@ -151,7 +148,8 @@ async def send_telegram(text: str):
         except (TimeoutError, httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException):
             if attempt < _TELEGRAM_MAX_RETRIES:
                 logger.warning(f"[Telegram] Send failed (attempt {attempt + 1}), retrying")
-                await asyncio.sleep(_TELEGRAM_RETRY_DELAY_SECS)
+                delay = _TELEGRAM_RETRY_DELAY_SECS * (_TELEGRAM_RETRY_BACKOFF ** attempt)
+                await asyncio.sleep(delay)
             else:
                 logger.error(f"[Telegram] Failed to send message after {_TELEGRAM_MAX_RETRIES + 1} attempts")
 

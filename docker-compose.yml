@@ -8,7 +8,9 @@ services:
   # Signal Server
   # ─────────────────────────────────────────────
   signal-server:
-    image: ${SIGNAL_SERVER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai:v5.5.1}
+    build:
+      context: .
+    image: ${SIGNAL_SERVER_IMAGE:-quantpilot-ai:local}
     container_name: signal-server
     restart: unless-stopped
     ports:
@@ -54,7 +56,7 @@ services:
       - UPDATER_BASE_DIR=/workspace
       - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-quantpilot-ai}
       - UPDATE_TARGET_SERVICE=signal-server
-      - UPDATE_TARGET_IMAGE=${SIGNAL_SERVER_IMAGE:-ghcr.io/ikun52012/quantpilot-ai:v5.5.1}
+      - UPDATE_TARGET_IMAGE=${SIGNAL_SERVER_IMAGE:-quantpilot-ai:local}
       - UPDATE_TARGET_HEALTH_URL=http://signal-server:8000/health
       - UPDATER_ROLLOUT_TIMEOUT_SECS=180
       - UPDATER_HEARTBEAT_SECS=10

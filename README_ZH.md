@@ -31,7 +31,7 @@
 ### 🆕 v5.2 扫描器、后台与发布链路强化
 - **自动市场扫描器**：支持多周期候选融合，在 AI 复核前纳入 EMA200、HTF 冲突、VWAP/POC、持仓量、行情 Regime、ADX/MACD 和成交量确认。
 - **独立后台工作区**：拆分前置过滤器、扫描器、日志和订阅管理页面，并加入限流加载与分页审计视图。
-- **更安全的订单元数据**：实盘限价挂单保留 timeout 与交易所实际提交数量，提升 pending 仓位对账可靠性。
+- **实盘入场安全收口**：新实盘仓位只允许市价入场；在入场与保护单能够原子绑定前，实盘限价入场会被明确拒绝。历史未完成限价单仍会继续对账和保护。
 
 ### 🆕 v5.1 机构级指标前置过滤器 & 实盘防损门控
 - **机构级指标过滤**：新增 VWAP 偏离度检查、持仓量 (OI) 与价格背离/停滞检测、交易所资金储备流向监控、资金费率期限结构乘数限制、跨交易所价差套利校验。
@@ -71,6 +71,7 @@
 ### 4. 📊 智能 DCA（马丁/斐波那契）策略与网格交易
 - **DCA 策略**：支持补仓（Average Down）和加仓（Average Up）模式。提供固定金额、马丁格尔倍增（1.5x/2x）、几何级数、斐波那契数等 4 种仓位计算方法。
 - **网格交易**：提供 中性网格、做多网格、做空网格模式。支持等差/等比间距分配，价格越出网格时自动动态补仓。
+- **当前安全边界**：DCA 与网格目前仅允许纸盘。它们接入统一仓位账本、账户熔断和崩溃后订单对账之前，系统会拒绝新建实盘策略；历史实盘策略会转入只减仓/撤单清理。
 
 ### 5. ⚡ 实时 WebSocket 数据流
 - `/ws/positions`：极速推送用户实时仓位和动态 PnL 变化。
@@ -158,7 +159,7 @@ python -m venv venv
 source venv/bin/activate  # Linux/macOS
 # Windows PowerShell: .\venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 
 # 3. 配置文件
 cp .env.example .env
@@ -197,10 +198,17 @@ docker compose up -d
 | `WEBHOOK_SECRET` | 验证 TradingView Webhook 的强口令 | 自定义强密码 |
 | `LIVE_TRADING` | **实盘交易总开关**，务必确认安全后设为 true | `false` (默认) |
 | `EXCHANGE` | 目标执行交易所 (binance/okx/bybit/gate等) | `binance` |
+| `EXCHANGE_DEFAULT_ORDER_TYPE` | 入场订单类型；生产安全值为 `market` | `market` |
+| `POSITION_MONITOR_INTERVAL_SECS` | 仓位与保护单对账周期（秒） | `5` |
 | `EXCHANGE_API_KEY` | 交易所 API Key | `your_api_key` |
 | `EXCHANGE_API_SECRET` | 交易所 API Secret | `your_api_secret` |
 | `AI_PROVIDER` | 主决策 AI 供应商 | `openrouter` / `deepseek` / `openai` |
+| `AI_MAX_PROVIDER_REQUESTS_PER_DAY` | 所有付费 AI 供应商每个 UTC 日的请求硬上限（`0` 表示关闭上限） | `500` |
+| `AI_WEBHOOK_MAX_PROVIDER_REQUESTS_PER_DAY` | TradingView 信号每天可使用的 AI 供应商请求上限 | `200` |
 | `OPENROUTER_API_KEY` | OpenRouter 密钥 (如使用 OpenRouter) | `sk-or-v1-xxx` |
+| `SCANNER_MODE` | 扫描器安全模式：仅观察、模拟执行或实盘 | `observe` / `paper` / `live` |
+| `SCANNER_OBSERVE_AI_ENABLED` | 观察模式是否允许调用付费 AI；默认关闭以节省 Token | `false` |
+| `SCANNER_LIVE_MIN_OUTCOME_SAMPLES` | 扫描器进入实盘前要求的最少已标注模拟结果数 | `30` |
 | `TELEGRAM_BOT_TOKEN` | 消息通知 Telegram 机器人 Token | `xxx:xxx` |
 
 **系统管理员默认账号**：
@@ -229,11 +237,13 @@ docker compose up -d
 
 ## 📬 TradingView 报警 Payload 格式
 
-在 TradingView 警报设置中，Webhook URL 填写 `https://your-domain.com/api/webhook`，消息框中填写以下标准 JSON：
+在 TradingView 警报设置中，Webhook URL 填写 `https://your-domain.com/webhook`，消息框中填写以下标准 JSON：
 
 ```json
 {
   "secret": "在.env中设置的WEBHOOK_SECRET",
+  "timestamp": "{{timenow}}",
+  "nonce": "{{ticker}}-{{timenow}}-{{strategy.order.id}}",
   "ticker": "{{ticker}}",
   "exchange": "{{exchange}}",
   "direction": "long",
@@ -243,6 +253,11 @@ docker compose up -d
 }
 ```
 
+通过认证的信号会先持久化到投递队列，再向 TradingView 返回 `202
+Accepted`。进程异常退出或短暂故障后，系统会自动恢复并重试；达到最大
+重试次数的事件可通过管理员 Webhook 事件接口重新入队。实盘模式下，
+Payload 中的 `exchange` 必须与实际执行交易所一致。
+
 ---
 
 ## 🧪 自动化单元测试
@@ -251,7 +266,7 @@ docker compose up -d
 
 ```bash
 # 安装测试依赖
-pip install pytest pytest-asyncio httpx
+pip install pytest==9.1.1 pytest-asyncio==1.4.0 pytest-cov==7.1.0
 
 # 运行全量测试
 pytest tests/ -v
@@ -271,6 +286,7 @@ pytest tests/test_voting.py -v            # 测试 AI 投票多路共识
 - [x] **生产密钥混淆**：绝不使用默认的 `JWT_SECRET` 和 `WEBHOOK_SECRET`。
 - [x] **后台隔离保护**：将 Fastapi 运行在内网环境，外层通过 Nginx 反向代理，并严格限制除 Webhook 端口外的外网访问。
 - [x] **实盘防护开门**：在未经过充分的 `LIVE_TRADING=false` 模拟纸面交易测试前，切勿将 `LIVE_TRADING` 改为 `true`。
+- [x] **扫描器证据门槛**：至少积累 30 个已标注模拟结果且样本外期望收益为正后再启用扫描器实盘；扫描器分数是规则积分，不是胜率。
 - [x] **双重验证机制**：所有管理账户强制在首次登录后绑定 TOTP Google 验证器。
 - [x] **审计日志外发**：定期备份 `logs/` 与 `trade_logs/` 下的审计路径，以备追溯资金异常。
 

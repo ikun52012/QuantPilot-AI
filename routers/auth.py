@@ -143,7 +143,6 @@ async def register(
             result = await db.execute(
                 select(InviteCodeModel).where(
                     InviteCodeModel.code == invite_code,
-                    InviteCodeModel.is_active,
                 ).with_for_update()
             )
             invite = result.scalar_one_or_none()
@@ -154,13 +153,15 @@ async def register(
             if invite.max_uses > 0 and invite.used_count >= invite.max_uses:
                 raise HTTPException(400, "Invite code has reached maximum uses")
 
-        user = await create_user(db, username, email, pw_hash)
-        if invite:
             invite.used_count += 1
-            invite.last_used_by = user.id
-            invite.last_used_at = utcnow()
             if invite.max_uses > 0 and invite.used_count >= invite.max_uses:
                 invite.is_active = False
+            await db.flush()
+
+        user = await create_user(db, username, email, pw_hash)
+        if invite:
+            invite.last_used_by = user.id
+            invite.last_used_at = utcnow()
 
         await db.commit()
     except ValueError as err:
@@ -203,7 +204,13 @@ async def login(
         raise HTTPException(429, f"Too many failed attempts. Try again in {secs} seconds.")
 
     user = await get_user_by_username(db, username)
-    if not user or not verify_password(req.password, user.password_hash):
+    if not user:
+        hash_password("dummy_timing_normalizer_x9k2m")
+        remaining = record_failed_attempt(ip, "password")
+        if remaining is None:
+            raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
+        raise HTTPException(401, f"Invalid username or password. {remaining} attempts remaining.")
+    if not verify_password(req.password, user.password_hash):
         remaining = record_failed_attempt(ip, "password")
         if remaining is None:
             raise HTTPException(429, "Too many failed attempts. Account temporarily locked for 15 minutes.")
@@ -609,7 +616,7 @@ async def change_password(
             target_type="user",
             target_id=db_user.id,
             summary=f"User {db_user.username} changed their password",
-            client_ip=get_client_ip_util(request) if 'request' in dir() else "",
+            client_ip=get_client_ip_util(request),
         )
         db.add(audit_entry)
         await db.flush()

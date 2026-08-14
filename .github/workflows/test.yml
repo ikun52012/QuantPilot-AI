@@ -24,8 +24,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio httpx pytest-cov
+          pip install --require-hashes -r requirements.lock
+          pip install pytest==9.1.1 pytest-asyncio==1.4.0 pytest-cov==7.1.0
 
       - name: Run SQLite migration smoke
         run: |
@@ -38,7 +38,6 @@ jobs:
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         run: |
-          pip install pytest-cov
           pytest tests/ --cov=. --cov-report=xml
 
       - name: Upload coverage to Codecov
@@ -60,7 +59,7 @@ jobs:
 
       - name: Install linters
         run: |
-          pip install ruff mypy
+          pip install ruff==0.16.1 mypy==2.3.0
 
       - name: Run Ruff
         run: ruff check .
@@ -68,6 +67,30 @@ jobs:
       - name: Run MyPy (advisory)
         run: |
           mypy --ignore-missing-imports . || echo "MyPy reported type issues; advisory only until the existing type debt is cleaned up."
+
+      - name: Run mandatory type checks for critical state modules
+        run: |
+          mypy --python-version 3.12 --ignore-missing-imports --follow-imports=skip \
+            --disable-error-code union-attr --disable-error-code attr-defined \
+            --disable-error-code assignment \
+            core/account_risk.py core/portfolio_risk.py core/redis_coordination.py \
+            services/order_reconciler.py services/signal_processor.py services/webhook_worker.py
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Audit locked runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit==2.10.1
+          pip-audit -r requirements.lock
 
   docker:
     runs-on: ubuntu-latest
@@ -130,7 +153,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --require-hashes -r requirements.lock
 
       - name: Run PostgreSQL migration smoke
         env:
@@ -139,3 +162,11 @@ jobs:
           REDIS_ENABLED: "true"
           MIGRATION_FAIL_FAST: "true"
         run: alembic upgrade head
+
+      - name: Run live-pipeline tests on PostgreSQL
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://signal:ci-postgres-password@localhost:5432/signal_server
+          ALLOW_EXTERNAL_TEST_DATABASE: "true"
+          REDIS_URL: redis://localhost:6379/0
+          REDIS_ENABLED: "true"
+        run: pytest tests/test_live_pipeline_hardening.py tests/test_account_risk.py -q

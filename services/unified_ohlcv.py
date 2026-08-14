@@ -6,7 +6,7 @@ pipeline's market snapshot behaviour.
 """
 import asyncio
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -122,16 +122,32 @@ def timeframe_to_seconds(timeframe: str) -> int:
 
 
 def _dt_from_timestamp(value: Any) -> datetime:
+    """Convert various timestamp formats to a naive UTC datetime.
+
+    The project standardizes on naive UTC (`utcnow()`); this helper mirrors
+    that convention while using the modern timezone-aware API internally so
+    we get correct DST/leap-second handling and avoid the deprecated
+    ``datetime.utcfromtimestamp`` (removed in Python 3.13+).
+    """
     if isinstance(value, datetime):
+        # Normalise tz-aware values to naive UTC for downstream comparisons.
+        if value.tzinfo is not None:
+            return value.astimezone(UTC).replace(tzinfo=None)
         return value
     if isinstance(value, (int, float)):
         raw = float(value)
         if raw > 10_000_000_000:
             raw = raw / 1000.0
-        return datetime.utcfromtimestamp(raw)
+        try:
+            return datetime.fromtimestamp(raw, tz=UTC).replace(tzinfo=None)
+        except (OverflowError, OSError, ValueError):
+            return utcnow()
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(UTC).replace(tzinfo=None)
+            return parsed
         except ValueError:
             return utcnow()
     return utcnow()
@@ -415,10 +431,15 @@ class UnifiedOHLCVProvider:
             mapping.exchange_symbol,
             mapping.source_exchange,
             mapping.source_market_type,
+            mapping.source_symbol,
+            mapping.target_exchange,
+            mapping.target_market_type,
             mapping.data_source_policy,
+            mapping.tradable,
             tuple(requested_tfs),
         )
         ttl = max(0, int(settings.scanner.bundle_cache_ttl_secs))
+        self._bundle_cache.ttl = max(1, ttl) if ttl > 0 else self._bundle_cache.ttl
         if ttl > 0:
             cached = self._bundle_cache.get(cache_key)
             if cached is not None:
@@ -426,10 +447,41 @@ class UnifiedOHLCVProvider:
         timeframes_data: dict[str, list[NormalizedCandle]] = {}
         indicators: dict[str, dict[str, Any]] = {}
 
+        if mapping.data_source == "ccxt":
+            source_ids = self._exchange_ids_for_mapping(mapping) or []
+            best_timeframes: dict[str, list[NormalizedCandle]] = {}
+            best_source = ""
+            best_quality = (-1, -1, -1)
+            min_required = 50
+            for source_id in source_ids:
+                candidate_timeframes: dict[str, list[NormalizedCandle]] = {}
+                for tf in requested_tfs:
+                    candidate_timeframes[tf] = await self._fetch_candles(
+                        mapping,
+                        tf,
+                        exchange_ids=[source_id],
+                    )
+                counts = [len(candidate_timeframes.get(tf) or []) for tf in requested_tfs]
+                complete_count = sum(count >= min_required for count in counts)
+                quality = (
+                    complete_count,
+                    min(counts, default=0),
+                    sum(counts),
+                )
+                if quality > best_quality:
+                    best_quality = quality
+                    best_timeframes = candidate_timeframes
+                    best_source = source_id
+                if complete_count == len(requested_tfs):
+                    break
+            timeframes_data = best_timeframes
+            mapping.actual_data_source = best_source
+        else:
+            for tf in requested_tfs:
+                timeframes_data[tf] = await self._fetch_candles(mapping, tf)
+
         for tf in requested_tfs:
-            candles = await self._fetch_candles(mapping, tf)
-            timeframes_data[tf] = candles
-            indicators[tf] = _indicator_snapshot(candles)
+            indicators[tf] = _indicator_snapshot(timeframes_data.get(tf, []))
 
         current_price = 0.0
         for tf in requested_tfs:
@@ -461,7 +513,11 @@ class UnifiedOHLCVProvider:
         if mapping.data_source == "ccxt":
             try:
                 ohlcv_price = current_price
-                source_ids = self._exchange_ids_for_mapping(mapping)
+                source_ids = (
+                    [mapping.actual_data_source]
+                    if mapping.actual_data_source
+                    else (self._exchange_ids_for_mapping(mapping) or [])
+                )
                 cache_scope = self._cache_scope(mapping) if source_ids else None
                 context_symbol = mapping.source_symbol or mapping.exchange_symbol
                 if source_ids:
@@ -564,10 +620,6 @@ class UnifiedOHLCVProvider:
             return None
         primary = str(mapping.source_exchange or settings.exchange.name).lower().strip()
         policy = _normalize_data_policy(mapping.data_source_policy)
-        source_type = _normalize_market_type(mapping.source_market_type, settings.exchange.market_type)
-        default_type = _normalize_market_type(settings.exchange.market_type, "contract")
-        if policy == "fallback" and primary == settings.exchange.name and source_type == default_type:
-            return None
         include_fallbacks = policy == "fallback"
         return _market_data_exchange_ids(primary, include_fallbacks=include_fallbacks)
 
@@ -638,10 +690,15 @@ class UnifiedOHLCVProvider:
                 logger.debug(f"[Scanner/OHLCV] confirmation source {exchange_id} failed for {mapping.exchange_symbol}: {exc}")
         return {"passed": False, "reason": "confirmation_unavailable", "source": ""}
 
-    async def _fetch_candles(self, mapping: SymbolMapping, timeframe: str) -> list[NormalizedCandle]:
+    async def _fetch_candles(
+        self,
+        mapping: SymbolMapping,
+        timeframe: str,
+        exchange_ids: list[str] | None = None,
+    ) -> list[NormalizedCandle]:
         if mapping.data_source == "yfinance":
             return await self._fetch_yfinance_candles(mapping.data_symbol, timeframe)
-        source_ids = self._exchange_ids_for_mapping(mapping)
+        source_ids = exchange_ids or self._exchange_ids_for_mapping(mapping)
         history_symbol = mapping.source_symbol or mapping.exchange_symbol
         if source_ids:
             rows = await fetch_ohlcv_history(
@@ -743,8 +800,8 @@ class UnifiedOHLCVProvider:
         if tf in {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d"}:
             return "60m" if tf == "1h" else tf
         if tf.endswith("h"):
-            return "60m"
-        return "60m"
+            return "1d"
+        return "1d"
 
     def _assess_quality(
         self,
@@ -779,7 +836,16 @@ class UnifiedOHLCVProvider:
             or next(iter(bundle.indicators.values()), {})
         )
 
-        if len(primary) < min_candles:
+        timeframe_counts = {
+            timeframe: len(candles)
+            for timeframe, candles in bundle.timeframes.items()
+        }
+        insufficient_timeframes = [
+            timeframe
+            for timeframe, count in timeframe_counts.items()
+            if count < min_candles
+        ]
+        if insufficient_timeframes:
             reasons.append("ohlcv_insufficient")
         if bundle.current_price <= 0:
             reasons.append("invalid_price")
@@ -805,6 +871,12 @@ class UnifiedOHLCVProvider:
             reasons.append("price_source_deviation")
         if bundle.mapping.data_source == "ccxt" and not market_context_available:
             reasons.append("market_context_unavailable")
+        missing_micro = set(missing_microstructure or [])
+        if bundle.mapping.data_source == "ccxt" and settings.scanner.liquidity_filter_enabled:
+            if "volume_24h" in missing_micro:
+                reasons.append("missing_volume_24h")
+            if "orderbook_depth" in missing_micro:
+                reasons.append("missing_orderbook_depth")
         if bundle.mapping.mapped_asset and bundle.mapping.exchange_symbol not in settings.scanner.live_symbol_whitelist:
             reasons.append("mapped_asset_live_disabled")
         if not bundle.mapping.tradable:
@@ -834,6 +906,8 @@ class UnifiedOHLCVProvider:
             "candle_gap_ratio": gap_ratio,
             "primary_timeframe": primary_tf,
             "primary_candles": len(primary),
+            "timeframe_candle_counts": timeframe_counts,
+            "insufficient_timeframes": insufficient_timeframes,
             "mapped_asset": bundle.mapping.mapped_asset,
             "market_context_available": market_context_available if bundle.mapping.data_source == "ccxt" else None,
             "market_context_source": market_context_source,
@@ -846,10 +920,39 @@ class UnifiedOHLCVProvider:
         }
 
 
+_DEFAULT_PROVIDER = UnifiedOHLCVProvider()
+
+
+async def fetch_ohlcv_bundle(
+    watch_symbol: str,
+    timeframes: list[str] | None = None,
+    limit: int | None = None,
+    **mapping_overrides: Any,
+) -> OHLCVBundle:
+    """Compatibility facade for consumers outside the scanner service.
+
+    The provider owns caching and symbol mapping. ``limit`` is applied to the
+    returned candle lists without mutating the cached bundle.
+    """
+    bundle = await _DEFAULT_PROVIDER.get_bundle(
+        watch_symbol,
+        timeframes=timeframes,
+        **mapping_overrides,
+    )
+    if not limit or limit <= 0:
+        return bundle
+    limited_timeframes = {
+        timeframe: candles[-limit:]
+        for timeframe, candles in bundle.timeframes.items()
+    }
+    return bundle.model_copy(update={"timeframes": limited_timeframes})
+
+
 __all__ = [
     "NormalizedCandle",
     "SymbolMapping",
     "OHLCVBundle",
     "UnifiedOHLCVProvider",
+    "fetch_ohlcv_bundle",
     "timeframe_to_seconds",
 ]

@@ -140,6 +140,10 @@ def update_fvg_fill_state(fvg: FVG, current_price: float) -> FVG:
     This method should be called before each analysis or trade decision
     to get the current fill state of a FVG.
 
+    NOTE: This function mutates the input FVG in-place AND returns it.
+    The return value is provided for backward compatibility, but callers
+    should be aware that the original object is also modified.
+
     Args:
         fvg: The FVG object to update
         current_price: Current market price
@@ -173,7 +177,7 @@ def update_fvg_fill_state(fvg: FVG, current_price: float) -> FVG:
         elif current_price > fvg.bottom:
             # Partially filled
             fvg.filled = False
-            fvg.fill_percentage = round((fvg.top - current_price) / fvg_size * 100, 2)
+            fvg.fill_percentage = round((current_price - fvg.bottom) / fvg_size * 100, 2)
         else:
             # Price below FVG, not filled
             fvg.filled = False
@@ -188,6 +192,10 @@ def update_ob_mitigation_state(ob: OrderBlock, current_price: float, recent_pric
     OB lifecycle: untested -> partial -> mitigated -> broken
 
     This method should be called before each analysis to track OB validity.
+
+    NOTE: This function mutates the input OrderBlock in-place AND returns it.
+    The return value is provided for backward compatibility, but callers
+    should be aware that the original object is also modified.
 
     Args:
         ob: The OrderBlock object to update
@@ -482,6 +490,12 @@ class SMCContext:
     timing_recommendation: str = ""  # Entry timing recommendation text
     # ENH-4: Liquidity sweep zones (populated if orderbook data available)
     liquidity_sweep_zones: list[dict] = field(default_factory=list)  # Simplified sweep zone data
+    # Round-4 audit additions: ICT/SMC concepts previously missing
+    equal_highs_lows: list[dict] = field(default_factory=list)  # EQH/EQL liquidity stacks
+    breaker_blocks: list[dict] = field(default_factory=list)  # Broken OBs that flip support/resistance
+    inducement_zones: list[dict] = field(default_factory=list)  # Inducement / fake-breakout traps
+    killzone_active: bool = False  # Whether current time is in an ICT killzone
+    killzone_name: str = ""
 
 
 @dataclass
@@ -765,7 +779,7 @@ def detect_fvgs(
                 elif current_price > bottom:
                     # Partially filled - calculate percentage
                     filled = False
-                    fill_percentage = round((top - current_price) / fvg_size * 100, 2)
+                    fill_percentage = round((current_price - bottom) / fvg_size * 100, 2)
 
             # P1-7: Only add FVG with sufficient volume (skip filter if no volume data available)
             if skip_volume_filter or volume_ratio >= min_volume_ratio:
@@ -1152,6 +1166,10 @@ def analyze_smc_single_tf(
     structure = detect_market_structure(ohlcv, timeframe)
     fvgs = detect_fvgs(ohlcv, timeframe, current_price)
     obs = detect_order_blocks(ohlcv, timeframe)
+    for fvg in fvgs:
+        update_fvg_fill_state(fvg, current_price)
+    for ob in obs:
+        update_ob_mitigation_state(ob, current_price)
 
     # P1-R1: Pass atr_pct to enable dynamic zones based on volatility
     premium_data = calculate_premium_discount(structure.swing_highs, structure.swing_lows, atr_pct)
@@ -1168,7 +1186,21 @@ def analyze_smc_single_tf(
     risk_score = calculate_structure_risk_score(structure, fvgs, obs, signal_direction, current_price, premium, discount)
 
     # NEW: Calculate entry timing score
-    timing_score, timing_recommendation = calculate_entry_timing_score(current_price, fvgs, obs, premium, discount)
+    timing_score, timing_recommendation = calculate_entry_timing_score(current_price, fvgs, obs, premium, discount, atr_pct=atr_pct, signal_direction=signal_direction)
+
+    # Round-4 audit additions: EQH/EQL, Inducement, Breaker Block, Killzone
+    eqh_eql = detect_equal_highs_lows(ohlcv)
+    inducement = detect_inducement_zones(ohlcv, structure)
+    breakers = detect_breaker_blocks(obs, ohlcv, current_price)
+    kz_active, kz_name = detect_ict_killzone()
+
+    # Populate the previously-dead liquidity_sweep_zones field with EQH/EQL
+    # data so downstream consumers can use it.
+    liquidity_sweep_zones = [
+        {"type": e.get("type"), "price": e.get("price"), "count": e.get("count"),
+         "strength": e.get("strength")}
+        for e in eqh_eql
+    ]
 
     return SMCContext(
         timeframe=timeframe,
@@ -1181,6 +1213,12 @@ def analyze_smc_single_tf(
         risk_score=risk_score,
         entry_timing_score=timing_score,
         timing_recommendation=timing_recommendation,
+        liquidity_sweep_zones=liquidity_sweep_zones,
+        equal_highs_lows=eqh_eql,
+        breaker_blocks=breakers,
+        inducement_zones=inducement,
+        killzone_active=kz_active,
+        killzone_name=kz_name,
     )
 
 
@@ -1209,10 +1247,15 @@ def calculate_structure_risk_score(
 
     # Structure trend conflict (highest risk)
     if structure and structure.trend != "ranging":
+        choch_mitigates = False
+        if structure.last_choch:
+            choch_dir = str(structure.last_choch.type if hasattr(structure.last_choch, 'type') else "").lower()
+            if choch_dir == signal_direction or (signal_direction == "long" and "bullish" in choch_dir) or (signal_direction == "short" and "bearish" in choch_dir):
+                choch_mitigates = True
         if signal_direction == "long" and structure.trend == "bearish":
-            risk += 0.4 if not structure.last_choch else 0.2  # CHoCH reduces conflict risk
+            risk += 0.2 if choch_mitigates else 0.4
         elif signal_direction == "short" and structure.trend == "bullish":
-            risk += 0.4 if not structure.last_choch else 0.2
+            risk += 0.2 if choch_mitigates else 0.4
 
     # No SMC support zones
     has_support = False
@@ -1260,6 +1303,7 @@ def calculate_entry_timing_score(
     premium_zone: float,
     discount_zone: float,
     atr_pct: float = 1.0,
+    signal_direction: str = "",
 ) -> tuple[float, str]:
     """Calculate entry timing quality score (0-1, higher = better timing).
 
@@ -1278,6 +1322,13 @@ def calculate_entry_timing_score(
     nearest_zone_distance_pct = 100.0  # Initialize with large value
     zone_type = ""
 
+    if signal_direction:
+        dir_fvgs = [f for f in fvgs if f.type == signal_direction]
+        dir_obs = [o for o in obs if o.type == signal_direction]
+        if dir_fvgs or dir_obs:
+            fvgs = dir_fvgs
+            obs = dir_obs
+
     for fvg in fvgs:
         distance_to_mid = abs(current_price - fvg.midpoint) / current_price * 100
         if distance_to_mid < nearest_zone_distance_pct:
@@ -1292,14 +1343,12 @@ def calculate_entry_timing_score(
 
     # Check discount/premium zone alignment
     if discount_zone > 0 and premium_zone > 0:
-        # Long signal: check if in discount zone
-        if current_price < discount_zone:
+        if signal_direction in ("long", "") and current_price < discount_zone:
             distance_to_discount = abs(current_price - discount_zone) / current_price * 100
             if distance_to_discount < nearest_zone_distance_pct:
                 nearest_zone_distance_pct = distance_to_discount
                 zone_type = "Discount zone"
-        # Short signal: check if in premium zone
-        elif current_price > premium_zone:
+        if signal_direction in ("short", "") and current_price > premium_zone:
             distance_to_premium = abs(current_price - premium_zone) / current_price * 100
             if distance_to_premium < nearest_zone_distance_pct:
                 nearest_zone_distance_pct = distance_to_premium
@@ -1424,13 +1473,15 @@ def format_smc_for_ai(mtf_smc: MultiTimeframeSMC, direction: str, current_price:
             lines.append(f"- Unfilled FVGs ({len(ctx.fvgs)}):")
             for fvg in ctx.fvgs[-3:]:
                 eff_text = f"effectiveness: {fvg.effectiveness:.2f}" if fvg.effectiveness < 1.0 else "fresh"
-                lines.append(f"  • {fvg.type.upper()} FVG: {fvg.bottom:.2f} - {fvg.top:.2f} (mid: {fvg.midpoint:.2f}, {eff_text})")
+                fill_text = f", {fvg.fill_percentage:.0f}% filled" if getattr(fvg, 'fill_percentage', 0) > 0 else ""
+                lines.append(f"  • {fvg.type.upper()} FVG: {fvg.bottom:.2f} - {fvg.top:.2f} (mid: {fvg.midpoint:.2f}, {eff_text}{fill_text})")
 
         if ctx.order_blocks:
             lines.append(f"- Order Blocks ({len(ctx.order_blocks)}):")
             for ob in ctx.order_blocks[-2:]:
                 eff_text = f"effectiveness: {ob.effectiveness:.2f}" if ob.effectiveness < ob.strength else f"strength: {ob.strength:.2f}"
-                lines.append(f"  • {ob.type.upper()} OB: {ob.low:.2f} - {ob.high:.2f} ({eff_text})")
+                mit_text = f", {ob.mitigation_status}" if getattr(ob, 'mitigation_status', 'untested') != 'untested' else ""
+                lines.append(f"  • {ob.type.upper()} OB: {ob.low:.2f} - {ob.high:.2f} ({eff_text}{mit_text})")
 
     if mtf_smc.confluence_zones:
         lines.append("\n### Confluence Zones (Multi-TF Overlap)")
@@ -1457,3 +1508,228 @@ def format_smc_for_ai(mtf_smc: MultiTimeframeSMC, direction: str, current_price:
             )
 
     return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
+# Round-4 audit additions: EQH/EQL, Inducement, Breaker Block, Killzone
+# ─────────────────────────────────────────────
+
+def detect_equal_highs_lows(
+    ohlcv: list[list],
+    lookback: int = 60,
+    tolerance_pct: float = 0.12,
+) -> list[dict]:
+    """Detect Equal Highs / Equal Lows — liquidity stacking zones.
+
+    EQH/EQL are price levels where multiple swing highs/lows cluster within a
+    tiny tolerance. Stops accumulate there, making them prime targets for
+    institutional stop-hunts (liquidity sweeps). After a sweep, price typically
+    reverses — so EQH/EQL are also high-probability reversal entry zones.
+
+    Returns a list of ``{"type": "eqh"|"eql", "price": float, "count": int,
+    "first_idx": int, "last_idx": int, "strength": float}``.
+    """
+    n = len(ohlcv)
+    if n < 7:
+        return []
+    start = max(0, n - lookback)
+    swing_highs: list[tuple[int, float]] = []
+    swing_lows: list[tuple[int, float]] = []
+    for i in range(start + 2, n - 2):
+        h = float(ohlcv[i][2])
+        low = float(ohlcv[i][3])
+        if (
+            h > float(ohlcv[i - 1][2])
+            and h > float(ohlcv[i + 1][2])
+            and h > float(ohlcv[i - 2][2])
+            and h > float(ohlcv[i + 2][2])
+        ):
+            swing_highs.append((i, h))
+        if (
+            low < float(ohlcv[i - 1][3])
+            and low < float(ohlcv[i + 1][3])
+            and low < float(ohlcv[i - 2][3])
+            and low < float(ohlcv[i + 2][3])
+        ):
+            swing_lows.append((i, low))
+
+    def _cluster(swings: list[tuple[int, float]], level_type: str) -> list[dict]:
+        clusters: list[dict] = []
+        for idx, price in swings:
+            placed = False
+            for c in clusters:
+                if abs(price - c["price"]) / c["price"] * 100.0 < tolerance_pct:
+                    c["count"] += 1
+                    c["price"] = (c["price"] * (c["count"] - 1) + price) / c["count"]
+                    c["first_idx"] = min(c["first_idx"], idx)
+                    c["last_idx"] = max(c["last_idx"], idx)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append({
+                    "type": level_type,
+                    "price": price,
+                    "count": 1,
+                    "first_idx": idx,
+                    "last_idx": idx,
+                })
+        # Only keep clusters with >= 2 hits; strength scales with count
+        for c in clusters:
+            c["strength"] = round(min(1.0, c["count"] / 4.0), 2)
+            c["price"] = round(c["price"], 8)
+        return [c for c in clusters if c["count"] >= 2]
+
+    return _cluster(swing_highs, "eqh") + _cluster(swing_lows, "eql")
+
+
+def detect_inducement_zones(
+    ohlcv: list[list],
+    structure: MarketStructure | None,
+    lookback: int = 30,
+) -> list[dict]:
+    """Detect inducement / fake-breakout traps.
+
+    An inducement zone is a level just beyond a recent swing high/low that
+    price spikes through briefly before reversing. Traders who enter on the
+    breakout get trapped; price then moves sharply in the opposite direction.
+
+    Detection: find bars where wick pierces a prior swing by <0.3 ATR but
+    close returns inside the range, followed by a reversal candle.
+    """
+    n = len(ohlcv)
+    if n < 10 or not structure:
+        return []
+    swings = (structure.swing_highs or []) + (structure.swing_lows or [])
+    if not swings:
+        return []
+    zones: list[dict] = []
+    recent = ohlcv[-lookback:] if n >= lookback else ohlcv
+    # Compute ATR for distance reference
+    atr = 0.0
+    if n >= 14:
+        trs = []
+        for i in range(1, min(15, n)):
+            tr = max(
+                float(ohlcv[-i][2]) - float(ohlcv[-i][3]),
+                abs(float(ohlcv[-i][2]) - float(ohlcv[-i - 1][4])),
+                abs(float(ohlcv[-i][3]) - float(ohlcv[-i - 1][4])),
+            )
+            trs.append(tr)
+        atr = sum(trs) / len(trs) if trs else 0.0
+    if atr <= 0:
+        return []
+
+    for sw in swings[-8:]:  # check last 8 swing points
+        sw_price = float(sw.price) if hasattr(sw, "price") else float(sw.get("price", 0))
+        sw_type = getattr(sw, "type", sw.get("type", "")) if isinstance(sw, dict) else getattr(sw, "type", "")
+        if sw_price <= 0:
+            continue
+        is_high = "high" in str(sw_type).lower() or "highs" in str(getattr(structure, "swing_highs", "")).lower() and sw in (structure.swing_highs or [])
+        # Check if any recent bar pierced this level and reversed
+        for i in range(1, len(recent) - 1):
+            bar = recent[i]
+            next_bar = recent[i + 1]
+            high, low, close = float(bar[2]), float(bar[3]), float(bar[4])
+            next_close = float(next_bar[4])
+            if is_high:
+                # Pierced above swing high then closed back below
+                if high > sw_price and high - sw_price < 0.3 * atr and close < sw_price:
+                    # Next bar must be bearish reversal
+                    if next_close < close:
+                        zones.append({
+                            "type": "bearish_inducement",
+                            "level": round(sw_price, 8),
+                            "pierced_at": i,
+                            "strength": round(min(1.0, (sw_price - next_close) / atr), 2),
+                        })
+                        break
+            else:
+                # Pierced below swing low then closed back above
+                if low < sw_price and sw_price - low < 0.3 * atr and close > sw_price:
+                    if next_close > close:
+                        zones.append({
+                            "type": "bullish_inducement",
+                            "level": round(sw_price, 8),
+                            "pierced_at": i,
+                            "strength": round(min(1.0, (next_close - sw_price) / atr), 2),
+                        })
+                        break
+    return zones
+
+
+def detect_breaker_blocks(
+    order_blocks: list[OrderBlock],
+    ohlcv: list[list],
+    current_price: float = 0.0,
+) -> list[dict]:
+    """Detect breaker blocks — order blocks that have been violated.
+
+    When a bullish OB is broken downward, it flips to resistance (bearish
+    breaker). When a bearish OB is broken upward, it flips to support
+    (bullish breaker). These are high-probability continuation zones.
+    """
+    if not order_blocks or len(ohlcv) < 5:
+        return []
+    breakers: list[dict] = []
+    for ob in order_blocks:
+        if not hasattr(ob, "low") or not hasattr(ob, "high"):
+            continue
+        ob_low = float(ob.low)
+        ob_high = float(ob.high)
+        ob_type = str(getattr(ob, "type", "")).lower()
+        if ob_low <= 0 or ob_high <= 0:
+            continue
+        # Check if price has closed through the OB
+        # Look at the most recent close
+        recent_close = float(ohlcv[-1][4])
+        if ob_type == "bullish" and recent_close < ob_low:
+            # Bullish OB broken downward → becomes bearish breaker (resistance)
+            breakers.append({
+                "type": "bearish_breaker",
+                "price_low": ob_low,
+                "price_high": ob_high,
+                "original_ob_type": "bullish",
+                "strength": 0.7,
+                "note": "former bullish OB broken; now acts as resistance",
+            })
+        elif ob_type == "bearish" and recent_close > ob_high:
+            # Bearish OB broken upward → becomes bullish breaker (support)
+            breakers.append({
+                "type": "bullish_breaker",
+                "price_low": ob_low,
+                "price_high": ob_high,
+                "original_ob_type": "bearish",
+                "strength": 0.7,
+                "note": "former bearish OB broken; now acts as support",
+            })
+    return breakers
+
+
+def detect_ict_killzone() -> tuple[bool, str]:
+    """Detect whether the current UTC time is inside an ICT killzone.
+
+    Killzones (UTC):
+      * Asian       : 23:00 - 02:00
+      * London      : 07:00 - 10:00
+      * New York    : 12:00 - 15:00
+      * London Close: 15:00 - 17:00
+
+    These windows have statistically higher probability for SMC setups.
+    Returns (is_active, zone_name).
+    """
+    from datetime import UTC, datetime
+    hour = datetime.now(UTC).hour
+    zones = [
+        (23, 2, "asian_killzone"),
+        (7, 10, "london_killzone"),
+        (12, 15, "new_york_killzone"),
+        (15, 17, "london_close_killzone"),
+    ]
+    for start, end, name in zones:
+        if start < end:
+            if start <= hour < end:
+                return True, name
+        else:
+            if hour >= start or hour < end:
+                return True, name
+    return False, ""

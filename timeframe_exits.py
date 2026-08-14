@@ -110,7 +110,7 @@ def validate_multi_tp_rr(
         "single_tp_min_rr": single_tp_min_rr,
         "single_tp_max_rr": single_tp_max_rr,
         "meets_minimum": worst_case_rr >= config.min_weighted_rr,
-        "analysis": _generate_rr_analysis_text(config, quantities, worst_case_rr, typical_case_rr),
+        "analysis": _generate_rr_analysis_text(config, quantities, worst_case_rr, typical_case_rr, best_case_rr),
     }
 
 
@@ -119,6 +119,9 @@ def _generate_rr_analysis_text(
     quantities: tuple[float, float, float, float],
     worst_case_rr: float,
     typical_case_rr: float,
+    best_case_rr: float = 0.0,
+    single_tp_min_rr: float = 0.0,
+    single_tp_max_rr: float = 0.0,
 ) -> str:
     """Generate human-readable R:R analysis."""
     q1, q2, q3, q4 = quantities
@@ -132,11 +135,11 @@ def _generate_rr_analysis_text(
         "R:R Scenarios:",
         f"  Worst Case (SL=max, TP=min): {worst_case_rr:.2f}:1",
         f"  Typical Case (SL=default, TP=mid): {typical_case_rr:.2f}:1",
-        f"  Best Case (SL=min, TP=max): {worst_case_rr * 2:.2f}:1 (estimated)",
+        f"  Best Case (SL=min, TP=max): {best_case_rr:.2f}:1",
         "",
         "Single TP Mode:",
-        f"  Min R:R: {config.tp1_range[0] / config.max_sl_pct:.2f}:1",
-        f"  Max R:R: {config.tp1_range[1] / config.min_sl_pct:.2f}:1",
+        f"  Min R:R: {single_tp_min_rr:.2f}:1",
+        f"  Max R:R: {single_tp_max_rr:.2f}:1",
     ]
 
     if worst_case_rr >= config.min_weighted_rr:
@@ -412,7 +415,10 @@ def get_timeframe_config(timeframe: str) -> TimeframeExitConfig:
     if tf_normalized.endswith("M"):
         tf_normalized = tf_normalized[:-1]  # "15M" -> "15"
     elif tf_normalized.endswith("H"):
-        tf_normalized = tf_normalized[:-1] + "60"  # "1H" -> "60"
+        try:
+            tf_normalized = str(int(tf_normalized[:-1]) * 60)  # "1H" -> "60", "4H" -> "240"
+        except (ValueError, TypeError):
+            tf_normalized = "60"
     elif tf_normalized == "H":
         tf_normalized = "60"
     elif tf_normalized == "D" or tf_normalized == "1D":

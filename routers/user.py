@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core import runtime_settings
@@ -39,7 +39,7 @@ def _simplify_symbol(ticker: str) -> str:
         if ticker.endswith(suffix):
             ticker = ticker[:-len(suffix)]
             break
-    return ticker or ticker
+    return ticker or "UNKNOWN"
 
 
 def _status_text(status: str) -> str:
@@ -83,7 +83,7 @@ class UserSettingsRequest(BaseModel):
     live_trading: bool = False
     sandbox_mode: bool = False
     market_type: str = Field(default="contract", max_length=20)
-    default_order_type: str = Field(default="limit", max_length=20)
+    default_order_type: str = Field(default="market", max_length=20)
     stop_loss_order_type: str = Field(default="market", max_length=20)
     limit_timeout_overrides: dict[str, int] = Field(default_factory=dict)
 
@@ -153,6 +153,7 @@ class AISettingsRequest(BaseModel):
     read_timeout_secs: float = Field(default=60.0, ge=5, le=300)
     write_timeout_secs: float = Field(default=30.0, ge=5, le=120)
     pool_timeout_secs: float = Field(default=10.0, ge=1, le=60)
+    max_retries: int = Field(default=3, ge=1, le=10)
     max_concurrent_calls: int = Field(default=5, ge=1, le=50)
     signal_queue_limit: int = Field(default=50, ge=1, le=500)
     global_processing_semaphore: int = Field(default=5, ge=1, le=50)
@@ -201,6 +202,7 @@ class RiskSettingsRequest(BaseModel):
     fixed_position_size_usdt: float = Field(default=100.0, ge=1.0, le=1000000.0)
     risk_per_trade_pct: float = Field(default=1.0, ge=0.1, le=100.0)
     account_equity_usdt: float = Field(default=10000.0, ge=100.0, le=10000000.0)
+    max_position_notional_usdt: float = Field(default=10000.0, ge=1.0, le=1000000000.0)
 
     @field_validator("position_sizing_mode")
     @classmethod
@@ -339,7 +341,7 @@ async def _require_admin_or_self(user: dict, target_user_id: str | None) -> None
     """Require admin OR the user accessing their own data."""
     if _is_admin(user):
         return
-    if user.get("id") and target_user_id and str(user["id"]) == str(target_user_id):
+    if user.get("sub") and target_user_id and str(user["sub"]) == str(target_user_id):
         return
     raise HTTPException(403, "Admin access required or must be the target user")
 
@@ -368,12 +370,60 @@ async def _save_user_settings(db: AsyncSession, db_user, settings_data: dict) ->
 async def _save_user_exchange(db: AsyncSession, db_user, req: UserSettingsRequest) -> None:
     current = _load_user_settings(db_user)
     current_exchange = current.get("exchange") or {}
+
+    active_result = await db.execute(
+        select(PositionModel.id).where(
+            PositionModel.user_id == db_user.id,
+            PositionModel.live_trading.is_(True),
+            PositionModel.status.in_(["open", "pending"]),
+        ).limit(1)
+    )
+    has_active_live_position = active_result.scalar_one_or_none() is not None
+    # Blank values intentionally clear credentials when there is no exposure.
+    # While a live position exists they mean "keep current", because deleting
+    # the only exit credentials would strand the position.
+    api_key = _present_str(
+        req.api_key if req.api_key or not has_active_live_position else current_exchange.get("api_key"),
+        "",
+    )
+    api_secret = _present_str(
+        req.api_secret if req.api_secret or not has_active_live_position else current_exchange.get("api_secret"),
+        "",
+    )
+    password = _present_str(
+        req.password if req.password or not has_active_live_position else current_exchange.get("password"),
+        "",
+    )
+
+    if has_active_live_position:
+        current_identity = (
+            str(current_exchange.get("name") or current_exchange.get("exchange") or settings.exchange.name).lower(),
+            str(current_exchange.get("api_key") or ""),
+            str(current_exchange.get("api_secret") or ""),
+            str(current_exchange.get("password") or ""),
+            safe_bool(current_exchange.get("sandbox_mode"), False),
+            str(current_exchange.get("market_type") or settings.exchange.market_type).lower(),
+        )
+        proposed_identity = (
+            req.exchange.lower().strip(),
+            api_key,
+            api_secret,
+            password,
+            safe_bool(req.sandbox_mode, False),
+            str(req.market_type or settings.exchange.market_type).lower(),
+        )
+        if proposed_identity != current_identity:
+            raise HTTPException(
+                409,
+                "Cannot change exchange account, credentials, sandbox mode, or market type while live positions are active. Close them first.",
+            )
+
     current["exchange"] = {
         "name": req.exchange.lower().strip(),
         "exchange": req.exchange.lower().strip(),
-        "api_key": _present_str(req.api_key, _present_str(current_exchange.get("api_key"), "")),
-        "api_secret": _present_str(req.api_secret, _present_str(current_exchange.get("api_secret"), "")),
-        "password": _present_str(req.password, _present_str(current_exchange.get("password"), "")),
+        "api_key": api_key,
+        "api_secret": api_secret,
+        "password": password,
         "live_trading": safe_bool(req.live_trading, False),
         "sandbox_mode": safe_bool(req.sandbox_mode, False),
         "market_type": req.market_type,
@@ -507,6 +557,66 @@ async def _paper_balance_for_user(db: AsyncSession, user: dict) -> dict:
         "free": {"USDT": round(free_equity, 8)},
         "used": {"USDT": round(used_margin, 8)},
     }
+
+
+def _validate_exit_exchange_config(
+    exchange_config: dict,
+    *,
+    position: PositionModel | None = None,
+) -> dict:
+    """Validate account identity for a reduce-only/manual exit.
+
+    Turning off new live entries must never turn a real close into a paper-only
+    database update, so this explicitly enables authenticated exit operations.
+    """
+    config = dict(exchange_config)
+    if not str(config.get("api_key") or "").strip() or not str(config.get("api_secret") or "").strip():
+        raise HTTPException(409, "Exchange credentials are unavailable; the live position was not changed")
+
+    configured_exchange = str(config.get("exchange") or config.get("name") or settings.exchange.name).lower().strip()
+    if position is not None:
+        recorded_exchange = str(position.exchange or "").lower().strip()
+        if recorded_exchange and recorded_exchange != configured_exchange:
+            raise HTTPException(
+                409,
+                f"Position belongs to {recorded_exchange}, but the configured account is {configured_exchange}; no close was sent",
+            )
+        if bool(position.sandbox_mode) != safe_bool(config.get("sandbox_mode"), False):
+            raise HTTPException(
+                409,
+                "Position sandbox mode does not match the configured account; no close was sent",
+            )
+    config["exchange"] = configured_exchange
+    config["live_trading"] = True
+    return config
+
+
+async def _exchange_config_for_position_owner(
+    db: AsyncSession,
+    position: PositionModel,
+) -> dict:
+    """Load credentials belonging to the position owner, never the acting admin."""
+    if not position.user_id:
+        return _validate_exit_exchange_config(_global_exchange_config(), position=position)
+
+    owner = await get_user_by_id(db, position.user_id)
+    if owner is None:
+        raise HTTPException(409, "Position owner no longer exists; the live position was not changed")
+    if str(owner.role or "").lower() == "admin":
+        config = _global_exchange_config()
+    else:
+        owner_settings = _load_user_settings(owner)
+        exchange = owner_settings.get("exchange") or {}
+        config = {
+            "exchange": exchange.get("name") or exchange.get("exchange") or settings.exchange.name,
+            "api_key": str(exchange.get("api_key") or ""),
+            "api_secret": str(exchange.get("api_secret") or ""),
+            "password": str(exchange.get("password") or ""),
+            "live_trading": True,
+            "sandbox_mode": safe_bool(exchange.get("sandbox_mode"), False),
+            "market_type": exchange.get("market_type") or settings.exchange.market_type,
+        }
+    return _validate_exit_exchange_config(config, position=position)
 
 
 # ─────────────────────────────────────────────
@@ -686,8 +796,7 @@ async def close_position(
         symbol = parts[1]
         side = parts[2]
 
-        if not exchange_config.get("live_trading"):
-            raise HTTPException(400, "Cannot close exchange position without live trading enabled")
+        exchange_config = _validate_exit_exchange_config(exchange_config)
 
         exchange = await asyncio.to_thread(
             _get_or_create_exchange,
@@ -695,7 +804,9 @@ async def close_position(
             api_key=exchange_config.get("api_key"),
             api_secret=exchange_config.get("api_secret"),
             password=exchange_config.get("password"),
+            live=True,
             sandbox=exchange_config.get("sandbox_mode"),
+            market_type=exchange_config.get("market_type"),
         )
 
         close_quantity = None
@@ -736,14 +847,17 @@ async def close_position(
         total_qty = float(position.remaining_quantity or position.quantity or 0)
         close_qty = total_qty * (close_pct / 100.0)
 
-    if position.live_trading and exchange_config.get("live_trading"):
+    if position.live_trading:
+        exchange_config = await _exchange_config_for_position_owner(db, position)
         exchange = await asyncio.to_thread(
             _get_or_create_exchange,
             exchange_id=exchange_config.get("name") or exchange_config.get("exchange") or settings.exchange.name,
             api_key=exchange_config.get("api_key"),
             api_secret=exchange_config.get("api_secret"),
             password=exchange_config.get("password"),
+            live=True,
             sandbox=exchange_config.get("sandbox_mode"),
+            market_type=exchange_config.get("market_type"),
         )
         symbol = await asyncio.to_thread(_resolve_symbol, exchange, position.ticker)
         result = await _close_position(exchange, symbol, position_side=position.direction, close_quantity=close_qty)
@@ -806,8 +920,6 @@ async def close_all_positions(
     from core.database import close_position_async
     from exchange import _close_position, _get_or_create_exchange, _resolve_symbol
 
-    exchange_config = await _exchange_config_for_user(db, user)
-
     filters = [PositionModel.status == "open"]
     if not _is_admin(user):
         filters.append(PositionModel.user_id == user.get("sub"))
@@ -827,14 +939,17 @@ async def close_all_positions(
             if close_qty <= 0:
                 continue
 
-            if position.live_trading and exchange_config.get("live_trading"):
+            if position.live_trading:
+                exchange_config = await _exchange_config_for_position_owner(db, position)
                 exchange = await asyncio.to_thread(
                     _get_or_create_exchange,
                     exchange_id=exchange_config.get("name") or exchange_config.get("exchange") or settings.exchange.name,
                     api_key=exchange_config.get("api_key"),
                     api_secret=exchange_config.get("api_secret"),
                     password=exchange_config.get("password"),
+                    live=True,
                     sandbox=exchange_config.get("sandbox_mode"),
+                    market_type=exchange_config.get("market_type"),
                 )
                 symbol = await asyncio.to_thread(_resolve_symbol, exchange, position.ticker)
                 result = await _close_position(exchange, symbol, position_side=position.direction)
@@ -1261,14 +1376,109 @@ async def get_user_settings(
     return response_data
 
 
+@router.post("/settings")
 @router.put("/settings")
 @router.put("/user/settings")
 async def update_user_settings(
     settings_data: dict,
+    request: Request,
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Update user settings."""
+    if not isinstance(settings_data, dict):
+        raise HTTPException(400, "Settings data must be a JSON object")
+    if len(settings_data) > 50:
+        raise HTTPException(400, "Too many settings keys")
+
+    if _is_admin(user) and request.url.path.endswith("/api/settings"):
+        allowed = {
+            "webhook_hmac_header_enabled",
+            "webhook_hmac_header_name",
+            "webhook_hmac_secret",
+            "trust_proxy_headers",
+            "public_base_url",
+            "cors_origins",
+            "trusted_hosts",
+        }
+        unknown = sorted(set(settings_data) - allowed)
+        if unknown:
+            raise HTTPException(400, f"Unsupported global setting(s): {', '.join(unknown)}")
+
+        hmac_name = str(
+            settings_data.get("webhook_hmac_header_name", settings.server.webhook_hmac_header_name)
+            or "X-Webhook-Signature"
+        ).strip()
+        if len(hmac_name) > 64 or not hmac_name.replace("-", "").isalnum():
+            raise HTTPException(400, "Webhook HMAC header name is invalid")
+
+        def _string_list(key: str, current: list[str]) -> list[str]:
+            raw = settings_data.get(key, current)
+            if not isinstance(raw, list) or not raw or len(raw) > 50:
+                raise HTTPException(400, f"{key} must be a non-empty list with at most 50 values")
+            values = [str(item).strip() for item in raw]
+            if any(not value or len(value) > 255 for value in values):
+                raise HTTPException(400, f"{key} contains an invalid value")
+            return list(dict.fromkeys(values))
+
+        cors_origins = _string_list("cors_origins", list(settings.server.cors_origins))
+        trusted_hosts = _string_list("trusted_hosts", list(settings.server.trusted_hosts))
+        public_url = str(settings_data.get("public_base_url", settings.server.public_base_url) or "").strip()
+        if len(public_url) > 2048:
+            raise HTTPException(400, "public_base_url is too long")
+        hmac_enabled = safe_bool(
+            settings_data.get("webhook_hmac_header_enabled", settings.server.webhook_hmac_header_enabled),
+            False,
+        )
+        hmac_secret = str(settings_data.get("webhook_hmac_secret") or settings.server.webhook_hmac_secret or "")
+
+        if settings.exchange.live_trading:
+            if "*" in cors_origins or "*" in trusted_hosts:
+                raise HTTPException(409, "Wildcard CORS or trusted hosts cannot be used while live trading is enabled")
+            if public_url and not public_url.lower().startswith("https://"):
+                raise HTTPException(409, "Live trading public_base_url must use HTTPS")
+            if hmac_enabled and len(hmac_secret) < 32:
+                raise HTTPException(409, "Live trading HMAC secret must be at least 32 characters")
+
+        from core.database import set_admin_setting
+        from core.security import encrypt_value
+
+        persisted = {
+            "webhook_hmac_header_enabled": json.dumps(hmac_enabled),
+            "webhook_hmac_header_name": hmac_name,
+            "trust_proxy_headers": json.dumps(
+                safe_bool(settings_data.get("trust_proxy_headers", settings.server.trust_proxy_headers), False)
+            ),
+            "public_base_url": public_url,
+            "cors_origins": json.dumps(cors_origins),
+            "trusted_hosts": json.dumps(trusted_hosts),
+        }
+        if "webhook_hmac_secret" in settings_data and str(settings_data.get("webhook_hmac_secret") or ""):
+            persisted["webhook_hmac_secret"] = encrypt_value(str(settings_data["webhook_hmac_secret"]))
+        for key, value in persisted.items():
+            await set_admin_setting(db, key, value)
+        await db.commit()
+
+        settings.server.webhook_hmac_header_enabled = hmac_enabled
+        settings.server.webhook_hmac_header_name = hmac_name
+        settings.server.trust_proxy_headers = safe_bool(
+            settings_data.get("trust_proxy_headers", settings.server.trust_proxy_headers), False
+        )
+        settings.server.public_base_url = public_url
+        settings.server.cors_origins = cors_origins
+        settings.server.trusted_hosts = trusted_hosts
+        if "webhook_hmac_secret" in settings_data and str(settings_data.get("webhook_hmac_secret") or ""):
+            settings.server.webhook_hmac_secret = str(settings_data["webhook_hmac_secret"])
+        return {"status": "ok"}
+
+    allowed_user_sections = {"preferences", "notifications"}
+    blocked = sorted(set(settings_data) - allowed_user_sections)
+    if blocked:
+        raise HTTPException(
+            400,
+            f"Use a dedicated validated endpoint for setting(s): {', '.join(blocked)}",
+        )
+
     db_user = await get_user_by_id(db, user["sub"])
     if not db_user:
         raise HTTPException(404, "User not found")
@@ -1299,7 +1509,35 @@ async def save_exchange_settings(
 ):
     """Save exchange settings."""
     if _is_admin(user) and request.url.path.endswith("/api/settings/exchange"):
-        updated = await runtime_settings.save_exchange_settings(db, req.model_dump(exclude_unset=True), apply_immediately=False)
+        proposed = req.model_dump(exclude_unset=True)
+        active_result = await db.execute(
+            select(PositionModel.id).where(
+                PositionModel.live_trading.is_(True),
+                PositionModel.status.in_(["open", "pending"]),
+                or_(PositionModel.user_id.is_(None), PositionModel.user_id == user.get("sub")),
+            ).limit(1)
+        )
+        if active_result.scalar_one_or_none() is not None:
+            identity_changes = {
+                "exchange": str(proposed.get("exchange") or settings.exchange.name).lower() != str(settings.exchange.name).lower()
+                if "exchange" in proposed else False,
+                "api_key": bool(proposed.get("api_key")) and str(proposed.get("api_key")) != str(settings.exchange.api_key),
+                "api_secret": bool(proposed.get("api_secret")) and str(proposed.get("api_secret")) != str(settings.exchange.api_secret),
+                "password": bool(proposed.get("password")) and str(proposed.get("password")) != str(settings.exchange.password),
+                "sandbox_mode": bool("sandbox_mode" in proposed and safe_bool(proposed.get("sandbox_mode"), False) != bool(settings.exchange.sandbox_mode)),
+                "market_type": bool("market_type" in proposed and str(proposed.get("market_type")) != str(settings.exchange.market_type)),
+            }
+            if any(identity_changes.values()):
+                raise HTTPException(
+                    409,
+                    "Cannot change the global exchange account identity while its live positions are active. Close them first.",
+                )
+        try:
+            updated = await runtime_settings.save_exchange_settings(db, proposed, apply_immediately=False)
+        except RuntimeError as exc:
+            # Validation failures are expected operator errors. At this point
+            # the candidate settings have not been persisted or applied.
+            raise HTTPException(409, str(exc)) from exc
         await db.commit()
         runtime_settings.apply_runtime_settings({"exchange": updated})
         return {"status": "ok"}
@@ -1396,7 +1634,10 @@ async def save_risk_settings(
 ):
     """Persist admin risk runtime settings."""
     _require_admin(user)
-    await runtime_settings.save_risk_settings(db, req.model_dump(exclude_unset=True))
+    try:
+        await runtime_settings.save_risk_settings(db, req.model_dump(exclude_unset=True))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await db.commit()
     return {"status": "ok"}
 

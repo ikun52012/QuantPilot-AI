@@ -184,6 +184,11 @@ class PreFilterResult(BaseModel):
     reason: str = ""
     checks: dict = Field(default_factory=dict)
     score: float = Field(default=100.0, ge=0.0, le=100.0, description="Weighted filter score 0-100")
+    account_equity_usdt: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Exchange-verified equity used by downstream live position sizing",
+    )
 
 
 # ─────────────────────────────────────────────
@@ -204,11 +209,56 @@ class MarketContext(BaseModel):
     open_interest: float | None = None
     open_interest_change_pct: float | None = None
     rsi_1h: float | None = None
+    rsi_4h: float | None = None
+    rsi_15m: float | None = None
     atr_pct: float | None = None
+    atr_4h_pct: float | None = None
     ema_fast: float | None = None
     ema_slow: float | None = None
+    ema_200: float | None = None
     orderbook_imbalance: float | None = None
     long_short_ratio: float | None = None
+    macd_line: float | None = None
+    macd_signal: float | None = None
+    macd_histogram: float | None = None
+    bb_upper: float | None = None
+    bb_middle: float | None = None
+    bb_lower: float | None = None
+    bb_bandwidth: float | None = None
+    bb_percent_b: float | None = None
+    adx: float | None = None
+    di_plus: float | None = None
+    di_minus: float | None = None
+    adx_trend_strength: str | None = None
+    stoch_rsi: float | None = None
+    obv: float | None = None
+    ichimoku_tenkan: float | None = None
+    ichimoku_kijun: float | None = None
+    ichimoku_senkou_a: float | None = None
+    ichimoku_senkou_b: float | None = None
+    ichimoku_chikou: float | None = None
+    ichimoku_cloud_position: str | None = None
+    supertrend: float | None = None
+    supertrend_direction: str | None = None
+    rsi_divergence: str | None = None
+    rsi_divergence_strength: float | None = None
+    macd_divergence: str | None = None
+    macd_divergence_strength: float | None = None
+    ttm_squeeze_active: bool | None = None
+    ttm_squeeze_fired: bool | None = None
+    keltner_upper: float | None = None
+    keltner_lower: float | None = None
+    pivot_r1: float | None = None
+    pivot_r2: float | None = None
+    pivot_s1: float | None = None
+    pivot_s2: float | None = None
+    pivot_pp: float | None = None
+    williams_r: float | None = None
+    cci: float | None = None
+    btc_dominance: float | None = None
+    btc_dominance_change: float | None = None
+    active_session: str | None = None
+    mtf_momentum_alignment: float | None = None
 
     model_config = {"extra": "allow"}
 
@@ -298,7 +348,7 @@ class TradeDecision(BaseModel):
     # Order type: market or limit
     order_type: str = Field(default="market", description="market or limit")
     # For limit orders: maximum time to wait before cancelling (seconds)
-    limit_timeout_secs: int = Field(default=4 * 60 * 60, ge=10, le=7 * 24 * 60 * 60)
+    limit_timeout_secs: int = Field(default=4 * 60 * 60, ge=60, le=7 * 24 * 60 * 60)
     entry_source: str = Field(default="raw_signal", max_length=80)
     exit_quality_score: float = Field(default=100.0, ge=0.0, le=100.0)
     exit_quality_reasons: list[str] = Field(default_factory=list)

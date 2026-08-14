@@ -4,12 +4,15 @@ Handles the complete signal processing pipeline.
 """
 import asyncio
 import hashlib
+import inspect
 import json
 import math
 import os
 import time as _time
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -38,7 +41,7 @@ from core.metrics import (
     record_signal_received,
     record_trade,
 )
-from core.redis_coordination import DistributedLockTimeout, distributed_lock
+from core.redis_coordination import DistributedLockLost, DistributedLockTimeout, distributed_lock
 from core.security import decrypt_settings_payload
 from core.trading_control import trading_allowed
 from core.utils.common import (
@@ -50,7 +53,8 @@ from core.utils.common import (
     safe_float,
     safe_int,
 )
-from exchange import cancel_order, execute_trade
+from core.utils.datetime import utcnow
+from exchange import cancel_order, client_order_id_for_idempotency, execute_trade
 from market_data import fetch_enhanced_market_context, fetch_market_context
 from models import (
     AIAnalysis,
@@ -93,6 +97,7 @@ _TICKER_PENDING_GUARD = asyncio.Lock()
 
 # Global processing semaphore and interval control
 _GLOBAL_PROCESSING_SEMAPHORE: asyncio.Semaphore | None = None
+_GLOBAL_PROCESSING_LIMIT = 0
 _GLOBAL_PROCESSING_GUARD = asyncio.Lock()
 # Per-user processing interval tracking (was global, now user-isolated)
 # Uses "_admin_" sentinel for admin signals to avoid collision with user_id=None
@@ -115,35 +120,34 @@ _PREFETCH_GUARD = asyncio.Lock()
 _PREFETCH_TTL_SECONDS = 30.0
 _PREFETCH_MAX_SIZE = 500
 
-# AI Circuit Breaker for scanner signals
-_AI_CB_FAILURES = 0
-_AI_CB_OPEN_UNTIL: float = 0.0
+# AI Circuit Breaker for scanner signals (per-provider)
+_AI_CB_FAILURES: dict[str, int] = {}  # provider -> failure count
+_AI_CB_OPEN_UNTIL: dict[str, float] = {}  # provider -> timestamp when circuit re-closes
 _AI_CB_GUARD = asyncio.Lock()
 _AI_CB_THRESHOLD = 3
 _AI_CB_COOLDOWN_SECS = 300.0
 
 
-async def _ai_circuit_breaker_check() -> tuple[bool, str]:
+async def _ai_circuit_breaker_check(provider: str = "default") -> tuple[bool, str]:
     """Return (allowed, reason) for AI calls. Opens after N consecutive failures."""
     async with _AI_CB_GUARD:
         now = _time.time()
-        if now < _AI_CB_OPEN_UNTIL:
-            remaining = int(_AI_CB_OPEN_UNTIL - now)
-            return False, f"AI circuit breaker open: retry after {remaining}s"
+        if now < _AI_CB_OPEN_UNTIL.get(provider, 0.0):
+            remaining = int(_AI_CB_OPEN_UNTIL[provider] - now)
+            return False, f"AI circuit breaker open for {provider}: retry after {remaining}s"
         return True, ""
 
 
-async def _ai_circuit_breaker_record(success: bool) -> None:
-    global _AI_CB_FAILURES, _AI_CB_OPEN_UNTIL
+async def _ai_circuit_breaker_record(success: bool, provider: str = "default") -> None:
     async with _AI_CB_GUARD:
         if success:
-            _AI_CB_FAILURES = 0
+            _AI_CB_FAILURES[provider] = 0
             return
-        _AI_CB_FAILURES += 1
-        if _AI_CB_FAILURES >= _AI_CB_THRESHOLD:
-            _AI_CB_OPEN_UNTIL = _time.time() + _AI_CB_COOLDOWN_SECS
+        _AI_CB_FAILURES[provider] = _AI_CB_FAILURES.get(provider, 0) + 1
+        if _AI_CB_FAILURES[provider] >= _AI_CB_THRESHOLD:
+            _AI_CB_OPEN_UNTIL[provider] = _time.time() + _AI_CB_COOLDOWN_SECS
             logger.warning(
-                f"[AI CircuitBreaker] Tripped after {_AI_CB_FAILURES} consecutive failures. "
+                f"[AI CircuitBreaker] Tripped for {provider} after {_AI_CB_FAILURES[provider]} consecutive failures. "
                 f"Cooling down for {_AI_CB_COOLDOWN_SECS}s."
             )
 
@@ -171,13 +175,13 @@ async def _get_dynamic_interval() -> float:
     Normal load -> use base interval
     """
     if not settings.ai.dynamic_interval_enabled:
-        return settings.ai.signal_processing_interval_secs
+        return float(settings.ai.signal_processing_interval_secs)
 
     avg_time = await _get_avg_ai_response_time()
-    base_interval = settings.ai.signal_processing_interval_secs
+    base_interval = float(settings.ai.signal_processing_interval_secs)
 
     if avg_time > settings.ai.dynamic_interval_high_load_threshold:
-        dynamic_interval = base_interval * settings.ai.dynamic_interval_high_load_multiplier
+        dynamic_interval = base_interval * float(settings.ai.dynamic_interval_high_load_multiplier)
         logger.info(
             f"[SignalProcessor] High AI load detected (avg={avg_time:.1f}s), "
             f"increasing interval: {base_interval:.1f}s -> {dynamic_interval:.1f}s"
@@ -188,11 +192,20 @@ async def _get_dynamic_interval() -> float:
 
 async def _get_global_semaphore() -> asyncio.Semaphore:
     """Get or create global processing semaphore (lazy init)."""
-    global _GLOBAL_PROCESSING_SEMAPHORE
+    global _GLOBAL_PROCESSING_LIMIT, _GLOBAL_PROCESSING_SEMAPHORE
     async with _GLOBAL_PROCESSING_GUARD:
-        if _GLOBAL_PROCESSING_SEMAPHORE is None:
-            _GLOBAL_PROCESSING_SEMAPHORE = asyncio.Semaphore(settings.ai.global_processing_semaphore)
+        requested = max(1, int(settings.ai.global_processing_semaphore))
+        if _GLOBAL_PROCESSING_SEMAPHORE is None or _GLOBAL_PROCESSING_LIMIT != requested:
+            _GLOBAL_PROCESSING_SEMAPHORE = asyncio.Semaphore(requested)
+            _GLOBAL_PROCESSING_LIMIT = requested
         return _GLOBAL_PROCESSING_SEMAPHORE
+
+
+def refresh_signal_runtime_settings() -> None:
+    """Invalidate loop-bound runtime controls after an admin hot update."""
+    global _GLOBAL_PROCESSING_LIMIT, _GLOBAL_PROCESSING_SEMAPHORE
+    _GLOBAL_PROCESSING_SEMAPHORE = None
+    _GLOBAL_PROCESSING_LIMIT = 0
 
 
 async def _wait_processing_interval(skip_interval: bool = False, user_id: str | None = None) -> None:
@@ -202,7 +215,6 @@ async def _wait_processing_interval(skip_interval: bool = False, user_id: str | 
         skip_interval: If True, skip waiting (for high-confidence signals)
         user_id: User ID for per-user rate limiting (prevents cross-user throttling)
     """
-    global _LAST_SIGNAL_PROCESS_TIME
     if skip_interval:
         logger.debug("[SignalProcessor] Skipping interval (high confidence signal)")
         return
@@ -211,21 +223,37 @@ async def _wait_processing_interval(skip_interval: bool = False, user_id: str | 
     if interval <= 0:
         return
 
-    # Use sentinel key for admin signals to avoid collision with user_id=None
     rate_key = user_id if user_id is not None else _ADMIN_RATE_LIMIT_KEY
-
-    async with _PROCESSING_INTERVAL_SEMAPHORE:
-        now = _time.time()
-        last_time = _LAST_SIGNAL_PROCESS_TIME.get(rate_key, 0.0)
-        elapsed = now - last_time
-        if elapsed < interval:
-            wait_time = interval - elapsed
-            logger.debug(f"[SignalProcessor] Waiting {wait_time:.1f}s before next signal (user={user_id})")
-            await asyncio.sleep(wait_time)
-        _LAST_SIGNAL_PROCESS_TIME[rate_key] = _time.time()
+    await _reserve_processing_slot(rate_key, interval, user_id=user_id)
 
 
-async def _prefetch_market_data_async(ticker: str, user_id: str | None = None) -> MarketContext | None:
+async def _reserve_processing_slot(rate_key: str, interval: float, *, user_id: str | None) -> None:
+    """Atomically reserve the next per-user processing slot.
+
+    Waiting happens outside the lock, but every waiter must re-check the
+    timestamp before reserving. This prevents concurrent signals from waking
+    together and bypassing the configured interval.
+    """
+    while True:
+        async with _PROCESSING_INTERVAL_SEMAPHORE:
+            now = _time.time()
+            elapsed = now - _LAST_SIGNAL_PROCESS_TIME.get(rate_key, 0.0)
+            wait_time = max(0.0, interval - elapsed)
+            if wait_time <= 0:
+                _LAST_SIGNAL_PROCESS_TIME[rate_key] = now
+                return
+        logger.debug(f"[SignalProcessor] Waiting {wait_time:.1f}s before processing (user={user_id})")
+        await asyncio.sleep(wait_time)
+
+
+async def _prefetch_market_data_async(
+    ticker: str,
+    user_id: str | None = None,
+    *,
+    exchange_id: str | None = None,
+    market_type: str | None = None,
+    enhanced: bool = False,
+) -> MarketContext | None:
     """Prefetch market data before acquiring semaphore (Optimization 5).
 
     This allows market data fetch to happen in parallel with other signals,
@@ -238,7 +266,9 @@ async def _prefetch_market_data_async(ticker: str, user_id: str | None = None) -
 
     # P1-8: Include user_id in cache key for per-user isolation
     cache_scope = user_id or "admin"
-    cache_key = f"{cache_scope}:{ticker.upper().strip()}"
+    source_key = str(exchange_id or settings.exchange.name).lower().strip()
+    type_key = str(market_type or settings.exchange.market_type).lower().strip()
+    cache_key = f"{cache_scope}:{source_key}:{type_key}:{int(enhanced)}:{ticker.upper().strip()}"
     now = _time.time()
 
     async with _PREFETCH_GUARD:
@@ -252,7 +282,16 @@ async def _prefetch_market_data_async(ticker: str, user_id: str | None = None) -
 
     # Cache miss or expired - fetch fresh data (outside lock to reduce contention)
     try:
-        context = await fetch_market_context(ticker)
+        fetch_kwargs = {
+            "exchange_ids": [source_key],
+            "market_type": type_key,
+            "cache_scope": f"signal:{cache_scope}:{source_key}:{type_key}",
+        }
+        context = (
+            await fetch_enhanced_market_context(ticker, **fetch_kwargs)
+            if enhanced
+            else await fetch_market_context(ticker, **fetch_kwargs)
+        )
         async with _PREFETCH_GUARD:
             # Evict oldest entries if cache is too large
             if len(_PREFETCHED_MARKET_DATA) >= _PREFETCH_MAX_SIZE:
@@ -269,50 +308,20 @@ async def _prefetch_market_data_async(ticker: str, user_id: str | None = None) -
 
 
 async def _check_batch_signals(ticker: str, signal: TradingViewSignal, raw_body: dict | None, user_id: str | None = None) -> bool:
-    """Check if signal should be batched with similar pending signals (Optimization 4).
+    """Compatibility hook for the retired lossy batching optimization.
 
-    Returns True if signal was batched (should not process individually).
-    Uses (ticker, user_id) key for user isolation.
+    The old implementation processed the first signals individually and then
+    discarded the threshold-crossing signal, so it neither reduced prior AI
+    calls nor preserved trading semantics. Until a real durable aggregation
+    queue exists, enabling the legacy flag must remain lossless.
     """
     if not settings.ai.batch_signals_enabled:
         return False
-
-    key = (ticker.upper().strip(), user_id)
-    now = _time.time()
-
-    async with _BATCH_SIGNALS_GUARD:
-        pending = _PENDING_BATCH_SIGNALS.get(key, [])
-
-        expired = [(s, t, b) for s, t, b in pending if now - t > settings.ai.batch_signals_window_secs]
-        for item in expired:
-            pending.remove(item)
-
-        same_direction = [
-            (s, t, b) for s, t, b in pending
-            if s.direction == signal.direction
-        ]
-
-        if len(same_direction) >= settings.ai.batch_signals_max_count:
-            logger.info(
-                f"[SignalProcessor] Batch triggered for {ticker} {signal.direction.value}: "
-                f"{len(same_direction) + 1} signals within {settings.ai.batch_signals_window_secs}s window. "
-                f"Skipping individual processing (user={user_id})."
-            )
-            for item in same_direction:
-                pending.remove(item)
-            _PENDING_BATCH_SIGNALS[key] = pending
-            return True
-
-        pending.append((signal, now, raw_body))
-        _PENDING_BATCH_SIGNALS[key] = pending
-
-        if len(same_direction) >= 1:
-            logger.debug(
-                f"[SignalProcessor] Signal batching pending for {ticker}: "
-                f"{len(same_direction) + 1}/{settings.ai.batch_signals_max_count} same-direction signals (user={user_id})"
-            )
-
-        return False
+    logger.warning(
+        "[SignalProcessor] AI_BATCH_SIGNALS_ENABLED is deprecated and ignored; "
+        f"processing {ticker} {signal.direction.value} without dropping it"
+    )
+    return False
 
 
 async def _ticker_lock(ticker: str, user_id: str | None = None) -> asyncio.Lock:
@@ -416,7 +425,7 @@ async def _fingerprint_lock(fingerprint: str) -> asyncio.Lock:
             _WEBHOOK_LOCK_CREATED[fingerprint] = now
 
             if len(_WEBHOOK_LOCKS) > _WEBHOOK_LOCK_MAX_SIZE:
-                sorted_keys = sorted(_WEBHOOK_LOCK_CREATED, key=_WEBHOOK_LOCK_CREATED.get)
+                sorted_keys = sorted(_WEBHOOK_LOCK_CREATED, key=lambda item: _WEBHOOK_LOCK_CREATED[item])
                 keys_to_remove = sorted_keys[:_WEBHOOK_LOCK_MAX_SIZE // 2]
                 for k in keys_to_remove:
                     if k == fingerprint:
@@ -517,43 +526,158 @@ class SignalProcessor:
     def __init__(self, session: AsyncSession):
         self.session = session
 
+    async def _checkpoint_db(self) -> None:
+        """Commit durable progress before waiting on slow external services."""
+        in_transaction = getattr(self.session, "in_transaction", None)
+        if callable(in_transaction):
+            transaction_state = in_transaction()
+            if inspect.isawaitable(transaction_state):
+                transaction_state = await transaction_state
+            if not transaction_state:
+                return
+        await self.session.commit()
+
+    @staticmethod
+    def _entry_signal_expiry_reason(signal: TradingViewSignal | None) -> str:
+        if signal is None or signal.direction in {
+            SignalDirection.CLOSE_LONG,
+            SignalDirection.CLOSE_SHORT,
+        }:
+            return ""
+        timestamp = signal.timestamp
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        age_seconds = max(0.0, (datetime.now(UTC) - timestamp).total_seconds())
+        max_age = max(30, int(settings.server.webhook_entry_max_age_secs))
+        if age_seconds <= max_age:
+            return ""
+        return (
+            f"Entry signal expired before execution: age={age_seconds:.1f}s "
+            f"> max={max_age}s"
+        )
+
     @staticmethod
     def _live_trading_requested(user_settings: dict | None = None, user_id: str | None = None) -> bool:
         exchange_cfg = (user_settings or {}).get("exchange") or {}
         if "live_trading" in exchange_cfg:
-            return safe_bool(exchange_cfg.get("live_trading"), False)
+            return bool(safe_bool(exchange_cfg.get("live_trading"), False))
         if user_id:
             return False
-        return safe_bool(settings.exchange.live_trading, False)
+        return bool(safe_bool(settings.exchange.live_trading, False))
+
+    @staticmethod
+    def _effective_market_source(user_settings: dict | None = None) -> tuple[str, str]:
+        exchange_cfg = (user_settings or {}).get("exchange") or {}
+        exchange_id = str(
+            exchange_cfg.get("name")
+            or exchange_cfg.get("exchange")
+            or settings.exchange.name
+        ).lower().strip()
+        market_type = str(
+            exchange_cfg.get("market_type")
+            or settings.exchange.market_type
+        ).lower().strip()
+        if market_type in {"swap", "future", "futures", "linear", "inverse"}:
+            market_type = "contract"
+        return exchange_id, market_type
+
+    @staticmethod
+    def _normalize_signal_exchange(value: str | None) -> str:
+        normalized = str(value or "").upper().strip().replace(" ", "")
+        aliases = {
+            "OKEX": "okx",
+            "OKX": "okx",
+            "BINANCE": "binance",
+            "BINANCEUS": "binanceus",
+            "BYBIT": "bybit",
+            "BITGET": "bitget",
+            "GATE": "gateio",
+            "GATEIO": "gateio",
+            "COINBASE": "coinbase",
+            "KRAKEN": "kraken",
+        }
+        return aliases.get(normalized, normalized.lower())
 
     @staticmethod
     def _block_live_risk_check_errors(user_settings: dict | None = None) -> bool:
         risk_cfg = (user_settings or {}).get("risk") or {}
         if "block_live_on_risk_check_error" in risk_cfg:
-            return safe_bool(risk_cfg.get("block_live_on_risk_check_error"), True)
-        return safe_bool(settings.risk.block_live_on_risk_check_error, True)
+            return bool(safe_bool(risk_cfg.get("block_live_on_risk_check_error"), True))
+        return bool(safe_bool(settings.risk.block_live_on_risk_check_error, True))
+
+    @staticmethod
+    def _scanner_meta(raw_body: dict) -> dict:
+        nested_value = raw_body.get("scanner")
+        nested: dict = nested_value if isinstance(nested_value, dict) else {}
+        return {**raw_body, **nested}
+
+    @staticmethod
+    def _scanner_live_symbol_allowed(signal: TradingViewSignal, raw_body: dict) -> tuple[bool, str]:
+        whitelist = {
+            position_symbol_key(item)
+            for item in (settings.scanner.live_symbol_whitelist or [])
+            if position_symbol_key(item)
+        }
+        if not whitelist:
+            return False, "Scanner live mode requires non-empty SCANNER_LIVE_SYMBOL_WHITELIST"
+
+        scanner_meta = SignalProcessor._scanner_meta(raw_body)
+        candidate_symbols = {
+            position_symbol_key(value)
+            for value in (
+                signal.ticker,
+                raw_body.get("ticker"),
+                raw_body.get("symbol"),
+                raw_body.get("exchange_symbol"),
+                scanner_meta.get("watch_symbol"),
+                scanner_meta.get("exchange_symbol"),
+                scanner_meta.get("source_symbol"),
+            )
+            if value
+        }
+        if candidate_symbols.intersection(whitelist):
+            return True, ""
+        return False, "Scanner live mode blocked: symbol is not in SCANNER_LIVE_SYMBOL_WHITELIST"
+
+    @staticmethod
+    def _analysis_used_ai_fallback(analysis: AIAnalysis) -> bool:
+        warnings = [str(item).lower() for item in (analysis.warnings or [])]
+        if any("ai fallback triggered" in item or item.startswith("ai error:") for item in warnings):
+            return True
+        return str(analysis.reasoning or "").lower().startswith("ai analysis unavailable")
 
     @staticmethod
     async def _validate_scanner_live_market(signal: TradingViewSignal, raw_body: dict) -> tuple[bool, str, dict]:
         """Verify the scanner's live execution market exists before any live order path."""
-        scanner_meta = raw_body.get("scanner") if isinstance(raw_body.get("scanner"), dict) else {}
+        scanner_meta = SignalProcessor._scanner_meta(raw_body)
         exchange_id = str(
-            scanner_meta.get("exchange_name")
+            scanner_meta.get("target_exchange")
+            or scanner_meta.get("exchange_name")
             or raw_body.get("exchange")
             or settings.exchange.name
         ).lower().strip()
-        market_type = str(scanner_meta.get("market_type") or settings.exchange.market_type).lower().strip()
+        market_type = str(
+            scanner_meta.get("target_market_type")
+            or scanner_meta.get("market_type")
+            or settings.exchange.market_type
+        ).lower().strip()
+        market_symbol = str(
+            scanner_meta.get("exchange_symbol")
+            or raw_body.get("exchange_symbol")
+            or raw_body.get("ticker")
+            or signal.ticker
+        ).strip()
         try:
             from exchange import get_market_limits
 
-            limits = await asyncio.to_thread(get_market_limits, exchange_id, signal.ticker, market_type)
+            limits = await asyncio.to_thread(get_market_limits, exchange_id, market_symbol, market_type)
         except Exception as exc:
-            reason = f"Scanner live market validation failed for {signal.ticker}: {exc}"
+            reason = f"Scanner live market validation failed for {market_symbol}: {exc}"
             logger.warning(f"[ScannerSignal] {reason}")
             return False, reason, {}
 
         if not limits or not limits.get("symbol"):
-            reason = f"Scanner live mode blocked: {signal.ticker} is not listed on {exchange_id}/{market_type}"
+            reason = f"Scanner live mode blocked: {market_symbol} is not listed on {exchange_id}/{market_type}"
             return False, reason, limits or {}
         return True, "", limits
 
@@ -587,6 +711,7 @@ class SignalProcessor:
         client_ip: str = "",
         raw_body: dict | None = None,
         reserved_event_id: str | None = None,
+        reserved_fingerprint: str | None = None,
     ) -> dict:
         """
         Process a webhook signal through the complete pipeline.
@@ -612,10 +737,19 @@ class SignalProcessor:
         9. Release semaphore and lock
         """
         payload = raw_body or signal.model_dump()
-        fingerprint = compute_webhook_fingerprint(payload, user_id)
+        fingerprint = reserved_fingerprint or compute_webhook_fingerprint(payload, user_id)
+        is_close_signal = signal.direction in {
+            SignalDirection.CLOSE_LONG,
+            SignalDirection.CLOSE_SHORT,
+        }
+        prefetched_user_settings = await self._load_user_settings(user_id) if user_id else {}
+        target_exchange, target_market_type = self._effective_market_source(prefetched_user_settings)
+        await self._checkpoint_db()
 
         # Optimization 4: Check batch signals (with user isolation)
-        batched = await _check_batch_signals(signal.ticker, signal, raw_body, user_id)
+        batched = False
+        if not is_close_signal:
+            batched = await _check_batch_signals(signal.ticker, signal, raw_body, user_id)
         if batched:
             await self._mark_reserved_event_by_id(
                 reserved_event_id,
@@ -634,7 +768,7 @@ class SignalProcessor:
             return {"status": "batched", "reason": "Signal added to batch queue"}
 
         # Check queue limit first (fast rejection for extreme load)
-        if not await _check_ticker_queue_limit(signal.ticker, user_id):
+        if not is_close_signal and not await _check_ticker_queue_limit(signal.ticker, user_id):
             reason = f"Queue full for {signal.ticker} - too many pending signals"
             await self._mark_reserved_event_by_id(
                 reserved_event_id,
@@ -653,13 +787,28 @@ class SignalProcessor:
                 "status": "rejected",
                 "reason": reason,
                 "queue_limit": settings.ai.signal_queue_limit,
+                "retry_safe": True,
+                "failure_stage": "pre_execution",
             }
 
         # Optimization 5: Prefetch market data AFTER queue limit check
-        prefetched_market = await _prefetch_market_data_async(signal.ticker, user_id)
+        prefetched_market = (
+            None
+            if is_close_signal
+            else await _prefetch_market_data_async(
+                signal.ticker,
+                user_id,
+                exchange_id=target_exchange,
+                market_type=target_market_type,
+                enhanced=(
+                    settings.ai.voting_enabled
+                    or os.getenv("ENHANCED_FILTERS_ENABLED", "true").lower() == "true"
+                ),
+            )
+        )
 
         # Get global processing semaphore
-        global_sem = await _get_global_semaphore()
+        global_sem = asyncio.Semaphore(1) if is_close_signal else await _get_global_semaphore()
 
         # Wait for global semaphore (max 5 concurrent signals)
         async with global_sem:
@@ -686,26 +835,20 @@ class SignalProcessor:
                 return {
                     "status": "error",
                     "reason": f"Lock timeout for {signal.ticker} - possible deadlock detected",
+                    "retry_safe": True,
+                    "failure_stage": "pre_execution",
                 }
 
             try:
                 try:
                     # P2-FIX: Check processing interval BEFORE processing (inside ticker lock)
                     # to prevent same-ticker signals from bypassing the interval wait
-                    interval = await _get_dynamic_interval()
+                    interval = 0.0 if is_close_signal else await _get_dynamic_interval()
                     if interval > 0:
                         rate_key = user_id if user_id is not None else _ADMIN_RATE_LIMIT_KEY
-                        async with _PROCESSING_INTERVAL_SEMAPHORE:
-                            now = _time.time()
-                            last_time = _LAST_SIGNAL_PROCESS_TIME.get(rate_key, 0.0)
-                            elapsed = now - last_time
-                            if elapsed < interval:
-                                wait_time = interval - elapsed
-                                logger.debug(f"[SignalProcessor] Waiting {wait_time:.1f}s before processing (user={user_id})")
-                                await asyncio.sleep(wait_time)
-                            _LAST_SIGNAL_PROCESS_TIME[rate_key] = _time.time()
+                        await _reserve_processing_slot(rate_key, interval, user_id=user_id)
 
-                    lock_user_settings = await self._load_user_settings(user_id) if user_id else None
+                    lock_user_settings = prefetched_user_settings
                     lock_live_trading = self._live_trading_requested(lock_user_settings, user_id)
 
                     # Process signal with prefetched market data
@@ -723,10 +866,26 @@ class SignalProcessor:
                                 raw_body,
                                 prefetched_market=prefetched_market,
                                 reserved_event_id=reserved_event_id,
+                                reserved_fingerprint=fingerprint,
+                                loaded_user_settings=lock_user_settings,
                             )
                     except DistributedLockTimeout as exc:
                         logger.error(f"[SignalProcessor] Distributed signal lock failed: {exc}")
-                        result = {"status": "error", "reason": str(exc)}
+                        result = {
+                            "status": "error",
+                            "reason": str(exc),
+                            "retry_safe": True,
+                            "failure_stage": "pre_execution",
+                        }
+                    except DistributedLockLost as exc:
+                        logger.critical(f"[SignalProcessor] Distributed signal lock was lost: {exc}")
+                        result = {
+                            "status": "manual_review",
+                            "reason": str(exc),
+                            "retry_safe": False,
+                            "failure_stage": "unknown_after_lock_loss",
+                            "requires_reconciliation": True,
+                        }
                 finally:
                     ticker_lock.release()
 
@@ -768,7 +927,7 @@ class SignalProcessor:
         raw_body["signal_source"] = SignalSource.AUTO_SCANNER.value
         raw_body.setdefault("source", SignalSource.AUTO_SCANNER.value)
         raw_body.setdefault("strategy", "AI_Auto_Scanner")
-        scanner_meta = raw_body.get("scanner") if isinstance(raw_body.get("scanner"), dict) else {}
+        scanner_meta = self._scanner_meta(raw_body)
         fingerprint = compute_webhook_fingerprint(raw_body, user_id)
         user_settings = await self._load_user_settings(user_id)
         scoped_user_settings = dict(user_settings or {})
@@ -799,19 +958,49 @@ class SignalProcessor:
         )
         if reservation is None:
             return {"status": "duplicate", "reason": "Duplicate scanner signal within 30 minutes"}
+        await self._checkpoint_db()
 
         live_requested = mode == "live"
         if mode in {"paper", "live"}:
             if live_requested:
-                whitelist = {str(item).upper().strip() for item in settings.scanner.live_symbol_whitelist}
                 if not safe_bool(settings.exchange.live_trading, False):
                     reason = "Scanner live mode requires global LIVE_TRADING=true"
                     self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
                     return {"status": "blocked", "reason": reason}
-                if whitelist and signal.ticker.upper().strip() not in whitelist:
-                    reason = "Scanner live mode blocked: symbol is not in SCANNER_LIVE_SYMBOL_WHITELIST"
+                from services.scanner_learning import compute_outcome_summary
+
+                outcome_summary = await compute_outcome_summary(
+                    self.session,
+                    scope=user_id or "admin",
+                    days=settings.scanner.outcome_lookback_days,
+                    include_recent=False,
+                    symbol=signal.ticker,
+                    timeframe=signal.timeframe,
+                    direction=signal.direction.value,
+                    execution_mode="paper",
+                )
+                outcome_total = int(outcome_summary.get("total") or 0)
+                outcome_expectancy = float(outcome_summary.get("expectancy_pct") or 0.0)
+                if outcome_total < int(settings.scanner.live_min_outcome_samples):
+                    reason = (
+                        "Scanner live mode requires validated paper outcomes: "
+                        f"{outcome_total}/{settings.scanner.live_min_outcome_samples}"
+                    )
                     self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
                     return {"status": "blocked", "reason": reason}
+                if outcome_expectancy <= float(settings.scanner.live_min_expectancy_pct):
+                    reason = (
+                        "Scanner live mode requires positive validated expectancy: "
+                        f"{outcome_expectancy:.4f}%"
+                    )
+                    self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
+                    return {"status": "blocked", "reason": reason}
+                whitelist_ok, whitelist_reason = self._scanner_live_symbol_allowed(signal, raw_body)
+                if not whitelist_ok:
+                    reason = whitelist_reason
+                    self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
+                    return {"status": "blocked", "reason": reason}
+                await self._checkpoint_db()
                 market_ok, market_reason, market_limits = await self._validate_scanner_live_market(signal, raw_body)
                 if not market_ok:
                     self._update_reserved_event(reservation, "blocked", 423, market_reason, raw_body)
@@ -825,6 +1014,8 @@ class SignalProcessor:
                 reason = trading_state.get("block_reason", "Trading is currently disabled")
                 self._update_reserved_event(reservation, "blocked", 423, reason, raw_body)
                 return {"status": "blocked", "reason": reason, "trading_mode": trading_state.get("mode")}
+
+        await self._checkpoint_db()
 
         record_signal_received(signal.ticker, signal.direction.value, user_id)
         await notify_signal_received(signal.ticker, signal.direction.value, signal.price)
@@ -848,12 +1039,45 @@ class SignalProcessor:
                 reason=prefilter_result.reason,
                 payload={"score": prefilter_result.score, "checks": prefilter_result.checks},
             )
+            await self._checkpoint_db()
             if not prefilter_result.passed:
                 self._update_reserved_event(reservation, "blocked", 200, prefilter_result.reason, raw_body)
                 await notify_pre_filter_blocked(signal.ticker, signal.direction.value, prefilter_result.reason)
                 return {"status": "blocked", "reason": prefilter_result.reason, "checks": prefilter_result.checks}
 
-            allowed, cb_reason = await _ai_circuit_breaker_check()
+            if prefilter_result.account_equity_usdt:
+                scoped_user_settings = dict(scoped_user_settings or {})
+                scoped_risk = dict(scoped_user_settings.get("risk") or {})
+                scoped_risk["account_equity_usdt"] = prefilter_result.account_equity_usdt
+                scoped_user_settings["risk"] = scoped_risk
+
+            if mode == "observe" and not settings.scanner.observe_ai_enabled:
+                reason = (
+                    "Scanner rule candidate observed; paid AI review is disabled in observe mode"
+                )
+                result = {
+                    "status": "observed",
+                    "reason": reason,
+                    "would_execute": None,
+                    "requires_ai_review": True,
+                    "paid_ai_used": False,
+                    "prefilter_score": prefilter_result.score,
+                    "checks": prefilter_result.checks,
+                }
+                self._update_reserved_event(reservation, "observed", 200, reason, raw_body)
+                await self._record_signal_audit(
+                    fingerprint=fingerprint,
+                    signal=signal,
+                    user_id=user_id,
+                    stage="scanner_observe",
+                    outcome="candidate_only",
+                    reason=reason,
+                    payload={"result": result},
+                )
+                return result
+
+            cb_provider = settings.ai.provider or "default"
+            allowed, cb_reason = await _ai_circuit_breaker_check(cb_provider)
             if not allowed:
                 logger.warning(f"[ScannerSignal] {cb_reason}")
                 await self._record_signal_audit(
@@ -876,9 +1100,28 @@ class SignalProcessor:
                     prefilter_result,
                     user_id=user_id,
                 )
-                await _ai_circuit_breaker_record(True)
+                if self._analysis_used_ai_fallback(analysis):
+                    await _ai_circuit_breaker_record(False, cb_provider)
+                    fallback_reason = "AI provider fallback used; scanner signal held for safety"
+                    await self._record_signal_audit(
+                        fingerprint=fingerprint,
+                        signal=signal,
+                        user_id=user_id,
+                        stage="scanner_ai_analysis",
+                        outcome="held",
+                        reason=fallback_reason,
+                        payload={"analysis": analysis.model_dump(), "mode": mode, "ai_fallback": True},
+                    )
+                    self._update_reserved_event(reservation, "held", 200, fallback_reason, raw_body)
+                    return {
+                        "status": "held",
+                        "reason": fallback_reason,
+                        "ai_fallback": True,
+                        "analysis": analysis.model_dump(),
+                    }
+                await _ai_circuit_breaker_record(True, cb_provider)
             except Exception as ai_exc:
-                await _ai_circuit_breaker_record(False)
+                await _ai_circuit_breaker_record(False, cb_provider)
                 raise ai_exc
 
             await self._record_signal_audit(
@@ -890,8 +1133,16 @@ class SignalProcessor:
                 reason=analysis.reasoning,
                 payload={"analysis": analysis.model_dump(), "mode": mode},
             )
+            await self._checkpoint_db()
 
-            decision = self._build_trade_decision(signal, analysis, market, user_id, scoped_user_settings)
+            decision = await asyncio.to_thread(
+                self._build_trade_decision,
+                signal,
+                analysis,
+                market,
+                user_id,
+                scoped_user_settings,
+            )
             await self._record_signal_audit(
                 fingerprint=fingerprint,
                 signal=signal,
@@ -908,6 +1159,7 @@ class SignalProcessor:
                     "entry_source": decision.entry_source,
                 },
             )
+            await self._checkpoint_db()
 
             if mode == "observe":
                 result = {
@@ -948,6 +1200,7 @@ class SignalProcessor:
                             blocking_timeout_seconds=_TICKER_LOCK_TIMEOUT_SECONDS,
                             allow_local_fallback=not live_requested,
                         ):
+                            reverse_close_failure: dict | None = None
                             conflict_reason, conflicting_position = await self._check_position_conflict(
                                 decision, user_id, scoped_user_settings
                             )
@@ -958,9 +1211,10 @@ class SignalProcessor:
                                 close_result = await self._close_conflicting_position(
                                     conflicting_position, user_id, scoped_user_settings
                                 )
-                                if close_result.get("status") == "error":
+                                if close_result.get("status") != "closed":
                                     decision.execute = False
                                     decision.reason = f"Failed to close existing position: {close_result.get('reason')}"
+                                    reverse_close_failure = close_result
                                 await self.session.flush()
 
                             if decision.execute:
@@ -976,11 +1230,21 @@ class SignalProcessor:
                                     scoped_user_settings,
                                     idempotency_key=fingerprint,
                                 )
+                            elif reverse_close_failure is not None:
+                                result = reverse_close_failure
                             else:
                                 result = {"status": "rejected", "reason": decision.reason}
                                 await notify_trade_executed(decision, result)
                     except DistributedLockTimeout as exc:
                         result = {"status": "error", "reason": str(exc)}
+                    except DistributedLockLost as exc:
+                        result = {
+                            "status": "manual_review",
+                            "reason": str(exc),
+                            "retry_safe": False,
+                            "failure_stage": "unknown_after_lock_loss",
+                            "requires_reconciliation": True,
+                        }
                     finally:
                         ticker_lock.release()
             else:
@@ -1028,6 +1292,8 @@ class SignalProcessor:
         raw_body: dict | None = None,
         prefetched_market: MarketContext | None = None,
         reserved_event_id: str | None = None,
+        reserved_fingerprint: str | None = None,
+        loaded_user_settings: dict | None = None,
     ) -> dict:
         """Internal signal processing with ticker lock already acquired.
 
@@ -1035,8 +1301,12 @@ class SignalProcessor:
             prefetched_market: Pre-fetched market data (Optimization 5)
         """
         # Compute fingerprint for deduplication
-        fingerprint = compute_webhook_fingerprint(raw_body or signal.model_dump(), user_id)
-        user_settings = await self._load_user_settings(user_id)
+        fingerprint = reserved_fingerprint or compute_webhook_fingerprint(raw_body or signal.model_dump(), user_id)
+        user_settings = (
+            loaded_user_settings
+            if loaded_user_settings is not None
+            else await self._load_user_settings(user_id)
+        )
 
         if reserved_event_id:
             reservation = await self._load_reserved_event(reserved_event_id, fingerprint)
@@ -1054,8 +1324,64 @@ class SignalProcessor:
             logger.warning(f"[Signal] Duplicate webhook: {fingerprint[:16]}")
             return {"status": "duplicate", "reason": "Duplicate signal within 30 minutes"}
 
+        if signal.direction in {SignalDirection.CLOSE_LONG, SignalDirection.CLOSE_SHORT}:
+            await self._checkpoint_db()
+            return await self._process_deterministic_close(
+                reservation=reservation,
+                signal=signal,
+                fingerprint=fingerprint,
+                user_id=user_id,
+                user_settings=user_settings,
+                raw_body=raw_body,
+            )
+
+        expiry_reason = self._entry_signal_expiry_reason(signal)
+        if expiry_reason:
+            self._update_reserved_event(
+                reservation,
+                status="expired",
+                status_code=409,
+                reason=expiry_reason,
+                payload=raw_body or signal.model_dump(),
+            )
+            await self._checkpoint_db()
+            return {
+                "status": "expired",
+                "reason": expiry_reason,
+                "retry_safe": False,
+                "failure_stage": "pre_execution",
+            }
+
         # Step 0: Check global trading control (emergency stop, paused, read_only)
         live_trading = self._live_trading_requested(user_settings, user_id)
+        if live_trading and user_id and not safe_bool(settings.exchange.live_trading, False):
+            reason = "User live entries require the global LIVE_TRADING master switch"
+            self._update_reserved_event(
+                reservation,
+                status="blocked",
+                status_code=423,
+                reason=reason,
+                payload=raw_body or signal.model_dump(),
+            )
+            await self._checkpoint_db()
+            return {"status": "blocked", "reason": reason}
+        target_exchange, _target_market_type = self._effective_market_source(user_settings)
+        signal_exchange = self._normalize_signal_exchange(signal.exchange)
+        if signal_exchange and signal_exchange != target_exchange:
+            mismatch_reason = (
+                f"TradingView exchange {signal_exchange} does not match execution "
+                f"exchange {target_exchange}"
+            )
+            if live_trading:
+                self._update_reserved_event(
+                    reservation,
+                    status="blocked",
+                    status_code=422,
+                    reason=mismatch_reason,
+                    payload=raw_body or signal.model_dump(),
+                )
+                return {"status": "blocked", "reason": mismatch_reason}
+            logger.warning(f"[Signal] {mismatch_reason}; paper analysis uses {target_exchange}")
         trading_state = await trading_allowed(self.session, user_id=user_id, live_trading=live_trading)
         if not trading_state.get("allowed"):
             logger.warning(
@@ -1075,6 +1401,8 @@ class SignalProcessor:
                 "trading_mode": trading_state.get("mode"),
             }
 
+        await self._checkpoint_db()
+
         # Record signal received
         record_signal_received(signal.ticker, signal.direction.value, user_id)
 
@@ -1088,9 +1416,19 @@ class SignalProcessor:
                 market = prefetched_market
                 logger.debug(f"[SignalProcessor] Using prefetched market data for {signal.ticker}")
             elif enhanced_filters:
-                market = await fetch_enhanced_market_context(signal.ticker)
+                market = await fetch_enhanced_market_context(
+                    signal.ticker,
+                    exchange_ids=[target_exchange],
+                    market_type=_target_market_type,
+                    cache_scope=f"signal:{user_id or 'admin'}:{target_exchange}:{_target_market_type}",
+                )
             else:
-                market = await fetch_market_context(signal.ticker)
+                market = await fetch_market_context(
+                    signal.ticker,
+                    exchange_ids=[target_exchange],
+                    market_type=_target_market_type,
+                    cache_scope=f"signal:{user_id or 'admin'}:{target_exchange}:{_target_market_type}",
+                )
 
             # Step 2: Run pre-filter
             prefilter_result = await self._run_prefilter(signal, market, user_id, user_settings)
@@ -1106,6 +1444,7 @@ class SignalProcessor:
                     "checks": prefilter_result.checks,
                 },
             )
+            await self._checkpoint_db()
 
             if not prefilter_result.passed:
                 await self._record_and_notify_blocked(
@@ -1117,6 +1456,14 @@ class SignalProcessor:
                     "checks": prefilter_result.checks,
                 }
 
+            if prefilter_result.account_equity_usdt:
+                user_settings = dict(user_settings or {})
+                verified_risk = dict(user_settings.get("risk") or {})
+                verified_risk["account_equity_usdt"] = prefilter_result.account_equity_usdt
+                user_settings["risk"] = verified_risk
+
+            await self._checkpoint_db()
+
             # Step 3: AI Analysis
             analysis = await self._run_ai_analysis(
                 signal,
@@ -1125,6 +1472,33 @@ class SignalProcessor:
                 prefilter_result,
                 user_id=user_id,
             )
+            if live_trading and self._analysis_used_ai_fallback(analysis):
+                # Local rule fallback is useful for paper analysis, but it is
+                # not an equivalent substitute for the configured provider in
+                # a money-moving path. Fail closed until AI health is restored.
+                fallback_reason = "AI provider fallback used; live entry held for safety"
+                await self._record_signal_audit(
+                    fingerprint=fingerprint,
+                    signal=signal,
+                    user_id=user_id,
+                    stage="ai_analysis",
+                    outcome="held",
+                    reason=fallback_reason,
+                    payload={"analysis": analysis.model_dump(), "ai_fallback": True},
+                )
+                self._update_reserved_event(
+                    reservation,
+                    status="held",
+                    status_code=503,
+                    reason=fallback_reason,
+                    payload=raw_body or signal.model_dump(),
+                )
+                return {
+                    "status": "held",
+                    "reason": fallback_reason,
+                    "ai_fallback": True,
+                    "analysis": analysis.model_dump(),
+                }
             await self._record_signal_audit(
                 fingerprint=fingerprint,
                 signal=signal,
@@ -1136,7 +1510,14 @@ class SignalProcessor:
             )
 
             # Step 4: Build trade decision
-            decision = self._build_trade_decision(signal, analysis, market, user_id, user_settings)
+            decision = await asyncio.to_thread(
+                self._build_trade_decision,
+                signal,
+                analysis,
+                market,
+                user_id,
+                user_settings,
+            )
             await self._record_signal_audit(
                 fingerprint=fingerprint,
                 signal=signal,
@@ -1157,8 +1538,10 @@ class SignalProcessor:
                     "trailing_stop": decision.trailing_stop.model_dump(),
                 },
             )
+            await self._checkpoint_db()
 
             # Step 5: Check for conflicting open positions
+            reverse_close_failure: dict | None = None
             if decision.execute:
                 conflict_reason, conflicting_position = await self._check_position_conflict(
                     decision, user_id, user_settings
@@ -1171,9 +1554,10 @@ class SignalProcessor:
                     close_result = await self._close_conflicting_position(
                         conflicting_position, user_id, user_settings
                     )
-                    if close_result.get("status") == "error":
+                    if close_result.get("status") != "closed":
                         decision.execute = False
                         decision.reason = f"Failed to close existing position: {close_result.get('reason')}"
+                        reverse_close_failure = close_result
                     else:
                         logger.info(
                             f"[Signal] Reverse signal: closed existing {conflicting_position.direction} position "
@@ -1191,12 +1575,18 @@ class SignalProcessor:
 
             # Step 7: Execute trade
             if decision.execute:
+                await self._checkpoint_db()
                 result = await self._execute_trade(
                     decision,
                     user_id,
                     user_settings,
                     idempotency_key=fingerprint,
                 )
+            elif reverse_close_failure is not None:
+                # Preserve exchange-close success/DB-write failure details so
+                # the durable worker marks the event for manual reconciliation
+                # instead of reducing it to an ordinary rejection.
+                result = reverse_close_failure
             else:
                 result = {"status": "rejected", "reason": decision.reason}
                 # Notify rejection to Telegram
@@ -1251,6 +1641,77 @@ class SignalProcessor:
 
             return {"status": "error", "reason": str(e)}
 
+    async def _process_deterministic_close(
+        self,
+        *,
+        reservation: WebhookEventModel,
+        signal: TradingViewSignal,
+        fingerprint: str,
+        user_id: str | None,
+        user_settings: dict | None,
+        raw_body: dict | None,
+    ) -> dict:
+        """Execute a risk-reducing close without entry filters or paid AI."""
+        record_signal_received(signal.ticker, signal.direction.value, user_id)
+        await notify_signal_received(signal.ticker, signal.direction.value, signal.price)
+
+        decision = TradeDecision(
+            signal=signal,
+            ticker=signal.ticker,
+            direction=signal.direction,
+            entry_price=signal.price,
+            execute=True,
+            order_type="market",
+            quantity=None,
+            stop_loss=None,
+            take_profit=None,
+            take_profit_levels=[],
+            reason="Deterministic TradingView close signal",
+        )
+        await self._record_signal_audit(
+            fingerprint=fingerprint,
+            signal=signal,
+            user_id=user_id,
+            stage="deterministic_close",
+            outcome="execute",
+            reason=decision.reason,
+            payload={"paid_ai_used": False, "order_type": "market"},
+        )
+        try:
+            result = await self._execute_trade(
+                decision,
+                user_id,
+                user_settings,
+                idempotency_key=fingerprint,
+            )
+        except Exception as exc:
+            result = {
+                "status": "manual_review",
+                "reason": f"Close execution outcome is unknown: {exc}",
+                "requires_reconciliation": True,
+                "retry_safe": False,
+                "failure_stage": "unknown_close_execution",
+            }
+
+        await self._record_signal_audit(
+            fingerprint=fingerprint,
+            signal=signal,
+            user_id=user_id,
+            stage="close_execution",
+            outcome=str(result.get("status") or "unknown"),
+            reason=str(result.get("reason") or ""),
+            payload={"result": result, "paid_ai_used": False},
+        )
+        self._update_reserved_event(
+            reservation,
+            status=str(result.get("status") or "processed"),
+            status_code=200 if result.get("status") != "error" else 500,
+            reason=str(result.get("reason") or decision.reason),
+            payload=raw_body or signal.model_dump(),
+        )
+        result["paid_ai_used"] = False
+        return result
+
     async def _reserve_webhook_event(
         self,
         fingerprint: str,
@@ -1294,6 +1755,9 @@ class SignalProcessor:
                     return event
                 except IntegrityError:
                     await self.session.rollback()
+                    # Rollback is expected here: the duplicate fingerprint was already
+                    # handled by the checks above, so this rollback only discards the
+                    # failed INSERT and keeps the transaction usable for subsequent ops.
                     return None
         finally:
             await _release_fingerprint_lock(fingerprint, lock)
@@ -1306,6 +1770,7 @@ class SignalProcessor:
             return None
         event.status = "processing"
         event.reason = "processing"
+        event.updated_at = utcnow()
         await self.session.flush()
         return event
 
@@ -1332,6 +1797,7 @@ class SignalProcessor:
         event.status_code = status_code
         event.reason = reason or ""
         event.payload_json = json.dumps(_safe_event_payload(payload or {}), default=str)
+        event.updated_at = utcnow()
 
     async def _run_prefilter(
         self,
@@ -1346,6 +1812,7 @@ class SignalProcessor:
         # Get user settings for limits
         max_daily_trades = int(getattr(settings.risk, "max_daily_trades", 0) or 0)
         max_daily_loss = float(getattr(settings.risk, "max_daily_loss_pct", 0.0) or 0.0)
+        max_total_loss = float(getattr(settings.risk, "max_total_loss_pct", 0.0) or 0.0)
         thresholds = get_thresholds()
         min_pass_score = float(thresholds.get("min_pass_score", signal.ticker) or 0.0)
         use_scoring = min_pass_score > 0.0
@@ -1379,6 +1846,15 @@ class SignalProcessor:
                 except (TypeError, ValueError):
                     pass
 
+            raw_total_loss = user_risk.get("max_total_loss_pct")
+            if raw_total_loss is not None:
+                try:
+                    max_total_loss = max(0.1, min(float(raw_total_loss), 100.0))
+                except (TypeError, ValueError):
+                    pass
+
+        exchange_config = self._build_exchange_config(user_id, user_settings)
+
         result = await run_pre_filter_async(
             signal=signal,
             market=market,
@@ -1388,6 +1864,8 @@ class SignalProcessor:
             use_scoring=use_scoring,
             min_pass_score=min_pass_score,
             live_trading=live_trading,
+            exchange_config=exchange_config,
+            max_total_loss_pct=max_total_loss,
             data_quality_mode=live_data_quality_mode,
             max_missing_data_checks=max_live_missing_data_checks,
             db_session=self.session,
@@ -1412,6 +1890,7 @@ class SignalProcessor:
     ) -> AIAnalysis:
         """Run AI analysis on the signal."""
         import time
+        await self._checkpoint_db()
         start = time.time()
 
         scoped_user_settings = dict(user_settings or {})
@@ -1554,6 +2033,7 @@ class SignalProcessor:
         # P2-FIX: Force limit order for ai_modified entries to prevent market execution at wrong price
         if decision.execute and recommendation == "modify":
             suggested = float(analysis.suggested_entry or 0)
+            strict_modified_entry = is_scanner_signal or self._live_trading_requested(user_settings, user_id)
 
             if suggested > 0:
                 price_diff_pct = abs(suggested - signal.price) / signal.price * 100 if signal.price > 0 else 0
@@ -1568,6 +2048,13 @@ class SignalProcessor:
                     decision.entry_source = "ai_modified"
                     decision.order_type = "limit"  # P2-FIX: Force limit order for modified entries
                 else:
+                    if strict_modified_entry:
+                        decision.execute = False
+                        decision.reason = (
+                            f"AI modify entry rejected: suggested_entry is {price_diff_pct:.2f}% "
+                            f"away from signal price, above 5.00% limit"
+                        )
+                        return decision
                     # Fallback: suggested entry too far, use original price
                     logger.warning(
                         f"[Signal] AI suggested entry {suggested} is {price_diff_pct:.2f}% away from signal price, "
@@ -1577,14 +2064,21 @@ class SignalProcessor:
                     decision.entry_source = "fallback_raw_invalid_ai_entry"
                     # Don't reject the trade, just use original price
             else:
-                # Fallback: no valid suggested_entry, use original signal price
-                logger.warning(
-                    f"[Signal] AI recommended modify without valid suggested_entry, "
-                    f"using original signal price {signal.price}"
-                )
+                if strict_modified_entry:
+                    decision.execute = False
+                    decision.reason = "AI modify entry rejected: missing valid suggested_entry"
+                    decision.entry_source = "rejected_missing_ai_entry"
+                    logger.warning(
+                        f"[Signal] AI recommended modify without valid suggested_entry for {signal.ticker}; "
+                        "scanner/live execution rejected"
+                    )
+                    return decision
                 decision.entry_price = signal.price
                 decision.entry_source = "fallback_raw_missing_ai_entry"
-                # Don't reject the trade, continue with original price
+                logger.warning(
+                    f"[Signal] AI recommended modify without valid suggested_entry for {signal.ticker}; "
+                    f"falling back to original signal price {signal.price}"
+                )
 
         if decision.execute:
             self._apply_exit_plan(decision, signal, analysis, market, user_settings or {})
@@ -1630,7 +2124,7 @@ class SignalProcessor:
             from timeframe_exits import get_timeframe_config
 
             tf_config = get_timeframe_config(str(signal.timeframe or "60"))
-            num_tp_levels = self._max_tp_levels(user_settings)
+            num_tp_levels = self._max_tp_levels(user_settings or {})
 
             trailing_decision = select_smart_trailing_stop(
                 confidence=analysis.confidence,
@@ -1687,6 +2181,8 @@ class SignalProcessor:
             decision=decision,
             user_settings=user_settings,
         )
+        if not decision.execute:
+            return decision
         if decision.quantity and decision.position_size_multiplier < 1.0:
             risk_settings = self._resolved_risk_settings(user_settings)
             if risk_settings.get("position_sizing_mode") == "fixed":
@@ -1754,6 +2250,10 @@ class SignalProcessor:
                     f"using deterministic fallback SL={sl_price}"
                 )
                 decision.exit_quality_reasons.append("server_fallback_stop_loss")
+            else:
+                decision.execute = False
+                decision.reason = f"No valid stop loss could be determined for {signal.ticker}"
+                return
         decision.stop_loss = sl_price
         if sl_price:
             self._append_stop_loss_advisory_warnings(
@@ -1867,10 +2367,10 @@ class SignalProcessor:
     def _min_risk_reward_ratio(user_settings: dict | None = None) -> float:
         risk_cfg = (user_settings or {}).get("risk") or {}
         if risk_cfg.get("min_risk_reward_ratio") is not None:
-            return safe_float(risk_cfg.get("min_risk_reward_ratio"), 1.5)
+            return float(safe_float(risk_cfg.get("min_risk_reward_ratio"), 1.5))
         profile = str(risk_cfg.get("ai_risk_profile") or settings.risk.ai_risk_profile or "balanced").lower().strip()
         profile_rr_defaults = {"conservative": 2.0, "balanced": 1.5, "aggressive": 1.2}
-        return profile_rr_defaults.get(profile, 1.5)
+        return float(profile_rr_defaults.get(profile, 1.5))
 
     def _apply_scanner_exit_safety(
         self,
@@ -2320,7 +2820,7 @@ class SignalProcessor:
         # ATR-based minimum (dynamic volatility adjustment)
         atr_min = atr_pct * 1.2 if atr_pct > 0 else tf_min
         # Return the most restrictive minimum
-        return max(tf_min, config_min, atr_min, 0.15)
+        return float(max(tf_min, config_min, atr_min, 0.15))
 
     @staticmethod
     def _get_max_sl_percentage(user_settings: dict, timeframe: str = "60") -> float:
@@ -2331,7 +2831,7 @@ class SignalProcessor:
         tf_max = get_max_sl_for_timeframe(timeframe)
         config_max = safe_float(risk_cfg.get("max_stop_loss_pct"), tf_max)
         # Use the more restrictive (smaller) max
-        return min(tf_max, config_max)
+        return float(min(tf_max, config_max))
 
     @staticmethod
     def _get_min_tp_percentage(atr_pct: float, user_settings: dict, timeframe: str = "60") -> float:
@@ -2342,7 +2842,7 @@ class SignalProcessor:
         tf_min = get_min_tp_for_timeframe(timeframe)
         config_min = safe_float(tp_cfg.get("min_tp_pct"), tf_min)
         atr_min = atr_pct * 0.8 if atr_pct > 0 else tf_min
-        return max(tf_min, config_min, atr_min, 0.2)
+        return float(max(tf_min, config_min, atr_min, 0.2))
 
     def _validate_risk_reward_ratio(
         self,
@@ -2532,7 +3032,7 @@ class SignalProcessor:
         - reason: str - explanation
         - current_exposure: dict - current position summary
         """
-        result = {
+        result: dict[str, Any] = {
             "exceeded": False,
             "reason": "",
             "current_exposure": {
@@ -2544,15 +3044,39 @@ class SignalProcessor:
         }
 
         try:
-            stmt = select(PositionModel).where(PositionModel.status.in_(["open", "pending"]))
-            if user_id:
-                stmt = stmt.where(PositionModel.user_id == user_id)
+            stmt = select(PositionModel).where(
+                PositionModel.status.in_(["open", "pending"]),
+                (
+                    PositionModel.user_id.is_(None)
+                    if user_id is None
+                    else PositionModel.user_id == user_id
+                ),
+            )
 
             db_result = await self.session.execute(stmt)
-            positions = list(db_result.scalars().all())
-
-            if not positions:
-                return result
+            exchange_config = self._build_exchange_config(user_id, user_settings)
+            target_exchange = str(
+                exchange_config.get("exchange")
+                or exchange_config.get("name")
+                or settings.exchange.name
+            ).lower().strip()
+            target_live = self._live_trading_requested(user_settings, user_id)
+            target_sandbox = safe_bool(exchange_config.get("sandbox_mode"), False)
+            positions = [
+                position
+                for position in db_result.scalars().all()
+                if safe_bool(getattr(position, "live_trading", False), False) == target_live
+                and (
+                    not target_live
+                    or safe_bool(getattr(position, "sandbox_mode", False), False)
+                    == target_sandbox
+                )
+                and (
+                    not str(getattr(position, "exchange", "") or "").lower().strip()
+                    or str(getattr(position, "exchange", "") or "").lower().strip()
+                    == target_exchange
+                )
+            ]
 
             # Count positions by direction
             long_positions = []
@@ -2560,34 +3084,41 @@ class SignalProcessor:
 
             for pos in positions:
                 pos_dir = str(pos.direction or "long").lower()
-                # FIX: Use actual margin (user capital at risk) instead of notional value.
-                # Notional includes leverage and makes the exposure look far larger
-                # than the real capital committed.
+                # Correlation and VaR are exposure controls, so they must use
+                # leveraged notional. Margin alone understates a 20x position
+                # by a factor of twenty.
+                entry = safe_float(pos.entry_price)
+                qty = safe_float(pos.remaining_quantity or pos.quantity)
+                try:
+                    pos_ts_config = json.loads(pos.trailing_stop_config_json or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pos_ts_config = {}
+                pos_contract_size = safe_float(pos_ts_config.get("_contract_size"), 1.0)
+                notional = entry * qty * pos_contract_size if entry > 0 and qty > 0 else 0
                 stored_margin = safe_float(pos.margin, 0.0)
                 if stored_margin > 0:
                     margin = stored_margin
                 else:
-                    # Fallback for legacy positions without margin recorded
-                    entry = safe_float(pos.entry_price)
-                    qty = safe_float(pos.remaining_quantity or pos.quantity)
-                    try:
-                        pos_ts_config = json.loads(pos.trailing_stop_config_json or "{}")
-                    except (json.JSONDecodeError, TypeError):
-                        pos_ts_config = {}
-                    pos_contract_size = safe_float(pos_ts_config.get("_contract_size"), 1.0)
                     leverage = max(1.0, safe_float(pos.leverage, 1.0))
-                    notional = entry * qty * pos_contract_size if entry > 0 and qty > 0 else 0
                     margin = notional / leverage
 
+                exposure = {
+                    "ticker": pos.ticker,
+                    "margin": margin,
+                    "notional": notional,
+                    "direction": pos_dir,
+                }
                 if pos_dir == "long":
-                    long_positions.append({"ticker": pos.ticker, "margin": margin})
+                    long_positions.append(exposure)
                 elif pos_dir == "short":
-                    short_positions.append({"ticker": pos.ticker, "margin": margin})
+                    short_positions.append(exposure)
 
             result["current_exposure"]["long_positions"] = len(long_positions)
             result["current_exposure"]["short_positions"] = len(short_positions)
             result["current_exposure"]["long_margin_usdt"] = sum(p["margin"] for p in long_positions)
             result["current_exposure"]["short_margin_usdt"] = sum(p["margin"] for p in short_positions)
+            result["current_exposure"]["long_notional_usdt"] = sum(p["notional"] for p in long_positions)
+            result["current_exposure"]["short_notional_usdt"] = sum(p["notional"] for p in short_positions)
 
             # Get correlation limits from settings
             risk_cfg = (user_settings or {}).get("risk") or {}
@@ -2604,10 +3135,10 @@ class SignalProcessor:
             new_direction = str(decision.direction.value or "long").lower()
             if new_direction == "long":
                 current_count = len(long_positions)
-                current_margin = sum(p["margin"] for p in long_positions)
+                current_notional = sum(p["notional"] for p in long_positions)
             else:
                 current_count = len(short_positions)
-                current_margin = sum(p["margin"] for p in short_positions)
+                current_notional = sum(p["notional"] for p in short_positions)
 
             # Position count limit
             if current_count >= max_same_direction_positions:
@@ -2619,41 +3150,43 @@ class SignalProcessor:
                 logger.warning(f"[Signal] Correlation risk exceeded: {result['reason']}")
                 return result
 
-            # Margin exposure limit (actual user capital, not notional)
+            # Leveraged notional exposure limit
             risk_settings = self._resolved_risk_settings(user_settings)
             equity = float(risk_settings.get("account_equity_usdt") or 1000)
+            new_contract_size = 1.0
+            try:
+                from exchange import get_market_limits
+                market_config = self._get_exchange_config(user_settings)
+                exchange_id = market_config.get("exchange") or market_config.get("name") or settings.exchange.name
+                market_type = market_config.get("market_type") or settings.exchange.market_type
+                limits = get_market_limits(exchange_id, decision.ticker, market_type)
+                if limits and limits.get("contract_size", 1.0) != 1.0:
+                    new_contract_size = float(limits.get("contract_size", 1.0))
+            except Exception:
+                pass
+            new_notional = (
+                decision.entry_price * decision.quantity * new_contract_size
+                if decision.entry_price and decision.quantity
+                else 0.0
+            )
+            max_leverage = 125
+            if user_id:
+                user = await get_user_by_id(self.session, user_id)
+                max_leverage = int(getattr(user, "max_leverage", None) or max_leverage) if user else max_leverage
+            leverage = max(1.0, self._effective_leverage(decision.ai_analysis, max_leverage))
             if risk_settings.get("position_sizing_mode") == "fixed":
-                # In fixed mode the configured amount IS the margin
-                new_margin = float(risk_settings.get("fixed_position_size_usdt") or 100.0)
-            else:
-                # Derive margin from notional / leverage for percentage / risk_ratio modes
-                new_contract_size = 1.0
-                try:
-                    from exchange import get_market_limits
-                    exchange_config = self._get_exchange_config(user_settings)
-                    exchange_id = exchange_config.get("exchange") or exchange_config.get("name") or settings.exchange.name
-                    market_type = exchange_config.get("market_type") or settings.exchange.market_type
-                    limits = get_market_limits(exchange_id, decision.ticker, market_type)
-                    if limits and limits.get("contract_size", 1.0) != 1.0:
-                        new_contract_size = float(limits.get("contract_size", 1.0))
-                except Exception:
-                    pass
-                new_notional = decision.entry_price * decision.quantity * new_contract_size if decision.entry_price and decision.quantity else 0
-                max_leverage = 125
-                if user_id:
-                    user = await get_user_by_id(self.session, user_id)
-                    max_leverage = int(getattr(user, "max_leverage", None) or max_leverage) if user else max_leverage
-                leverage = max(1.0, self._effective_leverage(decision.ai_analysis, max_leverage))
-                new_margin = new_notional / leverage
-            total_margin_after = current_margin + new_margin
-            exposure_pct = total_margin_after / equity * 100 if equity > 0 else 0
+                configured_margin = float(risk_settings.get("fixed_position_size_usdt") or 100.0)
+                if new_notional <= 0:
+                    new_notional = configured_margin * leverage
+            total_notional_after = current_notional + new_notional
+            exposure_pct = total_notional_after / equity * 100 if equity > 0 else float("inf")
 
             if exposure_pct > max_correlated_pct:
                 result["exceeded"] = True
                 result["reason"] = (
                     f"Correlation risk: {new_direction} exposure would be {exposure_pct:.1f}% "
                     f"of equity (max={max_correlated_pct}%). "
-                    f"Current={current_margin:.2f}USDT, New={new_margin:.2f}USDT, Equity={equity:.2f}USDT"
+                    f"Current={current_notional:.2f}USDT, New={new_notional:.2f}USDT, Equity={equity:.2f}USDT"
                 )
                 logger.warning(f"[Signal] Correlation risk exceeded: {result['reason']}")
                 return result
@@ -2661,8 +3194,78 @@ class SignalProcessor:
             # Log correlation status
             logger.info(
                 f"[Signal] Correlation check passed: {current_count + 1} {new_direction} positions "
-                f"(margin_exposure={exposure_pct:.1f}%, max={max_correlated_pct}%)"
+                f"(notional_exposure={exposure_pct:.1f}%, max={max_correlated_pct}%)"
             )
+
+            # ── Round-4 audit P0: Cluster-based correlation check ──────────
+            # Five correlated longs (BTC/ETH/SOL/AVAX/MATIC) previously counted
+            # as 5 independent positions but in reality they are 1 giant BTC
+            # bet. Use cluster classification to enforce a per-cluster cap.
+            try:
+                from core.portfolio_risk import (
+                    check_cluster_concentration,
+                    check_pre_trade_var,
+                    fetch_historical_prices_for_positions,
+                )
+                all_positions_for_cluster = [
+                    {
+                        "ticker": p["ticker"],
+                        "notional_usdt": p["notional"],
+                        "direction": p["direction"],
+                    }
+                    for p in long_positions + short_positions
+                ]
+                new_notional_for_cluster = new_notional
+                max_cluster_pct = safe_float(
+                    first_valid(risk_cfg.get("max_cluster_exposure_pct"), 30.0),
+                    30.0,
+                )
+                cluster_ok, cluster_reason = check_cluster_concentration(
+                    all_positions_for_cluster,
+                    decision.ticker,
+                    new_notional_for_cluster,
+                    equity,
+                    max_cluster_exposure_pct=max_cluster_pct,
+                )
+                if not cluster_ok:
+                    result["exceeded"] = True
+                    result["reason"] = cluster_reason
+                    logger.warning(f"[Signal] Cluster concentration exceeded: {cluster_reason}")
+                    return result
+
+                # ── Pre-trade VaR check ───────────────────────────────────
+                # Reject if adding this trade would push 95% portfolio VaR
+                # above the configured limit.
+                max_var_pct = safe_float(
+                    first_valid(risk_cfg.get("max_portfolio_var_pct"), 5.0),
+                    5.0,
+                )
+                historical_prices = await fetch_historical_prices_for_positions(
+                    all_positions_for_cluster + [{"ticker": decision.ticker, "notional_usdt": new_notional_for_cluster}],
+                    days=90,
+                )
+                var_ok, var_reason = check_pre_trade_var(
+                    all_positions_for_cluster,
+                    decision.ticker,
+                    new_notional_for_cluster,
+                    equity,
+                    historical_prices=historical_prices,
+                    max_var_pct=max_var_pct,
+                    new_direction=new_direction,
+                    fail_closed_on_missing_data=target_live and self._block_live_risk_check_errors(user_settings),
+                )
+                if not var_ok:
+                    result["exceeded"] = True
+                    result["reason"] = var_reason
+                    logger.warning(f"[Signal] Pre-trade VaR exceeded: {var_reason}")
+                    return result
+            except Exception as portfolio_err:
+                if target_live and self._block_live_risk_check_errors(user_settings):
+                    result["exceeded"] = True
+                    result["reason"] = f"Portfolio risk check failed in live mode: {portfolio_err}"
+                    logger.error(f"[Signal] {result['reason']}")
+                    return result
+                logger.warning(f"[Signal] Portfolio risk check skipped for non-live trade: {portfolio_err}")
 
         except Exception as e:
             live_trading = self._live_trading_requested(user_settings, user_id)
@@ -2765,6 +3368,19 @@ class SignalProcessor:
         if sizing_mode not in {"percentage", "fixed", "risk_ratio"}:
             sizing_mode = default_mode
 
+        global_notional_cap = cls._coerce_risk_float(
+            getattr(settings.risk, "max_position_notional_usdt", 10000.0),
+            10000.0,
+            1.0,
+            1_000_000_000.0,
+        )
+        requested_notional_cap = cls._coerce_risk_float(
+            risk_cfg.get("max_position_notional_usdt"),
+            global_notional_cap,
+            1.0,
+            global_notional_cap,
+        )
+
         return {
             "account_equity_usdt": cls._coerce_risk_float(
                 risk_cfg.get("account_equity_usdt"),
@@ -2790,6 +3406,9 @@ class SignalProcessor:
                 0.1,
                 100.0,
             ),
+            # Per-user settings may lower this global safety ceiling, never
+            # raise it above the administrator's hard cap.
+            "max_position_notional_usdt": min(global_notional_cap, requested_notional_cap),
             "position_sizing_mode": sizing_mode,
         }
 
@@ -2858,9 +3477,77 @@ class SignalProcessor:
                     f"[PositionSize] risk_ratio mode: equity={equity}USDT, risk_pct={risk_pct}%, "
                     f"SL_distance={sl_distance_pct}% -> notional={notional_value}USDT (risk_amount={risk_amount}USDT)"
                 )
+
+        elif sizing_mode == "atr_normalized":
+            # Round-4 audit P0 fix: ATR-normalized sizing — risk_per_trade_pct
+            # of equity per 1 ATR% of volatility. This makes BTC and SHIB
+            # equivalent in risk terms (high-volatility coins get smaller
+            # positions, low-volatility coins get larger ones).
+            risk_pct = float(risk_settings["risk_per_trade_pct"])
+            atr_pct = 0.0
+            try:
+                # decision.ai_analysis may carry atr; otherwise use a sensible default
+                if decision and hasattr(decision, "ai_analysis") and decision.ai_analysis:
+                    atr_pct = float(getattr(decision.ai_analysis, "atr_pct", 0) or 0)
+            except Exception:
+                pass
+            if atr_pct <= 0:
+                atr_pct = 1.5  # fallback: assume 1.5% per bar
+            # Risk units: each 1% of ATR consumes `risk_pct` of equity
+            risk_units = atr_pct
+            risk_amount = equity * (risk_pct / 100.0) * risk_units
+            notional_value = risk_amount * leverage
+            # Cap by max_position_pct
+            max_notional = equity * (max_position / 100.0)
+            if notional_value > max_notional:
+                notional_value = max_notional
+            logger.info(
+                f"[PositionSize] atr_normalized mode: equity={equity}, risk_pct={risk_pct}%, "
+                f"atr_pct={atr_pct:.2f}% -> notional={notional_value:.2f}USDT"
+            )
+
+        elif sizing_mode == "kelly":
+            # Round-4 audit P0 fix: Kelly / Half-Kelly sizing based on
+            # historical per-strategy win-rate and payoff ratio.
+            # Uses Half-Kelly for safety (full Kelly is too aggressive).
+            risk_pct = float(risk_settings["risk_per_trade_pct"])
+            # Pull historical stats from confidence_calibrator cache if available
+            win_rate = 0.5
+            payoff_ratio = 1.5
+            try:
+                from core.confidence_calibrator import _load_cached_table
+                table = _load_cached_table()
+                default = table.get("__default__", {})
+                if default:
+                    # Average hit-rate across confidence buckets as a proxy
+                    rates = list(default.values())
+                    win_rate = max(0.1, min(0.9, sum(rates) / len(rates))) if rates else 0.5
+            except Exception:
+                pass
+            # Kelly fraction: f = W - (1-W)/R
+            kelly_f = max(0.0, win_rate - (1 - win_rate) / max(payoff_ratio, 0.1))
+            half_kelly = kelly_f / 2.0  # Half-Kelly for safety
+            # Cap at risk_pct of equity
+            half_kelly = min(half_kelly, risk_pct / 100.0)
+            notional_value = equity * half_kelly * leverage
+            max_notional = equity * (max_position / 100.0)
+            if notional_value > max_notional:
+                notional_value = max_notional
+            logger.info(
+                f"[PositionSize] kelly mode: win_rate={win_rate:.2f}, payoff={payoff_ratio}, "
+                f"kelly_f={kelly_f:.3f}, half_kelly={half_kelly:.3f} -> notional={notional_value:.2f}USDT"
+            )
         else:
             margin_value = equity * (max_position / 100.0) * size_fraction
             notional_value = margin_value * leverage
+
+        hard_notional_cap = float(risk_settings["max_position_notional_usdt"])
+        if notional_value > hard_notional_cap:
+            logger.warning(
+                f"[PositionSize] Notional capped by hard safety limit: "
+                f"{notional_value:.2f} -> {hard_notional_cap:.2f} USDT"
+            )
+            notional_value = hard_notional_cap
 
         if sizing_mode != "fixed":
             notional_value = self._cap_notional_by_stop_risk(notional_value, price, decision, risk_settings)
@@ -2907,6 +3594,21 @@ class SignalProcessor:
                 if limits:
                     # Adjust quantity to respect limits
                     quantity = adjust_quantity_for_limits(quantity, price, limits)
+
+                    if sizing_mode != "fixed" and decision:
+                        risk_price = float(decision.entry_price or price)
+                        final_notional = quantity * risk_price * contract_size
+                        exceeded, reason = self._stop_risk_limit_violation(
+                            final_notional,
+                            risk_price,
+                            decision,
+                            risk_settings,
+                        )
+                        if exceeded:
+                            decision.execute = False
+                            decision.reason = reason
+                            logger.warning(f"[PositionSize] {reason}")
+                            return 0.0
 
                     # Log the adjustment
                     min_cost = limits.get("min_cost", 0)
@@ -2972,6 +3674,37 @@ class SignalProcessor:
 
         return notional_value
 
+    def _stop_risk_limit_violation(
+        self,
+        notional_value: float,
+        price: float,
+        decision: TradeDecision | None,
+        risk_settings: dict[str, float | str],
+    ) -> tuple[bool, str]:
+        """Return whether final exchange-adjusted notional exceeds accepted SL risk."""
+        if not decision or not decision.stop_loss or not self._has_valid_sl(price, decision.stop_loss):
+            return False, ""
+        if notional_value <= 0 or not math.isfinite(notional_value):
+            return False, ""
+
+        sl_distance_pct = self._sl_distance_pct(decision.direction, price, decision.stop_loss)
+        if sl_distance_pct <= 0:
+            return False, ""
+
+        equity = float(risk_settings["account_equity_usdt"])
+        risk_pct = float(risk_settings["risk_per_trade_pct"])
+        risk_amount = equity * (risk_pct / 100.0)
+        potential_loss = notional_value * (sl_distance_pct / 100.0)
+        tolerance = max(0.01, risk_amount * 0.001)
+        if potential_loss <= risk_amount + tolerance:
+            return False, ""
+
+        return True, (
+            "Final position size exceeds accepted stop-loss risk after exchange limits: "
+            f"loss_at_sl={potential_loss:.2f}USDT > allowed={risk_amount:.2f}USDT "
+            f"(SL_distance={sl_distance_pct:.2f}%, notional={notional_value:.2f}USDT)"
+        )
+
     def _get_exchange_config(self, user_settings: dict | None = None) -> dict:
         """Get exchange configuration from settings."""
         config = {
@@ -3010,8 +3743,21 @@ class SignalProcessor:
         idempotency_key: str = "",
     ) -> dict:
         """Execute the trade on the exchange."""
+        expiry_reason = self._entry_signal_expiry_reason(decision.signal)
+        if expiry_reason:
+            decision.execute = False
+            decision.reason = expiry_reason
+            logger.warning(f"[Signal] {expiry_reason}")
+            return {
+                "status": "expired",
+                "reason": expiry_reason,
+                "retry_safe": False,
+                "failure_stage": "pre_execution",
+            }
         if idempotency_key and not decision.idempotency_key:
             decision.idempotency_key = str(idempotency_key)[:128]
+        if not decision.idempotency_key:
+            decision.idempotency_key = f"generated:{uuid.uuid4().hex}"[:128]
         exchange_config = {
             "exchange": settings.exchange.name,
             "api_key": settings.exchange.api_key,
@@ -3057,6 +3803,16 @@ class SignalProcessor:
                     else settings.exchange.limit_timeout_overrides
                 ),
             })
+        if (
+            user_id
+            and safe_bool(exchange_config.get("live_trading"), False)
+            and not safe_bool(settings.exchange.live_trading, False)
+            and not is_close_decision
+        ):
+            return {
+                "status": "rejected",
+                "reason": "User live entries require the global LIVE_TRADING master switch",
+            }
         if user_id:
             user = db_user
             if user:
@@ -3081,7 +3837,15 @@ class SignalProcessor:
                 if exchange_config["live_trading"] and (not exchange_config.get("api_key") or not exchange_config.get("api_secret")):
                     return {"status": "rejected", "reason": "User exchange API credentials are required for live trading"}
 
-        self._apply_position_limits(decision, exchange_config, user_settings)
+        # User/subscription reads above start a transaction. Release it before
+        # synchronous market metadata lookup and the later exchange boundary.
+        await self._checkpoint_db()
+        await asyncio.to_thread(
+            self._apply_position_limits,
+            decision,
+            exchange_config,
+            user_settings,
+        )
         if not decision.execute:
             raw_result = {"status": "rejected", "reason": decision.reason}
         else:
@@ -3090,7 +3854,7 @@ class SignalProcessor:
                 user_id=user_id,
                 live_trading=safe_bool(exchange_config.get("live_trading"), False),
             )
-            if not control_state.get("allowed"):
+            if not control_state.get("allowed") and not is_close_decision:
                 reason = control_state.get("block_reason") or "Trading is currently disabled"
                 logger.warning(f"[Signal] Trade blocked by control mode: {reason}")
                 return {
@@ -3099,7 +3863,65 @@ class SignalProcessor:
                     "trading_control": control_state,
                 }
 
-            raw_result = await execute_trade(decision, exchange_config)
+            await self._checkpoint_db()
+
+            journal_id = ""
+            if safe_bool(exchange_config.get("live_trading"), False) and not is_close_decision:
+                from core.reconciliation_journal import record_order_intent
+
+                journal_id = record_order_intent(
+                    ticker=decision.ticker,
+                    direction=decision.direction.value if decision.direction else "unknown",
+                    client_order_id=client_order_id_for_idempotency(decision.idempotency_key),
+                    idempotency_key=decision.idempotency_key,
+                    user_id=user_id,
+                    exchange=str(exchange_config.get("exchange") or exchange_config.get("name") or ""),
+                    quantity=float(decision.quantity or 0.0),
+                )
+            try:
+                raw_result = await execute_trade(decision, exchange_config)
+            except BaseException as exc:
+                if journal_id:
+                    from core.reconciliation_journal import update_order_intent
+
+                    update_order_intent(
+                        journal_id,
+                        status="manual_review",
+                        result={
+                            "status": "manual_review",
+                            "reason": str(exc),
+                            "requires_reconciliation": True,
+                            "failure_stage": "unknown_exception",
+                        },
+                    )
+                raise
+            if journal_id:
+                from core.reconciliation_journal import update_order_intent
+
+                raw_status = str((raw_result or {}).get("status") or "").lower()
+                failure_stage = str((raw_result or {}).get("failure_stage") or "")
+                journal_status = (
+                    "resolved_pre_execution"
+                    if raw_status in {"rejected", "skipped"} or failure_stage == "pre_execution"
+                    else "exchange_result"
+                )
+                try:
+                    update_order_intent(journal_id, status=journal_status, result=dict(raw_result or {}))
+                except Exception as exc:
+                    if journal_status == "resolved_pre_execution":
+                        raise
+                    # The order may already exist at the exchange. Do not let a
+                    # local journal failure turn into an automatic webhook retry.
+                    logger.critical(f"[Signal] Post-submission journal update failed: {exc}")
+                    original_result = dict(raw_result or {})
+                    raw_result = {
+                        **original_result,
+                        "status": "manual_review",
+                        "reason": f"Exchange order may exist but reconciliation journal update failed: {exc}",
+                        "requires_reconciliation": True,
+                        "retry_safe": False,
+                        "failure_stage": "post_submission_journal",
+                    }
         result: dict[str, object] = dict(raw_result) if isinstance(raw_result, dict) else {}
         order_status = str(result.get("status", "unknown"))
 
@@ -3161,6 +3983,25 @@ class SignalProcessor:
             position_id=position_id,
         )
         result["order_event_id"] = order_event.id
+        if 'journal_id' in locals() and journal_id:
+            from core.reconciliation_journal import update_order_intent
+
+            try:
+                update_order_intent(journal_id, status="db_staged", result=result)
+            except Exception as exc:
+                logger.critical(f"[Signal] Failed to mark journal intent as DB-staged: {exc}")
+                result.update(
+                    {
+                        "status": "manual_review",
+                        "reason": f"Order event was staged but reconciliation journal update failed: {exc}",
+                        "requires_reconciliation": True,
+                        "retry_safe": False,
+                        "failure_stage": "post_submission_journal",
+                    }
+                )
+                order_event.status = "manual_review"
+                order_event.retry_state = "manual_review"
+                order_event.last_error = str(result["reason"])
 
         # Record metrics
         record_trade(
@@ -3169,7 +4010,9 @@ class SignalProcessor:
             order_status,
         )
 
-        # Notify
+        # Make the exchange result and audit rows durable before a potentially
+        # slow notification provider is contacted.
+        await self._checkpoint_db()
         await notify_trade_executed(decision, result)
 
         return result
@@ -3205,8 +4048,16 @@ class SignalProcessor:
         """Cap final quantity by the account and user max-position limits."""
         if not decision.entry_price or not decision.quantity or decision.quantity <= 0:
             return
+        # Position caps protect new exposure. Reduce-only closes must retain
+        # the full requested quantity so risk controls cannot strand exposure.
+        if decision.direction in {
+            SignalDirection.CLOSE_LONG,
+            SignalDirection.CLOSE_SHORT,
+        }:
+            return
         risk_settings = self._resolved_risk_settings(user_settings)
         sizing_mode = risk_settings.get("position_sizing_mode", "percentage")
+        hard_notional_cap = float(risk_settings["max_position_notional_usdt"])
 
         # Get contract size for correct notional calculation
         contract_size = 1.0
@@ -3220,6 +4071,17 @@ class SignalProcessor:
                 contract_size = float(limits.get("contract_size", 1.0))
         except Exception:
             pass
+
+        if (
+            safe_bool(exchange_config.get("live_trading"), False)
+            and not limits
+        ):
+            decision.execute = False
+            decision.reason = (
+                "Live entry blocked because exchange market limits could not be verified"
+            )
+            logger.error(f"[Signal] {decision.reason}: {decision.ticker}")
+            return
 
         # Fixed mode: ensure quantity matches the configured fixed amount
         # Skip the max_position_pct limit since user explicitly set the amount
@@ -3257,6 +4119,19 @@ class SignalProcessor:
                     )
                 except Exception as exc:
                     logger.warning(f"[Signal] Could not verify fixed margin deviation: {exc}")
+                    if safe_bool(exchange_config.get("live_trading"), False):
+                        decision.execute = False
+                        decision.reason = (
+                            "Live entry blocked because fixed-size exchange limits "
+                            "could not be verified"
+                        )
+                    else:
+                        self._enforce_hard_notional_cap(
+                            decision,
+                            hard_notional_cap,
+                            contract_size,
+                            limits,
+                        )
                     return
             else:
                 selected_leverage, deviation_pct = self._best_fixed_margin_leverage(
@@ -3295,6 +4170,12 @@ class SignalProcessor:
                 return
 
             decision.quantity = round(adjusted_quantity, 6)
+            self._enforce_hard_notional_cap(
+                decision,
+                hard_notional_cap,
+                contract_size,
+                limits,
+            )
             return
 
         # Percentage/risk_ratio mode: apply max_position_pct limit
@@ -3316,6 +4197,84 @@ class SignalProcessor:
                 f"[Signal] Quantity capped by max_position_pct: {decision.quantity} -> {max_quantity:.6f}"
             )
             decision.quantity = round(max_quantity, 6)
+        self._enforce_hard_notional_cap(
+            decision,
+            hard_notional_cap,
+            contract_size,
+            limits,
+        )
+        if not decision.execute:
+            return
+        final_notional = float(decision.quantity) * float(decision.entry_price) * contract_size
+        exceeded, reason = self._stop_risk_limit_violation(
+            final_notional,
+            float(decision.entry_price),
+            decision,
+            risk_settings,
+        )
+        if exceeded:
+            decision.execute = False
+            decision.reason = reason
+            logger.warning(f"[Signal] {reason}")
+
+    @staticmethod
+    def _enforce_hard_notional_cap(
+        decision: TradeDecision,
+        hard_cap: float,
+        contract_size: float,
+        limits: dict | None,
+    ) -> None:
+        """Cap final exchange quantity without rounding above the hard limit."""
+        price = float(decision.entry_price or 0.0)
+        quantity = float(decision.quantity or 0.0)
+        contract_size = max(float(contract_size or 1.0), 1e-18)
+        if price <= 0 or quantity <= 0 or hard_cap <= 0:
+            decision.execute = False
+            decision.reason = "Invalid price, quantity, or hard notional cap"
+            return
+
+        current_notional = quantity * price * contract_size
+        tolerance = max(1e-8, hard_cap * 1e-9)
+        if current_notional <= hard_cap + tolerance:
+            return
+
+        raw_cap_quantity = hard_cap / (price * contract_size)
+        precision = int((limits or {}).get("amount_precision", 8) or 0)
+        if precision >= 0:
+            scale = 10 ** min(precision, 18)
+            capped_quantity = math.floor(raw_cap_quantity * scale + 1e-12) / scale
+        else:
+            step = 10 ** precision
+            capped_quantity = math.floor(raw_cap_quantity / step + 1e-12) * step
+
+        min_amount = float((limits or {}).get("min_amount", 0.0) or 0.0)
+        min_cost = float((limits or {}).get("min_cost", 0.0) or 0.0)
+        minimum_quantity = max(min_amount, min_cost / (price * contract_size) if min_cost > 0 else 0.0)
+        if capped_quantity <= 0 or capped_quantity + 1e-12 < minimum_quantity:
+            decision.execute = False
+            decision.reason = (
+                f"Exchange minimum order exceeds hard notional cap: "
+                f"minimum={minimum_quantity * price * contract_size:.2f}USDT, "
+                f"cap={hard_cap:.2f}USDT"
+            )
+            logger.warning(f"[Signal] {decision.reason}")
+            return
+
+        final_notional = capped_quantity * price * contract_size
+        if final_notional > hard_cap + tolerance:
+            decision.execute = False
+            decision.reason = (
+                f"Could not represent a valid quantity below hard notional cap "
+                f"({final_notional:.2f}>{hard_cap:.2f}USDT)"
+            )
+            logger.error(f"[Signal] {decision.reason}")
+            return
+
+        logger.warning(
+            f"[Signal] Quantity capped by max_position_notional_usdt: "
+            f"{quantity} -> {capped_quantity} ({current_notional:.2f} -> {final_notional:.2f}USDT)"
+        )
+        decision.quantity = capped_quantity
 
     async def _check_position_conflict(
         self,
@@ -3339,17 +4298,48 @@ class SignalProcessor:
         try:
             direction = decision.direction.value if decision.direction else ""
             target_key = position_symbol_key(decision.ticker)
+            exchange_config = self._build_exchange_config(user_id, user_settings)
+            target_exchange = str(
+                exchange_config.get("exchange")
+                or exchange_config.get("name")
+                or settings.exchange.name
+            ).lower().strip()
+            live_trading = self._live_trading_requested(user_settings, user_id)
+            target_sandbox = safe_bool(exchange_config.get("sandbox_mode"), False)
+
+            def _same_account(position: PositionModel) -> bool:
+                if (
+                    safe_bool(getattr(position, "live_trading", False), False)
+                    != live_trading
+                ):
+                    return False
+                if (
+                    live_trading
+                    and safe_bool(getattr(position, "sandbox_mode", False), False)
+                    != target_sandbox
+                ):
+                    return False
+                position_exchange = str(
+                    getattr(position, "exchange", "") or ""
+                ).lower().strip()
+                return not position_exchange or position_exchange == target_exchange
 
             # Step 1: Check for pending orders of opposite direction and cancel them
-            pending_stmt = select(PositionModel).where(PositionModel.status == "pending")
-            if user_id:
-                pending_stmt = pending_stmt.where(PositionModel.user_id == user_id)
+            pending_stmt = select(PositionModel).where(
+                PositionModel.status == "pending",
+                (
+                    PositionModel.user_id.is_(None)
+                    if user_id is None
+                    else PositionModel.user_id == user_id
+                ),
+            )
 
             pending_result = await self.session.execute(pending_stmt)
             pending_positions = [
                 pos for pos in pending_result.scalars().all()
-                if position_symbol_key(pos.ticker) == target_key
+                if position_symbol_key(pos.ticker) == target_key and _same_account(pos)
             ]
+            await self._checkpoint_db()
 
             # Cancel pending orders of opposite direction
             for pending_pos in pending_positions:
@@ -3358,6 +4348,14 @@ class SignalProcessor:
                 pending_dir = (pending_pos.direction or "").lower()
                 if (direction in ("long", "short") and pending_dir in ("long", "short")
                         and direction != pending_dir):
+                    if live_trading and not str(
+                        getattr(pending_pos, "exchange", "") or ""
+                    ).strip():
+                        return (
+                            "Conflicting legacy pending position has unknown exchange; "
+                            "manual reconciliation required before live reversal",
+                            None,
+                        )
                     # Cancel this pending order
                     logger.info(
                         f"[Signal] Cancelling pending {pending_dir} order on {decision.ticker} "
@@ -3368,14 +4366,19 @@ class SignalProcessor:
                         return (cancel_result.get("reason") or "Failed to cancel conflicting pending order", None)
 
             # Step 2: Check database OPEN positions (FIX: only status="open")
-            stmt = select(PositionModel).where(PositionModel.status == "open")
-            if user_id:
-                stmt = stmt.where(PositionModel.user_id == user_id)
+            stmt = select(PositionModel).where(
+                PositionModel.status == "open",
+                (
+                    PositionModel.user_id.is_(None)
+                    if user_id is None
+                    else PositionModel.user_id == user_id
+                ),
+            )
 
             result = await self.session.execute(stmt)
             open_positions = [
                 pos for pos in result.scalars().all()
-                if position_symbol_key(pos.ticker) == target_key
+                if position_symbol_key(pos.ticker) == target_key and _same_account(pos)
             ]
 
             direction = decision.direction.value if decision.direction else ""
@@ -3385,20 +4388,27 @@ class SignalProcessor:
                 pos_dir = (pos.direction or "").lower()
                 if (direction in ("long", "short") and pos_dir in ("long", "short")
                         and direction != pos_dir):
+                    if live_trading and not str(
+                        getattr(pos, "exchange", "") or ""
+                    ).strip():
+                        return (
+                            "Conflicting legacy open position has unknown exchange; "
+                            "manual reconciliation required before live reversal",
+                            None,
+                        )
                     msg = (
                         f"Conflicting position: open {pos_dir} on {decision.ticker} "
                         f"(id={pos.id[:8]}). Closing existing position before opening {direction}."
                     )
                     logger.warning(f"[Signal] Database position conflict detected: {msg}")
+                    await self._checkpoint_db()
                     return (msg, pos)
 
             # Step 2: Check exchange actual positions only for the effective live account.
-            live_trading = self._live_trading_requested(user_settings, user_id)
-
             if live_trading:
                 from exchange import get_open_positions
-                exchange_config = self._build_exchange_config(user_id, user_settings)
                 try:
+                    await self._checkpoint_db()
                     exchange_positions = await get_open_positions(exchange_config)
                     for ex_pos in exchange_positions:
                         ex_symbol = position_symbol_key(ex_pos.get("symbol") or "")
@@ -3461,6 +4471,7 @@ class SignalProcessor:
                     logger.warning(f"[Signal] Failed to check exchange positions: {ex}")
 
             # Allow same-direction (scaling in)
+            await self._checkpoint_db()
             return (None, None)
         except Exception as e:
             live_trading = self._live_trading_requested(user_settings, user_id)
@@ -3529,14 +4540,28 @@ class SignalProcessor:
                         "Keeping DB position open and preserving TP/SL until monitor confirms flat."
                     )
                     result["exchange_close_error"] = close_result
-                    result["status"] = "error"
+                    result["status"] = "manual_review"
                     result["reason"] = "Exchange close not confirmed: no_position while DB position is open"
+                    result["requires_reconciliation"] = True
                     return result
                 else:
                     logger.warning(f"[Signal] Failed to close position on exchange: {close_result}")
                     result["exchange_close_error"] = close_result
-                    result["status"] = "error"
+                    requires_reconciliation = bool(
+                        close_result.get("requires_reconciliation")
+                        or close_result.get("status") == "manual_review"
+                        or close_result.get("order_id")
+                        or close_result.get("exchange_order_id")
+                    )
+                    result["status"] = (
+                        "manual_review" if requires_reconciliation else "error"
+                    )
                     result["reason"] = f"Failed to close on exchange: {close_result.get('reason')}"
+                    if requires_reconciliation:
+                        result["requires_reconciliation"] = True
+                        for key in ("order_id", "exchange_order_id", "client_order_id"):
+                            if close_result.get(key):
+                                result[key] = close_result.get(key)
                     return result
 
             # Step 2: Record close in database (only for non-synthetic positions)
@@ -3556,12 +4581,15 @@ class SignalProcessor:
                             close_reason="reverse_signal",
                         )
                         await self.session.flush()
+                        await self._checkpoint_db()
                     elif locked_position and locked_position.status != "open":
                         logger.info(f"[Signal] Position {position.id[:8]} already closed by concurrent operation")
                 except Exception as db_err:
                     logger.error(f"[Signal] Failed to update database position after exchange close: {db_err}")
-                    result["status"] = "error"
+                    result["status"] = "manual_review"
                     result["reason"] = "Exchange close succeeded but database update failed; reconciliation required"
+                    result["requires_reconciliation"] = True
+                    result["database_error"] = str(db_err)
                     return result
 
             # Step 3: The position is closed or already absent; now clean up any leftover TP/SL orders.
@@ -3587,8 +4615,13 @@ class SignalProcessor:
 
         except Exception as e:
             logger.error(f"[Signal] Failed to close conflicting position: {e}")
-            result["status"] = "error"
-            result["reason"] = str(e)
+            if safe_bool(getattr(position, "live_trading", False), False):
+                result["status"] = "manual_review"
+                result["reason"] = f"Live close outcome is unknown: {e}"
+                result["requires_reconciliation"] = True
+            else:
+                result["status"] = "error"
+                result["reason"] = str(e)
 
         return result
 

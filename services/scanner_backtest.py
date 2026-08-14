@@ -18,7 +18,7 @@ from typing import Any
 
 from loguru import logger
 
-from core.config import settings
+from core.config import DATA_DIR, settings
 from core.utils.datetime import utcnow
 from services.scanner_rules import DEFAULT_ENGINE, ScoringContext, ScoringEngine, ScoringRule
 from services.unified_ohlcv import OHLCVBundle, UnifiedOHLCVProvider, _indicator_snapshot
@@ -129,6 +129,194 @@ class ScannerBacktester:
 
         return self._compute_summary(run_id)
 
+    async def run_walk_forward_backtest(
+        self,
+        symbols: list[str],
+        timeframes: list[str] | None = None,
+        num_folds: int = 5,
+        oos_ratio: float = 0.3,
+        min_score_override: float | None = None,
+    ) -> dict:
+        """Walk-forward backtest with out-of-sample validation.
+
+        Round-4 audit P0 fix: the previous ``run_backtest`` ran once over all
+        data and reported aggregate stats — easy to overfit. This method:
+
+          1. Splits each symbol's historical data into ``num_folds`` windows.
+          2. For each fold, trains (finds optimal min_score threshold) on the
+             in-sample portion and reports performance on the next out-of-sample
+             portion (rolling-origin cross-validation).
+          3. Aggregates OOS performance as the trusted estimate.
+
+        Returns a dict with per-fold + aggregate OOS metrics.
+        """
+        run_id = uuid.uuid4().hex[:12]
+        timeframes = timeframes or list(settings.scanner.timeframes)
+        min_score = min_score_override if min_score_override is not None else self.min_score_threshold
+
+        rules = [ScoringRule.from_dict(rule) for rule in DEFAULT_ENGINE.get_rules()]
+        weights = dict(DEFAULT_ENGINE.weights)
+        self._engine = ScoringEngine(rules=rules, weights=weights)
+
+        fold_results: list[dict] = []
+        for symbol in symbols:
+            try:
+                bundle = await self.provider.get_bundle(symbol, timeframes)
+            except Exception as exc:
+                logger.warning(f"[WalkForward] Failed to fetch bundle for {symbol}: {exc}")
+                continue
+
+            for tf, candles in bundle.candles.items():
+                rows = self._ohlcv_to_rows(candles)
+                n = len(rows)
+                if n < 200:
+                    continue
+                # Split into folds
+                fold_size = max(50, n // num_folds)
+                oos_size = max(20, int(fold_size * oos_ratio))
+
+                for fold_idx in range(num_folds):
+                    is_start = fold_idx * fold_size
+                    is_end = min(is_start + fold_size - oos_size, n - oos_size)
+                    oos_start = is_end
+                    oos_end = min(oos_start + oos_size, n)
+                    if is_end <= is_start + 50 or oos_end <= oos_start + 20:
+                        continue
+
+                    # In-sample: find best min_score threshold by scanning
+                    is_results = self._simulate_on_slice(
+                        candles[:is_end], rows[:is_end], tf, bundle, symbol, run_id, min_score, fold_idx
+                    )
+                    best_threshold = self._find_best_threshold(is_results)
+                    # OOS: evaluate at that threshold
+                    oos_results = self._simulate_on_slice(
+                        candles[oos_start:oos_end], rows[oos_start:oos_end], tf, bundle, symbol, run_id, fold_idx, best_threshold
+                    )
+                    oos_summary = self._summarize_results(oos_results)
+                    is_summary = self._summarize_results(is_results)
+                    fold_results.append({
+                        "symbol": symbol,
+                        "timeframe": tf,
+                        "fold": fold_idx,
+                        "is_size": is_end - is_start,
+                        "oos_size": oos_end - oos_start,
+                        "is_win_rate": is_summary.get("win_rate", 0),
+                        "oos_win_rate": oos_summary.get("win_rate", 0),
+                        "is_profit_factor": is_summary.get("profit_factor", 0),
+                        "oos_profit_factor": oos_summary.get("profit_factor", 0),
+                        "is_count": is_summary.get("total_signals", 0),
+                        "oos_count": oos_summary.get("total_signals", 0),
+                        "best_threshold": best_threshold,
+                        "oos_degradation": max(0.0, is_summary.get("win_rate", 0) - oos_summary.get("win_rate", 0)),
+                    })
+
+        # Aggregate OOS metrics
+        all_oos_wr = [f["oos_win_rate"] for f in fold_results if f["oos_count"] > 0]
+        all_oos_pf = [f["oos_profit_factor"] for f in fold_results if f["oos_count"] > 0]
+        avg_oos_wr = sum(all_oos_wr) / len(all_oos_wr) if all_oos_wr else 0.0
+        avg_oos_pf = sum(all_oos_pf) / len(all_oos_pf) if all_oos_pf else 0.0
+        avg_deg = sum(f["oos_degradation"] for f in fold_results) / len(fold_results) if fold_results else 0.0
+
+        return {
+            "run_id": run_id,
+            "num_folds": num_folds,
+            "oos_ratio": oos_ratio,
+            "folds": fold_results,
+            "aggregate_oos_win_rate": round(avg_oos_wr, 4),
+            "aggregate_oos_profit_factor": round(avg_oos_pf, 4),
+            "avg_oos_degradation": round(avg_deg, 4),
+            "note": "OOS = out-of-sample. Low degradation (<5%) suggests strategy is robust to overfitting.",
+        }
+
+    def _simulate_on_slice(
+        self,
+        candles_slice: list,
+        rows_slice: list,
+        timeframe: str,
+        bundle: OHLCVBundle,
+        symbol: str,
+        run_id: str,
+        min_score: float,
+        fold_idx: int,
+        threshold_override: float | None = None,
+    ) -> list:
+        """Simulate signals on a slice of historical data."""
+        results: list = []
+        effective_threshold = threshold_override if threshold_override is not None else min_score
+        min_history_bars = 50
+        if len(rows_slice) < min_history_bars + 10:
+            return results
+        for bar_idx in range(min_history_bars, len(rows_slice) - 5):
+            history_candles = candles_slice[:bar_idx]
+            history_rows = rows_slice[:bar_idx]
+            if len(history_candles) < min_history_bars:
+                continue
+            bar = rows_slice[bar_idx]
+            bar_close = bar[1]
+            try:
+                indicators = _indicator_snapshot(history_candles)
+            except Exception:
+                continue
+            atr_pct = self._safe_float(indicators.get("atr_pct")) or 0.5
+            atr_price = max(bar_close * max(atr_pct, 0.05) / 100.0, bar_close * 0.001)
+            for direction in ["long", "short"]:
+                try:
+                    smc_ctx = analyze_smc_single_tf(history_rows, timeframe, bar_close, direction, atr_pct)
+                except Exception:
+                    continue
+                scoring_ctx = self._build_backtest_context(
+                    bundle, smc_ctx, direction, indicators, timeframe, bar_close, atr_pct, atr_price
+                )
+                score, reasons, breakdown = self._engine.evaluate(scoring_ctx)
+                if score < effective_threshold:
+                    continue
+                outcome, pnl_pct, holding = self._simulate_outcome(
+                    rows_slice, bar_idx, direction, bar_close, 5, atr_pct
+                )
+                results.append({
+                    "score": score,
+                    "outcome": outcome,
+                    "pnl_pct": pnl_pct,
+                    "direction": direction,
+                })
+        return results
+
+    def _find_best_threshold(self, results: list) -> float:
+        """Find the min_score threshold that maximises expectancy on the in-sample."""
+        if not results:
+            return self.min_score_threshold
+        # Try thresholds from 50 to 90 in steps of 5
+        best_threshold = 70.0
+        best_expectancy = -1e9
+        for threshold in range(50, 95, 5):
+            subset = [r for r in results if r["score"] >= threshold]
+            if not subset:
+                continue
+            wins = sum(1 for r in subset if r["outcome"] == "win")
+            losses = sum(1 for r in subset if r["outcome"] == "loss")
+            total = wins + losses
+            if total < 3:
+                continue
+            avg_pnl = sum(r["pnl_pct"] for r in subset) / len(subset)
+            if avg_pnl > best_expectancy:
+                best_expectancy = avg_pnl
+                best_threshold = float(threshold)
+        return best_threshold
+
+    def _summarize_results(self, results: list) -> dict:
+        if not results:
+            return {"total_signals": 0, "win_rate": 0.0, "profit_factor": 0.0}
+        wins = sum(1 for r in results if r["outcome"] == "win")
+        losses = sum(1 for r in results if r["outcome"] == "loss")
+        total = wins + losses
+        gross_profit = sum(r["pnl_pct"] for r in results if r["pnl_pct"] > 0)
+        gross_loss = abs(sum(r["pnl_pct"] for r in results if r["pnl_pct"] < 0))
+        return {
+            "total_signals": len(results),
+            "win_rate": round(wins / total, 4) if total > 0 else 0.0,
+            "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else 0.0,
+        }
+
     def _simulate_signal_candidates(
         self,
         bundle: OHLCVBundle,
@@ -153,15 +341,23 @@ class ScannerBacktester:
             for bar_idx in range(min_history_bars, len(rows) - self.simulation_bars):
                 bar = rows[bar_idx]
                 bar_time = datetime.fromtimestamp(bar[0] / 1000.0, tz=UTC)
-                bar_close = bar[4]
-                indicators = _indicator_snapshot(candles[:bar_idx + 1])
+                # CRITICAL: To avoid look-ahead bias, indicators / SMC must be
+                # computed on history STRICTLY BEFORE the decision bar.
+                # Entry price = open of bar_idx (executable on next bar after
+                # close of bar_idx-1). Outcome simulation begins at bar_idx.
+                history_candles = candles[:bar_idx]
+                history_rows = rows[:bar_idx]
+                if len(history_candles) < min_history_bars:
+                    continue
+                bar_close = bar[1]  # use OPEN of decision bar as entry price
+                indicators = _indicator_snapshot(history_candles)
                 atr_pct = self._safe_float(indicators.get("atr_pct"))
                 atr_price = max(bar_close * max(atr_pct, 0.05) / 100.0, bar_close * 0.001)
 
                 for direction in ["long", "short"]:
                     try:
                         smc_ctx = analyze_smc_single_tf(
-                            rows[:bar_idx + 1],
+                            history_rows,
                             timeframe,
                             bar_close,
                             direction,
@@ -211,11 +407,20 @@ class ScannerBacktester:
         entry_price: float,
         max_bars: int,
         atr_pct: float = 0.5,
+        taker_fee_pct: float = 0.05,
+        slippage_pct: float | None = None,
+        funding_rate_8h: float = 0.0001,
+        bar_seconds: int = 3600,
     ) -> tuple[str, float, int]:
         """Simulate trade outcome from historical data.
 
         Returns (outcome, pnl_pct, holding_bars).
         Outcome is 'win', 'loss', or 'neutral'.
+
+        Realism additions over the original implementation:
+          * Dynamic slippage proportional to ATR%% (薄盘币种更高).
+          * Funding cost accrued every 8h while holding (perpetual contract).
+          * Round-trip taker fees on entry and exit.
         """
         atr_price = entry_price * atr_pct / 100.0
         tp_distance = atr_price * 2.0
@@ -224,32 +429,49 @@ class ScannerBacktester:
         tp_price = entry_price + tp_distance if direction == "long" else entry_price - tp_distance
         sl_price = entry_price - sl_distance if direction == "long" else entry_price + sl_distance
 
+        # Dynamic slippage: scales with volatility, with a 0.02% floor.
+        if slippage_pct is None:
+            slippage_pct = max(0.02, atr_pct * 0.05)
+
+        round_trip_fee_pct = taker_fee_pct * 2.0 + slippage_pct
+
+        def _funding_cost(holding_bars: int) -> float:
+            """Funding cost % of notional. Long pays positive funding; short receives.
+
+            We assume the per-period funding rate is paid every 8 hours.
+            """
+            hours_held = holding_bars * bar_seconds / 3600.0
+            funding_periods = hours_held / 8.0
+            cost = funding_rate_8h * funding_periods * 100.0  # percent of notional
+            return cost if direction == "long" else -cost
+
         for i in range(entry_idx + 1, min(entry_idx + max_bars + 1, len(rows))):
             high = rows[i][2]
             low = rows[i][3]
+            holding = i - entry_idx
 
             if direction == "long":
                 hit_tp = high >= tp_price
                 hit_sl = low <= sl_price
                 if hit_sl:
-                    pnl = (sl_price - entry_price) / entry_price * 100.0
-                    return "loss", round(pnl, 2), i - entry_idx
+                    pnl = (sl_price - entry_price) / entry_price * 100.0 - round_trip_fee_pct - _funding_cost(holding)
+                    return "loss", round(pnl, 2), holding
                 if hit_tp:
-                    pnl = (tp_price - entry_price) / entry_price * 100.0
-                    return "win", round(pnl, 2), i - entry_idx
+                    pnl = (tp_price - entry_price) / entry_price * 100.0 - round_trip_fee_pct - _funding_cost(holding)
+                    return "win", round(pnl, 2), holding
             else:
                 hit_tp = low <= tp_price
                 hit_sl = high >= sl_price
                 if hit_sl:
-                    pnl = (entry_price - sl_price) / entry_price * 100.0
-                    return "loss", round(pnl, 2), i - entry_idx
+                    pnl = (entry_price - sl_price) / entry_price * 100.0 - round_trip_fee_pct - _funding_cost(holding)
+                    return "loss", round(pnl, 2), holding
                 if hit_tp:
-                    pnl = (entry_price - tp_price) / entry_price * 100.0
-                    return "win", round(pnl, 2), i - entry_idx
+                    pnl = (entry_price - tp_price) / entry_price * 100.0 - round_trip_fee_pct - _funding_cost(holding)
+                    return "win", round(pnl, 2), holding
 
         final_price = rows[min(entry_idx + max_bars, len(rows) - 1)][4]
         pnl = (final_price - entry_price) / entry_price * 100.0 if direction == "long" else (entry_price - final_price) / entry_price * 100.0
-        pnl = round(pnl, 2)
+        pnl = round(pnl - round_trip_fee_pct - _funding_cost(max_bars), 2)
 
         if abs(pnl) < 0.5:
             return "neutral", pnl, max_bars
@@ -533,15 +755,19 @@ class ScannerBacktester:
         contribution = self._compute_factor_contribution()
         suggestions: dict[str, float] = {}
 
+        from services.scanner_rules import DEFAULT_ENGINE
+        name_to_weight_key = {r.name: r.weight_key for r in DEFAULT_ENGINE.rules if hasattr(r, 'weight_key')}
+
         for factor, contrib in contribution.items():
+            wk = name_to_weight_key.get(factor, factor)
             if contrib > 2.0:
-                suggestions[factor] = 1.2
+                suggestions[wk] = 1.2
             elif contrib > 0:
-                suggestions[factor] = 1.0
+                suggestions[wk] = 1.0
             elif contrib < -2.0:
-                suggestions[factor] = 0.5
+                suggestions[wk] = 0.5
             else:
-                suggestions[factor] = 0.8
+                suggestions[wk] = 0.8
 
         return suggestions
 
@@ -609,7 +835,7 @@ class ScannerBacktester:
     def save_results(self, path: str | Path | None = None) -> None:
         """Save backtest results to JSON file."""
         if path is None:
-            path = Path(settings.data_dir) / "backtest_results.json"
+            path = DATA_DIR / "backtest_results.json"
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
@@ -622,7 +848,7 @@ class ScannerBacktester:
     def load_results(self, path: str | Path | None = None) -> bool:
         """Load backtest results from JSON file."""
         if path is None:
-            path = Path(settings.data_dir) / "backtest_results.json"
+            path = DATA_DIR / "backtest_results.json"
         path = Path(path)
         if not path.exists():
             return False

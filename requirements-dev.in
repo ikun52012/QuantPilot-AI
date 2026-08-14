@@ -1,0 +1,10 @@
+-r requirements.txt
+
+# Test and verification toolchain. This input is compiled to
+# requirements-dev.lock with exact versions and package hashes.
+pytest>=8.0.0,<10.0
+pytest-asyncio>=0.23.0,<2.0
+pytest-cov>=5.0.0,<8.0
+ruff>=0.3.0,<1.0
+mypy>=1.8.0,<3.0
+pip-audit>=2.9.0,<3.0

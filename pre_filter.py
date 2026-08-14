@@ -27,21 +27,28 @@ from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 
 from core.account_risk import check_account_loss_limits
-from core.config import settings
+from core.config import DATA_DIR, settings
 from core.utils.common import position_symbol_key
 from core.utils.datetime import utcnow
 from models import MarketContext, PreFilterResult, SignalDirection, TradingViewSignal
 from trade_logger import get_recent_trade_results_async, get_today_pnl_async
 
 # Filter statistics and block history
-_filter_stats_lock = asyncio.Lock()
+_filter_stats_lock: asyncio.Lock | None = None
 _filter_stats: dict[str, dict[str, int]] = {}
 _filter_stats_buffer: dict[str, dict[str, int]] = {}
 _filter_stats_last_flush: float = 0.0
 _filter_stats_last_cleanup: float = 0.0
-_STATS_FILE = "data/filter_stats.json"
+_STATS_FILE = DATA_DIR / "filter_stats.json"
 _STATS_FLUSH_INTERVAL = 5.0
 _STATS_CLEANUP_INTERVAL = 86400.0
+
+
+def _get_filter_stats_lock() -> asyncio.Lock:
+    global _filter_stats_lock
+    if _filter_stats_lock is None:
+        _filter_stats_lock = asyncio.Lock()
+    return _filter_stats_lock
 _STATS_MAX_ENTRIES_PER_CHECK = 200
 
 _block_history: deque[dict[str, Any]] = deque(maxlen=500)
@@ -51,8 +58,8 @@ _CIRCUIT_LOCK = asyncio.Lock()
 
 def _load_filter_stats() -> dict[str, dict[str, int]]:
     try:
-        if os.path.exists(_STATS_FILE):
-            with open(_STATS_FILE, encoding="utf-8") as f:
+        if _STATS_FILE.exists():
+            with _STATS_FILE.open(encoding="utf-8") as f:
                 raw = json.load(f)
             if not isinstance(raw, dict):
                 return {}
@@ -78,8 +85,8 @@ def _load_filter_stats() -> dict[str, dict[str, int]]:
 
 def _save_filter_stats(stats: dict[str, dict[str, int]]) -> None:
     try:
-        os.makedirs("data", exist_ok=True)
         stats_file = Path(_STATS_FILE)
+        stats_file.parent.mkdir(parents=True, exist_ok=True)
         # Write with atomic swap to prevent corruption
         tmp_file = stats_file.with_suffix(".tmp")
         with open(tmp_file, "w", encoding="utf-8") as f:
@@ -120,7 +127,7 @@ def _flush_filter_stats() -> None:
 async def _record_filter_block(check_name: str, ticker: str) -> None:
     global _filter_stats_last_flush
     key = position_symbol_key(ticker).upper() or ticker.upper()
-    async with _filter_stats_lock:
+    async with _get_filter_stats_lock():
         bucket = _filter_stats_buffer.setdefault(check_name, {})
         bucket[key] = bucket.get(key, 0) + 1
         now = time.time()
@@ -131,7 +138,7 @@ async def _record_filter_block(check_name: str, ticker: str) -> None:
 
 
 async def get_filter_stats() -> dict[str, dict[str, int]]:
-    async with _filter_stats_lock:
+    async with _get_filter_stats_lock():
         if not _filter_stats:
             _filter_stats.update(_load_filter_stats())
         merged = {check_name: dict(ticker_counts) for check_name, ticker_counts in _filter_stats.items()}
@@ -144,7 +151,7 @@ async def get_filter_stats() -> dict[str, dict[str, int]]:
 
 async def reset_filter_stats() -> None:
     global _filter_stats, _filter_stats_buffer, _filter_stats_last_flush, _filter_stats_last_cleanup
-    async with _filter_stats_lock:
+    async with _get_filter_stats_lock():
         _filter_stats = {}
         _filter_stats_buffer = {}
         _filter_stats_last_flush = 0.0
@@ -217,6 +224,14 @@ class FilterThresholds:
         "funding_steepening_threshold_multiplier": 2.0,
         "exchange_price_discrepancy_pct_max": 2.0,
         "exchange_price_min_exchanges": 2,
+        "ichimoku_inside_cloud_soft_fail": True,
+        "supertrend_conflict_soft_fail": True,
+        "rsi_divergence_strength_max": 0.7,
+        "macd_divergence_strength_max": 0.7,
+        "btc_dominance_high_threshold": 55.0,
+        "wyckoff_distribution_block": True,
+        "session_low_liquidity_reduce_position": True,
+        "mtf_alignment_min": -0.3,
     }
 
     DYNAMIC_THRESHOLDS: dict[str, dict[str, Any]] = {
@@ -254,15 +269,26 @@ class FilterThresholds:
             except (ValueError, TypeError):
                 pass
 
-    def get(self, key: str, ticker: str = "") -> Any:
-        ticker_upper = ticker.upper().strip()
+    def get(self, key: str, ticker: Any = "") -> Any:
+        """Return a threshold, accepting either a ticker or a fallback default.
+
+        Historically the second positional argument was a ticker. Newer checks
+        also use it as a default value, so distinguish the two by type instead
+        of blindly calling ``upper()`` on numbers and booleans.
+        """
+        default = None
+        if isinstance(ticker, str):
+            ticker_upper = ticker.upper().strip()
+        else:
+            default = ticker
+            ticker_upper = ""
         if ticker_upper not in self.DYNAMIC_THRESHOLDS:
-            ticker_upper = position_symbol_key(ticker).upper() or ticker_upper
+            ticker_upper = position_symbol_key(ticker_upper).upper() or ticker_upper
         if key in self._custom_thresholds:
             return self._custom_thresholds[key]
         if ticker_upper in self.DYNAMIC_THRESHOLDS and key in self.DYNAMIC_THRESHOLDS[ticker_upper]:
             return self.DYNAMIC_THRESHOLDS[ticker_upper][key]
-        return self.DEFAULT_THRESHOLDS.get(key)
+        return self.DEFAULT_THRESHOLDS.get(key, default)
 
     def get_with_profile(self, key: str, ticker: str = "", atr_pct: float | None = None, volume_24h: float = 0) -> Any:
         ticker_upper = ticker.upper().strip()
@@ -284,8 +310,8 @@ class FilterThresholds:
 
     def get_regime_multiplier(self, regime: str) -> float:
         if regime == "extreme_volatility":
-            return float(self.get("volatility_regime_extreme_multiplier", "") or 0)
-        return float(self.get("volatility_regime_multiplier", "") or 0)
+            return float(self.get("volatility_regime_extreme_multiplier", 2.0) or 2.0)
+        return float(self.get("volatility_regime_multiplier", 1.5) or 1.5)
 
     def set_custom(self, key: str, value: Any) -> None:
         with self._instance_lock:
@@ -368,6 +394,15 @@ FILTER_WEIGHTS: dict[str, float] = {
     "exchange_reserves": 6.0,
     "funding_term_structure": 5.0,
     "exchange_price_discrepancy": 6.0,
+    "ichimoku_cloud": 7.0,
+    "supertrend": 6.0,
+    "rsi_divergence": 8.0,
+    "macd_divergence": 7.0,
+    "ttm_squeeze": 5.0,
+    "wyckoff_phase": 6.0,
+    "btc_dominance": 5.0,
+    "session_liquidity": 4.0,
+    "mtf_alignment": 7.0,
     "live_data_quality": 10.0,
 }
 
@@ -390,7 +425,7 @@ def calculate_filter_score(checks: dict[str, dict]) -> float:
 # ════════════════════════════════════════════════════════════════════════════════
 # Signal Memory (Bucketed, Time-Based Eviction)
 # ════════════════════════════════════════════════════════════════════════════════
-_state_lock = asyncio.Lock()
+_state_lock: asyncio.Lock | None = None
 # FIX #15: Bucketed storage by (user_id, ticker_key) for O(1) lookups
 _signal_buckets: dict[str, deque[dict[str, Any]]] = {}
 _MAX_BUCKET_SIZE = 200
@@ -398,6 +433,13 @@ _SIGNAL_MAX_AGE_SECONDS = 3600  # 1 hour max retention per signal
 _daily_trade_count: int = 0
 _daily_trade_date: str = ""
 _daily_pnl: float = 0.0
+
+
+def _get_state_lock() -> asyncio.Lock:
+    global _state_lock
+    if _state_lock is None:
+        _state_lock = asyncio.Lock()
+    return _state_lock
 
 
 def _bucket_key(user_id: str | None, ticker: str) -> str:
@@ -409,7 +451,7 @@ def _bucket_key(user_id: str | None, ticker: str) -> str:
 async def _evict_stale_signals() -> None:
     """TIME-BASED EVICTION (#13): Remove signals older than _SIGNAL_MAX_AGE_SECONDS."""
     cutoff = utcnow() - timedelta(seconds=_SIGNAL_MAX_AGE_SECONDS)
-    async with _state_lock:
+    async with _get_state_lock():
         for key in list(_signal_buckets.keys()):
             bucket = _signal_buckets[key]
             while bucket and bucket[0]["timestamp"] < cutoff:
@@ -421,7 +463,7 @@ async def _evict_stale_signals() -> None:
 async def _append_signal(signal: TradingViewSignal, user_id: str | None, passed: bool) -> None:
     """FIX #6: Record ALL signals (passed or blocked) for accurate saturation tracking."""
     key = _bucket_key(user_id, signal.ticker)
-    async with _state_lock:
+    async with _get_state_lock():
         if key not in _signal_buckets:
             _signal_buckets[key] = deque(maxlen=_MAX_BUCKET_SIZE)
         _signal_buckets[key].append({
@@ -435,26 +477,29 @@ async def _append_signal(signal: TradingViewSignal, user_id: str | None, passed:
     await _evict_stale_signals()
 
 
-def reset_daily_counters():
+async def reset_daily_counters():
     global _daily_trade_count, _daily_trade_date, _daily_pnl
-    _daily_trade_count = 0
-    _daily_trade_date = utcnow().strftime("%Y-%m-%d")
-    _daily_pnl = 0.0
+    async with _get_state_lock():
+        _daily_trade_count = 0
+        _daily_trade_date = utcnow().strftime("%Y-%m-%d")
+        _daily_pnl = 0.0
 
 
 async def increment_trade_count():
-    global _daily_trade_count, _daily_trade_date
-    async with _state_lock:
+    global _daily_trade_count, _daily_trade_date, _daily_pnl
+    async with _get_state_lock():
         today = utcnow().strftime("%Y-%m-%d")
         if today != _daily_trade_date:
-            reset_daily_counters()
+            _daily_trade_count = 0
+            _daily_trade_date = today
+            _daily_pnl = 0.0
         _daily_trade_count += 1
 
 
 async def clear_signal_memory() -> None:
     """Clear all signal memory (buckets). Used by tests."""
     global _signal_buckets
-    async with _state_lock:
+    async with _get_state_lock():
         _signal_buckets.clear()
 
 
@@ -462,7 +507,7 @@ async def clear_signal_memory() -> None:
 async def _inject_signal(user_id: str | None, ticker: str, direction, timestamp=None, passed: bool = True) -> None:
     """Inject a synthetic signal into memory (for test fixtures)."""
     key = _bucket_key(user_id, ticker)
-    async with _state_lock:
+    async with _get_state_lock():
         if key not in _signal_buckets:
             _signal_buckets[key] = deque(maxlen=_MAX_BUCKET_SIZE)
         _signal_buckets[key].append({
@@ -476,11 +521,13 @@ async def _inject_signal(user_id: str | None, ticker: str, direction, timestamp=
 
 
 async def update_daily_pnl(pnl: float):
-    global _daily_pnl, _daily_trade_date
-    async with _state_lock:
+    global _daily_pnl, _daily_trade_date, _daily_trade_count
+    async with _get_state_lock():
         today = utcnow().strftime("%Y-%m-%d")
         if today != _daily_trade_date:
-            reset_daily_counters()
+            _daily_trade_count = 0
+            _daily_trade_date = today
+            _daily_pnl = 0.0
         _daily_pnl += float(pnl or 0)
 
 
@@ -491,7 +538,7 @@ async def _check_cooldown(signal: TradingViewSignal, cooldown_seconds: int = 300
     """Check if we received a similar signal recently (O(1) bucketed)."""
     cutoff = utcnow() - timedelta(seconds=cooldown_seconds)
     key = _bucket_key(user_id, signal.ticker)
-    async with _state_lock:
+    async with _get_state_lock():
         bucket = _signal_buckets.get(key, deque())
         for s in bucket:
             if s["timestamp"] > cutoff and s["direction"] == signal.direction and s.get("passed", True):
@@ -503,7 +550,7 @@ async def _count_recent_same_direction(signal: TradingViewSignal, window_minutes
     """Count same-direction signals in window (FIX #6: counts all signals, not just passed)."""
     cutoff = utcnow() - timedelta(minutes=window_minutes)
     key = _bucket_key(user_id, signal.ticker)
-    async with _state_lock:
+    async with _get_state_lock():
         bucket = _signal_buckets.get(key, deque())
         return sum(
             1 for s in bucket
@@ -516,7 +563,7 @@ async def _count_recent_opposite_direction(signal: TradingViewSignal, window_min
     cutoff = utcnow() - timedelta(minutes=window_minutes)
     opposite = SignalDirection.SHORT if signal.direction == SignalDirection.LONG else SignalDirection.LONG
     key = _bucket_key(user_id, signal.ticker)
-    async with _state_lock:
+    async with _get_state_lock():
         bucket = _signal_buckets.get(key, deque())
         return sum(
             1 for s in bucket
@@ -525,10 +572,9 @@ async def _count_recent_opposite_direction(signal: TradingViewSignal, window_min
 
 
 # FIX #11: Block rate throttle
-def _check_block_rate_throttle(ticker_key: str, thresholds: FilterThresholds) -> tuple[bool, str | None]:
-    """Check if this ticker has been blocked too many times recently."""
-    threshold = int(thresholds.get("block_rate_threshold", ""))
-    window = int(thresholds.get("block_rate_window_seconds", ""))
+async def _check_block_rate_throttle(ticker_key: str, thresholds: FilterThresholds) -> tuple[bool, str | None]:
+    threshold = int(thresholds.get("block_rate_threshold", 5))
+    window = int(thresholds.get("block_rate_window_seconds", 600))
 
     cutoff = time.time() - window
     recent_blocks = [b for b in _block_history if b["ticker"] == ticker_key and b["timestamp"] > cutoff]
@@ -541,9 +587,9 @@ def _check_block_rate_throttle(ticker_key: str, thresholds: FilterThresholds) ->
 # FIX: Circuit breaker / kill switch (#INSTITUTIONAL)
 async def _check_circuit_breaker(ticker_key: str, thresholds: FilterThresholds) -> tuple[bool, str | None]:
     """Circuit breaker: if too many blocks in short window, kill trading for cooldown."""
-    max_blocks = int(thresholds.get("circuit_breaker_max_blocks", ""))
-    window = int(thresholds.get("circuit_breaker_window_seconds", ""))
-    cooldown_secs = int(thresholds.get("circuit_breaker_cooldown_seconds", ""))
+    max_blocks = int(thresholds.get("circuit_breaker_max_blocks", 10))
+    window = int(thresholds.get("circuit_breaker_window_seconds", 300))
+    cooldown_secs = int(thresholds.get("circuit_breaker_cooldown_seconds", 900))
 
     now = time.time()
 
@@ -568,12 +614,12 @@ async def _check_circuit_breaker(ticker_key: str, thresholds: FilterThresholds) 
 # Signal velocity tracker (#INSTITUTIONAL)
 async def _check_signal_velocity(ticker_key: str, thresholds: FilterThresholds, user_id: str | None = None) -> tuple[bool, float, str | None]:
     """Check if signals are arriving too fast (momentum exhaustion risk)."""
-    window = int(thresholds.get("signal_velocity_window_seconds", ""))
-    max_per_minute = float(thresholds.get("signal_velocity_max_per_minute", ""))
+    window = int(thresholds.get("signal_velocity_window_seconds", 300))
+    max_per_minute = float(thresholds.get("signal_velocity_max_per_minute", 3.0))
 
     cutoff = utcnow() - timedelta(seconds=window)
     key = _bucket_key(user_id, ticker_key)
-    async with _state_lock:
+    async with _get_state_lock():
         bucket = _signal_buckets.get(key, deque())
         recent_count = sum(1 for s in bucket if s["timestamp"] > cutoff)
 
@@ -591,7 +637,7 @@ async def _check_signal_consistency(ticker_key: str, signal: TradingViewSignal, 
     cutoff = utcnow() - timedelta(seconds=60)
     opposite = SignalDirection.SHORT if signal.direction == SignalDirection.LONG else SignalDirection.LONG
     key = _bucket_key(user_id, ticker_key)
-    async with _state_lock:
+    async with _get_state_lock():
         bucket = _signal_buckets.get(key, deque())
         for s in bucket:
             if s["timestamp"] > cutoff and s["direction"] == opposite:
@@ -610,7 +656,7 @@ def _check_mtf_confirmation(
     Uses EMA alignment on multiple timeframes as a proxy for HTF confirmation.
     """
     result = {"htf_aligned": False, "htf_timeframe": None, "htf_trend": "neutral"}
-    require_htf = bool(thresholds.get("mtf_require_htf_alignment", ""))
+    require_htf = bool(thresholds.get("mtf_require_htf_alignment", True))
 
     ohlcv_4h = getattr(market, "_ohlcv_4h", None) or []
     ohlcv_1h = getattr(market, "_ohlcv_1h", None) or []
@@ -657,7 +703,7 @@ def _check_volume_drop(market: MarketContext, thresholds: FilterThresholds) -> t
 
     Uses the _volume_history attribute if available on market context.
     """
-    vol_max_drop = float(thresholds.get("volume_drop_pct_max", ""))
+    vol_max_drop = float(thresholds.get("volume_drop_pct_max", 70.0))
     vol_history = getattr(market, "_volume_history", None) or []
 
     if len(vol_history) < 24:
@@ -691,8 +737,8 @@ async def _check_position_concentration(
         result["note"] = "No DB session available - skip"
         return True, result
 
-    soft_limit = int(thresholds.get("position_concentration_soft_limit", ""))
-    hard_limit = int(thresholds.get("position_concentration_hard_limit", ""))
+    soft_limit = int(thresholds.get("position_concentration_soft_limit", 3))
+    hard_limit = int(thresholds.get("position_concentration_hard_limit", 6))
 
     try:
         from sqlalchemy import select
@@ -785,6 +831,8 @@ async def run_pre_filter_async(
     use_scoring: bool = False,
     min_pass_score: float | None = None,
     live_trading: bool = False,
+    exchange_config: dict[str, Any] | None = None,
+    max_total_loss_pct: float | None = None,
     data_quality_mode: str | None = None,
     max_missing_data_checks: int | None = None,
     db_session=None,
@@ -850,10 +898,43 @@ async def run_pre_filter_async(
         reasons.append(f"Daily trade limit reached ({daily_count_snapshot}/{max_daily_trades})")
         await record_filter_block("daily_trade_limit")
 
-    # 鈹€鈹€ Check 2: Daily loss limit 鈹€鈹€
-    account_equity = float(getattr(settings.risk, "account_equity_usdt", 10000.0) or 10000.0)
+    # ── Check 2: Daily loss limit ──
+    # Round-4 audit P0 fix: use live account equity in live mode (was hardcoded
+    # to settings.risk.account_equity_usdt = $10000 paper constant).
+    from core.account_risk import get_live_account_equity
+    try:
+        account_equity = await get_live_account_equity(
+            user_id=user_id,
+            exchange_config=exchange_config if exchange_config is not None else {"live_trading": live_trading},
+            fallback=float(getattr(settings.risk, "account_equity_usdt", 10000.0) or 10000.0),
+            require_live_balance=live_trading,
+        )
+    except RuntimeError as equity_error:
+        reason = f"Live account equity verification failed: {equity_error}"
+        checks["account_equity"] = {
+            "passed": False,
+            "live_trading": live_trading,
+            "reason": reason,
+        }
+        await record_filter_block("account_equity")
+        return PreFilterResult(
+            passed=False,
+            reason=reason,
+            checks=checks,
+            score=0.0,
+            account_equity_usdt=None,
+        )
     if account_equity <= 0:
-        account_equity = 10000.0
+        reason = "Account equity must be positive before risk checks can run"
+        checks["account_equity"] = {"passed": False, "reason": reason}
+        await record_filter_block("account_equity")
+        return PreFilterResult(
+            passed=False,
+            reason=reason,
+            checks=checks,
+            score=0.0,
+            account_equity_usdt=None,
+        )
 
     current_pnl = await get_today_pnl_async(user_id=user_id, account_equity_usdt=account_equity)
     loss_ok = current_pnl > -max_daily_loss_pct
@@ -877,7 +958,7 @@ async def run_pre_filter_async(
         user_id=user_id,
         account_equity_usdt=account_equity,
         max_daily_loss_pct=max_daily_loss_pct,
-        max_total_loss_pct=None,
+        max_total_loss_pct=max_total_loss_pct,
     )
     checks["account_daily_loss_limit"] = {
         "passed": loss_allowed,
@@ -886,6 +967,25 @@ async def run_pre_filter_async(
     if not loss_allowed:
         reasons.append(loss_reason)
         await record_filter_block("account_daily_loss_limit")
+
+    # ── Check 3b: Drawdown circuit breaker (rolling 1h/4h) ──
+    try:
+        from core.account_risk import check_drawdown_circuit_breaker
+        dd_ok, dd_reason = await check_drawdown_circuit_breaker(
+            user_id=user_id,
+            account_equity_usdt=account_equity,
+            rolling_1h_max_drawdown_pct=settings.risk.rolling_1h_max_drawdown_pct,
+            rolling_4h_max_drawdown_pct=settings.risk.rolling_4h_max_drawdown_pct,
+        )
+        checks["drawdown_circuit_breaker"] = {
+            "passed": dd_ok,
+            "reason": dd_reason,
+        }
+        if not dd_ok:
+            reasons.append(dd_reason)
+            await record_filter_block("drawdown_circuit_breaker")
+    except (ImportError, AttributeError):
+        checks["drawdown_circuit_breaker"] = {"passed": True, "note": "Not available"}
 
     # 鈹€鈹€ Check 4: Circuit breaker / kill switch (NEW v5.0) 鈹€鈹€
     cb_ok, cb_reason = await _check_circuit_breaker(ticker_key, thresholds)
@@ -898,7 +998,7 @@ async def run_pre_filter_async(
         await record_filter_block("circuit_breaker")
 
     # ── Check 5: Block rate throttle (NEW v5.0) ──
-    throttle_ok, throttle_reason = _check_block_rate_throttle(ticker_key, thresholds)
+    throttle_ok, throttle_reason = await _check_block_rate_throttle(ticker_key, thresholds)
     checks["block_rate"] = {
         "passed": throttle_ok,
         "reason": throttle_reason,
@@ -1042,7 +1142,7 @@ async def run_pre_filter_async(
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     # 鈹€鈹€ Check 13: VWAP Deviation (P0 鈥?institutional benchmark) 鈹€鈹€
     vwap_ok = True
-    vwap_dev_max = float(thresholds.get("vwap_deviation_pct_max", ""))
+    vwap_dev_max = float(thresholds.get("vwap_deviation_pct_max", 2.0))
     vwap_data = None
     ohlcv_1h_vwap = getattr(market, "_ohlcv_1h", None) or []
     if len(ohlcv_1h_vwap) >= 24 and market.current_price > 0:
@@ -1058,8 +1158,7 @@ async def run_pre_filter_async(
                 # Long entry below VWAP = favorable; above VWAP by too much = chasing
                 if is_long and vwap_dir == "above_vwap" and vwap_dev > vwap_dev_max:
                     vwap_ok = False
-                # Short entry above VWAP = favorable; below VWAP by too much = chasing
-                elif is_short and vwap_dir == "below_vwap" and vwap_dev > vwap_dev_max:
+                elif is_short and vwap_dir == "below_vwap" and abs(vwap_dev) > vwap_dev_max:
                     vwap_ok = False
 
             checks["vwap_deviation"] = {
@@ -1080,6 +1179,111 @@ async def run_pre_filter_async(
         checks["vwap_deviation"] = {"passed": True, "missing_data": True, "note": "Need 24 1h candles for VWAP"}
         if len(ohlcv_1h_vwap) < 24:
             missing_data_checks.append("vwap_deviation")
+
+    # ── Check 13b: Ichimoku Cloud Position ──
+    ichimoku_ok = True
+    ichimoku_inside = bool(thresholds.get("ichimoku_inside_cloud_soft_fail", True))
+    if hasattr(market, 'ichimoku_cloud_position') and market.ichimoku_cloud_position is not None:
+        is_long = signal.direction in (SignalDirection.LONG,)
+        is_short = signal.direction in (SignalDirection.SHORT,)
+        if market.ichimoku_cloud_position == "below_cloud" and is_long:
+            ichimoku_ok = False
+        elif market.ichimoku_cloud_position == "above_cloud" and is_short:
+            ichimoku_ok = False
+        elif market.ichimoku_cloud_position == "inside_cloud":
+            checks["ichimoku_cloud"] = {"passed": True, "cloud_position": market.ichimoku_cloud_position}
+            if ichimoku_inside:
+                soft_fail_reasons.append("Ichimoku: price inside cloud (uncertain direction)")
+                checks["ichimoku_cloud"]["soft_fail"] = True
+        if not ichimoku_ok and "ichimoku_cloud" not in checks:
+            soft_fail_reasons.append(f"Ichimoku cloud position conflicts with {signal.direction.value} (soft fail)")
+            checks["ichimoku_cloud"] = {"passed": True, "cloud_position": market.ichimoku_cloud_position, "soft_fail": True}
+    elif not hasattr(market, 'ichimoku_cloud_position') or getattr(market, 'ichimoku_cloud_position', None) is None:
+        checks["ichimoku_cloud"] = {"passed": True, "missing_data": True}
+
+    # ── Check 13c: Supertrend Conflict ──
+    supertrend_ok = True
+    if hasattr(market, 'supertrend_direction') and market.supertrend_direction is not None:
+        is_long = signal.direction in (SignalDirection.LONG,)
+        is_short = signal.direction in (SignalDirection.SHORT,)
+        if is_long and market.supertrend_direction == "down":
+            supertrend_ok = False
+        elif is_short and market.supertrend_direction == "up":
+            supertrend_ok = False
+        checks["supertrend"] = {"passed": supertrend_ok, "direction": market.supertrend_direction}
+        if not supertrend_ok:
+            soft_fail_reasons.append(f"Supertrend ({market.supertrend_direction}) conflicts with {signal.direction.value} (soft fail)")
+            checks["supertrend"]["soft_fail"] = True
+    else:
+        checks["supertrend"] = {"passed": True, "missing_data": True}
+
+    # ── Check 13d: RSI Divergence ──
+    rsi_div_ok = True
+    rsi_div_strength_max = float(thresholds.get("rsi_divergence_strength_max", 0.7))
+    if hasattr(market, 'rsi_divergence') and market.rsi_divergence is not None:
+        is_long = signal.direction in (SignalDirection.LONG,)
+        is_short = signal.direction in (SignalDirection.SHORT,)
+        strength = market.rsi_divergence_strength or 0.0
+        if is_long and market.rsi_divergence == "bearish" and strength > rsi_div_strength_max:
+            rsi_div_ok = False
+        elif is_short and market.rsi_divergence == "bullish" and strength > rsi_div_strength_max:
+            rsi_div_ok = False
+        checks["rsi_divergence"] = {"passed": rsi_div_ok, "divergence_type": market.rsi_divergence, "strength": strength}
+        if not rsi_div_ok:
+            reasons.append(f"Strong {market.rsi_divergence} RSI divergence (strength={strength:.2f}) against {signal.direction.value}")
+            await record_filter_block("rsi_divergence")
+        elif market.rsi_divergence in ("bearish", "bullish") and strength > 0.3:
+            soft_fail_reasons.append(f"RSI divergence: {market.rsi_divergence} (strength={strength:.2f})")
+            checks["rsi_divergence"]["soft_fail"] = True
+    else:
+        checks["rsi_divergence"] = {"passed": True, "missing_data": True}
+
+    # ── Check 13e: MACD Divergence ──
+    macd_div_ok = True
+    macd_div_strength_max = float(thresholds.get("macd_divergence_strength_max", 0.7))
+    if hasattr(market, 'macd_divergence') and market.macd_divergence is not None:
+        is_long = signal.direction in (SignalDirection.LONG,)
+        is_short = signal.direction in (SignalDirection.SHORT,)
+        strength = market.macd_divergence_strength or 0.0
+        if is_long and market.macd_divergence == "bearish" and strength > macd_div_strength_max:
+            macd_div_ok = False
+        elif is_short and market.macd_divergence == "bullish" and strength > macd_div_strength_max:
+            macd_div_ok = False
+        checks["macd_divergence"] = {"passed": macd_div_ok, "divergence_type": market.macd_divergence, "strength": strength}
+        if not macd_div_ok:
+            reasons.append(f"Strong {market.macd_divergence} MACD divergence against {signal.direction.value}")
+            await record_filter_block("macd_divergence")
+        elif market.macd_divergence in ("bearish", "bullish") and strength > 0.3:
+            soft_fail_reasons.append(f"MACD divergence: {market.macd_divergence} (strength={strength:.2f})")
+            checks["macd_divergence"]["soft_fail"] = True
+    else:
+        checks["macd_divergence"] = {"passed": True, "missing_data": True}
+
+    # ── Check 13f: BTC Dominance ──
+    btc_dom_ok = True
+    btc_dom_threshold = float(thresholds.get("btc_dominance_high_threshold", 55.0))
+    if hasattr(market, 'btc_dominance') and market.btc_dominance is not None:
+        is_altcoin = "BTC" not in ticker.upper()
+        if market.btc_dominance > btc_dom_threshold and is_altcoin:
+            btc_dom_ok = False
+        checks["btc_dominance"] = {"passed": btc_dom_ok, "btc_dominance": market.btc_dominance, "threshold": btc_dom_threshold}
+        if not btc_dom_ok:
+            soft_fail_reasons.append(f"High BTC dominance ({market.btc_dominance:.1f}%) - altcoins may underperform (soft fail)")
+            checks["btc_dominance"]["soft_fail"] = True
+    else:
+        checks["btc_dominance"] = {"passed": True, "missing_data": True}
+
+    # ── Check 13g: MTF Alignment ──
+    mtf_ok = True
+    mtf_min = float(thresholds.get("mtf_alignment_min", -0.3))
+    if hasattr(market, 'mtf_momentum_alignment') and market.mtf_momentum_alignment is not None:
+        mtf_ok = market.mtf_momentum_alignment >= mtf_min
+        checks["mtf_alignment"] = {"passed": mtf_ok, "alignment": market.mtf_momentum_alignment, "threshold": mtf_min}
+        if not mtf_ok:
+            soft_fail_reasons.append(f"Multi-timeframe momentum misaligned ({market.mtf_momentum_alignment:.2f})")
+            checks["mtf_alignment"]["soft_fail"] = True
+    else:
+        checks["mtf_alignment"] = {"passed": True, "missing_data": True}
 
     # 鈹€鈹€ Check 14: RSI Extreme Guard 鈹€鈹€
     rsi_ok = True
@@ -1137,7 +1341,7 @@ async def run_pre_filter_async(
     ob_ok = True
     ob_long_min = float(thresholds.get_with_profile("orderbook_long_min", ticker))
     ob_short_max = float(thresholds.get_with_profile("orderbook_short_max", ticker))
-    if has_orderbook_data and market.orderbook_imbalance > 0:
+    if has_orderbook_data and market.orderbook_imbalance is not None:
         is_long = signal.direction in (SignalDirection.LONG,)
         is_short = signal.direction in (SignalDirection.SHORT,)
 
@@ -1165,16 +1369,16 @@ async def run_pre_filter_async(
     time_ok = True
     now_utc = utcnow()
     is_weekend = now_utc.weekday() >= 5
-    low_hour_start = int(thresholds.get("low_liquidity_hour_start", ""))
-    low_hour_end = int(thresholds.get("low_liquidity_hour_end", ""))
+    low_hour_start = int(thresholds.get("low_liquidity_hour_start", 21))
+    low_hour_end = int(thresholds.get("low_liquidity_hour_end", 1))
 
     if low_hour_start > low_hour_end:
         is_low_liq_hour = now_utc.hour >= low_hour_start or now_utc.hour < low_hour_end
     else:
         is_low_liq_hour = low_hour_start <= now_utc.hour < low_hour_end
 
-    weekend_vol_min = float(thresholds.get("low_liquidity_weekend_vol_min", ""))
-    liq_spread_max = float(thresholds.get("low_liquidity_spread_max", ""))
+    weekend_vol_min = float(thresholds.get("low_liquidity_weekend_vol_min", 5_000_000))
+    liq_spread_max = float(thresholds.get("low_liquidity_spread_max", 0.05))
 
     if is_weekend and market.volume_24h > 0:
         if market.volume_24h < weekend_vol_min:
@@ -1198,7 +1402,7 @@ async def run_pre_filter_async(
     # FIX #1: Uses the same recent_results already fetched for cooldown
     # FIX #2: Excludes asyncio.CancelledError
     consec_ok = True
-    consec_max = int(thresholds.get("consecutive_loss_max", ticker))
+    consec_max = int(thresholds.get("consecutive_loss_max", 3))
     position_reduce_pct = float(thresholds.get("position_reduce_on_loss_pct", ticker))
     consec_losses = 0
 
@@ -1389,8 +1593,8 @@ async def run_pre_filter_async(
                 oi_change_pct=market.open_interest_change_pct,
                 price_change_1h=market.price_change_1h,
                 price_change_4h=market.price_change_4h,
-                oi_change_threshold=float(thresholds.get("oi_divergence_threshold_pct", "")),
-                price_stall_threshold=float(thresholds.get("oi_price_stall_threshold_pct", "")),
+                oi_change_threshold=float(thresholds.get("oi_divergence_threshold_pct", 5.0)),
+                price_stall_threshold=float(thresholds.get("oi_price_stall_threshold_pct", 1.0)),
             )
             div_type = oi_div_data.get("divergence_type")
             is_bearish = oi_div_data.get("is_bearish", False)
@@ -1630,7 +1834,14 @@ async def run_pre_filter_async(
         basis_pct = basis_data.get("basis_pct")
 
         if basis_pct is not None:
-            basis_ok = abs(basis_pct) < basis_max
+            is_long = signal.direction in (SignalDirection.LONG,)
+            is_short = signal.direction in (SignalDirection.SHORT,)
+            if is_long:
+                basis_ok = basis_pct > -basis_max
+            elif is_short:
+                basis_ok = basis_pct < basis_max
+            else:
+                basis_ok = abs(basis_pct) < basis_max
 
         checks["basis_check"] = {
             "passed": basis_ok,
@@ -1810,7 +2021,7 @@ async def run_pre_filter_async(
 
     # 鈹€鈹€ Check 36: Multi-Exchange Price Discrepancy (P2) 鈹€鈹€
     price_disc_ok = True
-    disc_max = float(thresholds.get("exchange_price_discrepancy_pct_max", ""))
+    disc_max = float(thresholds.get("exchange_price_discrepancy_pct_max", 2.0))
     if isinstance(price_disc_result, Exception) and not isinstance(price_disc_result, asyncio.CancelledError):
         checks["exchange_price_discrepancy"] = {"passed": True, "note": f"Skip: {price_disc_result}"}
         unavailable_data_checks.append("exchange_price_discrepancy")
@@ -1896,11 +2107,48 @@ async def run_pre_filter_async(
         )
         await record_filter_block("live_data_quality")
 
-    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    # Final Verdict
+    # ── Check 40: Maximum Position Notional Value ──
+    # The final notional is unknown until AI sizing, leverage and exchange
+    # contract rounding have been applied.  Do not substitute account equity
+    # for order notional here; SignalProcessor enforces this cap on the final
+    # quantity immediately before execution.
+    max_notional = float(getattr(settings.risk, "max_position_notional_usdt", 10000.0))
+    checks["max_position_notional"] = {
+        "passed": True,
+        "max_notional": max_notional,
+        "enforced_at": "final_position_sizing",
+    }
+
+    # ── Check 41: Slippage Protection ──
+    max_slippage_pct = float(thresholds.get("max_slippage_pct", 0.5))
+    if has_spread_data and market.current_price > 0:
+        estimated_slippage = market.bid_ask_spread * 2.0
+        if estimated_slippage > max_slippage_pct:
+            checks["slippage_protection"] = {
+                "passed": False,
+                "estimated_slippage_pct": round(estimated_slippage, 4),
+                "max_slippage_pct": max_slippage_pct,
+                "spread_pct": market.bid_ask_spread,
+            }
+            soft_fail_reasons.append(f"High slippage risk: ~{estimated_slippage:.3f}% (max {max_slippage_pct}%)")
+            checks["slippage_protection"]["soft_fail"] = True
+        else:
+            checks["slippage_protection"] = {
+                "passed": True,
+                "estimated_slippage_pct": round(estimated_slippage, 4),
+                "max_slippage_pct": max_slippage_pct,
+            }
+
+    # ── Final Verdict ──
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    _PROTECTED_CHECKS = {"daily_loss_limit", "account_daily_loss_limit", "circuit_breaker", "daily_trade_limit"}
+
     for name in disabled:
         for check_name, check in checks.items():
             if check_name.lower() == name:
+                if check_name.lower() in _PROTECTED_CHECKS:
+                    logger.warning(f"[PreFilter] Cannot disable protected safety check: {check_name}")
+                    continue
                 check["disabled"] = True
                 check["passed"] = True
 
@@ -1954,6 +2202,7 @@ async def run_pre_filter_async(
         reason=final_reason,
         checks=checks,
         score=score,
+        account_equity_usdt=account_equity,
     )
 
 
@@ -1968,7 +2217,7 @@ _MAX_PENDING_OUTCOMES = 500
 
 _pending_outcomes: deque[dict[str, Any]] = deque(maxlen=_MAX_PENDING_OUTCOMES)
 _check_performance: dict[str, dict[str, float]] = {}  # check_name -> {tp, fp, tn, fn, precision, sample_count}
-_PERFORMANCE_FILE = "data/filter_performance.json"
+_PERFORMANCE_FILE = DATA_DIR / "filter_performance.json"
 
 
 def _load_performance() -> dict[str, dict[str, float]]:
@@ -1990,8 +2239,8 @@ def _load_performance() -> dict[str, dict[str, float]]:
 
 def _save_performance(perf: dict) -> None:
     try:
-        os.makedirs("data", exist_ok=True)
         perf_file = Path(_PERFORMANCE_FILE)
+        perf_file.parent.mkdir(parents=True, exist_ok=True)
         # Write with atomic swap to prevent corruption
         tmp_file = perf_file.with_suffix(".tmp")
         with open(tmp_file, "w", encoding="utf-8") as f:

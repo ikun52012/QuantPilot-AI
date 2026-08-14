@@ -10,7 +10,6 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import ccxt
@@ -18,7 +17,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.config import settings
+from core.config import DATA_DIR, settings
 from core.database import (
     PositionModel,
     UserModel,
@@ -101,11 +100,18 @@ def _resolve_trailing_mode(trailing_config: dict, position: "PositionModel" = No
         return "step_trailing"
 
 
-_position_monitor_lock = asyncio.Lock()
+_position_monitor_lock: asyncio.Lock | None = None
 _GHOST_POSITION_TRACKER: dict[str, dict[str, Any]] = {}
 _PROTECTIVE_ORDERS_LAST_VERIFY: dict[str, datetime] = {}
-_PROTECTIVE_ORDERS_VERIFY_INTERVAL = 600  # seconds (10 min) between TP/SL existence checks
+_PROTECTIVE_ORDERS_VERIFY_INTERVAL = 60  # verify on every normal monitor cycle
 _PROTECTION_QTY_EPSILON = 1e-8
+
+
+def _get_position_monitor_lock() -> asyncio.Lock:
+    global _position_monitor_lock
+    if _position_monitor_lock is None:
+        _position_monitor_lock = asyncio.Lock()
+    return _position_monitor_lock
 
 # P2-14: Per-position reconcile locks to prevent concurrent TP/SL processing
 _position_reconcile_locks: dict[str, asyncio.Lock] = {}
@@ -152,7 +158,7 @@ def _normalized_pending_tp_pcts(tp_levels: list[dict]) -> dict[int, float]:
 
 
 _GHOST_MIN_ELAPSED_SECS = 900  # minimum elapsed before ghost-close (15 min, protects against API instability)
-_GHOST_TRACKER_FILE = Path("data") / "ghost_position_tracker.json"
+_GHOST_TRACKER_FILE = DATA_DIR / "ghost_position_tracker.json"
 _CLOSED_POSITION_RECOVERY_LOOKBACK_HOURS = 24
 
 
@@ -173,8 +179,8 @@ def _save_ghost_tracker() -> None:
         tmp_file = _GHOST_TRACKER_FILE.with_suffix(".tmp")
         tmp_file.write_text(json.dumps(serializable))
         tmp_file.replace(_GHOST_TRACKER_FILE)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"[GhostTracker] Failed to save ghost tracker: {e}")
 
 
 def _load_ghost_tracker() -> None:
@@ -689,6 +695,39 @@ async def _close_missing_entry_order_without_exposure(
             f"[PositionMonitor] Entry order {position.entry_order_id} not found for {position.ticker}, "
             f"but exchange still reports {contracts} contracts. Synced DB position instead of closing."
         )
+        # An order disappearing from fetch_order can mean it filled.  Restore
+        # protection immediately instead of waiting for the next monitor pass.
+        try:
+            from exchange import _get_or_create_exchange, _resolve_symbol
+
+            exchange = _get_or_create_exchange(
+                exchange_id=exchange_config.get("exchange", settings.exchange.name),
+                api_key=exchange_config.get("api_key", settings.exchange.api_key),
+                api_secret=exchange_config.get("api_secret", settings.exchange.api_secret),
+                password=exchange_config.get("password", settings.exchange.password),
+                live=True,
+                sandbox=safe_bool(exchange_config.get("sandbox_mode", settings.exchange.sandbox_mode), False),
+                market_type=exchange_config.get("market_type", settings.exchange.market_type),
+                margin_mode=exchange_config.get("margin_mode", settings.risk.margin_mode),
+            )
+            symbol = await asyncio.to_thread(
+                _resolve_symbol,
+                exchange,
+                position.ticker,
+                exchange_config.get("market_type", settings.exchange.market_type),
+            )
+            await _create_protective_orders_for_position(
+                position,
+                exchange,
+                symbol,
+                contracts,
+                session=session,
+            )
+        except Exception as exc:
+            logger.error(
+                f"[PositionMonitor] Failed to restore protection for recovered fill "
+                f"{position.ticker}: {exc}"
+            )
         await session.flush()
         return False
 
@@ -803,7 +842,7 @@ async def run_position_monitor_once(user_configs: dict | None = None) -> dict:
     Protected by asyncio.Lock to prevent concurrent execution from
     both scheduler and manual admin API trigger.
     """
-    async with _position_monitor_lock:
+    async with _get_position_monitor_lock():
         stats = {
             "tracked": 0,
             "updated": 0,
@@ -1101,21 +1140,21 @@ async def _reconcile_paper_position(session, position: PositionModel, exchange_c
 
         if remaining_qty > 0:
             if position.live_trading:
-                from exchange import place_protective_stop
-                exchange_config = _get_exchange_config_for_position(position)
-                if exchange_config:
-                    await _adjust_trailing_stop_on_tp_hit(position, tp_levels, hit_levels, exchange_config, place_protective_stop)
-            else:
-                new_stop = _compute_paper_trailing_stop(position, hit_levels)
-                if new_stop and new_stop > 0:
-                    old_sl = safe_float(position.stop_loss)
-                    direction = str(position.direction or "long").lower()
-                    if direction == "short":
-                        if old_sl <= 0 or new_stop < old_sl:
-                            position.stop_loss = new_stop
-                    else:
-                        if old_sl <= 0 or new_stop > old_sl:
-                            position.stop_loss = new_stop
+                logger.warning(
+                    f"[PositionMonitor] Position {position.id} marked as live_trading=True "
+                    f"but found in paper reconciliation path - skipping exchange operations. "
+                    f"This position will be reconciled by the live position reconciler."
+                )
+            new_stop = _compute_paper_trailing_stop(position, hit_levels)
+            if new_stop and new_stop > 0:
+                old_sl = safe_float(position.stop_loss)
+                direction = str(position.direction or "long").lower()
+                if direction == "short":
+                    if old_sl <= 0 or new_stop < old_sl:
+                        position.stop_loss = new_stop
+                else:
+                    if old_sl <= 0 or new_stop > old_sl:
+                        position.stop_loss = new_stop
 
         if remaining_qty <= max(0.00000001, opened_qty * 0.000001):
             stats["closed"] += 1
@@ -1181,7 +1220,60 @@ def _hit_take_profit_levels(direction: str, levels: list[dict], high: float, low
     return [level for level in pending if (tp_price := safe_float(level.get("price"))) > 0 and high >= tp_price]
 
 
-async def _check_pending_limit_orders(session, position: PositionModel, exchange_config: dict) -> None:
+async def _apply_confirmed_entry_fill(
+    position: PositionModel,
+    order: dict,
+    exchange,
+    symbol: str,
+    session: AsyncSession,
+) -> bool:
+    """Persist a confirmed entry fill and protect it before returning."""
+    filled_amount = safe_float(order.get("filled") or 0)
+    if filled_amount <= 0 and str(order.get("status") or "").lower() in {"closed", "filled"}:
+        filled_amount = safe_float(order.get("amount") or 0)
+    if filled_amount <= 0:
+        return False
+
+    filled_price = safe_float(order.get("average") or order.get("price"))
+    filled_cost = safe_float(order.get("cost") or 0)
+    position.status = "open"
+    position.quantity = filled_amount
+    position.remaining_quantity = filled_amount
+    if filled_price > 0:
+        position.entry_price = filled_price
+        position.last_price = filled_price
+    position.margin = _filled_margin_from_order(
+        position,
+        filled_cost,
+        filled_amount,
+        filled_price,
+    )
+    if str(order.get("status") or "").lower() in {
+        "closed",
+        "filled",
+        "canceled",
+        "cancelled",
+        "expired",
+        "rejected",
+    }:
+        position.entry_order_id = ""
+    position.updated_at = utcnow()
+    await _create_protective_orders_for_position(
+        position,
+        exchange,
+        symbol,
+        filled_amount,
+        session=session,
+    )
+    await session.flush()
+    return True
+
+
+async def _check_pending_limit_orders(
+    session,
+    position: PositionModel,
+    exchange_config: dict,
+) -> dict[str, Any] | None:
     """Check status of pending limit orders and update position if filled or expired."""
     if not position.entry_order_id or position.entry_order_id == "":
         return
@@ -1223,13 +1315,25 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                 order_status = str(raw_status).lower()
 
             if order_status in {"closed", "filled"}:
-                # P0-FIX: Prevent re-processing an already-consumed filled order.
-                # Once the position is open with an entry_price (set from a prior
-                # fill), every subsequent cycle re-sets status="open" from the same
-                # filled order that never changes status. This creates an infinite
-                # loop when the user manually closes on exchange: filled→open→
-                # exchange empty→next cycle→filled→open→...
+                filled_price = safe_float(order.get("average") or order.get("price"))
+                filled_amount = safe_float(order.get("filled") or 0)
+                filled_cost = safe_float(order.get("cost") or 0)
+
                 if position.status == "open" and safe_float(position.entry_price) > 0:
+                    current_qty = safe_float(position.quantity)
+                    if filled_amount > 0 and abs(filled_amount - current_qty) > 1e-8:
+                        position.quantity = filled_amount
+                        position.remaining_quantity = filled_amount
+                        if filled_price > 0:
+                            position.entry_price = filled_price
+                            position.last_price = filled_price
+                        position.margin = _filled_margin_from_order(position, filled_cost, filled_amount, filled_price)
+                        position.updated_at = utcnow()
+                        logger.warning(
+                            f"[PositionMonitor] Partial→full fill update for {position.ticker}: "
+                            f"qty {current_qty}→{filled_amount}, re-creating protective orders"
+                        )
+                        await _create_protective_orders_for_position(position, exchange, symbol, filled_amount, session=session)
                     return
 
                 # Limit order filled - update position entry price and quantity
@@ -1274,8 +1378,7 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                             f"[P1-FIX] Failed to re-evaluate trailing_stop for live limit order: {e}. "
                             f"Using original config. Position {position.id} flagged for manual review."
                         )
-                        # Flag position for manual review
-                        position.close_reason = "trailing_config_reevaluation_failed"
+                        position.notes = (getattr(position, 'notes', '') or '') + "; trailing_config_reevaluation_failed"
 
                 # Sync actual filled quantity from exchange
                 if filled_amount > 0:
@@ -1432,42 +1535,114 @@ async def _check_pending_limit_orders(session, position: PositionModel, exchange
                     order_age_secs = (time.time() * 1000 - created_at) / 1000
                     limit_timeout = _position_limit_timeout_secs(position)
                     if order_age_secs > limit_timeout:
-                        cancel_confirmed = False
+                        cancel_response: dict | None = None
+                        verification: dict | None = None
                         try:
-                            await asyncio.to_thread(exchange.cancel_order, position.entry_order_id, symbol)
-                            cancel_confirmed = True
+                            cancel_response = await asyncio.to_thread(
+                                exchange.cancel_order,
+                                position.entry_order_id,
+                                symbol,
+                            )
                         except ccxt.OrderNotFound:
                             logger.warning(
                                 f"[PositionMonitor] Limit order not found during timeout cancel for {position.ticker}. "
                                 f"Re-fetching to check if it was filled before we could cancel."
                             )
                             try:
-                                recheck = await asyncio.to_thread(exchange.fetch_order, position.entry_order_id, symbol)
-                                if str(recheck.get("status", "")).lower() in {"closed", "filled"}:
-                                    filled_qty = safe_float(recheck.get("filled") or recheck.get("amount") or 0)
-                                    if filled_qty > 0:
-                                        logger.info(
-                                            f"[PositionMonitor] Order was actually filled before cancel: {position.ticker} qty={filled_qty}"
-                                        )
-                                        position.status = "open"
-                                        position.quantity = filled_qty
-                                        position.remaining_quantity = filled_qty
-                                        position.updated_at = utcnow()
-                                        await session.flush()
-                                        return {"status": "filled", "order": recheck}
-                            except Exception:
-                                pass
-                            cancel_confirmed = True
+                                verification = await asyncio.to_thread(
+                                    exchange.fetch_order,
+                                    position.entry_order_id,
+                                    symbol,
+                                )
+                            except ccxt.OrderNotFound:
+                                # Two OrderNotFound responses are still not
+                                # proof of cancellation: some exchanges move a
+                                # just-filled order out of the queried history.
+                                # Verify the actual account exposure before any
+                                # DB-only close.
+                                closed = await _close_missing_entry_order_without_exposure(
+                                    session,
+                                    position,
+                                    exchange_config,
+                                )
+                                return {"status": "closed" if closed else "state_unknown"}
+                            except Exception as exc:
+                                logger.error(
+                                    f"[PositionMonitor] Could not verify missing limit order "
+                                    f"{position.entry_order_id} for {position.ticker}: {exc}. "
+                                    "Leaving it unchanged for reconciliation."
+                                )
+                                return {"status": "state_unknown"}
                         except ccxt.NetworkError as e:
                             logger.warning(f"[PositionMonitor] Network error cancelling limit order: {e}")
+                            return {"status": "state_unknown"}
                         except Exception as e:
                             logger.warning(f"[PositionMonitor] Failed to cancel limit order: {e}")
+                            return {"status": "state_unknown"}
 
-                        if not cancel_confirmed:
-                            return
+                        # Always verify after a nominally successful cancel;
+                        # the entry may have raced to a partial/full fill.
+                        if verification is None:
+                            try:
+                                verification = await asyncio.to_thread(
+                                    exchange.fetch_order,
+                                    position.entry_order_id,
+                                    symbol,
+                                )
+                            except ccxt.OrderNotFound:
+                                response_status = str((cancel_response or {}).get("status") or "").lower()
+                                response_filled = safe_float((cancel_response or {}).get("filled") or 0)
+                                if response_filled > 0:
+                                    verification = cancel_response
+                                elif response_status not in {
+                                    "canceled",
+                                    "cancelled",
+                                    "expired",
+                                    "rejected",
+                                }:
+                                    closed = await _close_missing_entry_order_without_exposure(
+                                        session,
+                                        position,
+                                        exchange_config,
+                                    )
+                                    return {"status": "closed" if closed else "state_unknown"}
+                            except Exception as exc:
+                                logger.error(
+                                    f"[PositionMonitor] Cancel returned but final order state for "
+                                    f"{position.ticker} is unknown: {exc}. Leaving DB unchanged."
+                                )
+                                return {"status": "state_unknown"}
+
+                        effective_order = verification or cancel_response or {}
+                        if await _apply_confirmed_entry_fill(
+                            position,
+                            effective_order,
+                            exchange,
+                            symbol,
+                            session,
+                        ):
+                            logger.warning(
+                                f"[PositionMonitor] Timed-out limit order for {position.ticker} "
+                                "had a fill; kept the position open and restored protection."
+                            )
+                            return {"status": "filled", "order": effective_order}
+
+                        final_status = str(effective_order.get("status") or "").lower()
+                        if final_status not in {
+                            "canceled",
+                            "cancelled",
+                            "expired",
+                            "rejected",
+                        }:
+                            logger.error(
+                                f"[PositionMonitor] Refusing to close timed-out limit position "
+                                f"{position.ticker}: final order status is {final_status or 'unknown'}"
+                            )
+                            return {"status": "state_unknown"}
 
                         position.status = "closed"
                         position.close_reason = "limit_order_timeout"
+                        position.entry_order_id = ""
                         position.closed_at = utcnow()
                         position.updated_at = utcnow()
                         logger.info(f"[PositionMonitor] Cancelled expired limit order for {position.ticker}")
@@ -1709,6 +1884,7 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
     exchange-side order cancellations (e.g. after server restart, disconnect).
     """
     from exchange import (
+        _cancel_exchange_order,
         _create_conditional_order,
         _get_or_create_exchange,
         _resolve_symbol,
@@ -1746,10 +1922,47 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
         logger.warning(f"[PositionMonitor] Skipping protective order verification for {position.ticker}: {e}")
         return False
 
-    open_ids = {str(o.get("id") or "") for o in open_orders if o.get("id")}
+    open_by_id = {
+        str(order.get("id") or ""): order
+        for order in open_orders
+        if order.get("id")
+    }
+    open_ids = set(open_by_id)
+    remaining_qty = safe_float(position.remaining_quantity, safe_float(position.quantity, 0.0))
+    if remaining_qty <= 0:
+        return False
+    quantity_tolerance = max(_PROTECTION_QTY_EPSILON, remaining_qty * 0.001)
+
+    def _reported_order_qty(order_id: str, fallback: float = 0.0) -> float:
+        order = open_by_id.get(order_id) or {}
+        info = order.get("info") if isinstance(order.get("info"), dict) else {}
+        return safe_float(
+            order.get("remaining")
+            or order.get("amount")
+            or order.get("origQty")
+            or info.get("origQty")
+            or info.get("sz")
+            or info.get("size"),
+            fallback,
+        )
 
     # Check SL
     sl_missing = needs_sl and (not sl_id or sl_id not in open_ids)
+    trailing_config = loads_dict(position.trailing_stop_config_json)
+    recorded_sl_qty = safe_float(trailing_config.get("_stop_loss_protected_qty"), 0.0)
+    reported_sl_qty = _reported_order_qty(sl_id, recorded_sl_qty) if sl_id else 0.0
+    if needs_sl and sl_id in open_ids and reported_sl_qty <= 0:
+        sl_missing = True
+        logger.error(
+            f"[PositionMonitor] CRITICAL: SL order {sl_id[:8]} for {position.ticker} "
+            "has no verifiable protected quantity; replacing it"
+        )
+    elif needs_sl and sl_id in open_ids and reported_sl_qty + quantity_tolerance < remaining_qty:
+        sl_missing = True
+        logger.error(
+            f"[PositionMonitor] CRITICAL: SL order {sl_id[:8]} for {position.ticker} "
+            f"covers only {reported_sl_qty} of {remaining_qty}; replacing it"
+        )
     if sl_missing:
         if sl_id:
             logger.warning(
@@ -1764,14 +1977,36 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
 
     # Check TP
     missing_tp_indices = []
+    normalized_pending_pcts = _normalized_pending_tp_pcts(tp_levels) if tp_levels else {}
     for i, tp_id in enumerate(tp_ids):
         level = tp_levels[i] if i < len(tp_levels) and isinstance(tp_levels[i], dict) else {}
         level_status = str(level.get("status") or "pending").lower()
         if level_status in {"hit", "filled", "closed"}:
             continue
-        if not tp_id or tp_id not in open_ids:
+        tp_qty_pct = normalized_pending_pcts.get(i, safe_float(level.get("qty_pct"), 100.0))
+        desired_tp_qty = remaining_qty * (tp_qty_pct / 100.0)
+        recorded_tp_qty = safe_float(level.get("protected_qty"), 0.0)
+        reported_tp_qty = _reported_order_qty(tp_id, recorded_tp_qty) if tp_id else 0.0
+        under_protected = (
+            bool(tp_id)
+            and tp_id in open_ids
+            and desired_tp_qty > 0
+            and reported_tp_qty + quantity_tolerance < desired_tp_qty
+        )
+        if not tp_id or tp_id not in open_ids or under_protected:
             missing_tp_indices.append(i)
-            if tp_id:
+            if under_protected:
+                if reported_tp_qty <= 0:
+                    logger.error(
+                        f"[PositionMonitor] CRITICAL: TP{i+1} order {tp_id[:8]} for {position.ticker} "
+                        "has no verifiable protected quantity; replacing it"
+                    )
+                else:
+                    logger.error(
+                        f"[PositionMonitor] CRITICAL: TP{i+1} order {tp_id[:8]} for {position.ticker} "
+                        f"covers only {reported_tp_qty} of required {desired_tp_qty}; replacing it"
+                    )
+            elif tp_id:
                 logger.warning(
                     f"[PositionMonitor] CRITICAL: TP{i+1} order {tp_id[:8]} for {position.ticker} "
                     f"NOT found on exchange - re-placing"
@@ -1807,10 +2042,6 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
             exchange_config.get("market_type", ""),
         )
 
-        remaining_qty = safe_float(position.remaining_quantity, safe_float(position.quantity, 0.0))
-        if remaining_qty <= 0:
-            return False
-
         re_placed = False
 
         # Re-place missing TP orders
@@ -1834,6 +2065,19 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                 if tp_qty <= 0:
                     continue
                 try:
+                    old_tp_id = tp_ids[i] if i < len(tp_ids) else ""
+                    if old_tp_id and old_tp_id in open_ids:
+                        cancel_result = await _cancel_exchange_order(
+                            exchange,
+                            symbol,
+                            old_tp_id,
+                        )
+                        if cancel_result.get("status") not in {"cancelled", "not_found"}:
+                            logger.error(
+                                f"[PositionMonitor] Could not cancel under-sized TP{i+1} "
+                                f"{old_tp_id} for {position.ticker}: {cancel_result}"
+                            )
+                            continue
                     tp_order = await _create_conditional_order(
                         exchange, symbol, "take_profit", tp_close_side,
                         round(tp_qty, 6), tp_price, pos_side,
@@ -1876,9 +2120,11 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                         exchange_config,
                         existing_order_id=sl_id,
                     )
-                    if sl_result.get("order_id"):
+                    if (
+                        sl_result.get("status") in {"placed", "simulated"}
+                        and sl_result.get("order_id")
+                    ):
                         position.stop_loss_order_id = sl_result["order_id"]
-                        trailing_config = loads_dict(position.trailing_stop_config_json)
                         trailing_config["_stop_loss_protected_qty"] = round(remaining_qty, 8)
                         trailing_config["_stop_loss_protected_at"] = utcnow().isoformat()
                         position.trailing_stop_config_json = json.dumps(trailing_config, ensure_ascii=False, default=str)
@@ -1889,7 +2135,7 @@ async def _verify_protective_orders(session, position: PositionModel, exchange_c
                         re_placed = True
                     else:
                         logger.warning(
-                            f"[PositionMonitor] SL re-place for {position.ticker} returned no order id: {sl_result}"
+                            f"[PositionMonitor] SL re-place for {position.ticker} was not confirmed: {sl_result}"
                         )
                 except Exception as e:
                     position.stop_loss_order_id = ""
@@ -1935,7 +2181,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
     if match:
         _GHOST_POSITION_TRACKER.pop(position.id, None)
         _save_ghost_tracker()
-        _sync_open_position_from_exchange(position, match)
+        authoritative_remaining = _sync_open_position_from_exchange(position, match)
         mark_price = safe_float(match.get("mark_price") or match.get("markPrice") or match.get("entry_price"))
         if mark_price > 0:
             _update_unrealized(position, mark_price)
@@ -1948,7 +2194,15 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         except Exception as exc:
             logger.warning(f"[PositionMonitor] Skipping TP order reconciliation for {position.ticker}; recent-order query failed: {exc}")
             tp_orders = []
-        tp_hit_levels = _detect_tp_hits_from_orders(position, tp_orders)
+        # The exchange position is authoritative here.  TP orders and the
+        # position snapshot describe the same fills, so subtracting the TP
+        # quantities again would double-count them and could mark a live
+        # position closed while contracts still exist on the exchange.
+        tp_hit_levels = _detect_tp_hits_from_orders(
+            position,
+            tp_orders,
+            authoritative_remaining=authoritative_remaining,
+        )
         if tp_hit_levels:
             tp_levels = loads_list(position.take_profit_json)
             if await _adjust_trailing_stop_on_tp_hit(position, tp_levels, tp_hit_levels, exchange_config, place_protective_stop):
@@ -2082,7 +2336,7 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
             except Exception as single_exc:
                 logger.warning(
                     f"[P0-CRITICAL] Empty positions list but single-position verification failed "
-                    f"for {position.ticker}: {single_exc}. Proceeding to ghost detection."
+                    f"for {position.ticker}: {single_exc}. Deferring ghost detection."
                 )
                 try:
                     ticker = await get_ticker(position.ticker, exchange_config)
@@ -2092,7 +2346,9 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                 if mark_price > 0:
                     _update_unrealized(position, mark_price)
                     stats["updated"] += 1
-                # Fall through to ghost detection — do NOT return here
+                # An API error is not evidence that the position is absent.
+                # Keep the DB position and retry on the next monitor cycle.
+                return stats
 
             if str(position.status or "").lower() == "pending" and position.entry_order_id:
                 logger.info(
@@ -2154,6 +2410,13 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         f"[P0-FIX] Could not verify order status for {position.entry_order_id}: {order_exc}"
                     )
                     order_alive = None
+
+                if order_alive is None:
+                    logger.error(
+                        f"[PositionMonitor] Entry order state is unknown for {position.ticker}; "
+                        "keeping the DB position until the exchange can be queried reliably"
+                    )
+                    return stats
 
                 if order_alive is True:
                     limit_timeout = _position_limit_timeout_secs(position)
@@ -2225,9 +2488,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                                 f"[P0-FIX] Entry order {position.entry_order_id} already gone from exchange"
                             )
                         except Exception as cancel_exc:
-                            logger.warning(
-                                f"[P0-FIX] Failed to cancel entry order {position.entry_order_id}: {cancel_exc}"
+                            logger.error(
+                                f"[P0-FIX] Failed to cancel entry order {position.entry_order_id}: {cancel_exc}. "
+                                "Keeping the DB position to avoid an orphaned future fill."
                             )
+                            return stats
                     else:
                         logger.info(
                             f"[P0-FIX] Entry order {position.entry_order_id} for {position.ticker} "
@@ -2239,21 +2504,19 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         f"not found on exchange, no cancel needed"
                     )
                 except Exception as order_exc:
-                    logger.warning(
-                        f"[P0-FIX] Failed to check entry order {position.entry_order_id}: {order_exc}"
+                    logger.error(
+                        f"[P0-FIX] Failed to check entry order {position.entry_order_id}: {order_exc}. "
+                        "Keeping the DB position because exchange state is unknown."
                     )
+                    return stats
 
-            await _close_db_position_without_exchange_exposure(
-                session,
-                position,
-                "exchange_position_not_found",
+            # Do not close immediately on an empty batch response. Fall through
+            # to the same repeated-confirmation tracker used when a non-empty
+            # batch omits this symbol.
+            logger.info(
+                f"[GhostSafe] Empty batch and targeted fetch both report no {position.ticker} "
+                "exposure; applying the normal multi-cycle ghost threshold"
             )
-            logger.warning(
-                f"[PositionMonitor] Closed stale DB position {position.id} for {position.ticker}: "
-                "get_open_positions returned empty and targeted single-position verification also found no exposure."
-            )
-            stats["closed"] += 1
-            return stats
 
         # Exchange data is non-empty (positions_data_reliable=True) and position not
         # found in batch list. Before incrementing ghost counter, ALWAYS verify with
@@ -2452,10 +2715,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                                 f"[P0-FIX] Entry order {position.entry_order_id} already gone from exchange"
                             )
                         except Exception as cancel_exc:
-                            logger.warning(
+                            logger.error(
                                 f"[P0-FIX] Failed to cancel entry order {position.entry_order_id}: {cancel_exc}. "
-                                f"Proceeding with Ghost close anyway."
+                                f"Aborting Ghost close to prevent an orphaned future fill."
                             )
+                            return stats
                     else:
                         logger.info(
                             f"[P0-FIX] Ghost position {position.id[:8]} entry order {position.entry_order_id} "
@@ -2467,10 +2731,11 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
                         f"not found on exchange, no cancel needed"
                     )
                 except Exception as order_exc:
-                    logger.warning(
+                    logger.error(
                         f"[P0-FIX] Failed to check entry order {position.entry_order_id} for Ghost position: "
-                        f"{order_exc}. Proceeding with Ghost close."
+                        f"{order_exc}. Aborting Ghost close because order state is unknown."
                     )
+                    return stats
 
             await record_position_close_trade_async(
                 session=session,
@@ -2570,26 +2835,78 @@ async def _reconcile_exchange_position(session, position: PositionModel, exchang
         # P0-FIX: Cancel leftover protective orders (SL/TP) when closing a position.
         # On hedge-mode exchanges, leftover orders can block margin or create unwanted fills.
         try:
+            from core.reconciliation_journal import record_reconciliation_issue
             from exchange import cancel_order
+
+            def _record_cleanup_issue(order_id: str, operation: str, reason: object) -> None:
+                record_reconciliation_issue(
+                    ticker=position.ticker,
+                    order_ids=[str(order_id)],
+                    operation=operation,
+                    reason=str(reason),
+                    exchange=str(exchange_config.get("exchange") or exchange_config.get("name") or position.exchange or ""),
+                    context={"position_id": str(position.id), "close_reason": close_reason},
+                )
+
             tp_order_ids = loads_list(position.take_profit_order_ids_json)
             for order_id in tp_order_ids:
                 if order_id:
                     try:
-                        await cancel_order(str(order_id), position.ticker, exchange_config)
-                    except Exception:
-                        pass  # Best-effort cancel
+                        cancel_result = await cancel_order(str(order_id), position.ticker, exchange_config)
+                        if cancel_result.get("status") not in {
+                            "cancelled", "canceled", "not_found", "simulated"
+                        }:
+                            logger.error(
+                                f"[PositionMonitor] TP cleanup requires reconciliation for "
+                                f"{position.ticker}: {cancel_result}"
+                            )
+                            _record_cleanup_issue(str(order_id), "cancel_take_profit_after_close", cancel_result)
+                    except Exception as exc:
+                        logger.error(
+                            f"[PositionMonitor] TP cleanup failed for {position.ticker}/{order_id}: {exc}"
+                        )
+                        _record_cleanup_issue(str(order_id), "cancel_take_profit_after_close", exc)
             if position.stop_loss_order_id:
                 try:
-                    await cancel_order(str(position.stop_loss_order_id), position.ticker, exchange_config)
-                except Exception:
-                    pass  # Best-effort cancel
+                    cancel_result = await cancel_order(
+                        str(position.stop_loss_order_id),
+                        position.ticker,
+                        exchange_config,
+                    )
+                    if cancel_result.get("status") not in {
+                        "cancelled", "canceled", "not_found", "simulated"
+                    }:
+                        logger.error(
+                            f"[PositionMonitor] SL cleanup requires reconciliation for "
+                            f"{position.ticker}: {cancel_result}"
+                        )
+                        _record_cleanup_issue(
+                            str(position.stop_loss_order_id),
+                            "cancel_stop_loss_after_close",
+                            cancel_result,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        f"[PositionMonitor] SL cleanup failed for "
+                        f"{position.ticker}/{position.stop_loss_order_id}: {exc}"
+                    )
+                    _record_cleanup_issue(
+                        str(position.stop_loss_order_id),
+                        "cancel_stop_loss_after_close",
+                        exc,
+                    )
         except Exception as cancel_exc:
             logger.debug(f"[PositionMonitor] Best-effort order cancel skipped for {position.ticker}: {cancel_exc}")
 
     return stats
 
 
-def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> list[dict]:
+def _detect_tp_hits_from_orders(
+    position: PositionModel,
+    orders: list[dict],
+    *,
+    authoritative_remaining: float | None = None,
+) -> list[dict]:
     raw_tp_ids = [str(order_id or "") for order_id in loads_list(position.take_profit_order_ids_json)]
     tp_order_ids = {order_id for order_id in raw_tp_ids if order_id}
     tp_levels = loads_list(position.take_profit_json)
@@ -2654,11 +2971,13 @@ def _detect_tp_hits_from_orders(position: PositionModel, orders: list[dict]) -> 
         current_remaining = _effective_remaining_quantity(position, opened_qty)
         if total_filled_qty_pct > 0 and current_remaining > 0:
             filled_qty_total = (total_filled_qty_pct / 100.0) * safe_float(position.quantity)
-            new_remaining = max(0, current_remaining - filled_qty_total)
-            if position.live_trading:
-                new_remaining = current_remaining
+            if authoritative_remaining is not None:
+                # A matching live exchange-position snapshot was applied just
+                # before this function.  It already includes these TP fills.
+                new_remaining = max(0.0, safe_float(authoritative_remaining))
             else:
-                position.remaining_quantity = new_remaining
+                new_remaining = max(0, current_remaining - filled_qty_total)
+            position.remaining_quantity = new_remaining
 
             entry_price = safe_float(position.entry_price)
             leverage = safe_float(position.leverage, 1.0)

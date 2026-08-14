@@ -243,7 +243,7 @@ def calculate_expected_rr_with_trailing(
     Returns scenarios for different trailing outcomes.
     """
     if sl_distance <= 0:
-        return {"error": "Invalid SL distance"}
+        return {"mode": str(mode.value), "error": "SL distance must be positive"}
 
     q1, q2, q3, q4 = tp_quantities
     d1, d2, d3, d4 = tp_distances

@@ -31,9 +31,20 @@ end
 return 0
 """
 
+_RENEW_LOCK_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("expire", KEYS[1], ARGV[2])
+end
+return 0
+"""
+
 
 class DistributedLockTimeout(TimeoutError):
     """Raised when a distributed lock cannot be acquired before timeout."""
+
+
+class DistributedLockLost(RuntimeError):
+    """Raised when a renewable lock is lost while protected work is running."""
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -103,12 +114,15 @@ async def _local_lock(name: str) -> asyncio.Lock:
         if lock is None:
             lock = asyncio.Lock()
             _LOCAL_LOCKS[name] = lock
-            # BUG FIX: Periodic cleanup to prevent unbounded growth
             if len(_LOCAL_LOCKS) > 5000:
-                # Remove locks that are not currently held
-                _LOCAL_LOCKS.clear()
-                # Re-add the current lock
-                _LOCAL_LOCKS[name] = lock
+                to_remove = [k for k, v in _LOCAL_LOCKS.items() if not v.locked() and k != name]
+                for k in to_remove:
+                    del _LOCAL_LOCKS[k]
+                if len(_LOCAL_LOCKS) > 5000:
+                    logger.critical(
+                        f"[RedisCoordination] Local lock pool still has {len(_LOCAL_LOCKS)} entries "
+                        f"after removing unlocked entries. Mutual exclusion may be compromised."
+                    )
         return lock
 
 
@@ -122,6 +136,7 @@ async def distributed_lock(
     allow_local_fallback: bool = True,
 ) -> AsyncIterator[None]:
     """Acquire a Redis SETNX lock, with local fallback when Redis is absent."""
+    ttl_seconds = max(1, int(ttl_seconds))
     lock_key = make_key("lock", name)
     token = uuid.uuid4().hex
     client = await _get_client()
@@ -143,6 +158,8 @@ async def distributed_lock(
     deadline = time.monotonic() + max(blocking_timeout_seconds, 0.0)
     acquired = False
     renew_task: asyncio.Task | None = None
+    owner_task = asyncio.current_task()
+    ownership_lost = asyncio.Event()
     while True:
         try:
             acquired = bool(await _maybe_await(client.set(lock_key, token, nx=True, ex=ttl_seconds)))
@@ -157,24 +174,42 @@ async def distributed_lock(
         await asyncio.sleep(retry_interval_seconds)
 
     async def _renew_lock() -> None:
-        interval = max(1.0, min(float(ttl_seconds) / 3.0, 30.0))
+        interval = max(0.1, min(float(ttl_seconds) / 3.0, 30.0))
         while True:
             await asyncio.sleep(interval)
             try:
-                current = await _maybe_await(client.get(lock_key))
-                if current is None or _decode(current) != token:
+                renewed = await _maybe_await(
+                    client.eval(_RENEW_LOCK_SCRIPT, 1, lock_key, token, int(ttl_seconds))
+                )
+                if int(renewed or 0) != 1:
                     logger.error(f"[RedisCoordination] Lost Redis lock ownership for {lock_key}")
+                    ownership_lost.set()
+                    if owner_task is not None:
+                        owner_task.cancel()
                     return
-                await _maybe_await(client.expire(lock_key, ttl_seconds))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(f"[RedisCoordination] Redis lock renew failed for {lock_key}: {exc}")
+                logger.error(f"[RedisCoordination] Redis lock renew failed for {lock_key}: {exc}")
+                ownership_lost.set()
+                if owner_task is not None:
+                    owner_task.cancel()
                 return
 
     renew_task = asyncio.create_task(_renew_lock())
     try:
-        yield
+        try:
+            yield
+            if ownership_lost.is_set():
+                raise DistributedLockLost(
+                    f"Lost Redis lock {lock_key} while protected work was running; reconciliation required"
+                )
+        except asyncio.CancelledError as exc:
+            if ownership_lost.is_set():
+                raise DistributedLockLost(
+                    f"Lost Redis lock {lock_key} while protected work was running; reconciliation required"
+                ) from exc
+            raise
     finally:
         if renew_task:
             renew_task.cancel()
@@ -186,12 +221,8 @@ async def distributed_lock(
             await _maybe_await(client.eval(_RELEASE_LOCK_SCRIPT, 1, lock_key, token))
         except Exception as exc:
             logger.warning(f"[RedisCoordination] Redis lock release failed for {lock_key}: {exc}")
-            try:
-                current = await _maybe_await(client.get(lock_key))
-                if current is not None and _decode(current) == token:
-                    await _maybe_await(client.delete(lock_key))
-            except Exception as exc2:
-                logger.warning(f"[RedisCoordination] Redis lock release fallback also failed for {lock_key}: {exc2}")
+            # Do not fall back to GET followed by DELETE. That sequence is not
+            # atomic and can delete a new owner's lock between the two calls.
 
 
 async def redis_get_json(key: str) -> Any | None:

@@ -19,7 +19,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_admin
-from core.config import settings
+from core.config import DATA_DIR, settings
 from core.database import (
     AdminAuditLogModel,
     AdminSettingModel,
@@ -762,7 +762,21 @@ async def update_settings(
     SAFE_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 
     # Protected settings that require special handling
-    PROTECTED_KEYS = {"webhook_secret", "app_encryption_key"}
+    PROTECTED_KEYS = {
+        "webhook_secret",
+        "app_encryption_key",
+        "runtime_exchange",
+        "exchange",
+        "api_key",
+        "api_secret",
+        "password",
+        "live_trading",
+        "sandbox_mode",
+        "market_type",
+        "default_order_type",
+        "stop_loss_order_type",
+        "limit_timeout_overrides",
+    }
 
     # Validate critical risk settings
     RISK_SETTING_RANGES = {
@@ -902,9 +916,28 @@ async def list_webhook_events(
             "reason": _html.escape(str(e.reason)) if e.reason else None,
             "client_ip": e.client_ip,
             "created_at": e.created_at.isoformat() if e.created_at else None,
+            "updated_at": e.updated_at.isoformat() if e.updated_at else None,
+            "attempt_count": int(e.attempt_count or 0),
+            "next_attempt_at": e.next_attempt_at.isoformat() if e.next_attempt_at else None,
         }
         for e in events
     ]
+
+
+@router.post("/webhook-events/{event_id}/retry")
+async def retry_webhook_event(
+    event_id: str,
+    admin: dict = Depends(require_admin),
+):
+    """Manually requeue a terminal webhook event for durable processing."""
+    from services.webhook_worker import requeue_webhook_event
+
+    result = await requeue_webhook_event(event_id)
+    if result.get("status") == "missing":
+        raise HTTPException(404, "Webhook event not found")
+    if result.get("status") == "conflict":
+        raise HTTPException(409, str(result.get("reason") or "Webhook event already active"))
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -1282,7 +1315,7 @@ async def get_system_status(
     admin: dict = Depends(require_admin),
 ):
     """Return lightweight system/admin diagnostics for the admin dashboard."""
-    data_dir = Path(__file__).resolve().parent.parent / "data"
+    data_dir = DATA_DIR
     logs_dir = Path(__file__).resolve().parent.parent / "logs"
     return {
         "version": settings.app_version,
@@ -1454,14 +1487,14 @@ async def approve_order_event(
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Approve a manual review order event for re-execution."""
+    """Acknowledge a manually reconciled order event without re-execution."""
     from services.order_reconciler import approve_order_event as _approve
     body = await request.json() if request.headers.get("content-length") else {}
     admin_notes = body.get("admin_notes", "")
     result = await _approve(db, event_id, admin_notes)
     await _add_audit_log(
         db, admin, "approve_order_event", "order_event", event_id,
-        f"Approved order event {event_id}", request,
+        f"Acknowledged reconciled order event {event_id}", request,
     )
     await db.commit()
     return result
@@ -1494,14 +1527,18 @@ async def retry_order_event(
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Queue a manual review order event for retry."""
+    """Reject unsafe blind retry and retain the event for reconciliation."""
     from services.order_reconciler import retry_order_event as _retry
     body = await request.json() if request.headers.get("content-length") else {}
     admin_notes = body.get("admin_notes", "")
     result = await _retry(db, event_id, admin_notes)
     await _add_audit_log(
         db, admin, "retry_order_event", "order_event", event_id,
-        f"Queued order event {event_id} for retry", request,
+        (
+            f"Order retry request for {event_id}: "
+            f"{'accepted' if result.get('success') else 'refused'}"
+        ),
+        request,
     )
     await db.commit()
     return result
@@ -1526,7 +1563,12 @@ async def update_order_execution_settings(
     """Update order execution auto-approve/auto-reject settings."""
     from core.runtime_settings import save_order_execution_settings
     body = await request.json()
-    result = await save_order_execution_settings(db, body)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    try:
+        result = await save_order_execution_settings(db, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _add_audit_log(
         db, admin, "update_order_execution_settings", "settings", "order_execution",
         "Updated order execution settings", request,
@@ -1756,53 +1798,84 @@ async def _add_audit_log(
 # ─────────────────────────────────────────────
 
 class FilterThresholdsRequest(BaseModel):
-    atr_pct_max: float | None = None
-    spread_pct_max: float | None = None
-    volume_24h_min: float | None = None
-    price_change_1h_max: float | None = None
-    rsi_long_max: float | None = None
-    rsi_short_min: float | None = None
-    funding_rate_threshold: float | None = None
-    orderbook_long_min: float | None = None
-    orderbook_short_max: float | None = None
-    signal_saturation_max: int | None = None
-    ema_diff_pct_min: float | None = None
-    consecutive_loss_max: int | None = None
-    cooldown_seconds: int | None = None
-    cooldown_win_multiplier: float | None = None
-    cooldown_loss_multiplier: float | None = None
-    price_deviation_pct_max: float | None = None
-    oi_change_pct_max: float | None = None
-    correlated_asset_change_max: float | None = None
-    whale_threshold_usd: float | None = None
-    liquidation_distance_pct_min: float | None = None
-    long_short_ratio_extreme_high: float | None = None
-    long_short_ratio_extreme_low: float | None = None
-    basis_pct_max: float | None = None
-    fear_greed_extreme_threshold: int | None = None
-    cvd_divergence_threshold: float | None = None
-    volatility_regime_multiplier: float | None = None
-    position_reduce_on_loss_pct: float | None = None
+    atr_pct_max: float | None = Field(default=None, ge=0.01, le=100)
+    spread_pct_max: float | None = Field(default=None, ge=0, le=100)
+    volume_24h_min: float | None = Field(default=None, ge=0, le=1e15)
+    price_change_1h_max: float | None = Field(default=None, ge=0, le=100)
+    rsi_long_max: float | None = Field(default=None, ge=0, le=100)
+    rsi_short_min: float | None = Field(default=None, ge=0, le=100)
+    funding_rate_threshold: float | None = Field(default=None, ge=0, le=1)
+    orderbook_long_min: float | None = Field(default=None, ge=0, le=100)
+    orderbook_short_max: float | None = Field(default=None, ge=0, le=100)
+    signal_saturation_max: int | None = Field(default=None, ge=1, le=100)
+    ema_diff_pct_min: float | None = Field(default=None, ge=0, le=100)
+    consecutive_loss_max: int | None = Field(default=None, ge=1, le=100)
+    cooldown_seconds: int | None = Field(default=None, ge=0, le=86_400)
+    cooldown_win_multiplier: float | None = Field(default=None, ge=0, le=100)
+    cooldown_loss_multiplier: float | None = Field(default=None, ge=0, le=100)
+    price_deviation_pct_max: float | None = Field(default=None, ge=0, le=100)
+    oi_change_pct_max: float | None = Field(default=None, ge=0, le=1000)
+    correlated_asset_change_max: float | None = Field(default=None, ge=0, le=100)
+    whale_threshold_usd: float | None = Field(default=None, ge=0, le=1e15)
+    liquidation_distance_pct_min: float | None = Field(default=None, ge=0, le=100)
+    long_short_ratio_extreme_high: float | None = Field(default=None, ge=0.01, le=100)
+    long_short_ratio_extreme_low: float | None = Field(default=None, ge=0.01, le=100)
+    basis_pct_max: float | None = Field(default=None, ge=0, le=100)
+    fear_greed_extreme_threshold: int | None = Field(default=None, ge=0, le=100)
+    cvd_divergence_threshold: float | None = Field(default=None, ge=0, le=1000)
+    volatility_regime_multiplier: float | None = Field(default=None, ge=0.1, le=10)
+    position_reduce_on_loss_pct: float | None = Field(default=None, ge=0, le=100)
     dynamic_cooldown_enabled: bool | None = None
-    min_pass_score: float | None = None
-    data_completeness_soft_fail_count: int | None = None
-    max_same_direction_positions: int | None = None
-    max_correlated_exposure_pct: float | None = None
-    max_live_missing_data_checks: int | None = None
+    min_pass_score: float | None = Field(default=None, ge=0, le=100)
+    data_completeness_soft_fail_count: int | None = Field(default=None, ge=0, le=100)
+    max_same_direction_positions: int | None = Field(default=None, ge=1, le=100)
+    max_correlated_exposure_pct: float | None = Field(default=None, ge=0.1, le=100)
+    max_live_missing_data_checks: int | None = Field(default=None, ge=0, le=100)
     block_live_on_risk_check_error: bool | None = None
     margin_mode: str | None = None
+
+    @field_validator("margin_mode")
+    @classmethod
+    def _validate_margin_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.lower().strip()
+        if normalized not in {"cross", "isolated"}:
+            raise ValueError("margin_mode must be 'cross' or 'isolated'")
+        return normalized
 
 
 class RiskThresholdsRequest(BaseModel):
-    max_same_direction_positions: int | None = None
-    max_correlated_exposure_pct: float | None = None
-    max_live_missing_data_checks: int | None = None
+    max_same_direction_positions: int | None = Field(default=None, ge=1, le=100)
+    max_correlated_exposure_pct: float | None = Field(default=None, ge=0.1, le=100)
+    max_live_missing_data_checks: int | None = Field(default=None, ge=0, le=100)
     block_live_on_risk_check_error: bool | None = None
-    max_daily_trades: int | None = None
-    max_daily_loss_pct: float | None = None
-    max_position_pct: float | None = None
-    risk_per_trade_pct: float | None = None
+    max_daily_trades: int | None = Field(default=None, ge=1, le=10_000)
+    max_daily_loss_pct: float | None = Field(default=None, ge=0.1, le=100)
+    max_position_pct: float | None = Field(default=None, ge=0.1, le=100)
+    risk_per_trade_pct: float | None = Field(default=None, ge=0.1, le=100)
     margin_mode: str | None = None
+    live_data_quality_mode: str | None = None
+
+    @field_validator("margin_mode")
+    @classmethod
+    def _validate_margin_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.lower().strip()
+        if normalized not in {"cross", "isolated"}:
+            raise ValueError("margin_mode must be 'cross' or 'isolated'")
+        return normalized
+
+    @field_validator("live_data_quality_mode")
+    @classmethod
+    def _validate_live_data_quality_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.lower().strip()
+        if normalized not in {"fail_closed", "warn"}:
+            raise ValueError("live_data_quality_mode must be 'fail_closed' or 'warn'")
+        return normalized
 
 
 @router.get("/filter-thresholds")
@@ -1898,13 +1971,40 @@ async def update_risk_thresholds(
     if not updates:
         return {"status": "success", "updated": {}}
 
-    # Persist each setting to admin_settings table
+    # Validate the complete live configuration before persisting any runtime
+    # risk change.  Restore the in-memory object when validation fails so an
+    # unsafe request cannot partially alter the running process.
+    previous = {key: getattr(settings.risk, key) for key in updates}
     for key, value in updates.items():
-        await set_admin_setting(db, key, str(value))
         setattr(settings.risk, key, value)
+    try:
+        if settings.exchange.live_trading:
+            settings._validate_settings()
+    except RuntimeError as exc:
+        for key, value in previous.items():
+            setattr(settings.risk, key, value)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    await db.commit()
-    await _add_audit_log(db, admin, "update_risk_thresholds", "settings", "", f"Updated {len(updates)} risk thresholds", request)
+    # Persist only after the candidate configuration has passed validation.
+    # Keep memory and storage in sync even if the database transaction fails.
+    try:
+        for key, value in updates.items():
+            await set_admin_setting(db, key, str(value))
+        await _add_audit_log(
+            db,
+            admin,
+            "update_risk_thresholds",
+            "settings",
+            "",
+            f"Updated {len(updates)} risk thresholds",
+            request,
+        )
+        await db.commit()
+    except Exception:
+        for key, value in previous.items():
+            setattr(settings.risk, key, value)
+        await db.rollback()
+        raise
 
     return {"status": "success", "updated": updates}
 
@@ -1915,7 +2015,7 @@ async def get_filter_statistics(
 ):
     """Get pre-filter blocking statistics."""
     from pre_filter import get_filter_stats
-    stats = get_filter_stats()
+    stats = await get_filter_stats()
 
     summary = {}
     for check_name, ticker_counts in stats.items():
@@ -1936,7 +2036,7 @@ async def reset_filter_statistics(
 ):
     """Reset pre-filter blocking statistics."""
     from pre_filter import reset_filter_stats
-    reset_filter_stats()
+    await reset_filter_stats()
 
     await _add_audit_log(db, admin, "reset_filter_stats", "settings", "", "Reset filter statistics", request)
 
@@ -2242,7 +2342,7 @@ async def update_enhanced_filters_settings(
 
 GITHUB_REPO = "ikun52012/QuantPilot-AI"
 GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-UPDATE_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "updater"
+UPDATE_DATA_DIR = DATA_DIR / "updater"
 UPDATE_REQUEST_DIR = UPDATE_DATA_DIR / "requests"
 UPDATE_STATUS_DIR = UPDATE_DATA_DIR / "status"
 UPDATE_HEALTH_FILE = UPDATE_STATUS_DIR / "updater-health.json"

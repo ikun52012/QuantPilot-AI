@@ -26,6 +26,8 @@ from typing import Any
 
 from loguru import logger
 
+from core.config import DATA_DIR
+
 
 class CacheLayer:
     """Cache layer identifier."""
@@ -67,7 +69,7 @@ class MultiLayerCache:
         l2_redis_url: str = "redis://localhost:6379/0",
         l2_ttl: float = 300.0,
         l3_enabled: bool = True,
-        l3_cache_dir: str = "./data/cache",
+        l3_cache_dir: str | Path | None = None,
         l3_ttl: float = 3600.0,
     ):
         """Initialize multi-layer cache.
@@ -101,7 +103,7 @@ class MultiLayerCache:
 
         # L3 Disk Cache
         self._l3_enabled = l3_enabled
-        self._l3_cache_dir = Path(l3_cache_dir)
+        self._l3_cache_dir = Path(l3_cache_dir) if l3_cache_dir else DATA_DIR / "cache"
         self._l3_ttl = l3_ttl
         self._l3_lock = asyncio.Lock()
 
@@ -549,7 +551,7 @@ async def get_ai_analysis_cache() -> MultiLayerCache:
             l2_redis_url=settings.redis.url,
             l2_ttl=settings.redis.ttl,
             l3_enabled=True,
-            l3_cache_dir="./data/cache/ai",
+            l3_cache_dir=DATA_DIR / "cache" / "ai",
             l3_ttl=3600,
         )
 
@@ -596,7 +598,7 @@ async def get_smc_analysis_cache() -> MultiLayerCache:
             l2_redis_url=settings.redis.url,
             l2_ttl=600.0,
             l3_enabled=True,
-            l3_cache_dir="./data/cache/smc",
+            l3_cache_dir=DATA_DIR / "cache" / "smc",
             l3_ttl=7200,
         )
 

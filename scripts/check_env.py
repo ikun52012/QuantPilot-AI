@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).parent.parent
 os.chdir(ROOT)
@@ -63,6 +64,7 @@ REQUIRED_PACKAGES = [
     ("qrcode", "qrcode[pil]"),
     ("aiofiles", "aiofiles"),
     ("dotenv", "python-dotenv"),
+    ("psutil", "psutil"),
 ]
 OPTIONAL_PACKAGES = [
     ("ccxt", "ccxt (实盘交易/行情数据支持)"),
@@ -104,7 +106,8 @@ if env_file.exists():
             warn=True,
         )
     else:
-        print(f"  {INFO}  DEFAULT_ADMIN_PASSWORD 留空：首次建库会生成 data/bootstrap_admin_password.txt")
+        data_dir_display = env_vals.get("DATA_DIR", "./data") or "./data"
+        print(f"  {INFO}  DEFAULT_ADMIN_PASSWORD 留空：首次建库会生成 {data_dir_display}/bootstrap_admin_password.txt")
 
     live_trading = (env_vals.get("LIVE_TRADING", "false") or "false").lower() == "true"
     ccxt_available = importlib.util.find_spec("ccxt") is not None
@@ -126,14 +129,20 @@ if env_file.exists():
         if not ccxt_available:
             print(f"  {INFO}  ccxt 未安装：纸交易/后台可启动，实盘交易和交易所实时行情不可用")
 
-    db_url = env_vals.get("DATABASE_URL", "sqlite+aiosqlite:///./data/server.db") or "sqlite+aiosqlite:///./data/server.db"
+    data_dir_value = env_vals.get("DATA_DIR", "./data") or "./data"
+    default_db_url = f"sqlite+aiosqlite:///{(Path(data_dir_value) / 'server.db').as_posix()}"
+    db_url = env_vals.get("DATABASE_URL", default_db_url) or default_db_url
     check("DATABASE_URL 已配置", bool(db_url), "DATABASE_URL 未设置")
     print(f"  {INFO}  数据库: {db_url.split('@')[-1] if '@' in db_url else db_url}")
 
     redis_enabled = (env_vals.get("REDIS_ENABLED", "false") or "false").lower() == "true"
     if redis_enabled:
         redis_url = env_vals.get("REDIS_URL", "redis://localhost:6379/0") or "redis://localhost:6379/0"
-        print(f"  {INFO}  Redis: {redis_url}")
+        parsed_redis = urlsplit(redis_url)
+        redis_host = parsed_redis.hostname or "localhost"
+        redis_port = parsed_redis.port or 6379
+        redis_db = parsed_redis.path or "/0"
+        print(f"  {INFO}  Redis: {parsed_redis.scheme or 'redis'}://{redis_host}:{redis_port}{redis_db}")
     else:
         print(f"  {INFO}  Redis: 已禁用 (使用内存缓存)")
 
@@ -141,9 +150,15 @@ if env_file.exists():
 # 4. 必要目录
 # ──────────────────────────────────────────────
 print("\n[4/7] 必要目录检查")
+data_dir_raw = os.getenv("DATA_DIR", "")
+if env_file.exists():
+    data_dir_raw = str(env_vals.get("DATA_DIR", data_dir_raw or "./data") or "./data")
+runtime_data_dir = Path(data_dir_raw or "./data").expanduser()
+if not runtime_data_dir.is_absolute():
+    runtime_data_dir = ROOT / runtime_data_dir
 REQUIRED_DIRS = [
-    ROOT / "data",
-    ROOT / "data" / "backups",
+    runtime_data_dir,
+    runtime_data_dir / "backups",
     ROOT / "logs",
     ROOT / "trade_logs",
     ROOT / "static",

@@ -194,3 +194,23 @@ class TestBootstrapAdminPassword:
             config = Settings.from_env()
 
         assert config.default_admin_password == ""
+
+
+def test_malformed_host_cannot_poison_request_url_path():
+    """Regression test for CVE-2026-48710 / GHSA-86qp-5c8j-p5mr."""
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+
+    @app.get("/actual-path")
+    async def actual_path(request: Request):
+        return {"path": request.url.path}
+
+    response = TestClient(app).get(
+        "/actual-path",
+        headers={"host": "example.com/forged?path="},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["path"] == "/actual-path"

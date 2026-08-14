@@ -13,6 +13,7 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import desc, select
 
+from core.ai_cost_tracker import ai_costs
 from core.config import settings
 from core.database import (
     PositionModel,
@@ -25,7 +26,8 @@ from core.database import (
     set_scanner_symbol_cooldown,
     update_scanner_state_counts,
 )
-from core.utils.common import position_symbol_key
+from core.redis_coordination import DistributedLockLost, DistributedLockTimeout, distributed_lock
+from core.utils.common import position_symbol_key, safe_bool
 from core.utils.datetime import utcnow
 from services.scanner_learning import compute_outcome_summary, compute_walk_forward_thresholds, sync_scanner_outcomes
 from services.scanner_rules import DEFAULT_ENGINE, ScoringContext
@@ -137,6 +139,7 @@ class ScannerCandidate:
     target_market_type: str = ""
     source_exchange: str = ""
     source_market_type: str = ""
+    source_symbol: str = ""
     actual_data_source: str = ""
     data_source_policy: str = "fallback"
     tradable: bool = True
@@ -145,7 +148,13 @@ class ScannerCandidate:
     liquidity_tier: str = "unknown"
 
     def to_payload(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["score_metadata"] = {
+            "kind": "rule_points",
+            "is_probability": False,
+            "description": "Rule-engine points; not a calibrated win probability",
+        }
+        return payload
 
 
 def _ohlcv_rows(candles: list[Any]) -> list[list[float]]:
@@ -229,6 +238,13 @@ class MarketScannerService:
         self._last_learning_refreshed_at: float = 0.0
         self._learning_summary_cache: dict[str, Any] = {}
 
+    def _scope_user_id(self) -> str | None:
+        """Map the scanner audit scope to the matching position owner."""
+        scope = str(self.scope or "admin").strip()
+        if scope == "admin":
+            return None
+        return scope.removeprefix("user:")
+
     @property
     def last_status(self) -> dict[str, Any]:
         return dict(self._last_status)
@@ -309,6 +325,30 @@ class MarketScannerService:
             self._scan_lock.release()
 
     async def _scan_once_locked(self, run_id: str) -> dict[str, Any]:
+        """Protect scheduled and manually triggered scans across instances."""
+        try:
+            async with distributed_lock(
+                f"market-scanner:{self.scope}",
+                ttl_seconds=max(120, int(settings.scanner.scan_timeout_secs) + 60),
+                blocking_timeout_seconds=0.1,
+                allow_local_fallback=not settings.redis.enabled,
+            ):
+                return await self._scan_once_coordinated(run_id)
+        except DistributedLockTimeout:
+            return {
+                "status": "skipped",
+                "reason": "Scanner already running on another instance",
+                "run_id": run_id,
+            }
+        except DistributedLockLost as exc:
+            logger.error(f"[Scanner] Distributed scan lease lost: {exc}")
+            return {
+                "status": "error",
+                "reason": f"Distributed scan lease lost: {exc}",
+                "run_id": run_id,
+            }
+
+    async def _scan_once_coordinated(self, run_id: str) -> dict[str, Any]:
         self._learning_summary = await self._refresh_learning(run_id)
         self._adaptive_min_score = await self._get_effective_min_score()
         self._adaptive_min_score_cached_at = time.time()
@@ -626,7 +666,7 @@ class MarketScannerService:
             "universe_min_quote_volume": settings.scanner.universe_min_quote_volume,
             "universe_cache_ttl_secs": settings.scanner.universe_cache_ttl_secs,
             "watchlist_empty_means_all_tradable": True,
-            "live_whitelist_empty_means_all_tradable": True,
+            "live_whitelist_empty_means_all_tradable": False,
             "include_symbols": list(settings.scanner.include_symbols or []),
             "exclude_symbols": list(settings.scanner.exclude_symbols or []),
             "count": len(universe),
@@ -998,7 +1038,7 @@ class MarketScannerService:
             )
             return {"scanned": 1, "data_failures": 0, "filtered": 1, "filter_reasons": {event_reason or "event_filter": 1}, "candidates": []}
 
-        symbol_candidates = self._build_candidates(bundle)
+        symbol_candidates = await self._build_candidates(bundle)
         if not symbol_candidates:
             await self._audit(
                 run_id,
@@ -1033,9 +1073,9 @@ class MarketScannerService:
             accepted.append((candidate, bundle))
         return {"scanned": 1, "data_failures": 0, "filtered": 0, "filter_reasons": {}, "candidates": accepted}
 
-    def _build_candidates(self, bundle: OHLCVBundle) -> list[ScannerCandidate]:
+    async def _build_candidates(self, bundle: OHLCVBundle) -> list[ScannerCandidate]:
         if settings.scanner.mtf_consensus_enabled:
-            return self._build_consensus_candidates(bundle)
+            return await self._build_consensus_candidates(bundle)
 
         primary_tf = bundle.primary_timeframe
         indicators = bundle.indicators.get(primary_tf, {})
@@ -1068,7 +1108,7 @@ class MarketScannerService:
         for direction in directions:
             for timeframe, ctx in all_smc[direction].items():
                 tf_indicators = bundle.indicators.get(timeframe) or indicators
-                candidate = self._score_smc_candidate(
+                candidate = await self._score_smc_candidate(
                     bundle, ctx, timeframe, direction, tf_indicators,
                     htf_trend=htf_trend if timeframe != sorted(bundle.candles.keys(), key=lambda tf: timeframe_to_seconds(tf))[-1] else None,
                 )
@@ -1077,7 +1117,7 @@ class MarketScannerService:
 
         return self._fuse_timeframe_candidates(candidates, bundle)
 
-    def _build_consensus_candidates(self, bundle: OHLCVBundle) -> list[ScannerCandidate]:
+    async def _build_consensus_candidates(self, bundle: OHLCVBundle) -> list[ScannerCandidate]:
         current = float(bundle.current_price or 0.0)
         if current <= 0:
             return []
@@ -1106,7 +1146,7 @@ class MarketScannerService:
                 if not ctx:
                     continue
                 tf_indicators = bundle.indicators.get(timeframe) or bundle.indicators.get(bundle.primary_timeframe, {})
-                candidate = self._score_smc_candidate(
+                candidate = await self._score_smc_candidate(
                     bundle,
                     ctx,
                     timeframe,
@@ -1533,13 +1573,17 @@ class MarketScannerService:
             item = self._threshold_overrides.get(key)
             if not item:
                 continue
+            if not bool(item.get("validated")):
+                continue
+            if _safe_float(item.get("validation_expectancy_pct"), 0.0) <= 0:
+                continue
             threshold = _safe_float(item.get("threshold"), 0.0)
             if threshold > 0:
                 return max(float(settings.scanner.adaptive_min_score_floor), min(float(settings.scanner.adaptive_min_score_ceiling), threshold))
         return base
 
     async def _refresh_learning(self, run_id: str) -> dict[str, Any]:
-        if not settings.scanner.learning_enabled or db_manager.async_session_factory is None:
+        if not settings.scanner.learning_enabled:
             self._threshold_overrides = {}
             return {"enabled": False}
 
@@ -1548,6 +1592,10 @@ class MarketScannerService:
         if elapsed < settings.scanner.learning_refresh_interval_secs and self._learning_summary_cache:
             logger.debug(f"[ScannerLearning] Skipping refresh, using cached learning summary (elapsed={elapsed:.1f}s)")
             return self._learning_summary_cache
+
+        if db_manager.async_session_factory is None:
+            self._threshold_overrides = {}
+            return {"enabled": False}
 
         try:
             async with db_manager.async_session_factory() as session:
@@ -1640,24 +1688,26 @@ class MarketScannerService:
         from smc_analyzer import analyze_smc_single_tf
 
         contexts: dict[str, Any] = {}
-        atr_pct = _safe_float(bundle.indicators.get(bundle.primary_timeframe, {}).get("atr_pct"))
         for timeframe, candles in bundle.candles.items():
             rows = _ohlcv_rows(candles)
             if len(rows) < 11:
                 continue
+            tf_atr_pct = _safe_float(bundle.indicators.get(timeframe, {}).get("atr_pct"))
+            if tf_atr_pct <= 0:
+                tf_atr_pct = _safe_float(bundle.indicators.get(bundle.primary_timeframe, {}).get("atr_pct"))
             try:
                 contexts[timeframe] = analyze_smc_single_tf(
                     rows,
                     timeframe,
                     bundle.current_price,
                     direction,
-                    atr_pct,
+                    tf_atr_pct,
                 )
             except Exception as exc:
                 logger.debug(f"[Scanner] SMC failed for {bundle.mapping.watch_symbol} {timeframe}: {exc}")
         return contexts
 
-    def _build_scoring_context(
+    async def _build_scoring_context(
         self,
         bundle: OHLCVBundle,
         ctx: Any,
@@ -1708,7 +1758,7 @@ class MarketScannerService:
             else:
                 price_zone = "discount_or_neutral"
 
-        return ScoringContext(
+        sc = ScoringContext(
             direction=direction,
             current_price=current,
             atr_pct=atr_pct,
@@ -1736,11 +1786,274 @@ class MarketScannerService:
             equilibrium=equilibrium,
             spread_pct=bundle.bid_ask_spread_pct,
             bid_ask_spread_pct=bundle.bid_ask_spread_pct,
+            funding_rate=bundle.funding_rate,
+            long_short_ratio=bundle.long_short_ratio,
             bundle_quality_passed=bundle.quality_passed,
             bundle_quality_reasons=list(bundle.quality_reasons or []),
             timeframe=str(timeframe or bundle.primary_timeframe),
             market_type=bundle.mapping.market_type or settings.exchange.market_type,
         )
+        # ── Enrich ScoringContext with all enhanced-market-data fields ──────────
+        # Round-4 audit fix: previously only 4 fields were injected via __dict__
+        # hack, leaving 26/53 rules as dead code. Now we populate every field
+        # declared on ScoringContext so all rules can fire.
+        try:
+            from enhanced_market_data import (
+                calculate_atr_percentile,
+                calculate_cvd_divergence,
+                calculate_funding_term_structure,
+                calculate_ichimoku,
+                calculate_mtf_momentum_alignment,
+                calculate_supertrend,
+                calculate_volume_zscore,
+                detect_active_session,
+                detect_macd_divergence,
+                detect_rsi_divergence,
+                detect_ttm_squeeze,
+                detect_volatility_regime,
+                detect_wyckoff_phase,
+                estimate_orderbook_slippage,
+                fetch_btc_dominance,
+                fetch_fear_greed_index,
+                fetch_liquidation_heatmap,
+                fetch_long_short_ratio,
+            )
+            ohlcv_rows = _ohlcv_rows(bundle.candles.get(bundle.primary_timeframe, []))
+            watch_sym = bundle.mapping.watch_symbol
+
+            # 1) Volume / ATR percentile (already had, but proper assignment now)
+            if ohlcv_rows:
+                try:
+                    vol_z = await calculate_volume_zscore(ohlcv_rows)
+                    sc.volume_zscore = vol_z.get("volume_zscore")
+                    sc.rvol = vol_z.get("rvol")
+                except Exception:
+                    pass
+                try:
+                    atr_p = await calculate_atr_percentile(ohlcv_rows)
+                    sc.atr_percentile = atr_p.get("atr_percentile")
+                except Exception:
+                    pass
+
+            # 2) Orderbook slippage
+            try:
+                order_size = float(settings.scanner.liquidity_order_size_usdt)
+                slip_dir = "buy" if direction == "long" else "sell"
+                slippage_data = await estimate_orderbook_slippage(watch_sym, order_size, slip_dir)
+                sc.orderbook_slippage_bps = slippage_data.get("slippage_bps")
+            except Exception:
+                pass
+
+            # 3) Ichimoku cloud position
+            if ohlcv_rows and len(ohlcv_rows) >= 52:
+                try:
+                    ich = calculate_ichimoku(ohlcv_rows)
+                    sc.ichimoku_cloud_position = ich.get("cloud_position")
+                except Exception:
+                    pass
+
+            # 4) Supertrend direction
+            if ohlcv_rows and len(ohlcv_rows) >= 11:
+                try:
+                    st = calculate_supertrend(ohlcv_rows)
+                    sc.supertrend_direction = st.get("direction")
+                except Exception:
+                    pass
+
+            # 5) RSI / MACD divergence
+            if ohlcv_rows and len(ohlcv_rows) >= 30:
+                try:
+                    rsi_div = detect_rsi_divergence(ohlcv_rows)
+                    sc.rsi_divergence_type = rsi_div.get("divergence")
+                    sc.rsi_divergence_strength = float(rsi_div.get("strength") or 0.0)
+                except Exception:
+                    pass
+            if ohlcv_rows and len(ohlcv_rows) >= 40:
+                try:
+                    macd_div = detect_macd_divergence(ohlcv_rows)
+                    sc.macd_divergence_type = macd_div.get("divergence")
+                    sc.macd_divergence_strength = float(macd_div.get("strength") or 0.0)
+                except Exception:
+                    pass
+
+            # 6) TTM Squeeze
+            if ohlcv_rows and len(ohlcv_rows) >= 21:
+                try:
+                    ttm = detect_ttm_squeeze(ohlcv_rows)
+                    sc.ttm_squeeze_active = bool(ttm.get("squeeze_active"))
+                    sc.ttm_squeeze_fired = bool(ttm.get("squeeze_fired"))
+                except Exception:
+                    pass
+
+            # 7) Wyckoff phase
+            if ohlcv_rows and len(ohlcv_rows) >= 60:
+                try:
+                    sc.wyckoff_phase = detect_wyckoff_phase(ohlcv_rows).get("phase")
+                except Exception:
+                    pass
+
+            # 8) Active session
+            try:
+                sess = detect_active_session()
+                sc.active_session = str(sess or "").lower().strip() or None
+            except Exception as exc:
+                logger.debug(f"[Scanner] Active-session detection failed: {exc}")
+
+            # 9) BTC dominance
+            try:
+                btc_dom = await fetch_btc_dominance()
+                sc.btc_dominance = btc_dom.get("btc_dominance")
+            except Exception:
+                pass
+
+            # 10) Funding rate + Long/Short ratio + nearest liquidation
+            try:
+                ls = await fetch_long_short_ratio(watch_sym)
+                if isinstance(ls, dict):
+                    if ls.get("long_short_ratio") is not None:
+                        sc.long_short_ratio = ls.get("long_short_ratio")
+                    if ls.get("funding_rate") is not None:
+                        sc.funding_rate = ls.get("funding_rate")
+            except Exception:
+                pass
+            try:
+                liq = await fetch_liquidation_heatmap(watch_sym)
+                if isinstance(liq, dict):
+                    # Use nearest cluster distance depending on direction
+                    if sc.direction == "long":
+                        sc.nearest_liq_distance_pct = liq.get("nearest_short_liq_distance_pct")
+                    else:
+                        sc.nearest_liq_distance_pct = liq.get("nearest_long_liq_distance_pct")
+            except Exception:
+                pass
+
+            # 11) MTF momentum alignment
+            try:
+                if ohlcv_rows:
+                    def _tf_rsi(*names: str) -> float | None:
+                        for name in names:
+                            snapshot = bundle.indicators.get(name) or {}
+                            value = snapshot.get("rsi") or snapshot.get("rsi14")
+                            if value is not None:
+                                return float(value)
+                        return None
+
+                    bullish_alignment = calculate_mtf_momentum_alignment(
+                        rsi_1h=_tf_rsi("1h", "60m", "60"),
+                        rsi_4h=_tf_rsi("4h", "240m", "240"),
+                        rsi_15m=_tf_rsi("15m", "15"),
+                        ema_fast=sc.ema_fast,
+                        ema_slow=sc.ema_slow,
+                        ema_200=sc.ema200,
+                        current_price=sc.current_price,
+                        supertrend_direction=sc.supertrend_direction,
+                        ichimoku_cloud_position=sc.ichimoku_cloud_position,
+                    )
+                    # Store a candidate-direction-relative score in [-1, 1].
+                    # Positive means aligned; negative means conflicted.
+                    centered = (float(bullish_alignment) - 0.5) * 2.0
+                    sc.mtf_alignment = centered if direction == "long" else -centered
+            except Exception as exc:
+                logger.debug(f"[Scanner] MTF momentum calculation failed: {exc}")
+
+            # ── Round-4 new fields ────────────────────────────────────────────
+            # 12) Volatility regime
+            if ohlcv_rows and len(ohlcv_rows) >= 50:
+                try:
+                    vol_reg = await detect_volatility_regime(ohlcv_rows)
+                    sc.volatility_regime = vol_reg.get("regime") if isinstance(vol_reg, dict) else None
+                except Exception:
+                    pass
+
+            # 13) CVD divergence
+            if ohlcv_rows and len(ohlcv_rows) >= 20:
+                try:
+                    cvd = await calculate_cvd_divergence(ohlcv_rows)
+                    sc.cvd_divergence_type = cvd.get("divergence") if isinstance(cvd, dict) else None
+                    sc.cvd_divergence_strength = float(cvd.get("strength") or 0.0)
+                except Exception:
+                    pass
+
+            # 14) Fear & Greed
+            try:
+                fg = await fetch_fear_greed_index()
+                if isinstance(fg, dict) and fg.get("value") is not None:
+                    sc.fear_greed_value = int(fg.get("value"))
+            except Exception:
+                pass
+
+            # 15) Funding term structure
+            try:
+                fts = await calculate_funding_term_structure(watch_sym, sc.funding_rate)
+                if isinstance(fts, dict):
+                    sc.funding_term_structure = fts.get("trend")  # rising/falling/stable
+            except Exception as exc:
+                logger.debug(f"[Scanner] Funding term-structure calculation failed: {exc}")
+
+            # 16) Hurst exponent (compute locally — cheap)
+            if ohlcv_rows and len(ohlcv_rows) >= 100:
+                try:
+                    from core.quant_indicators import compute_hurst_exponent
+                    closes = [float(r[4]) for r in ohlcv_rows[-200:]]
+                    sc.hurst_exponent = compute_hurst_exponent(closes)
+                except Exception:
+                    pass
+
+            # 17) Relative strength vs BTC (24h)
+            try:
+                from core.quant_indicators import compute_relative_strength_btc
+                sc.relative_strength_btc = await compute_relative_strength_btc(watch_sym, ohlcv_rows)
+            except Exception:
+                pass
+
+            # 18) Candlestick pattern (latest bar)
+            if ohlcv_rows and len(ohlcv_rows) >= 3:
+                try:
+                    from core.quant_indicators import detect_candlestick_pattern
+                    pattern = detect_candlestick_pattern(ohlcv_rows[-3:])
+                    sc.candlestick_pattern = pattern.get("pattern")
+                    sc.candlestick_pattern_strength = float(pattern.get("strength") or 0.0)
+                except Exception:
+                    pass
+
+            # 19) Anchored VWAP distance
+            if ohlcv_rows and len(ohlcv_rows) >= 30:
+                try:
+                    from core.quant_indicators import compute_anchored_vwap_distance
+                    sc.anchored_vwap_distance_pct = compute_anchored_vwap_distance(ohlcv_rows, sc.current_price)
+                except Exception:
+                    pass
+
+            # 20) Liquidity sweep
+            if ohlcv_rows and len(ohlcv_rows) >= 30:
+                try:
+                    from market_data import _detect_liquidity_sweep
+                    sweep = _detect_liquidity_sweep(ohlcv_rows, lookback=20)
+                    if isinstance(sweep, dict):
+                        sc.liquidity_sweep_type = sweep.get("type")
+                        sc.liquidity_sweep_strength = float(sweep.get("strength") or 0.0)
+                except Exception as exc:
+                    logger.debug(f"[Scanner] Liquidity-sweep detection failed: {exc}")
+
+            # 21) EQH/EQL proximity
+            if ohlcv_rows and len(ohlcv_rows) >= 60:
+                try:
+                    from core.quant_indicators import detect_equal_highs_lows_proximity
+                    sc.eqh_eql_proximity_pct = detect_equal_highs_lows_proximity(ohlcv_rows, sc.current_price)
+                except Exception:
+                    pass
+
+            # 22) ICT Killzone
+            try:
+                from core.quant_indicators import get_killzone
+                kz = get_killzone()
+                sc.in_killzone = bool(kz.get("active"))
+                sc.killzone_name = kz.get("name")
+            except Exception:
+                pass
+        except ImportError:
+            pass
+        return sc
 
     def _estimate_risk_reward(self, ctx: ScoringContext) -> float:
         support = ctx.support_zone or {}
@@ -1776,10 +2089,13 @@ class MarketScannerService:
     def _minutes_to_next_funding_boundary(self) -> int:
         now = utcnow()
         current_minutes = now.hour * 60 + now.minute
-        boundaries = [0, 8 * 60, 16 * 60, 24 * 60]
-        distances = [abs(current_minutes - item) for item in boundaries]
-        distances.append(abs((24 * 60 + current_minutes) - boundaries[-2]))
-        return int(min(distances))
+        boundaries = [0, 8 * 60, 16 * 60]
+        # Only consider future boundaries today, wrap to next day if needed.
+        future = [b - current_minutes for b in boundaries if b > current_minutes]
+        if future:
+            return int(min(future))
+        # Next funding is tomorrow 00:00 UTC
+        return int(24 * 60 - current_minutes)
 
     def _in_utc_window(self, window: str) -> bool:
         text = str(window or "").strip().lower()
@@ -1872,8 +2188,12 @@ class MarketScannerService:
             return True, "", diagnostics
         if volume_24h > 0 and volume_24h < float(settings.scanner.min_quote_volume_24h):
             return False, "liquidity_filter:quote_volume_too_low", diagnostics
+        if side_depth <= 0 and (bid_depth > 0 or ask_depth > 0):
+            return False, "liquidity_filter:orderbook_depth_zero_on_entry_side", diagnostics
         if side_depth > 0 and side_depth < float(settings.scanner.min_orderbook_depth_usdt):
             return False, "liquidity_filter:orderbook_depth_too_low", diagnostics
+        if side_depth <= 0:
+            return False, "liquidity_filter:no_orderbook_data_for_slippage", diagnostics
         if slippage > float(settings.scanner.max_estimated_slippage_pct):
             return False, "liquidity_filter:estimated_slippage_too_high", diagnostics
         if imbalance is not None:
@@ -1919,7 +2239,7 @@ class MarketScannerService:
             return False, liquidity_reason, diagnostics
         return True, "", diagnostics
 
-    def _score_smc_candidate(
+    async def _score_smc_candidate(
         self,
         bundle: OHLCVBundle,
         ctx: Any,
@@ -1931,7 +2251,7 @@ class MarketScannerService:
         mapping = bundle.mapping
         current = float(bundle.current_price or 0.0)
 
-        scoring_ctx = self._build_scoring_context(
+        scoring_ctx = await self._build_scoring_context(
             bundle,
             ctx,
             direction,
@@ -2039,6 +2359,7 @@ class MarketScannerService:
             target_market_type=mapping.target_market_type or mapping.market_type or settings.exchange.market_type,
             source_exchange=mapping.source_exchange or "",
             source_market_type=mapping.source_market_type or "",
+            source_symbol=mapping.source_symbol or mapping.watch_symbol,
             actual_data_source=mapping.actual_data_source or bundle.data_quality.get("actual_data_source", ""),
             data_source_policy=mapping.data_source_policy,
             tradable=mapping.tradable,
@@ -2098,7 +2419,11 @@ class MarketScannerService:
         return matches[0]
 
     async def _check_existing_position(
-        self, exchange_symbol: str, direction: str
+        self,
+        exchange_symbol: str,
+        direction: str,
+        exchange_name: str | None = None,
+        sandbox_mode: bool | None = None,
     ) -> tuple[bool, str]:
         """Check if an open or pending position already exists for the same symbol+direction.
 
@@ -2111,14 +2436,35 @@ class MarketScannerService:
             target_key = position_symbol_key(exchange_symbol)
             if not target_key:
                 return False, ""
+            live_mode = str(settings.scanner.mode or "observe").lower().strip() == "live"
+            target_exchange = str(
+                exchange_name or settings.exchange.name
+            ).lower().strip()
+            target_sandbox = (
+                safe_bool(sandbox_mode, settings.exchange.sandbox_mode)
+                if sandbox_mode is not None
+                else safe_bool(settings.exchange.sandbox_mode, False)
+            )
             async with db_manager.async_session_factory() as session:
                 stmt = select(PositionModel).where(
                     PositionModel.status.in_(["open", "pending"]),
+                    (
+                        PositionModel.user_id.is_(None)
+                        if self._scope_user_id() is None
+                        else PositionModel.user_id == self._scope_user_id()
+                    ),
                 )
                 result = await session.execute(stmt)
                 positions = result.scalars().all()
             for pos in positions:
                 if position_symbol_key(pos.ticker) != target_key:
+                    continue
+                if safe_bool(pos.live_trading, False) != live_mode:
+                    continue
+                if live_mode and safe_bool(pos.sandbox_mode, False) != target_sandbox:
+                    continue
+                position_exchange = str(pos.exchange or "").lower().strip()
+                if position_exchange and position_exchange != target_exchange:
                     continue
                 pos_dir = (pos.direction or "").lower()
                 if pos_dir == direction.lower():
@@ -2128,7 +2474,12 @@ class MarketScannerService:
                     )
             return False, ""
         except Exception as exc:
-            logger.warning(f"[Scanner] Position conflict check failed (allowing signal): {exc}")
+            logger.warning(
+                f"[Scanner] Position conflict check failed "
+                f"({'blocking live signal' if live_mode else 'allowing non-live signal'}): {exc}"
+            )
+            if live_mode:
+                return True, f"Position conflict check unavailable in live mode: {exc}"
             return False, ""
 
     async def _dispatch_candidate(
@@ -2160,35 +2511,6 @@ class MarketScannerService:
                 )
                 await session.commit()
                 return {"status": "skipped", "reason": "daily signal limit reached", "setup_hash": candidate.setup_hash}
-            if (
-                settings.scanner.max_ai_calls_per_day
-                and int(state.ai_call_count or 0) >= settings.scanner.max_ai_calls_per_day
-            ):
-                await update_scanner_state_counts(
-                    session,
-                    self.scope,
-                    degraded_mode="ai_budget_exhausted",
-                    degraded_reason="daily scanner AI call limit reached",
-                )
-                await record_scanner_audit(
-                    session,
-                    scope=self.scope,
-                    run_id=run_id,
-                    event_type="ai_budget_exhausted",
-                    watch_symbol=candidate.watch_symbol,
-                    exchange_symbol=candidate.exchange_symbol,
-                    direction=candidate.direction,
-                    score=candidate.score,
-                    setup_hash=candidate.setup_hash,
-                    reason="daily AI call limit reached",
-                )
-                await session.commit()
-                return {
-                    "status": "skipped",
-                    "reason": "daily AI call limit reached",
-                    "setup_hash": candidate.setup_hash,
-                }
-
             market_ok, market_reason, market_limits = await self._validate_live_market(candidate)
             if not market_ok:
                 await record_scanner_audit(
@@ -2216,7 +2538,14 @@ class MarketScannerService:
                 return {"status": "skipped", "reason": market_reason, "setup_hash": candidate.setup_hash}
 
             has_conflict, conflict_reason = await self._check_existing_position(
-                candidate.exchange_symbol, candidate.direction
+                candidate.exchange_symbol,
+                candidate.direction,
+                exchange_name=(
+                    candidate.target_exchange
+                    or candidate.exchange_name
+                    or settings.exchange.name
+                ),
+                sandbox_mode=settings.exchange.sandbox_mode,
             )
             if has_conflict:
                 await record_scanner_audit(
@@ -2285,6 +2614,7 @@ class MarketScannerService:
             signal, raw_body = build_synthetic_signal(candidate)
             market = market_context_from_bundle(bundle, ticker=candidate.exchange_symbol)
             processor = SignalProcessor(session)
+            provider_requests_before = ai_costs.requests_today("auto_scanner")
             result = await processor.process_scanner_signal(
                 signal,
                 scanner_mode=settings.scanner.mode,
@@ -2292,9 +2622,19 @@ class MarketScannerService:
                 market=market,
             )
 
-            ai_used = isinstance(result.get("analysis"), dict)
-            if ai_used:
-                await update_scanner_state_counts(session, self.scope, ai_call_delta=1, signal_delta=1)
+            provider_requests_used = max(
+                0,
+                ai_costs.requests_today("auto_scanner") - provider_requests_before,
+            )
+            analysis_produced = isinstance(result.get("analysis"), dict)
+            ai_used = provider_requests_used > 0
+            if analysis_produced or provider_requests_used:
+                await update_scanner_state_counts(
+                    session,
+                    self.scope,
+                    ai_call_delta=provider_requests_used,
+                    signal_delta=1 if analysis_produced else 0,
+                )
 
             cooldown_level = await self._get_symbol_cooldown_level(candidate.exchange_symbol)
             cooldown_ttl = self._symbol_cooldown_ttl_for_result(result, candidate.score, cooldown_level)
@@ -2320,6 +2660,7 @@ class MarketScannerService:
                 payload={
                     "result": result,
                     "ai_used": ai_used,
+                    "provider_requests_used": provider_requests_used,
                     "cooldown_ttl_secs": cooldown_ttl,
                     "target_exchange": candidate.target_exchange or candidate.exchange_name,
                     "source_exchange": candidate.source_exchange,
@@ -2343,6 +2684,7 @@ class MarketScannerService:
                 "score": candidate.score,
                 "setup_hash": candidate.setup_hash,
                 "ai_used": ai_used,
+                "provider_requests_used": provider_requests_used,
                 "cooldown_ttl_secs": cooldown_ttl,
                 "target_exchange": candidate.target_exchange or candidate.exchange_name,
                 "source_exchange": candidate.source_exchange,
@@ -2405,6 +2747,7 @@ class MarketScannerService:
         try:
             async with db_manager.async_session_factory() as session:
                 stmt = select(ScannerAuditModel).where(
+                    ScannerAuditModel.scope == self.scope,
                     ScannerAuditModel.exchange_symbol == exchange_symbol,
                     ScannerAuditModel.event_type == "result",
                 ).order_by(desc(ScannerAuditModel.created_at)).limit(10)
@@ -2431,11 +2774,27 @@ class MarketScannerService:
             return False, candidate.tradability_reason or "Scanner live mode blocked: symbol is not tradable", {}
         if not settings.exchange.live_trading:
             return False, "Scanner live mode requires global LIVE_TRADING=true", {}
-        snapshot_symbols = {str(item).upper().strip() for item in self._live_universe_snapshot.get("symbols") or []}
-        if snapshot_symbols and candidate.exchange_symbol.upper().strip() not in snapshot_symbols:
+        snapshot_symbols = {
+            position_symbol_key(item)
+            for item in (self._live_universe_snapshot.get("symbols") or [])
+            if position_symbol_key(item)
+        }
+        candidate_keys = {
+            position_symbol_key(candidate.exchange_symbol),
+            position_symbol_key(candidate.watch_symbol),
+            position_symbol_key(candidate.source_symbol),
+        }
+        candidate_keys.discard("")
+        if snapshot_symbols and not candidate_keys.intersection(snapshot_symbols):
             return False, "Scanner live mode blocked: symbol is outside the current live universe snapshot", {}
-        whitelist = {str(item).upper().strip() for item in settings.scanner.live_symbol_whitelist}
-        if whitelist and candidate.exchange_symbol.upper().strip() not in whitelist:
+        whitelist = {
+            position_symbol_key(item)
+            for item in (settings.scanner.live_symbol_whitelist or [])
+            if position_symbol_key(item)
+        }
+        if not whitelist:
+            return False, "Scanner live mode requires non-empty SCANNER_LIVE_SYMBOL_WHITELIST", {}
+        if not candidate_keys.intersection(whitelist):
             return False, "Scanner live mode blocked: symbol is not in SCANNER_LIVE_SYMBOL_WHITELIST", {}
         exchange_name = str(candidate.target_exchange or candidate.exchange_name or settings.exchange.name).lower().strip()
         market_type = str(candidate.target_market_type or candidate.market_type or settings.exchange.market_type).lower().strip()

@@ -214,6 +214,12 @@ def test_ai_cost_tracker_prefers_longest_model_match():
     assert tracker._estimate_cost("gpt-4o-mini", 1_000_000, 0) == 0.15
 
 
+def test_ai_cost_tracker_extracts_anthropic_usage_fields():
+    from core.ai_cost_tracker import extract_usage_from_response
+
+    assert extract_usage_from_response({"usage": {"input_tokens": 12, "output_tokens": 8}}) == (12, 8, 20)
+
+
 @pytest.mark.asyncio
 async def test_ai_memory_cache_returns_copies():
     from ai_analyzer import _AI_CACHE, _get_cached_analysis, _set_cached_analysis
@@ -269,3 +275,107 @@ async def test_scanner_backtest_does_not_pass_unsupported_cache_flag_or_mutate_d
     assert summary.total_signals == 0
     assert provider.calls == [("BTCUSDT", ["1h"], {})]
     assert DEFAULT_ENGINE.weights == original_weights
+
+
+@pytest.mark.asyncio
+async def test_ai_decision_log_inserts_json_in_sqlite(db_session):
+    import json
+
+    from sqlalchemy import text
+
+    from core.ai_decision_log import _insert_into_db
+
+    record = {
+        "decision_id": "decision-sqlite",
+        "timestamp": "2026-07-23T00:00:00+00:00",
+        "ticker": "BTCUSDT",
+        "direction": "long",
+        "signal_price": 50000.0,
+        "timeframe": "1h",
+        "strategy": "test",
+        "user_id": "user-1",
+        "provider": "test",
+        "model_id": "test-model",
+        "system_prompt": "system",
+        "user_prompt": "user",
+        "raw_response": "{}",
+        "analysis_json": '{"confidence": 0.8}',
+        "market_context_json": '{"regime": "trending"}',
+        "enhanced_data_json": "{}",
+        "recommendation": "execute",
+        "confidence": 0.8,
+        "risk_score": 0.2,
+    }
+
+    await _insert_into_db(record)
+    row = (
+        await db_session.execute(
+            text(
+                "SELECT analysis_json, market_context_json, created_at "
+                "FROM ai_decision_log WHERE decision_id = :decision_id"
+            ),
+            {"decision_id": record["decision_id"]},
+        )
+    ).one()
+
+    assert json.loads(row.analysis_json)["confidence"] == pytest.approx(0.8)
+    assert json.loads(row.market_context_json)["regime"] == "trending"
+    assert row.created_at is not None
+
+
+def test_confidence_calibrator_without_data_preserves_raw_value(monkeypatch, tmp_path):
+    import core.confidence_calibrator as calibrator
+
+    calibrator._CALIBRATION_CACHE.clear()
+    monkeypatch.setattr(calibrator, "_CALIBRATION_FILE", tmp_path / "missing-calibration.json")
+
+    assert calibrator.calibrate_confidence(0.81, "BTCUSDT", "trending") == pytest.approx(0.81)
+
+    calibrator._CALIBRATION_CACHE.clear()
+
+
+def test_ai_decision_jsonl_retention_removes_expired_files(monkeypatch, tmp_path):
+    from datetime import UTC, datetime
+
+    import core.ai_decision_log as decision_log
+
+    old_file = tmp_path / "ai_decisions_2026-01-01.jsonl"
+    recent_file = tmp_path / "ai_decisions_2026-07-22.jsonl"
+    old_file.write_text("{}\n", encoding="utf-8")
+    recent_file.write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(decision_log, "_LOG_DIR", tmp_path)
+    monkeypatch.setattr(decision_log, "_LAST_LOG_CLEANUP_DATE", "")
+    monkeypatch.setenv("AI_DECISION_LOG_RETENTION_DAYS", "90")
+
+    deleted = decision_log._cleanup_expired_jsonl(datetime(2026, 7, 23, tzinfo=UTC))
+
+    assert deleted == 1
+    assert not old_file.exists()
+    assert recent_file.exists()
+
+
+def test_scheduler_lock_does_not_expire_while_owner_is_alive(monkeypatch, tmp_path):
+    import core.lifespan as lifespan
+
+    lock_path = tmp_path / "data" / "scheduler.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("4242:1", encoding="ascii")
+
+    monkeypatch.setattr(lifespan, "DATA_DIR", lock_path.parent)
+    monkeypatch.setattr(lifespan, "_pid_is_running", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(lifespan, "_scheduler_lock_fd", None)
+    monkeypatch.setattr(lifespan, "_scheduler_lock_path", None)
+
+    assert lifespan._acquire_scheduler_lock() is False
+    assert lock_path.exists()
+
+
+def test_scheduler_pid_reuse_is_detected(monkeypatch):
+    import core.lifespan as lifespan
+
+    monkeypatch.setattr(lifespan.sys, "platform", "linux")
+    monkeypatch.setattr(lifespan.os, "kill", lambda *_args: None)
+    monkeypatch.setattr(lifespan, "_process_start_time", lambda _pid: 2000.0)
+
+    assert lifespan._pid_is_running(42, expected_start_time=1000.0) is False

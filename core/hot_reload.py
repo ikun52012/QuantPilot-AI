@@ -6,7 +6,6 @@ and environment without restarting the application process.
 
 Supported reloadable settings:
   - webhook_secret
-  - exchange credentials (sandbox_mode, live_trading)
   - AI provider config (provider, model, temperature, max_tokens)
   - Risk settings (max_daily_trades, max_daily_loss_pct, etc.)
   - Telegram settings
@@ -47,21 +46,9 @@ async def reload_settings_from_db(session: AsyncSession) -> dict[str, Any]:
         logger.info("[HotReload] webhook_secret updated")
 
     # ── Exchange mode ──
-    old_live = getattr(settings.exchange, "live_trading", False)
-    new_live_str = await get_admin_setting(session, "live_trading", str(old_live).lower())
-    new_live = str(new_live_str).lower() in ("true", "1", "yes")
-    if new_live != old_live:
-        settings.exchange.live_trading = new_live
-        changed["live_trading"] = (old_live, new_live)
-        logger.warning(f"[HotReload] live_trading changed: {old_live} -> {new_live}")
-
-    old_sandbox = getattr(settings.exchange, "sandbox_mode", False)
-    new_sandbox_str = await get_admin_setting(session, "sandbox_mode", str(old_sandbox).lower())
-    new_sandbox = str(new_sandbox_str).lower() in ("true", "1", "yes")
-    if new_sandbox != old_sandbox:
-        settings.exchange.sandbox_mode = new_sandbox
-        changed["sandbox_mode"] = (old_sandbox, new_sandbox)
-        logger.info(f"[HotReload] sandbox_mode changed: {old_sandbox} -> {new_sandbox}")
+    # Exchange identity and live/sandbox mode intentionally do not use this
+    # legacy generic settings channel. They must pass the dedicated encrypted
+    # exchange-settings endpoint, active-position checks, and production gates.
 
     # ── AI Provider ──
     old_ai_provider = getattr(settings.ai, "provider", "")
@@ -102,6 +89,9 @@ async def reload_settings_from_db(session: AsyncSession) -> dict[str, Any]:
     if env_live is not None:
         env_live_bool = env_live.lower() in ("true", "1", "yes")
         if env_live_bool != settings.exchange.live_trading:
+            from core.runtime_settings import validate_exchange_runtime_settings
+
+            validate_exchange_runtime_settings({"live_trading": env_live_bool})
             old = settings.exchange.live_trading
             settings.exchange.live_trading = env_live_bool
             changed["live_trading(env)"] = (old, env_live_bool)

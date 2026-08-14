@@ -255,6 +255,17 @@ class TestLeverageRetryIntegration:
             mock_exchange = Mock()
             mock_exchange.id = "binance"
             mock_exchange.set_leverage = Mock(return_value={"leverage": 10})
+            mock_exchange.fetch_order_book = Mock(return_value={
+                "asks": [[50_000.0, 1.0]],
+                "bids": [[49_999.0, 1.0]],
+            })
+            mock_exchange.create_order = Mock(return_value={
+                "id": "entry-1",
+                "status": "closed",
+                "filled": 0.01,
+                "amount": 0.01,
+                "average": 50_000.0,
+            })
             mock_get_exchange.return_value = mock_exchange
 
             # Mock symbol resolution
@@ -269,6 +280,7 @@ class TestLeverageRetryIntegration:
                         direction=SignalDirection.LONG,
                         quantity=0.01,
                         execute=True,
+                        entry_price=50_000.0,
                         ai_analysis=AIAnalysis(
                             recommended_leverage=10,
                             confidence=0.8,

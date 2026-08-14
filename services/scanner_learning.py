@@ -18,6 +18,7 @@ from core.database import (
     get_or_create_scanner_state,
     record_scanner_audit,
 )
+from core.utils.common import safe_bool
 from core.utils.datetime import utcnow
 
 
@@ -78,12 +79,18 @@ def extract_scanner_payload(trade_payload: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-async def _candidate_payload_for_setup(session: AsyncSession, setup_hash: str) -> dict[str, Any]:
+async def _candidate_payload_for_setup(
+    session: AsyncSession,
+    setup_hash: str,
+    *,
+    scope: str,
+) -> dict[str, Any]:
     if not setup_hash:
         return {}
     result = await session.execute(
         select(ScannerAuditModel)
         .where(
+            ScannerAuditModel.scope == scope,
             ScannerAuditModel.event_type == "candidate",
             ScannerAuditModel.setup_hash == setup_hash,
         )
@@ -170,15 +177,20 @@ async def sync_scanner_outcomes(
     lookback_days = max(1, int(days or settings.scanner.outcome_lookback_days))
     limit = max(1, int(max_positions or settings.scanner.outcome_max_sync_positions))
     cutoff = utcnow() - timedelta(days=lookback_days)
+    scope_user_id = None if scope == "admin" else str(scope).removeprefix("user:")
     result = await session.execute(
         select(PositionModel)
         .where(
             PositionModel.status == "closed",
             PositionModel.closed_at.is_not(None),
             PositionModel.closed_at >= cutoff,
+            (
+                PositionModel.user_id.is_(None)
+                if scope_user_id is None
+                else PositionModel.user_id == scope_user_id
+            ),
         )
         .order_by(desc(PositionModel.closed_at))
-        .limit(limit)
     )
     positions = list(result.scalars().all())
     labels: list[dict[str, Any]] = []
@@ -189,6 +201,8 @@ async def sync_scanner_outcomes(
         settings.scanner.outcome_path_metrics_enabled = bool(include_path_metrics)
     try:
         for position in positions:
+            if len(labels) >= limit:
+                break
             if not position.open_trade_id:
                 skipped += 1
                 continue
@@ -203,10 +217,13 @@ async def sync_scanner_outcomes(
                 continue
 
             setup_hash = str(scanner_payload.get("setup_hash") or "").strip()
-            dedupe_hash = setup_hash or f"position:{position.id}"
+            # One closed position is one immutable outcome. Reusing setup_hash
+            # across users or repeated paper runs must not collapse labels.
+            dedupe_hash = f"outcome:{position.id}"
             existing = await session.execute(
                 select(ScannerAuditModel.id)
                 .where(
+                    ScannerAuditModel.scope == scope,
                     ScannerAuditModel.event_type == "outcome_label",
                     ScannerAuditModel.setup_hash == dedupe_hash[:64],
                 )
@@ -216,7 +233,11 @@ async def sync_scanner_outcomes(
                 skipped += 1
                 continue
 
-            candidate_payload = await _candidate_payload_for_setup(session, setup_hash)
+            candidate_payload = await _candidate_payload_for_setup(
+                session,
+                setup_hash,
+                scope=scope,
+            )
             score_breakdown = scanner_payload.get("score_breakdown") or candidate_payload.get("score_breakdown") or {}
             timeframe = str(scanner_payload.get("timeframe") or candidate_payload.get("timeframe") or "1h")
             pnl_pct = _safe_float(position.pnl_pct)
@@ -230,6 +251,20 @@ async def sync_scanner_outcomes(
             hold_minutes = 0.0
             if position.opened_at and position.closed_at:
                 hold_minutes = max(0.0, (position.closed_at - position.opened_at).total_seconds() / 60.0)
+            raw_exchange_payload = trade_payload.get("exchange_config")
+            exchange_payload: dict[str, Any] = (
+                raw_exchange_payload
+                if isinstance(raw_exchange_payload, dict)
+                else {}
+            )
+            execution_mode = str(scanner_payload.get("mode") or "").lower().strip()
+            if execution_mode not in {"observe", "paper", "live", "sandbox"}:
+                if safe_bool(exchange_payload.get("sandbox_mode"), False):
+                    execution_mode = "sandbox"
+                elif safe_bool(exchange_payload.get("live_trading"), False):
+                    execution_mode = "live"
+                else:
+                    execution_mode = "paper"
 
             label = {
                 "position_id": position.id,
@@ -239,6 +274,8 @@ async def sync_scanner_outcomes(
                 "symbol": position.ticker,
                 "timeframe": timeframe,
                 "direction": str(position.direction or "").lower(),
+                "scope": scope,
+                "execution_mode": execution_mode,
                 "score": _safe_float(scanner_payload.get("score") or candidate_payload.get("score")),
                 "score_breakdown": score_breakdown,
                 "pnl_pct": round(pnl_pct, 6),
@@ -275,7 +312,16 @@ async def sync_scanner_outcomes(
     return {"synced": len(labels), "skipped": skipped, "labels": labels}
 
 
-async def _outcome_labels(session: AsyncSession, *, scope: str = "admin", days: int | None = None) -> list[dict[str, Any]]:
+async def _outcome_labels(
+    session: AsyncSession,
+    *,
+    scope: str = "admin",
+    days: int | None = None,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    direction: str | None = None,
+    execution_mode: str | None = None,
+) -> list[dict[str, Any]]:
     lookback_days = max(1, int(days or settings.scanner.outcome_lookback_days))
     cutoff = utcnow() - timedelta(days=lookback_days)
     result = await session.execute(
@@ -283,7 +329,6 @@ async def _outcome_labels(session: AsyncSession, *, scope: str = "admin", days: 
         .where(
             ScannerAuditModel.scope == scope,
             ScannerAuditModel.event_type == "outcome_label",
-            ScannerAuditModel.created_at >= cutoff,
         )
         .order_by(ScannerAuditModel.created_at.asc())
     )
@@ -291,10 +336,21 @@ async def _outcome_labels(session: AsyncSession, *, scope: str = "admin", days: 
     for row in result.scalars().all():
         payload = _parse_json(row.payload_json)
         if payload:
+            closed_at = _dt(payload.get("closed_at"))
+            if closed_at is None or closed_at < cutoff:
+                continue
             payload.setdefault("score", row.score)
             payload.setdefault("symbol", row.exchange_symbol or row.watch_symbol)
             payload.setdefault("direction", row.direction)
             payload.setdefault("created_at", row.created_at.isoformat() if row.created_at else None)
+            if symbol and str(payload.get("symbol") or "").upper().strip() != str(symbol).upper().strip():
+                continue
+            if timeframe and str(payload.get("timeframe") or "").lower().strip() != str(timeframe).lower().strip():
+                continue
+            if direction and str(payload.get("direction") or "").lower().strip() != str(direction).lower().strip():
+                continue
+            if execution_mode and str(payload.get("execution_mode") or "").lower().strip() != str(execution_mode).lower().strip():
+                continue
             labels.append(payload)
     return labels
 
@@ -353,8 +409,20 @@ async def compute_outcome_summary(
     scope: str = "admin",
     days: int | None = None,
     include_recent: bool = True,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    direction: str | None = None,
+    execution_mode: str | None = None,
 ) -> dict[str, Any]:
-    labels = await _outcome_labels(session, scope=scope, days=days)
+    labels = await _outcome_labels(
+        session,
+        scope=scope,
+        days=days,
+        symbol=symbol,
+        timeframe=timeframe,
+        direction=direction,
+        execution_mode=execution_mode,
+    )
     wins = [item for item in labels if _safe_float(item.get("pnl_pct")) > 0]
     losses = [item for item in labels if _safe_float(item.get("pnl_pct")) < 0]
     flats = [item for item in labels if _safe_float(item.get("pnl_pct")) == 0]
@@ -468,8 +536,13 @@ def _best_threshold(samples: list[dict[str, Any]]) -> dict[str, Any] | None:
     split = max(1, int(len(ordered) * (1.0 - float(settings.scanner.walk_forward_validation_ratio))))
     train = ordered[:split]
     validation = ordered[split:]
-    eval_samples = validation if len(validation) >= max(3, min_samples // 3) else train
-    min_selected = max(3, min_samples // 3)
+    eval_samples = train
+    # Permit a smaller high-quality tail when held-out data can validate it.
+    # Requiring one third of the minimum sample count biased small datasets
+    # toward low thresholds even when scores cleanly separated outcomes.
+    min_selected = max(2, min_samples // 6)
+    if len(validation) < min_selected:
+        return None
     best: dict[str, Any] | None = None
     for threshold in _threshold_candidates():
         subset = [item for item in eval_samples if _safe_float(item.get("score")) >= threshold]
@@ -487,7 +560,7 @@ def _best_threshold(samples: list[dict[str, Any]]) -> dict[str, Any] | None:
             "samples": len(samples),
             "train_samples": len(train),
             "validation_samples": len(validation),
-            "validated": eval_samples is validation,
+            "validated": len(validation) >= min_selected,
         }
         if best is None:
             best = candidate
@@ -496,6 +569,19 @@ def _best_threshold(samples: list[dict[str, Any]]) -> dict[str, Any] | None:
             best["expectancy_pct"], best["win_rate"], best["threshold"]
         ):
             best = candidate
+    if best is not None:
+        val_subset = [item for item in validation if _safe_float(item.get("score")) >= best["threshold"]]
+        if len(val_subset) < min_selected:
+            return None
+        val_pnls = [_safe_float(item.get("pnl_pct")) for item in val_subset]
+        val_win_rate = sum(1 for pnl in val_pnls if pnl > 0) / len(val_pnls) * 100.0
+        val_expectancy = sum(val_pnls) / len(val_pnls)
+        if val_expectancy <= 0:
+            return None
+        best["validation_win_rate"] = round(val_win_rate, 2)
+        best["validation_expectancy_pct"] = round(val_expectancy, 4)
+        best["validation_samples"] = len(val_subset)
+        best["validated"] = True
     return best
 
 

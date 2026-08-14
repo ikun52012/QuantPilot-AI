@@ -3,6 +3,7 @@ Signal Server - Chain Verification
 Verify blockchain transactions for payment confirmation.
 """
 import os
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
 import httpx
 from loguru import logger
@@ -28,6 +29,9 @@ EXPLORER_APIS = {
     "APT": {
         "url": "",
         "manual": True,
+    },
+    "SOL": {
+        "url": "https://api.mainnet-beta.solana.com",
     },
 }
 
@@ -67,11 +71,7 @@ async def verify_payment_tx(
         elif network in ("ERC20", "BEP20", "ARBITRUM"):
             return await _verify_evm(tx_hash, network, expected_amount, expected_address)
         elif network == "SOL":
-            return {
-                "verified": False,
-                "status": "unsupported",
-                "reason": "Solana SPL USDT auto-verification is not supported",
-            }
+            return await _verify_solana(tx_hash, expected_amount, expected_address)
         elif network == "APT":
             return {
                 "verified": False,
@@ -89,7 +89,7 @@ async def verify_payment_tx(
         return {
             "verified": False,
             "status": "error",
-            "reason": str(e),
+            "reason": "Verification failed due to an internal error",
         }
 
 
@@ -132,19 +132,27 @@ async def _verify_trc20(
             amount_str = transfer.get("amount_str", "0")
             # P0-FIX: Verify TRC20 USDT contract address
             contract_address = transfer.get("contract_address", "").lower()
-            if contract_address and contract_address != TRC20_USDT_CONTRACT.lower():
+            if not contract_address or contract_address != TRC20_USDT_CONTRACT.lower():
                 continue
 
             try:
-                amount = float(amount_str) / 1e6  # USDT has 6 decimals
-            except (TypeError, ValueError):
+                amount_int = int(amount_str)  # USDT has 6 decimals on TRC20
+                amount = float(Decimal(amount_int) / Decimal(1_000_000))
+            except (TypeError, ValueError, InvalidOperation):
                 amount = 0
 
             if expected_address and to_address.lower() != expected_address.lower():
                 continue
 
-            if expected_amount and abs(amount - expected_amount) > 0.01:
-                continue
+            if expected_amount:
+                try:
+                    amt_dec = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                    exp_dec = Decimal(str(expected_amount)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                    if abs(amt_dec - exp_dec) > Decimal("0.01"):
+                        continue
+                except (InvalidOperation, ValueError):
+                    if abs(amount - expected_amount) > 0.01:
+                        continue
 
             return {
                 "verified": True,
@@ -195,7 +203,10 @@ async def _verify_evm(
             return {"verified": False, "status": "error", "reason": "API error"}
 
         data = resp.json()
-        status = data.get("result", {}).get("status", "0")
+        result_data = data.get("result", {})
+        if not isinstance(result_data, dict):
+            return {"verified": False, "status": "error", "reason": "Unexpected API response format"}
+        status = result_data.get("status", "0")
 
         if status == "0":
             return {"verified": False, "status": "failed"}
@@ -304,10 +315,10 @@ async def _verify_solana(
 
         if not expected_amount or not expected_address:
             return {
-                "verified": True,
-                "status": "confirmed",
+                "verified": False,
+                "status": "manual_review",
                 "slot": status.get("slot"),
-                "warning": "Amount/address verification skipped (not configured)",
+                "reason": "Amount and address verification required for Solana auto-verification",
             }
 
         tx_resp = await client.post(
@@ -332,25 +343,56 @@ async def _verify_solana(
         if meta.get("err"):
             return {"verified": False, "status": "failed", "error": meta.get("err")}
 
-        post_balances = meta.get("postBalances", [])
-        pre_balances = meta.get("preBalances", [])
-        account_keys = tx_result.get("transaction", {}).get("message", {}).get("accountKeys", [])
+        # USDT on Solana is an SPL token, not native SOL.
+        # Check postTokenBalances / preTokenBalances for SPL token transfers.
+        # Solana USDT mint address: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+        SOL_USDT_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        USDT_DECIMALS = 6
 
-        if len(post_balances) != len(pre_balances) or not account_keys:
-            return {"verified": False, "status": "error", "reason": "Incomplete transaction data"}
+        post_token_balances = meta.get("postTokenBalances") or []
+        pre_token_balances = meta.get("preTokenBalances") or []
 
         expected_address_lower = expected_address.lower().strip()
         amount_found = False
         amount_received = 0.0
 
-        for idx, account in enumerate(account_keys):
-            addr = account.get("pubkey", "") if isinstance(account, dict) else str(account)
-            if addr.lower().strip() == expected_address_lower:
-                lamports_received = post_balances[idx] - pre_balances[idx]
-                amount_received = lamports_received / 1e9
+        # Build index: (accountIndex) -> pre token balance
+        pre_token_map: dict[int, dict] = {}
+        for entry in pre_token_balances:
+            if isinstance(entry, dict) and entry.get("mint") == SOL_USDT_MINT:
+                idx = int(entry.get("accountIndex", -1))
+                pre_token_map[idx] = entry
+
+        # Check post token balances for USDT received at expected address
+        for entry in post_token_balances:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("mint") != SOL_USDT_MINT:
+                continue
+            owner = str(entry.get("owner") or "").lower().strip()
+            if owner != expected_address_lower:
+                continue
+            try:
+                post_amount = int(entry.get("uiTokenAmount", {}).get("amount", "0"))
+            except (ValueError, TypeError):
+                continue
+            idx = int(entry.get("accountIndex", -1))
+            pre_entry = pre_token_map.get(idx, {})
+            try:
+                pre_amount = int(pre_entry.get("uiTokenAmount", {}).get("amount", "0"))
+            except (ValueError, TypeError):
+                pre_amount = 0
+            received_raw = post_amount - pre_amount
+            amount_received = received_raw / (10 ** USDT_DECIMALS)
+            try:
+                recv_dec = Decimal(str(amount_received)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                exp_dec = Decimal(str(expected_amount)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                if abs(recv_dec - exp_dec) <= Decimal("0.01"):
+                    amount_found = True
+            except (InvalidOperation, ValueError):
                 if abs(amount_received - expected_amount) <= 0.01:
                     amount_found = True
-                break
+            break
 
         if not amount_found:
             return {

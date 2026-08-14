@@ -72,6 +72,7 @@ class DCAConfig:
     trailing_stop_pct: float = 0.0
     cooldown_minutes: int = 60
     max_total_capital_usdt: float = 5000.0
+    max_single_entry_usdt: float = 0.0
     leverage: float = 1.0
     fee_pct: float = 0.04
     mode: str = "average_down"
@@ -120,6 +121,12 @@ class DCAPosition:
     updated_at: datetime = field(default_factory=utcnow)
     closed_at: datetime | None = None
     close_reason: str = ""
+    stop_loss_order_id: str = ""
+    take_profit_order_id: str = ""
+    stop_loss_order_ids: list[str] = field(default_factory=list)
+    take_profit_order_ids: list[str] = field(default_factory=list)
+    cleanup_errors: list[dict] = field(default_factory=list)
+    close_price: float = 0.0
 
 
 class DCAEngine:
@@ -162,6 +169,10 @@ class DCAEngine:
 
             config = DCAConfig(**config_data)
             position = DCAPosition(**position_data)
+            if position.stop_loss_order_id and position.stop_loss_order_id not in position.stop_loss_order_ids:
+                position.stop_loss_order_ids.append(position.stop_loss_order_id)
+            if position.take_profit_order_id and position.take_profit_order_id not in position.take_profit_order_ids:
+                position.take_profit_order_ids.append(position.take_profit_order_id)
             position_id = str(record.get("strategy_id") or position.config_id or config.strategy_id)
             if not position_id:
                 return False
@@ -183,10 +194,10 @@ class DCAEngine:
             return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.sync_position_state(position_id))
+            task = loop.create_task(self.sync_position_state(position_id))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
         except RuntimeError:
-            # No running event loop - log warning instead of creating conflicting loop
-            logger.warning(f"[DCA] Cannot sync state: no running event loop for position {position_id}")
+            logger.warning("[DCA] Cannot sync state: no running event loop")
 
     async def sync_position_state(self, position_id: str) -> bool:
         """Persist latest local DCA state into Redis hashes."""
@@ -195,7 +206,7 @@ class DCAEngine:
             return False
 
         saved = await redis_hset_json(_DCA_STATE_HASH, position_id, record)
-        if record["status"] == "active":
+        if record["status"] in {"active", "cleanup_required"}:
             saved = await redis_hset_json(_DCA_ACTIVE_HASH, position_id, record) or saved
         else:
             await redis_hdel(_DCA_ACTIVE_HASH, position_id)
@@ -379,6 +390,10 @@ class DCAEngine:
                         order_id=order_result.get("order_id", ""),
                         fees_usdt=filled_capital * config.fee_pct / 100,
                     )
+                    position.stop_loss_order_id = str(order_result.get("stop_loss_order_id") or "")
+                    position.take_profit_order_id = str(order_result.get("take_profit_order_id") or "")
+                    position.stop_loss_order_ids = [position.stop_loss_order_id] if position.stop_loss_order_id else []
+                    position.take_profit_order_ids = [position.take_profit_order_id] if position.take_profit_order_id else []
                     logger.info(f"[DCA] Placed initial order: {order_result.get('order_id')}")
                 else:
                     logger.error(f"[DCA] Failed to place initial order: {order_result}")
@@ -393,6 +408,8 @@ class DCAEngine:
             return finalized
 
     def _calculate_initial_quantity(self, config: DCAConfig, price: float) -> float:
+        if price <= 0:
+            return 0.0
         if config.initial_capital_usdt > 0:
             return config.initial_capital_usdt / price
         elif config.fixed_size_usdt > 0:
@@ -415,24 +432,40 @@ class DCAEngine:
         else:
             return entry_price * (1 - config.take_profit_pct / 100)
 
-    def _calculate_next_entry_quantity(self, config: DCAConfig, entry_idx: int, base_quantity: float) -> float:
+    def _calculate_next_entry_quantity(self, config: DCAConfig, entry_idx: int, base_quantity: float, position: DCAPosition | None = None, entry_price: float = 0.0) -> float:
         method = config.sizing_method
 
         if method == "fixed":
-            return base_quantity
+            quantity = base_quantity
 
         elif method == "martingale":
-            return base_quantity * (config.sizing_multiplier ** (entry_idx - 1))
+            quantity = base_quantity * (config.sizing_multiplier ** (entry_idx - 1))
 
         elif method == "geometric":
-            return base_quantity * entry_idx
+            quantity = base_quantity * entry_idx
 
         elif method == "fibonacci":
             fib = [1, 1, 2, 3, 5, 8, 13, 21]
             idx = min(entry_idx - 1, len(fib) - 1)
-            return base_quantity * fib[idx]
+            quantity = base_quantity * fib[idx]
 
-        return base_quantity
+        else:
+            quantity = base_quantity
+
+        if config.max_total_capital_usdt > 0 and position is not None:
+            remaining_capital = config.max_total_capital_usdt - position.total_capital_usdt
+            if entry_price <= 0:
+                return 0.0
+            per_entry_cap = config.max_single_entry_usdt
+            if per_entry_cap <= 0 and config.max_entries > 0:
+                per_entry_cap = config.max_total_capital_usdt / config.max_entries
+            if per_entry_cap > 0 and quantity * entry_price > per_entry_cap:
+                quantity = per_entry_cap / entry_price
+            if quantity * entry_price > remaining_capital:
+                quantity = remaining_capital / entry_price
+                quantity = max(0, quantity)
+
+        return quantity
 
     def _calculate_next_entry(self, position: DCAPosition, config: DCAConfig) -> None:
         if position.entries_remaining <= 0:
@@ -504,7 +537,20 @@ class DCAEngine:
             position.highest_price = max(position.highest_price, current_price)
             position.lowest_price = min(position.lowest_price, current_price)
 
-            self._update_pnl(position)
+            self._update_pnl(position, config)
+
+            if position.status == "cleanup_required":
+                await self._close_position(
+                    position_id,
+                    position.close_price or current_price,
+                    position.close_reason or "cleanup_retry",
+                    exchange_config,
+                )
+                return {
+                    "action": "cleanup",
+                    "reason": position.status,
+                    "cleanup_errors": position.cleanup_errors,
+                }
 
             if position.status != "active":
                 return {"action": "none", "reason": f"Position {position.status}"}
@@ -559,6 +605,9 @@ class DCAEngine:
         if position.next_entry_price <= 0:
             return False
 
+        if position.average_entry_price <= 0:
+            return False
+
         if config.mode == "average_down":
             if position.direction == "long":
                 loss_pct = (position.average_entry_price - current_price) / position.average_entry_price * 100
@@ -583,7 +632,7 @@ class DCAEngine:
         base_qty = position.entries[0].quantity
 
         new_entry_idx = len(position.entries) + 1
-        new_quantity = self._calculate_next_entry_quantity(config, new_entry_idx, base_qty)
+        new_quantity = self._calculate_next_entry_quantity(config, new_entry_idx, base_qty, position=position, entry_price=current_price)
 
         if config.sizing_method == "fixed" and config.fixed_size_usdt > 0:
             new_quantity = config.fixed_size_usdt / current_price
@@ -677,11 +726,128 @@ class DCAEngine:
 
         total_qty = position.total_quantity
 
-        weighted_avg = sum(e.entry_price * e.quantity for e in position.entries) / total_qty
+        if total_qty > 0:
+            weighted_avg = sum(e.entry_price * e.quantity for e in position.entries) / total_qty
+        else:
+            weighted_avg = 0.0
         position.average_entry_price = weighted_avg
 
         self._update_stop_take(position, config)
         self._calculate_next_entry(position, config)
+
+        if not config.paper_mode:
+            from exchange import cancel_order, place_protective_stop, place_protective_take_profit
+
+            old_sl_id = position.stop_loss_order_id
+            old_tp_id = position.take_profit_order_id
+            entry_sl_id = str(order_result.get("stop_loss_order_id") or "")
+            entry_tp_id = str(order_result.get("take_profit_order_id") or "")
+            if old_sl_id and old_sl_id not in position.stop_loss_order_ids:
+                position.stop_loss_order_ids.append(old_sl_id)
+            if old_tp_id and old_tp_id not in position.take_profit_order_ids:
+                position.take_profit_order_ids.append(old_tp_id)
+            if entry_sl_id and entry_sl_id not in position.stop_loss_order_ids:
+                position.stop_loss_order_ids.append(entry_sl_id)
+            if entry_tp_id and entry_tp_id not in position.take_profit_order_ids:
+                position.take_profit_order_ids.append(entry_tp_id)
+
+            if position.stop_loss_price:
+                sl_result = await place_protective_stop(
+                    ticker=config.ticker,
+                    direction=position.direction,
+                    quantity=position.total_quantity,
+                    stop_price=position.stop_loss_price,
+                    exchange_config=exchange_config,
+                    existing_order_id=old_sl_id or None,
+                )
+                if sl_result.get("status") == "placed" and sl_result.get("order_id"):
+                    position.stop_loss_order_id = str(sl_result["order_id"])
+                    position.stop_loss_order_ids = [position.stop_loss_order_id] + [
+                        order_id
+                        for order_id in position.stop_loss_order_ids
+                        if order_id not in {old_sl_id, position.stop_loss_order_id}
+                    ]
+                    if entry_sl_id and entry_sl_id != position.stop_loss_order_id:
+                        entry_sl_cancel = await cancel_order(entry_sl_id, config.ticker, exchange_config)
+                        if entry_sl_cancel.get("status") in {"cancelled", "canceled", "not_found", "simulated"}:
+                            position.stop_loss_order_ids = [
+                                order_id for order_id in position.stop_loss_order_ids if order_id != entry_sl_id
+                            ]
+                        else:
+                            logger.error(
+                                f"[DCA] New-entry SL {entry_sl_id} could not be cancelled after aggregate "
+                                f"SL replacement: {entry_sl_cancel}"
+                            )
+                            position.cleanup_errors.append({
+                                "order_id": entry_sl_id,
+                                "kind": "stop_loss",
+                                "reason": str(entry_sl_cancel.get("reason") or entry_sl_cancel.get("status")),
+                                "reconciliation_id": entry_sl_cancel.get("reconciliation_id"),
+                            })
+                elif sl_result.get("status") == "manual_review":
+                    position.stop_loss_order_ids = list(dict.fromkeys(
+                        position.stop_loss_order_ids
+                        + [str(item) for item in sl_result.get("active_order_ids") or [] if item]
+                    ))
+                    position.cleanup_errors.append({
+                        "kind": "stop_loss_replacement",
+                        "reason": str(sl_result.get("reason")),
+                        "reconciliation_id": sl_result.get("reconciliation_id"),
+                    })
+                else:
+                    logger.error(
+                        f"[DCA] Aggregate SL replacement failed after entry #{new_entry_idx}; "
+                        f"keeping existing per-entry protection: {sl_result}"
+                    )
+
+            if position.take_profit_price:
+                tp_result = await place_protective_take_profit(
+                    ticker=config.ticker,
+                    direction=position.direction,
+                    quantity=position.total_quantity,
+                    take_profit_price=position.take_profit_price,
+                    exchange_config=exchange_config,
+                    existing_order_id=old_tp_id or None,
+                )
+                if tp_result.get("status") == "placed" and tp_result.get("order_id"):
+                    position.take_profit_order_id = str(tp_result["order_id"])
+                    position.take_profit_order_ids = [position.take_profit_order_id] + [
+                        order_id
+                        for order_id in position.take_profit_order_ids
+                        if order_id not in {old_tp_id, position.take_profit_order_id}
+                    ]
+                    if entry_tp_id and entry_tp_id != position.take_profit_order_id:
+                        entry_tp_cancel = await cancel_order(entry_tp_id, config.ticker, exchange_config)
+                        if entry_tp_cancel.get("status") in {"cancelled", "canceled", "not_found", "simulated"}:
+                            position.take_profit_order_ids = [
+                                order_id for order_id in position.take_profit_order_ids if order_id != entry_tp_id
+                            ]
+                        else:
+                            logger.error(
+                                f"[DCA] New-entry TP {entry_tp_id} could not be cancelled after aggregate "
+                                f"TP replacement: {entry_tp_cancel}"
+                            )
+                            position.cleanup_errors.append({
+                                "order_id": entry_tp_id,
+                                "kind": "take_profit",
+                                "reason": str(entry_tp_cancel.get("reason") or entry_tp_cancel.get("status")),
+                                "reconciliation_id": entry_tp_cancel.get("reconciliation_id"),
+                            })
+                elif tp_result.get("status") == "manual_review":
+                    position.take_profit_order_ids = list(dict.fromkeys(
+                        position.take_profit_order_ids
+                        + [str(item) for item in tp_result.get("active_order_ids") or [] if item]
+                    ))
+                    position.cleanup_errors.append({
+                        "kind": "take_profit_replacement",
+                        "reason": str(tp_result.get("reason")),
+                        "reconciliation_id": tp_result.get("reconciliation_id"),
+                    })
+                else:
+                    logger.error(
+                        f"[DCA] Aggregate TP replacement failed after entry #{new_entry_idx}; "
+                        f"keeping existing per-entry protection: {tp_result}"
+                    )
 
         position.updated_at = utcnow()
 
@@ -691,19 +857,32 @@ class DCAEngine:
 
         return {"success": True, "entry_idx": new_entry_idx, "quantity": entry.quantity, "average_entry": weighted_avg}
 
-    def _update_pnl(self, position: DCAPosition) -> None:
+    def _update_pnl(self, position: DCAPosition, config: DCAConfig | None = None) -> None:
+        # NOTE: Unrealized PnL does not deduct accumulated fees; fees are tracked separately
+        if position.average_entry_price <= 0:
+            return
+        leverage = max(1.0, float(config.leverage if config else 1.0))
         if position.direction == "long":
             position.unrealized_pnl_usdt = (position.current_price - position.average_entry_price) * position.total_quantity
-            position.unrealized_pnl_pct = (position.current_price - position.average_entry_price) / position.average_entry_price * 100
+            position.unrealized_pnl_pct = (position.current_price - position.average_entry_price) / position.average_entry_price * 100 * leverage
         else:
             position.unrealized_pnl_usdt = (position.average_entry_price - position.current_price) * position.total_quantity
-            position.unrealized_pnl_pct = (position.average_entry_price - position.current_price) / position.average_entry_price * 100
+            position.unrealized_pnl_pct = (position.average_entry_price - position.current_price) / position.average_entry_price * 100 * leverage
 
     async def _close_position(self, position_id: str, exit_price: float, reason: str, exchange_config: dict | None = None) -> None:
         position = self.positions[position_id]
         config = self.configs.get(position_id)
+        cleanup_retry = position.status == "cleanup_required"
 
-        if config and not config.paper_mode:
+        # A cleanup retry may mean either "already flat, cancel remaining
+        # protection" or "legacy live position still needs flattening".  Only
+        # skip the reduce-only close after a prior close was durably recorded.
+        needs_exchange_close = bool(
+            config
+            and not config.paper_mode
+            and (not cleanup_retry or position.closed_at is None)
+        )
+        if needs_exchange_close:
             close_confirmed = False
             try:
                 from exchange import execute_trade
@@ -724,7 +903,7 @@ class DCAEngine:
 
                 order_result = await execute_trade(decision, exchange_config)
 
-                if order_result.get("status") in ["closed", "filled", "simulated"]:
+                if order_result.get("status") in ["closed", "filled", "simulated", "no_position"]:
                     logger.info(f"[DCA] Closed position via exchange: {order_result.get('order_id')}")
                     close_confirmed = True
                 elif order_result.get("status") == "partial_closed":
@@ -746,21 +925,70 @@ class DCAEngine:
                 await self.sync_position_state(position_id)
                 raise RuntimeError("DCA exchange close was not confirmed; keeping position active")
 
+        cleanup_failures: list[dict] = []
+        if config and not config.paper_mode:
+            from exchange import cancel_order
+
+            stop_ids = list(dict.fromkeys(
+                [position.stop_loss_order_id, *position.stop_loss_order_ids]
+            ))
+            take_profit_ids = list(dict.fromkeys(
+                [position.take_profit_order_id, *position.take_profit_order_ids]
+            ))
+            for order_id, kind in (
+                *((order_id, "stop_loss") for order_id in stop_ids if order_id),
+                *((order_id, "take_profit") for order_id in take_profit_ids if order_id),
+            ):
+                cancel_result = await cancel_order(order_id, position.ticker, exchange_config)
+                if cancel_result.get("status") in {"cancelled", "canceled", "not_found", "simulated"}:
+                    if kind == "stop_loss":
+                        position.stop_loss_order_ids = [
+                            item for item in position.stop_loss_order_ids if item != order_id
+                        ]
+                        if position.stop_loss_order_id == order_id:
+                            position.stop_loss_order_id = ""
+                    else:
+                        position.take_profit_order_ids = [
+                            item for item in position.take_profit_order_ids if item != order_id
+                        ]
+                        if position.take_profit_order_id == order_id:
+                            position.take_profit_order_id = ""
+                else:
+                    cleanup_failures.append({
+                        "order_id": order_id,
+                        "kind": kind,
+                        "reason": str(cancel_result.get("reason") or cancel_result.get("status")),
+                        "reconciliation_id": cancel_result.get("reconciliation_id"),
+                    })
+
+        effective_exit_price = position.close_price or exit_price
+        effective_reason = position.close_reason or reason
         if position.direction == "long":
-            pnl_usdt = (exit_price - position.average_entry_price) * position.total_quantity
+            pnl_usdt = (effective_exit_price - position.average_entry_price) * position.total_quantity
         else:
-            pnl_usdt = (position.average_entry_price - exit_price) * position.total_quantity
+            pnl_usdt = (position.average_entry_price - effective_exit_price) * position.total_quantity
 
         total_fees = sum(e.fees_usdt for e in position.entries)
         pnl_usdt -= total_fees
 
         position.realized_pnl_usdt = pnl_usdt
-        position.status = "closed"
-        position.closed_at = utcnow()
-        position.close_reason = reason
-        position.current_price = exit_price
+        position.status = "cleanup_required" if cleanup_failures else "closed"
+        position.closed_at = position.closed_at or utcnow()
+        position.close_reason = effective_reason
+        position.close_price = effective_exit_price
+        position.current_price = effective_exit_price
+        position.cleanup_errors = cleanup_failures
 
-        logger.info(f"[DCA] Closed position {position_id}: reason={reason}, pnl_usdt={pnl_usdt:.2f}, entries={len(position.entries)}")
+        if cleanup_failures:
+            logger.error(
+                f"[DCA] Position {position_id} is flat but {len(cleanup_failures)} "
+                "protective orders still require cleanup"
+            )
+        else:
+            logger.info(
+                f"[DCA] Closed position {position_id}: reason={effective_reason}, "
+                f"pnl_usdt={pnl_usdt:.2f}, entries={len(position.entries)}"
+            )
 
         await self.sync_position_state(position_id)
 
@@ -784,6 +1012,7 @@ class DCAEngine:
             "unrealized_pnl_pct": round(position.unrealized_pnl_pct, 2),
             "stop_loss_price": round(position.stop_loss_price, 6),
             "take_profit_price": round(position.take_profit_price, 6),
+            "cleanup_errors": position.cleanup_errors,
             "next_entry_price": round(position.next_entry_price, 6),
             "entries_remaining": position.entries_remaining,
             "highest_price": round(position.highest_price, 6),
@@ -811,7 +1040,7 @@ class DCAEngine:
         return [
             self.get_position_status(pid)
             for pid, pos in self.positions.items()
-            if pos.status == "active"
+            if pos.status in {"active", "cleanup_required"}
         ]
 
     async def list_active_positions_async(self) -> list[dict]:
@@ -826,10 +1055,9 @@ class DCAEngine:
             if settings.redis.enabled:
                 try:
                     loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    asyncio.run(self.remove_position_async(position_id))
-                else:
                     loop.create_task(self.remove_position_async(position_id))
+                except RuntimeError:
+                    logger.warning(f"[DCA] Cannot remove position {position_id} from Redis: no running event loop")
             return True
         return False
 

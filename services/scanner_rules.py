@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from core.config import settings
+from core.config import DATA_DIR, settings
 
 
 @dataclass
@@ -54,6 +54,41 @@ class ScoringContext:
     bundle_quality_reasons: list[str]
     timeframe: str
     market_type: str
+    volume_zscore: float | None = None
+    rvol: float | None = None
+    atr_percentile: float | None = None
+    orderbook_slippage_bps: float | None = None
+    funding_rate: float | None = None
+    long_short_ratio: float | None = None
+    nearest_liq_distance_pct: float | None = None
+    ichimoku_cloud_position: str | None = None
+    supertrend_direction: str | None = None
+    rsi_divergence_type: str | None = None
+    rsi_divergence_strength: float = 0.0
+    macd_divergence_type: str | None = None
+    macd_divergence_strength: float = 0.0
+    ttm_squeeze_active: bool = False
+    ttm_squeeze_fired: bool = False
+    wyckoff_phase: str | None = None
+    btc_dominance: float | None = None
+    active_session: str | None = None
+    mtf_alignment: float = 0.0
+    # ── Round 4 audit additions ────────────────────────────────────────
+    volatility_regime: str | None = None
+    hurst_exponent: float | None = None
+    relative_strength_btc: float | None = None
+    candlestick_pattern: str | None = None
+    candlestick_pattern_strength: float = 0.0
+    anchored_vwap_distance_pct: float | None = None
+    liquidity_sweep_type: str | None = None
+    liquidity_sweep_strength: float = 0.0
+    fear_greed_value: int | None = None
+    cvd_divergence_type: str | None = None
+    cvd_divergence_strength: float = 0.0
+    funding_term_structure: str | None = None
+    eqh_eql_proximity_pct: float | None = None
+    in_killzone: bool = False
+    killzone_name: str | None = None
 
     @property
     def expected_trend(self) -> str:
@@ -173,6 +208,102 @@ class ScoringContext:
         if self.direction == "long":
             return self.htf_bearish
         return self.htf_bullish
+
+    @property
+    def ichimoku_above_cloud(self) -> bool:
+        return self.ichimoku_cloud_position == "above_cloud"
+
+    @property
+    def ichimoku_below_cloud(self) -> bool:
+        return self.ichimoku_cloud_position == "below_cloud"
+
+    @property
+    def ichimoku_inside_cloud(self) -> bool:
+        return self.ichimoku_cloud_position == "inside_cloud"
+
+    @property
+    def supertrend_aligned(self) -> bool:
+        if not self.supertrend_direction:
+            return False
+        if self.direction == "long":
+            return self.supertrend_direction == "up"
+        return self.supertrend_direction == "down"
+
+    @property
+    def supertrend_conflicts(self) -> bool:
+        if not self.supertrend_direction:
+            return False
+        if self.direction == "long":
+            return self.supertrend_direction == "down"
+        return self.supertrend_direction == "up"
+
+    @property
+    def rsi_bearish_divergence(self) -> bool:
+        return self.rsi_divergence_type == "bearish"
+
+    @property
+    def rsi_bullish_divergence(self) -> bool:
+        return self.rsi_divergence_type == "bullish"
+
+    @property
+    def macd_bearish_divergence(self) -> bool:
+        return self.macd_divergence_type == "bearish"
+
+    @property
+    def macd_bullish_divergence(self) -> bool:
+        return self.macd_divergence_type == "bullish"
+
+    @property
+    def ttm_squeeze_firing(self) -> bool:
+        return self.ttm_squeeze_fired
+
+    @property
+    def in_accumulation(self) -> bool:
+        return self.wyckoff_phase == "accumulation"
+
+    @property
+    def in_distribution(self) -> bool:
+        return self.wyckoff_phase == "distribution"
+
+    @property
+    def btc_dominance_high(self) -> bool:
+        return self.btc_dominance is not None and self.btc_dominance > 55.0
+
+    @property
+    def low_liquidity_session(self) -> bool:
+        return self.active_session in ("off_hours", "asian")
+
+    @property
+    def mtf_aligned(self) -> bool:
+        return self.mtf_alignment > 0.5
+
+    @property
+    def mtf_conflicted(self) -> bool:
+        return self.mtf_alignment < -0.5
+
+    @property
+    def funding_extreme(self) -> bool:
+        return self.funding_rate is not None and abs(self.funding_rate) > 0.0005
+
+    @property
+    def funding_favorable(self) -> bool:
+        if self.funding_rate is None:
+            return False
+        if self.direction == "long":
+            return self.funding_rate < 0
+        return self.funding_rate > 0
+
+    @property
+    def ls_ratio_extreme_long(self) -> bool:
+        return self.long_short_ratio is not None and self.long_short_ratio > 2.5
+
+    @property
+    def ls_ratio_extreme_short(self) -> bool:
+        return self.long_short_ratio is not None and self.long_short_ratio < 0.4
+
+    @property
+    def high_slippage(self) -> bool:
+        return self.orderbook_slippage_bps is not None and self.orderbook_slippage_bps > 5.0
 
 
 @dataclass
@@ -294,6 +425,32 @@ def _init_default_conditions() -> None:
     register_condition("oi_divergence_short", lambda ctx: ctx.direction == "short" and ctx.oi_rising)
     register_condition("regime_trending", lambda ctx: ctx.is_trending)
     register_condition("regime_ranging", lambda ctx: ctx.is_ranging)
+    register_condition("ichimoku_above_long", lambda ctx: ctx.direction == "long" and ctx.ichimoku_above_cloud)
+    register_condition("ichimoku_below_short", lambda ctx: ctx.direction == "short" and ctx.ichimoku_below_cloud)
+    register_condition("ichimoku_inside_penalty", lambda ctx: ctx.ichimoku_inside_cloud)
+    register_condition("supertrend_aligned", lambda ctx: ctx.supertrend_aligned)
+    register_condition("supertrend_conflict", lambda ctx: ctx.supertrend_conflicts)
+    register_condition("rsi_bearish_div_long", lambda ctx: ctx.direction == "long" and ctx.rsi_bearish_divergence)
+    register_condition("rsi_bullish_div_short", lambda ctx: ctx.direction == "short" and ctx.rsi_bullish_divergence)
+    register_condition("rsi_bullish_div_long", lambda ctx: ctx.direction == "long" and ctx.rsi_bullish_divergence)
+    register_condition("rsi_bearish_div_short", lambda ctx: ctx.direction == "short" and ctx.rsi_bearish_divergence)
+    register_condition("macd_bearish_div_long", lambda ctx: ctx.direction == "long" and ctx.macd_bearish_divergence)
+    register_condition("macd_bullish_div_short", lambda ctx: ctx.direction == "short" and ctx.macd_bullish_divergence)
+    register_condition("macd_bullish_div_long", lambda ctx: ctx.direction == "long" and ctx.macd_bullish_divergence)
+    register_condition("macd_bearish_div_short", lambda ctx: ctx.direction == "short" and ctx.macd_bearish_divergence)
+    register_condition("ttm_squeeze_fired", lambda ctx: ctx.ttm_squeeze_firing)
+    register_condition("wyckoff_accumulation", lambda ctx: ctx.in_accumulation)
+    register_condition("wyckoff_distribution", lambda ctx: ctx.in_distribution)
+    register_condition("btc_dominance_high", lambda ctx: ctx.btc_dominance_high)
+    register_condition("low_liquidity_session", lambda ctx: ctx.low_liquidity_session)
+    register_condition("mtf_aligned", lambda ctx: ctx.mtf_aligned)
+    register_condition("mtf_conflicted", lambda ctx: ctx.mtf_conflicted)
+    register_condition("funding_extreme", lambda ctx: ctx.funding_extreme)
+    register_condition("funding_favorable", lambda ctx: ctx.funding_favorable)
+    register_condition("ls_ratio_extreme_long", lambda ctx: ctx.ls_ratio_extreme_long)
+    register_condition("ls_ratio_extreme_short", lambda ctx: ctx.ls_ratio_extreme_short)
+    register_condition("high_slippage", lambda ctx: ctx.high_slippage)
+    register_condition("near_liquidation", lambda ctx: ctx.nearest_liq_distance_pct is not None and ctx.nearest_liq_distance_pct < 1.0)
 
 
 _init_default_conditions()
@@ -629,6 +786,234 @@ DEFAULT_RULES: list[ScoringRule] = [
         description="ranging market regime penalized",
         penalty=True,
     ),
+    ScoringRule(
+        name="ichimoku_above_long",
+        base_score=12.0,
+        weight_key="ichimoku",
+        condition="ichimoku_above_long",
+        category="ichimoku",
+        description="Price above Ichimoku cloud for long",
+        regime_modifier={"trending": 4.0},
+    ),
+    ScoringRule(
+        name="ichimoku_below_short",
+        base_score=12.0,
+        weight_key="ichimoku",
+        condition="ichimoku_below_short",
+        category="ichimoku",
+        description="Price below Ichimoku cloud for short",
+        regime_modifier={"trending": 4.0},
+    ),
+    ScoringRule(
+        name="ichimoku_inside_penalty",
+        base_score=-8.0,
+        weight_key="ichimoku",
+        condition="ichimoku_inside_penalty",
+        category="ichimoku",
+        description="Price inside Ichimoku cloud (uncertain)",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="supertrend_confirmation",
+        base_score=10.0,
+        weight_key="supertrend",
+        condition="supertrend_aligned",
+        category="trend",
+        description="Supertrend confirms direction",
+        regime_modifier={"trending": 4.0},
+    ),
+    ScoringRule(
+        name="supertrend_conflict",
+        base_score=-12.0,
+        weight_key="supertrend",
+        condition="supertrend_conflict",
+        category="trend",
+        description="Supertrend conflicts with direction",
+        penalty=True,
+        regime_modifier={"trending": -6.0},
+    ),
+    ScoringRule(
+        name="rsi_bearish_div_long",
+        base_score=-15.0,
+        weight_key="rsi_divergence",
+        condition="rsi_bearish_div_long",
+        category="divergence",
+        description="Bearish RSI divergence for long penalty",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="rsi_bullish_div_short",
+        base_score=-15.0,
+        weight_key="rsi_divergence",
+        condition="rsi_bullish_div_short",
+        category="divergence",
+        description="Bullish RSI divergence for short penalty",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="rsi_bullish_div_long",
+        base_score=8.0,
+        weight_key="rsi_divergence",
+        condition="rsi_bullish_div_long",
+        category="divergence",
+        description="Bullish RSI divergence supports long",
+    ),
+    ScoringRule(
+        name="rsi_bearish_div_short",
+        base_score=8.0,
+        weight_key="rsi_divergence",
+        condition="rsi_bearish_div_short",
+        category="divergence",
+        description="Bearish RSI divergence supports short",
+    ),
+    ScoringRule(
+        name="macd_bearish_div_long",
+        base_score=-10.0,
+        weight_key="macd_divergence",
+        condition="macd_bearish_div_long",
+        category="divergence",
+        description="Bearish MACD divergence for long penalty",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="macd_bullish_div_short",
+        base_score=-10.0,
+        weight_key="macd_divergence",
+        condition="macd_bullish_div_short",
+        category="divergence",
+        description="Bullish MACD divergence for short penalty",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="macd_bullish_div_long",
+        base_score=6.0,
+        weight_key="macd_divergence",
+        condition="macd_bullish_div_long",
+        category="divergence",
+        description="Bullish MACD divergence supports long",
+    ),
+    ScoringRule(
+        name="macd_bearish_div_short",
+        base_score=6.0,
+        weight_key="macd_divergence",
+        condition="macd_bearish_div_short",
+        category="divergence",
+        description="Bearish MACD divergence supports short",
+    ),
+    ScoringRule(
+        name="ttm_squeeze_fired",
+        base_score=14.0,
+        weight_key="ttm_squeeze",
+        condition="ttm_squeeze_fired",
+        category="volatility",
+        description="TTM Squeeze just fired - breakout imminent",
+    ),
+    ScoringRule(
+        name="wyckoff_accumulation",
+        base_score=10.0,
+        weight_key="wyckoff",
+        condition="wyckoff_accumulation",
+        category="structure",
+        description="Wyckoff accumulation phase",
+    ),
+    ScoringRule(
+        name="wyckoff_distribution",
+        base_score=-10.0,
+        weight_key="wyckoff",
+        condition="wyckoff_distribution",
+        category="structure",
+        description="Wyckoff distribution phase penalty",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="btc_dominance_high_penalty",
+        base_score=-5.0,
+        weight_key="btc_dominance",
+        condition="btc_dominance_high",
+        category="macro",
+        description="High BTC dominance - altcoins underperform",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="low_liquidity_session_penalty",
+        base_score=-6.0,
+        weight_key="session",
+        condition="low_liquidity_session",
+        category="execution",
+        description="Low liquidity session penalty",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="mtf_alignment",
+        base_score=10.0,
+        weight_key="mtf_alignment",
+        condition="mtf_aligned",
+        category="trend",
+        description="Multi-timeframe momentum aligned",
+        regime_modifier={"trending": 5.0},
+    ),
+    ScoringRule(
+        name="mtf_conflict_penalty",
+        base_score=-12.0,
+        weight_key="mtf_alignment",
+        condition="mtf_conflicted",
+        category="trend",
+        description="Multi-timeframe momentum conflict",
+        penalty=True,
+        regime_modifier={"trending": -6.0},
+    ),
+    ScoringRule(
+        name="funding_extreme_penalty",
+        base_score=-8.0,
+        weight_key="funding",
+        condition="funding_extreme",
+        category="open_interest",
+        description="Extreme funding rate penalty",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="funding_favorable_bonus",
+        base_score=6.0,
+        weight_key="funding",
+        condition="funding_favorable",
+        category="open_interest",
+        description="Funding rate favorable for direction",
+    ),
+    ScoringRule(
+        name="ls_ratio_extreme_long_penalty",
+        base_score=-7.0,
+        weight_key="ls_ratio",
+        condition="ls_ratio_extreme_long",
+        category="sentiment",
+        description="Extreme long/short ratio (crowded long)",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="ls_ratio_extreme_short_penalty",
+        base_score=-7.0,
+        weight_key="ls_ratio",
+        condition="ls_ratio_extreme_short",
+        category="sentiment",
+        description="Extreme long/short ratio (crowded short)",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="high_slippage_penalty",
+        base_score=-8.0,
+        weight_key="slippage",
+        condition="high_slippage",
+        category="execution",
+        description="High orderbook slippage penalty",
+        penalty=True,
+    ),
+    ScoringRule(
+        name="near_liquidation_bonus",
+        base_score=5.0,
+        weight_key="liquidation",
+        condition="near_liquidation",
+        category="structure",
+        description="Near liquidation pool - magnetic price effect",
+    ),
 ]
 
 
@@ -796,17 +1181,19 @@ def get_scoring_engine() -> ScoringEngine:
 def save_rules_config(path: str | Path | None = None) -> None:
     """Save current rules configuration to file."""
     if path is None:
-        path = Path(settings.data_dir) / "scanner_rules.json"
+        path = DATA_DIR / "scanner_rules.json"
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(DEFAULT_ENGINE.to_json(), encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(DEFAULT_ENGINE.to_json(), encoding="utf-8")
+    temp_path.replace(path)
     logger.info(f"[ScannerRules] Saved rules config to {path}")
 
 
 def load_rules_config(path: str | Path | None = None) -> bool:
     """Load rules configuration from file."""
     if path is None:
-        path = Path(settings.data_dir) / "scanner_rules.json"
+        path = DATA_DIR / "scanner_rules.json"
     path = Path(path)
     if not path.exists():
         return False

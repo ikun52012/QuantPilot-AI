@@ -50,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 from core.account_risk import record_position_pnl
-from core.config import settings
+from core.config import DATA_DIR, settings
 from core.utils.common import position_symbol_key, resolve_limit_timeout_secs
 from core.utils.datetime import parse_datetime_utc_naive, utcnow
 
@@ -221,6 +221,9 @@ class WebhookEventModel(Base):
     client_ip = Column(String(45), default="")
     payload_json = Column(Text, default="{}")
     created_at = Column(DateTime, default=lambda: utcnow(), index=True)
+    updated_at = Column(DateTime, default=lambda: utcnow(), index=True)
+    attempt_count = Column(Integer, default=0)
+    next_attempt_at = Column(DateTime, nullable=True, index=True)
 
 
 class SignalDecisionAuditModel(Base):
@@ -241,6 +244,36 @@ class SignalDecisionAuditModel(Base):
     reason = Column(Text, default="")
     payload_json = Column(Text, default="{}")
     created_at = Column(DateTime, default=lambda: utcnow(), index=True)
+
+
+class AIDecisionLogModel(Base):
+    """Full AI prompt/response audit trail managed by Alembic."""
+    __tablename__ = "ai_decision_log"
+    __table_args__ = (
+        Index("idx_ai_decision_log_ticker_ts", "ticker", "timestamp"),
+        Index("idx_ai_decision_log_created_at", "created_at"),
+    )
+
+    decision_id = Column(String(36), primary_key=True)
+    timestamp = Column(String(40), nullable=False)
+    ticker = Column(String(60), default="")
+    direction = Column(String(20), default="")
+    signal_price = Column(Float, nullable=True)
+    timeframe = Column(String(20), default="")
+    strategy = Column(String(120), default="")
+    user_id = Column(String(36), nullable=True)
+    provider = Column(String(40), default="")
+    model_id = Column(String(120), default="")
+    system_prompt = Column(Text, default="")
+    user_prompt = Column(Text, default="")
+    raw_response = Column(Text, default="")
+    analysis_json = Column(Text, default="{}")
+    market_context_json = Column(Text, default="{}")
+    enhanced_data_json = Column(Text, default="{}")
+    recommendation = Column(String(40), default="")
+    confidence = Column(Float, default=0.0)
+    risk_score = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=lambda: utcnow(), nullable=True)
 
 
 class ScannerStateModel(Base):
@@ -763,6 +796,9 @@ class DatabaseManager:
             "client_ip": "VARCHAR(45) DEFAULT ''",
             "payload_json": "TEXT DEFAULT '{}'",
             "created_at": "TIMESTAMP",
+            "updated_at": "TIMESTAMP",
+            "attempt_count": "INTEGER DEFAULT 0",
+            "next_attempt_at": "TIMESTAMP",
         })
         add_missing_columns("signal_decision_audits", {
             "user_id": "VARCHAR(36)",
@@ -933,6 +969,10 @@ class DatabaseManager:
         create_index_if_missing("idx_users_webhook_secret_hash", "CREATE INDEX idx_users_webhook_secret_hash ON users(webhook_secret_hash)")
         create_index_if_missing("idx_trades_user_timestamp", "CREATE INDEX idx_trades_user_timestamp ON trades(user_id, timestamp)")
         create_index_if_missing("idx_webhook_fingerprint_created", "CREATE INDEX idx_webhook_fingerprint_created ON webhook_events(fingerprint, created_at)")
+        create_index_if_missing(
+            "idx_webhook_status_retry",
+            "CREATE INDEX idx_webhook_status_retry ON webhook_events(status, next_attempt_at, updated_at)",
+        )
         if dialect_name in {"sqlite", "postgresql"}:
             create_index_if_missing(
                 "uq_webhook_active_fingerprint",
@@ -1040,9 +1080,12 @@ async def get_user_by_username(session: AsyncSession, username: str) -> UserMode
 
 
 async def get_user_by_id(session: AsyncSession, user_id: str) -> UserModel | None:
-    """Get user by ID."""
+    """Get user by ID. Excludes soft-deleted users."""
     result = await session.execute(
-        select(UserModel).where(UserModel.id == user_id)
+        select(UserModel).where(
+            UserModel.id == user_id,
+            UserModel.deleted_at.is_(None),
+        )
     )
     return result.scalar_one_or_none()
 
@@ -1378,6 +1421,7 @@ def _take_profit_levels_from_entry(entry: dict) -> list[dict]:
             "qty_pct": _safe_float(level.get("qty_pct"), 100.0),
             "order_id": str(level.get("order_id") or ""),
             "status": level.get("status") if level.get("status") != "simulated" else "pending",
+            "protected_qty": _safe_float(level.get("qty"), 0.0),
         })
 
     if not levels:
@@ -1445,7 +1489,7 @@ async def close_position_async(
             )
         except Exception as retry_exc:
             logger.error(f"[Database] CRITICAL: close_position_async lock retry failed for {position.id}: {retry_exc}")
-            return 0.0
+            raise RuntimeError(f"Failed to acquire lock for position {position.id} after retry") from retry_exc
     locked_position = result.scalar_one_or_none()
     if not locked_position:
         raise ValueError(f"Position {position.id} not found")
@@ -1509,11 +1553,15 @@ async def close_position_async(
 
     # Record PnL in account risk tracker for loss-limit enforcement
     try:
+        net_pnl_usdt = pnl_usdt - _safe_float(locked_position.fees_total_usdt, 0.0)
         await record_position_pnl(
             user_id=locked_position.user_id,
             pnl_pct=pnl_pct,
-            pnl_usdt=pnl_usdt,
-            equity_usdt=float(getattr(settings.risk, "account_equity_usdt", 0.0) or 0.0),
+            pnl_usdt=net_pnl_usdt,
+            # Equity is checked from the active account immediately before a
+            # new entry.  Do not contaminate the tracker with a global/static
+            # deployment default at close time.
+            equity_usdt=0.0,
         )
     except Exception:
         logger.error(f"[Database] CRITICAL: Failed to record account risk PnL for position {locked_position.id}")
@@ -1616,11 +1664,14 @@ async def record_position_partial_close_trade_async(
 
     if write_ledger:
         try:
+            risk_event_pnl_usdt = event_pnl_usdt
+            if is_final:
+                risk_event_pnl_usdt -= _safe_float(locked_position.fees_total_usdt, 0.0)
             await record_position_pnl(
                 user_id=locked_position.user_id,
                 pnl_pct=round(event_pnl_pct, 6),
-                pnl_usdt=event_pnl_usdt,
-                equity_usdt=float(getattr(settings.risk, "account_equity_usdt", 0.0) or 0.0),
+                pnl_usdt=risk_event_pnl_usdt,
+                equity_usdt=0.0,
             )
         except Exception:
             logger.error(f"[Database] CRITICAL: Failed to record partial PnL for position {locked_position.id}")
@@ -1836,6 +1887,10 @@ async def sync_position_from_trade_entry_async(session: AsyncSession, entry: dic
             contract_size = _safe_float(order_details.get("contract_size"), 1.0)
             if trailing_stop_config:
                 trailing_stop_config["_contract_size"] = contract_size
+            stop_loss_protected_qty = _safe_float(order_details.get("stop_loss_protected_qty"), 0.0)
+            if stop_loss_protected_qty > 0:
+                trailing_stop_config["_stop_loss_protected_qty"] = stop_loss_protected_qty
+                trailing_stop_config["_stop_loss_protected_at"] = opened_at.isoformat()
             fallback_notional = entry_price * quantity * contract_size if entry_price > 0 and quantity > 0 else 0
 
             position = PositionModel(
@@ -2056,7 +2111,7 @@ async def has_recent_webhook_event(session: AsyncSession, fingerprint: str, wind
     P0-FIX: Ignore failed/error/cancelled statuses to allow legitimate retries after stale reservations.
     """
     cutoff = utcnow() - timedelta(seconds=window_secs)
-    ignored_statuses = {"failed", "cancelled", "rejected"}
+    ignored_statuses = {"failed", "error", "cancelled", "rejected"}
     result = await session.execute(
         select(WebhookEventModel)
         .where(
@@ -2099,18 +2154,22 @@ async def record_signal_decision_audit(
     if session is None:
         return None
     try:
-        audit = SignalDecisionAuditModel(
-            user_id=user_id,
-            fingerprint=str(fingerprint or ""),
-            ticker=str(ticker or ""),
-            direction=str(direction or ""),
-            stage=str(stage or "")[:40],
-            outcome=str(outcome or "")[:40],
-            reason=str(reason or ""),
-            payload_json=json.dumps(payload or {}, default=str),
-        )
-        session.add(audit)
-        await session.flush()
+        nested_transaction = session.begin_nested()
+        if asyncio.iscoroutine(nested_transaction):
+            nested_transaction = await nested_transaction
+        async with nested_transaction:
+            audit = SignalDecisionAuditModel(
+                user_id=user_id,
+                fingerprint=str(fingerprint or ""),
+                ticker=str(ticker or ""),
+                direction=str(direction or ""),
+                stage=str(stage or "")[:40],
+                outcome=str(outcome or "")[:40],
+                reason=str(reason or ""),
+                payload_json=json.dumps(payload or {}, default=str),
+            )
+            session.add(audit)
+            await session.flush()
         return audit
     except Exception as exc:
         logger.warning(f"[Audit] Failed to record signal decision audit: {exc}")
@@ -2198,20 +2257,24 @@ async def record_scanner_audit(
 ) -> ScannerAuditModel | None:
     """Record an append-only scanner audit event."""
     try:
-        audit = ScannerAuditModel(
-            scope=str(scope or "admin")[:40],
-            run_id=str(run_id or "")[:64],
-            event_type=str(event_type or "")[:40],
-            watch_symbol=str(watch_symbol or "")[:60],
-            exchange_symbol=str(exchange_symbol or "")[:60],
-            direction=str(direction or "")[:20],
-            score=float(score or 0.0),
-            setup_hash=str(setup_hash or "")[:64],
-            reason=str(reason or ""),
-            payload_json=json.dumps(payload or {}, default=str),
-        )
-        session.add(audit)
-        await session.flush()
+        nested_transaction = session.begin_nested()
+        if asyncio.iscoroutine(nested_transaction):
+            nested_transaction = await nested_transaction
+        async with nested_transaction:
+            audit = ScannerAuditModel(
+                scope=str(scope or "admin")[:40],
+                run_id=str(run_id or "")[:64],
+                event_type=str(event_type or "")[:40],
+                watch_symbol=str(watch_symbol or "")[:60],
+                exchange_symbol=str(exchange_symbol or "")[:60],
+                direction=str(direction or "")[:20],
+                score=float(score or 0.0),
+                setup_hash=str(setup_hash or "")[:64],
+                reason=str(reason or ""),
+                payload_json=json.dumps(payload or {}, default=str),
+            )
+            session.add(audit)
+            await session.flush()
         return audit
     except Exception as exc:
         logger.warning(f"[ScannerAudit] Failed to record scanner audit: {exc}")
@@ -2452,7 +2515,7 @@ async def set_admin_setting(session: AsyncSession, key: str, value: str):
 # Seed Default Data
 # ─────────────────────────────────────────────
 
-_BOOTSTRAP_PASSWORD_FILE = Path("data") / "bootstrap_admin_password.txt"
+_BOOTSTRAP_PASSWORD_FILE = DATA_DIR / "bootstrap_admin_password.txt"
 
 
 def _generate_bootstrap_admin_password(length: int = 28) -> str:
@@ -2595,6 +2658,7 @@ async def cleanup_old_records(
     trades_retention_days: int = 90,
     order_events_retention_days: int = 90,
     audit_logs_retention_days: int = 30,
+    ai_decision_logs_retention_days: int = 90,
     webhook_events_retention_days: int = 30,
     admin_audit_logs_retention_days: int = 90,
     batch_size: int = 1000,
@@ -2609,6 +2673,7 @@ async def cleanup_old_records(
         trades_retention_days: Keep trade logs for this many days.
         order_events_retention_days: Keep order events for this many days.
         audit_logs_retention_days: Keep signal decision audits for this many days.
+        ai_decision_logs_retention_days: Keep full AI prompt/response audits for this many days.
         webhook_events_retention_days: Keep webhook events for this many days.
         admin_audit_logs_retention_days: Keep admin audit logs for this many days.
         batch_size: Number of rows to delete per batch.
@@ -2625,20 +2690,21 @@ async def cleanup_old_records(
     now = utcnow()
     deleted = {}
 
-    async def _bulk_delete(model, where_clause, table_name: str) -> int:
+    async def _bulk_delete(model, where_clause, table_name: str, id_column=None) -> int:
         """Delete rows in batches to avoid memory issues.
 
         Uses a subquery approach compatible with both SQLite and PostgreSQL.
         PostgreSQL does not support DELETE ... LIMIT directly.
         """
         total_deleted = 0
+        id_column = id_column if id_column is not None else model.id
         while True:
             subq = (
-                select(model.id)
+                select(id_column)
                 .where(where_clause)
                 .limit(batch_size)
             )
-            stmt = delete(model).where(model.id.in_(subq))
+            stmt = delete(model).where(id_column.in_(subq))
             result = await session.execute(stmt)
             await session.flush()
             count = result.rowcount or 0
@@ -2689,7 +2755,18 @@ async def cleanup_old_records(
     if count > 0:
         deleted["signal_decision_audits"] = count
 
-    # 5. Webhook events older than retention period
+    # 5. Full AI decision logs older than retention period
+    cutoff = now - timedelta(days=ai_decision_logs_retention_days)
+    count = await _bulk_delete(
+        AIDecisionLogModel,
+        AIDecisionLogModel.created_at < cutoff,
+        "ai_decision_log",
+        AIDecisionLogModel.decision_id,
+    )
+    if count > 0:
+        deleted["ai_decision_log"] = count
+
+    # 6. Webhook events older than retention period
     cutoff = now - timedelta(days=webhook_events_retention_days)
     count = await _bulk_delete(
         WebhookEventModel,
@@ -2699,7 +2776,7 @@ async def cleanup_old_records(
     if count > 0:
         deleted["webhook_events"] = count
 
-    # 6. Admin audit logs older than retention period
+    # 7. Admin audit logs older than retention period
     cutoff = now - timedelta(days=admin_audit_logs_retention_days)
     count = await _bulk_delete(
         AdminAuditLogModel,

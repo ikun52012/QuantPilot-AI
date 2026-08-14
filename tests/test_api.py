@@ -498,6 +498,27 @@ class TestUserEndpoints:
         assert exchange["limit_timeout_overrides"] == {}
 
     @pytest.mark.asyncio
+    async def test_generic_user_settings_cannot_bypass_exchange_validation(self, client: AsyncClient, test_user_data):
+        login = await client.post("/api/auth/register", json=test_user_data)
+        assert login.status_code == 200
+        headers = _csrf_headers(login)
+
+        response = await client.put(
+            "/api/user/settings",
+            headers=headers,
+            json={
+                "exchange": {
+                    "live_trading": True,
+                    "api_key": "bypass-key",
+                    "api_secret": "bypass-secret",
+                }
+            },
+        )
+
+        assert response.status_code == 400
+        assert "dedicated validated endpoint" in response.json()["detail"]
+
+    @pytest.mark.asyncio
     async def test_admin_exchange_partial_update_preserves_existing_values(self, client: AsyncClient, db_session, test_admin_data):
         headers = await _login_admin(client, db_session, test_admin_data)
 
@@ -509,7 +530,7 @@ class TestUserEndpoints:
                 "api_key": "keep-key",
                 "api_secret": "keep-secret",
                 "password": "keep-password",
-                "live_trading": True,
+                "live_trading": False,
                 "sandbox_mode": True,
                 "market_type": "contract",
                 "default_order_type": "limit",
@@ -539,7 +560,7 @@ class TestUserEndpoints:
         settings_response = await client.get("/api/settings", headers=headers)
         assert settings_response.status_code == 200
         exchange = settings_response.json()["exchange"]
-        assert exchange["live_trading"] is True
+        assert exchange["live_trading"] is False
         assert exchange["sandbox_mode"] is False
         assert exchange["api_configured"] is True
         assert exchange["api_key_masked"] == "ke****ey"
@@ -560,7 +581,7 @@ class TestUserEndpoints:
                 "api_key": "exchange-key",
                 "api_secret": "exchange-secret",
                 "password": "exchange-pass",
-                "live_trading": True,
+                "live_trading": False,
                 "sandbox_mode": True,
                 "market_type": "contract",
                 "default_order_type": "limit",
@@ -585,11 +606,38 @@ class TestUserEndpoints:
         status_response = await client.get("/api/status", headers=headers)
         assert status_response.status_code == 200
         status = status_response.json()
-        assert status["live_trading"] is True
+        assert status["live_trading"] is False
         assert status["exchange_sandbox_mode"] is True
         assert status["deepseek_api_configured"] is True
         assert status["deepseek_api_key_masked"] == "deep****-key"
         assert status["exchange_api_key_masked"] == "exch****-key"
+
+    @pytest.mark.asyncio
+    async def test_admin_cannot_enable_live_trading_without_production_prerequisites(
+        self, client: AsyncClient, db_session, test_admin_data
+    ):
+        headers = await _login_admin(client, db_session, test_admin_data)
+
+        response = await client.post(
+            "/api/settings/exchange",
+            headers=headers,
+            json={
+                "exchange": "okx",
+                "api_key": "exchange-key",
+                "api_secret": "exchange-secret",
+                "password": "exchange-pass",
+                "live_trading": True,
+                "sandbox_mode": True,
+                "market_type": "contract",
+                "default_order_type": "market",
+                "stop_loss_order_type": "market",
+            },
+        )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "Configuration validation failed" in detail
+        assert "Redis must be enabled" in detail
 
     @pytest.mark.asyncio
     async def test_admin_exchange_settings_allow_clearing_credentials(self, client: AsyncClient, db_session, test_admin_data):
@@ -1074,10 +1122,12 @@ class TestOfflineTradeSync:
     async def test_sync_offline_trade_records_current_user(self, client: AsyncClient, test_user_data):
         login = await client.post("/api/auth/register", json=test_user_data)
         assert login.status_code == 200
+        csrf_token = client.cookies.get("tvss_csrf")
+        assert csrf_token
 
         response = await client.post(
             "/api/user/trades/sync",
-            headers={"X-PWA-Sync": "1"},
+            headers={"X-PWA-Sync": "1", "X-CSRF-Token": csrf_token},
             json={
                 "id": "offline-1",
                 "ticker": "btcusdt",

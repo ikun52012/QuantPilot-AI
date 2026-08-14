@@ -39,6 +39,7 @@ pytest-cache-files-*/
 
 # Temp test directories
 .test_tmp/
+.pytest-tmp*/
 
 # OS
 .DS_Store

@@ -62,6 +62,105 @@ def test_apply_runtime_settings_allows_empty_voting_collections(monkeypatch):
     assert runtime_settings.settings.ai.voting_strategy == "consensus"
 
 
+def test_ai_config_reads_operational_controls_from_env(monkeypatch):
+    monkeypatch.setenv("AI_MAX_CONCURRENT_CALLS", "7")
+    monkeypatch.setenv("AI_SIGNAL_QUEUE_LIMIT", "77")
+    monkeypatch.setenv("AI_GLOBAL_PROCESSING_SEMAPHORE", "6")
+    monkeypatch.setenv("AI_PREFILTER_ENHANCED_TIMEOUT_SECS", "44")
+
+    cfg = AIConfig.from_env()
+
+    assert cfg.max_concurrent_calls == 7
+    assert cfg.signal_queue_limit == 77
+    assert cfg.global_processing_semaphore == 6
+    assert cfg.prefilter_enhanced_timeout_secs == 44
+
+
+def test_apply_ai_runtime_controls_refreshes_cached_objects():
+    import ai_analyzer
+    from services import signal_processor
+
+    old_values = {
+        "provider": runtime_settings.settings.ai.provider,
+        "connect_timeout_secs": runtime_settings.settings.ai.connect_timeout_secs,
+        "read_timeout_secs": runtime_settings.settings.ai.read_timeout_secs,
+        "write_timeout_secs": runtime_settings.settings.ai.write_timeout_secs,
+        "pool_timeout_secs": runtime_settings.settings.ai.pool_timeout_secs,
+        "max_retries": runtime_settings.settings.ai.max_retries,
+        "max_concurrent_calls": runtime_settings.settings.ai.max_concurrent_calls,
+        "global_processing_semaphore": runtime_settings.settings.ai.global_processing_semaphore,
+    }
+    try:
+        runtime_settings.apply_runtime_settings(
+            {
+                "ai": {
+                    "connect_timeout_secs": 11,
+                    "read_timeout_secs": 71,
+                    "write_timeout_secs": 31,
+                    "pool_timeout_secs": 12,
+                    "max_retries": 4,
+                    "max_concurrent_calls": 7,
+                    "global_processing_semaphore": 6,
+                }
+            }
+        )
+
+        assert runtime_settings.settings.ai.provider == old_values["provider"]
+        assert ai_analyzer._AI_MAX_RETRIES == 4
+        assert ai_analyzer._AI_TIMEOUT.connect == 11
+        assert ai_analyzer._AI_TIMEOUT.read == 71
+        assert ai_analyzer._AI_SEMAPHORE._value == 7
+        assert signal_processor._GLOBAL_PROCESSING_SEMAPHORE is None
+    finally:
+        for name, value in old_values.items():
+            setattr(runtime_settings.settings.ai, name, value)
+        ai_analyzer.refresh_ai_runtime_settings()
+        signal_processor.refresh_signal_runtime_settings()
+
+
+@pytest.mark.asyncio
+async def test_order_execution_settings_apply_and_reject_conflicting_actions(monkeypatch):
+    class _FakeSession:
+        pass
+
+    monkeypatch.setattr(runtime_settings, "_load_encrypted_dict", AsyncMock(return_value={}))
+    monkeypatch.setattr(runtime_settings, "_save_encrypted_dict", AsyncMock())
+    for name in (
+        "auto_approve_failed_orders",
+        "auto_reject_failed_orders",
+        "auto_retry_leverage_errors",
+        "max_leverage_retry_attempts",
+        "leverage_retry_delay_secs",
+    ):
+        monkeypatch.setattr(
+            runtime_settings.settings.order_execution,
+            name,
+            getattr(runtime_settings.settings.order_execution, name),
+        )
+
+    updated = await runtime_settings.save_order_execution_settings(
+        _FakeSession(),
+        {
+            "auto_retry_leverage_errors": False,
+            "max_leverage_retry_attempts": 6,
+            "leverage_retry_delay_secs": 2.5,
+        },
+    )
+
+    assert updated["auto_retry_leverage_errors"] is False
+    assert runtime_settings.settings.order_execution.max_leverage_retry_attempts == 6
+    assert runtime_settings.settings.order_execution.leverage_retry_delay_secs == 2.5
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await runtime_settings.save_order_execution_settings(
+            _FakeSession(),
+            {
+                "auto_approve_failed_orders": True,
+                "auto_reject_failed_orders": True,
+            },
+        )
+
+
 @pytest.mark.asyncio
 async def test_save_ai_settings_allows_clearing_strings_and_voting(monkeypatch):
     class _FakeSession:
@@ -190,6 +289,28 @@ def test_apply_runtime_settings_respects_empty_limit_timeout_overrides(monkeypat
     assert runtime_settings.settings.exchange.limit_timeout_overrides == {}
 
 
+def test_apply_runtime_settings_rejects_unsafe_live_enable_and_restores_state(monkeypatch):
+    monkeypatch.setattr(runtime_settings.settings.exchange, "live_trading", False)
+    monkeypatch.setattr(runtime_settings.settings.exchange, "api_key", "old-key")
+    monkeypatch.setattr(runtime_settings.settings.exchange, "api_secret", "old-secret")
+    monkeypatch.setattr(runtime_settings.settings, "jwt_secret", "")
+
+    with pytest.raises(RuntimeError, match="JWT_SECRET"):
+        runtime_settings.apply_runtime_settings(
+            {
+                "exchange": {
+                    "live_trading": True,
+                    "api_key": "new-key",
+                    "api_secret": "new-secret",
+                }
+            }
+        )
+
+    assert runtime_settings.settings.exchange.live_trading is False
+    assert runtime_settings.settings.exchange.api_key == "old-key"
+    assert runtime_settings.settings.exchange.api_secret == "old-secret"
+
+
 @pytest.mark.asyncio
 async def test_apply_persisted_admin_settings_reloads_prefilter_thresholds(monkeypatch):
     class _FakeSession:
@@ -260,3 +381,42 @@ async def test_apply_persisted_admin_settings_decrypts_provider_keys(monkeypatch
     await runtime_settings.apply_persisted_admin_settings(_FakeSession())
 
     assert runtime_settings.settings.ai.openai_api_key == "sk-runtime-test-key"
+
+
+@pytest.mark.asyncio
+async def test_apply_persisted_admin_settings_restores_standalone_risk_controls(monkeypatch):
+    from core import database
+
+    stored = {
+        "max_same_direction_positions": "3",
+        "max_live_missing_data_checks": "2",
+        "block_live_on_risk_check_error": "false",
+        "margin_mode": "isolated",
+        "live_data_quality_mode": "warn",
+    }
+
+    async def fake_get_admin_setting(session, key, default=""):
+        return stored.get(key, default)
+
+    monkeypatch.setattr(runtime_settings, "load_admin_runtime_settings", AsyncMock(return_value={}))
+    monkeypatch.setattr(database, "get_admin_setting", fake_get_admin_setting)
+    for name in (
+        "max_same_direction_positions",
+        "max_live_missing_data_checks",
+        "block_live_on_risk_check_error",
+        "margin_mode",
+        "live_data_quality_mode",
+    ):
+        monkeypatch.setattr(
+            runtime_settings.settings.risk,
+            name,
+            getattr(runtime_settings.settings.risk, name),
+        )
+
+    await runtime_settings.apply_persisted_admin_settings(object())
+
+    assert runtime_settings.settings.risk.max_same_direction_positions == 3
+    assert runtime_settings.settings.risk.max_live_missing_data_checks == 2
+    assert runtime_settings.settings.risk.block_live_on_risk_check_error is False
+    assert runtime_settings.settings.risk.margin_mode == "isolated"
+    assert runtime_settings.settings.risk.live_data_quality_mode == "warn"

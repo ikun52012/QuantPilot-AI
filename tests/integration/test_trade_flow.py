@@ -94,6 +94,10 @@ class TestTradeFlowIntegration:
         mock_exchange = Mock()
         mock_exchange.id = "binance"
         mock_exchange.set_leverage = Mock(return_value={"leverage": 10})
+        mock_exchange.fetch_order_book = Mock(return_value={
+            "asks": [[50000.0, 1.0]],
+            "bids": [[49999.0, 1.0]],
+        })
         mock_exchange.create_order = Mock(return_value={
             "id": "order_test_123",
             "status": "closed",

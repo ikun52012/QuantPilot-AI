@@ -3,12 +3,46 @@ P4-FIX: QuantPilot Test Configuration
 Pytest configuration with fixtures for unit and integration tests.
 """
 import asyncio
+import os
+import shutil
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+# Configure an isolated runtime data root before application modules are
+# imported during test collection. This prevents risk trackers, ghost state,
+# caches, encryption material, and backups from touching the real data volume.
+_PYTEST_DATA_DIR_OVERRIDE = os.getenv("PYTEST_RUNTIME_DATA_DIR", "").strip()
+_PYTEST_DATA_DIR = (
+    Path(_PYTEST_DATA_DIR_OVERRIDE).expanduser().resolve(strict=False)
+    if _PYTEST_DATA_DIR_OVERRIDE
+    else (Path.cwd() / ".test_tmp" / f"pytest-runtime-{os.getpid()}").resolve(strict=False)
+)
+os.environ["DATA_DIR"] = str(_PYTEST_DATA_DIR)
+if os.getenv("TEST_DATABASE_URL", "").strip() and os.getenv(
+    "ALLOW_EXTERNAL_TEST_DATABASE", "false"
+).lower() == "true":
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+else:
+    os.environ["DATABASE_URL"] = (
+        f"sqlite+aiosqlite:///{(_PYTEST_DATA_DIR / 'server.db').as_posix()}"
+    )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Remove only the automatically-created test runtime directory."""
+    if _PYTEST_DATA_DIR_OVERRIDE:
+        return
+    test_root = (Path.cwd() / ".test_tmp").resolve(strict=False)
+    try:
+        _PYTEST_DATA_DIR.relative_to(test_root)
+    except ValueError:
+        return
+    shutil.rmtree(_PYTEST_DATA_DIR, ignore_errors=True)
 
 # Configure pytest for async tests
 pytest_plugins = ('pytest_asyncio',)
@@ -29,9 +63,19 @@ async def db_engine():
     """
     from core.database import Base, db_manager
 
-    # Use in-memory SQLite for tests
+    test_database_url = os.getenv("TEST_DATABASE_URL", "").strip()
+    if test_database_url and not (
+        os.getenv("ALLOW_EXTERNAL_TEST_DATABASE", "false").lower() == "true"
+    ):
+        raise RuntimeError(
+            "TEST_DATABASE_URL requires ALLOW_EXTERNAL_TEST_DATABASE=true "
+            "to prevent accidental schema deletion"
+        )
+
+    # Default to isolated in-memory SQLite. CI also runs the live-pipeline
+    # suite against an explicitly authorised ephemeral PostgreSQL service.
     engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
+        test_database_url or "sqlite+aiosqlite:///:memory:",
         echo=False,
         future=True,
     )
@@ -63,7 +107,7 @@ async def db_engine():
 
 
 @pytest_asyncio.fixture
-async def db_session(db_engine):
+async def db_session(db_engine, cleanup_db):
     """Create test database session."""
     from core.database import db_manager
 
@@ -72,9 +116,9 @@ async def db_session(db_engine):
         await session.rollback()
 
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture
 async def cleanup_db(db_engine):
-    """Clean up database after each test to ensure isolation."""
+    """Clean the shared test database only for tests that actually use it."""
 
     yield
 
@@ -105,8 +149,55 @@ def isolate_global_settings():
     settings.exchange.sandbox_mode = original_sandbox
 
 
-@pytest.fixture
-async def client(db_engine):
+@pytest.fixture(autouse=True)
+def isolate_runtime_state_files(tmp_path, monkeypatch):
+    """Give every test fresh persistent and in-memory trading safety state."""
+    import position_monitor
+    import pre_filter
+    from core import account_risk, confidence_calibrator, portfolio_risk
+
+    state_dir = tmp_path / "runtime_state"
+    monkeypatch.setattr(account_risk, "_ACCOUNT_TRACKER_FILE", state_dir / "account_risk_tracker.json")
+    monkeypatch.setattr(account_risk, "_DRAWDOWN_STATE_FILE", state_dir / "drawdown_cb_state.json")
+    monkeypatch.setattr(position_monitor, "_GHOST_TRACKER_FILE", state_dir / "ghost_position_tracker.json")
+    monkeypatch.setattr(pre_filter, "_STATS_FILE", state_dir / "filter_stats.json")
+    monkeypatch.setattr(pre_filter, "_PERFORMANCE_FILE", state_dir / "filter_performance.json")
+    monkeypatch.setattr(confidence_calibrator, "_CALIBRATION_FILE", state_dir / "ai_calibration.json")
+    monkeypatch.setattr(portfolio_risk, "_VAR_CACHE_FILE", state_dir / "portfolio_var_cache.json")
+
+    account_risk._ACCOUNT_DAILY_TRACKER.clear()
+    account_risk._DRAWDOWN_CIRCUIT_BREAKERS.clear()
+    account_risk._LIVE_EQUITY_CACHE.clear()
+    position_monitor._GHOST_POSITION_TRACKER.clear()
+    position_monitor._PROTECTIVE_ORDERS_LAST_VERIFY.clear()
+    pre_filter._filter_stats.clear()
+    pre_filter._filter_stats_buffer.clear()
+    pre_filter._block_history.clear()
+    pre_filter._CIRCUIT_BREAKERS.clear()
+    pre_filter._pending_outcomes.clear()
+    pre_filter._check_performance.clear()
+    confidence_calibrator._CALIBRATION_CACHE.clear()
+    portfolio_risk._VAR_CACHE.clear()
+
+    yield
+
+    account_risk._ACCOUNT_DAILY_TRACKER.clear()
+    account_risk._DRAWDOWN_CIRCUIT_BREAKERS.clear()
+    account_risk._LIVE_EQUITY_CACHE.clear()
+    position_monitor._GHOST_POSITION_TRACKER.clear()
+    position_monitor._PROTECTIVE_ORDERS_LAST_VERIFY.clear()
+    pre_filter._filter_stats.clear()
+    pre_filter._filter_stats_buffer.clear()
+    pre_filter._block_history.clear()
+    pre_filter._CIRCUIT_BREAKERS.clear()
+    pre_filter._pending_outcomes.clear()
+    pre_filter._check_performance.clear()
+    confidence_calibrator._CALIBRATION_CACHE.clear()
+    portfolio_risk._VAR_CACHE.clear()
+
+
+@pytest_asyncio.fixture
+async def client(db_engine, cleanup_db):
     """Create test HTTP client."""
     from httpx import ASGITransport
 

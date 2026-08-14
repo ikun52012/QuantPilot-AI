@@ -21,6 +21,10 @@ https://www.xxx.xxx/webhook
 {
 "secret": "Copy the secret from Admin Settings or My Trading",
 
+"timestamp": "{{timenow}}",
+
+"nonce": "{{ticker}}-{{timenow}}-{{strategy.order.id}}",
+
 "ticker": "{{ticker}}",
 
 "exchange": "{{exchange}}",
@@ -41,6 +45,10 @@ https://www.xxx.xxx/webhook
 {
 "secret": "Copy the secret from Admin Settings or My Trading",
 
+"timestamp": "{{timenow}}",
+
+"nonce": "{{ticker}}-{{timenow}}-{{strategy.order.id}}",
+
 "ticker": "{{ticker}}",
 
 "exchange": "{{exchange}}",
@@ -59,6 +67,8 @@ https://www.xxx.xxx/webhook
 --- Close Long Alert ---
 { 
 "secret": "Copy the secret from Admin Settings or My Trading",
+"timestamp": "{{timenow}}",
+"nonce": "{{ticker}}-{{timenow}}-{{strategy.order.id}}",
 "ticker": "{{ticker}}", 
 "exchange": "{{exchange}}", 
 "direction": "close_long", 
@@ -71,6 +81,8 @@ https://www.xxx.xxx/webhook
 --- Close Short Alert ---
 { 
 "secret": "Copy the secret from Admin Settings or My Trading",
+"timestamp": "{{timenow}}",
+"nonce": "{{ticker}}-{{timenow}}-{{strategy.order.id}}",
 "ticker": "{{ticker}}", 
 "exchange": "{{exchange}}", 
 "direction": "close_short", 

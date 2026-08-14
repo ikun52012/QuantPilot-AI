@@ -28,7 +28,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.database import db_manager, get_admin_setting, get_db
+from core.database import get_admin_setting, get_db
 from core.request_utils import client_ip as get_client_ip
 from core.security import is_placeholder_webhook_secret
 from models import TradingViewSignal
@@ -36,8 +36,9 @@ from services.signal_processor import SignalProcessor, compute_webhook_fingerpri
 
 router = APIRouter(prefix="", tags=["webhook"])
 
-# P0-FIX: Reduced replay window from 300s (5min) to 60s (1min) for better security
-_WEBHOOK_REPLAY_WINDOW_SECS = 60
+# Match TradingView's practical delivery/clock-skew tolerance while nonce
+# deduplication prevents a valid payload from being executed twice.
+_WEBHOOK_REPLAY_WINDOW_SECS = 300
 
 
 async def _verify_hmac_signature(request: Request, raw_body: bytes) -> None:
@@ -137,10 +138,10 @@ async def _get_redis_nonce_client():
     return None
 
 
-def _parse_webhook_timestamp(value: Any) -> float:
-    """Parse a required webhook timestamp into epoch seconds."""
+def _parse_webhook_timestamp(value: Any) -> float | None:
+    """Parse an optional webhook timestamp into epoch seconds."""
     if value is None or value == "":
-        raise HTTPException(401, "Webhook timestamp is required")
+        return None
     try:
         if isinstance(value, (int, float)):
             timestamp = float(value)
@@ -164,28 +165,38 @@ def _parse_webhook_timestamp(value: Any) -> float:
         raise HTTPException(400, "Webhook timestamp must be epoch seconds, epoch milliseconds, or ISO-8601") from exc
 
 
-def _parse_webhook_nonce(value: Any) -> str:
-    """Parse and validate a required webhook nonce."""
+def _durable_queue_payload(body: dict[str, Any], signal: TradingViewSignal) -> dict[str, Any]:
+    """Freeze validation-time defaults before a signal enters the durable queue."""
+    payload = dict(body)
+    payload["timestamp"] = signal.timestamp.isoformat()
+    return payload
+
+
+def _parse_webhook_nonce(value: Any) -> str | None:
+    """Parse and validate an optional webhook nonce."""
+    if value is None:
+        return None
     nonce = str(value or "").strip()
     if not nonce:
-        raise HTTPException(401, "Webhook nonce is required")
+        return None
     if len(nonce) > 128 or any(ord(ch) < 32 or ord(ch) > 126 for ch in nonce):
         raise HTTPException(400, "Webhook nonce must be 1-128 printable ASCII characters")
     return nonce
 
 
-async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> None:
-    """Check for replay attacks using timestamp and nonce.
+async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> bool:
+    """Validate replay fields and report whether this nonce was seen.
 
-    P0-FIX: Stricter timestamp validation (60s window) to prevent replay attacks.
+    Uses a five-minute delivery window so TradingView retries and ordinary
+    network/clock skew do not invalidate an otherwise authenticated nonce.
 
-    Uses Redis for multi-process safety when available, falls back to
-    in-memory dict for single-process deployments.
+    The cache is advisory. Durable fingerprint reservation in the database is
+    authoritative, so a transient database failure cannot poison the nonce
+    cache and prevent TradingView from retrying a signal.
     """
     now = time.time()
     time_diff = abs(now - timestamp)
 
-    # P0-FIX: Stricter timestamp window (60s instead of 300s)
     if time_diff > _WEBHOOK_REPLAY_WINDOW_SECS:
         logger.warning(
             f"[Webhook] Timestamp expired: {time_diff:.1f}s old (max {_WEBHOOK_REPLAY_WINDOW_SECS}s). "
@@ -211,12 +222,10 @@ async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> 
                 existing = await client.get(redis_key)
                 if existing:
                     logger.warning(f"[Webhook] Duplicate nonce detected in Redis: {nonce[:16]}...")
-                    raise HTTPException(409, "Duplicate nonce — possible replay attack")
-                # P0-FIX: Store nonce for full replay window duration
+                    return True
+                # Keep Redis and the in-memory fallback on the same contract.
                 await client.setex(redis_key, _WEBHOOK_REPLAY_WINDOW_SECS + 10, str(now))
-                return
-        except HTTPException:
-            raise
+                return False
         except Exception:
             logger.warning("[Webhook] Redis nonce check failed, falling back to in-memory")
         # Fall through to in-memory
@@ -233,7 +242,7 @@ async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> 
 
         if nonce_key in _NONCE_CACHE:
             logger.warning(f"[Webhook] Duplicate nonce detected in memory: {nonce[:16]}...")
-            raise HTTPException(409, "Duplicate nonce — possible replay attack")
+            return True
 
         # P4-FIX: Use OrderedDict with LRU eviction on every insert to
         # guarantee cache stays bounded even under sustained high traffic.
@@ -248,6 +257,7 @@ async def _check_replay_protection(nonce: str, timestamp: float, scope: str) -> 
             # Then evict oldest entries to enforce hard cap (LRU)
             while len(_NONCE_CACHE) > _NONCE_CACHE_MAX_SIZE:
                 _NONCE_CACHE.popitem(last=False)
+    return False
 
 
 async def _check_ip_rate_limit(client_ip: str) -> None:
@@ -369,19 +379,37 @@ async def webhook(
             logger.warning(f"[Webhook] Invalid secret from {client_ip}")
             raise HTTPException(401, "Invalid webhook secret")
 
+    fingerprint = compute_webhook_fingerprint(body, user_id)
     timestamp = _parse_webhook_timestamp(body.get("timestamp"))
     nonce = _parse_webhook_nonce(body.get("nonce"))
     replay_scope = user_id or "admin"
-    await _check_replay_protection(nonce, timestamp, replay_scope)
+    if (timestamp is None) != (nonce is None):
+        raise HTTPException(
+            400,
+            "Webhook timestamp and nonce must either both be provided or both be omitted",
+        )
+    if timestamp is not None and nonce is not None:
+        nonce_seen = await _check_replay_protection(nonce, timestamp, replay_scope)
+    else:
+        short_fingerprint = hashlib.sha256(f"{replay_scope}:{fingerprint}".encode()).hexdigest()[:16]
+        nonce_seen = await _check_replay_protection(
+            short_fingerprint,
+            time.time(),
+            replay_scope,
+        )
+
+    # Persist the validation-time timestamp even when the sender omitted one.
+    # Reconstructing the model later in a durable worker would otherwise assign
+    # a fresh timestamp and allow a delayed entry signal to bypass the age cap.
+    persisted_body = _durable_queue_payload(body, signal)
 
     processor = SignalProcessor(db)
-    fingerprint = compute_webhook_fingerprint(body, user_id)
     reservation = await processor._reserve_webhook_event(
         fingerprint=fingerprint,
         signal=signal,
         user_id=user_id,
         client_ip=client_ip,
-        payload=body,
+        payload=persisted_body,
     )
     if reservation is None:
         await db.commit()
@@ -390,19 +418,28 @@ async def webhook(
             content={"status": "duplicate", "message": "Signal already received"},
         )
     await db.commit()
+    if nonce_seen:
+        logger.info(
+            f"[Webhook] Previously seen nonce accepted for durable retry: "
+            f"event={reservation.id}"
+        )
 
     background_tasks.add_task(
         _process_webhook_background,
         signal=signal,
         user_id=user_id,
         client_ip=client_ip,
-        raw_body=body,
+        raw_body=persisted_body,
         reserved_event_id=reservation.id,
     )
 
     return JSONResponse(
         status_code=202,
-        content={"status": "accepted", "message": "Signal queued for processing"},
+        content={
+            "status": "accepted",
+            "event_id": reservation.id,
+            "message": "Signal durably queued for processing",
+        },
     )
 
 
@@ -413,65 +450,21 @@ async def _process_webhook_background(
     raw_body: dict,
     reserved_event_id: str | None = None,
 ):
-    """Process webhook signal in background to avoid TradingView timeout.
+    """Kick the durable worker for low latency.
 
-    Includes retry logic and dead-letter logging for error recovery.
-    On final failure, updates the webhook event status to 'failed' for
-    later recovery via admin dashboard or manual re-processing.
+    The event is already committed. If this in-process kick is lost, the
+    scheduler reclaims the same database row after restart.
     """
-    max_retries = 2
-    for attempt in range(1, max_retries + 1):
-        session = None
-        try:
-            async with db_manager.async_session_factory() as session:
-                processor = SignalProcessor(session)
-                result = await processor.process_webhook(
-                    signal=signal,
-                    user_id=user_id,
-                    client_ip=client_ip,
-                    raw_body=raw_body,
-                    reserved_event_id=reserved_event_id,
-                )
-                await session.commit()
-                logger.info(f"[Webhook] Background processing complete: {result.get('status')}")
-                return
-        except Exception as exc:
-            if session is not None:
-                try:
-                    await session.rollback()
-                except Exception:
-                    pass
-            if attempt < max_retries:
-                import asyncio
-                delay = 2 ** attempt
-                logger.warning(
-                    f"[Webhook] Background processing error (attempt {attempt}/{max_retries}), "
-                    f"retrying in {delay}s: {exc}"
-                )
-                await asyncio.sleep(delay)
-            else:
-                logger.error(
-                    f"[Webhook] Background processing failed after {max_retries} attempts. "
-                    f"Signal queued for manual review. Ticker: {signal.ticker}, "
-                    f"Direction: {signal.direction.value}, Error: {exc}"
-                )
-                try:
-                    from core.database import has_recent_webhook_event
-                    from services.signal_processor import compute_webhook_fingerprint
-                    async with db_manager.async_session_factory() as failure_session:
-                        try:
-                            fingerprint = compute_webhook_fingerprint(raw_body, user_id)
-                            existing = await has_recent_webhook_event(failure_session, fingerprint, window_secs=3600)
-                            if existing and existing.status in {"received", "reserved", "retrying"}:
-                                existing.status = "failed"
-                                existing.reason = str(exc)[:500]
-                                await failure_session.commit()
-                                logger.info(f"[Webhook] Marked event {fingerprint[:12]}... as failed for recovery")
-                        except Exception:
-                            await failure_session.rollback()
-                            raise
-                except Exception:
-                    pass
+    if not reserved_event_id:
+        logger.error(f"[Webhook] Durable event id missing for {signal.ticker}")
+        return
+    from services.webhook_worker import process_webhook_event
+
+    result = await process_webhook_event(reserved_event_id)
+    logger.info(
+        f"[Webhook] Durable processing update: event={reserved_event_id}, "
+        f"status={result.get('status')}"
+    )
 
 
 async def _find_user_by_secret(db: AsyncSession, secret: str):

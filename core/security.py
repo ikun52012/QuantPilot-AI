@@ -9,14 +9,14 @@ import os
 import re
 import secrets
 import threading
-from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from loguru import logger
 
+from core.config import DATA_DIR
+
 # Data directory for encryption key
-DATA_DIR = Path(__file__).parent.parent / "data"
 KEY_FILE = DATA_DIR / "app_encryption.key"
 ENCRYPTED_PREFIX = "enc:v1:"
 
@@ -190,14 +190,32 @@ def _derive_fernet_key(raw: str) -> bytes:
         return raw.encode()
     except (ValueError, TypeError, Exception):
         # P0-FIX: Use PBKDF2 for secure key derivation
-        # Salt: fixed salt derived from application name (not secret, but unique)
-        salt = hashlib.sha256(b"QuantPilot-AI-Encryption-Key-Salt").digest()
+        # Salt is derived from the key material itself plus a per-installation
+        # component stored alongside the key file, making precomputation infeasible.
+        _salt_path = KEY_FILE.parent / ".encryption_salt"
+        salt = None
+        if _salt_path:
+            try:
+                if _salt_path.exists():
+                    salt = base64.b64decode(_salt_path.read_text().strip())
+                else:
+                    salt = os.urandom(32)
+                    _salt_path.write_text(base64.b64encode(salt).decode())
+                    try:
+                        os.chmod(str(_salt_path), 0o600)
+                    except OSError:
+                        pass
+            except Exception:
+                salt = None
+        if salt is None:
+            # Fallback: derive salt from key material (better than fixed string)
+            salt = hashlib.sha256(b"QuantPilot-AI:" + raw.encode("utf-8")).digest()
         # PBKDF2 with 100,000 iterations (OWASP recommendation for PBKDF2-SHA256)
         dk = hashlib.pbkdf2_hmac(
             "sha256",
             raw.encode("utf-8"),
             salt,
-            iterations=100_000,  # High iteration count for security
+            iterations=100_000,
         )
         return base64.urlsafe_b64encode(dk)
 
@@ -273,7 +291,7 @@ def _load_or_create_key() -> bytes:
     except (OSError, PermissionError) as err:
         logger.warning(
             f"[Security] Could not set strict permissions on {KEY_FILE}: {err}. "
-            "Manually run: chmod 600 data/app_encryption.key (Linux) or icacls (Windows)"
+            f"Manually restrict access to {KEY_FILE} with chmod 600 (Linux) or icacls (Windows)"
         )
 
     # On Windows, try to set restricted ACL permissions

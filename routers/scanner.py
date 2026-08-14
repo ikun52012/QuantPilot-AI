@@ -308,6 +308,11 @@ async def scanner_update_settings(
     data = update.model_dump(exclude_unset=True)
     updated = await save_scanner_settings(db, data)
     await db.commit()
+    if "score_weights" in data:
+        from services.scanner_rules import DEFAULT_ENGINE
+        new_weights = updated.get("score_weights", {})
+        if isinstance(new_weights, dict):
+            DEFAULT_ENGINE.set_weights(new_weights)
 
     from core.lifespan import sync_scanner_scheduler
 
@@ -672,17 +677,30 @@ async def scanner_ai_circuit_breaker_status(
 ):
     from services.signal_processor import _AI_CB_COOLDOWN_SECS, _AI_CB_FAILURES, _AI_CB_OPEN_UNTIL, _AI_CB_THRESHOLD
 
-    now = time.time()
-    is_open = now < _AI_CB_OPEN_UNTIL
-    remaining = int(_AI_CB_OPEN_UNTIL - now) if is_open else 0
+    providers = sorted(set(list(_AI_CB_FAILURES.keys()) + list(_AI_CB_OPEN_UNTIL.keys())))
+    if not providers:
+        providers = ["default"]
+
+    per_provider = {}
+    for p in providers:
+        now = time.time()
+        is_open = now < _AI_CB_OPEN_UNTIL.get(p, 0.0)
+        remaining = int(_AI_CB_OPEN_UNTIL.get(p, 0.0) - now) if is_open else 0
+        per_provider[p] = {
+            "failures": _AI_CB_FAILURES.get(p, 0),
+            "is_open": is_open,
+            "remaining_cooldown_secs": remaining,
+            "status": "circuit_breaker_open" if is_open else "normal",
+        }
+
+    any_open = any(v["is_open"] for v in per_provider.values())
 
     return {
-        "failures": _AI_CB_FAILURES,
+        "per_provider": per_provider,
         "threshold": _AI_CB_THRESHOLD,
         "cooldown_secs": _AI_CB_COOLDOWN_SECS,
-        "is_open": is_open,
-        "remaining_cooldown_secs": remaining,
-        "status": "circuit_breaker_open" if is_open else "normal",
+        "is_open": any_open,
+        "status": "circuit_breaker_open" if any_open else "normal",
     }
 
 

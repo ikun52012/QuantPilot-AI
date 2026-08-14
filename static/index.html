@@ -818,10 +818,13 @@
                     </div>
                     <div class="form-row three-col">
                         <div class="form-group">
+                            <label for="ai-max-retries">Max Retries</label>
+                            <input type="number" id="ai-max-retries" class="text-input" value="3" min="1" max="10" step="1">
+                        </div>
+                        <div class="form-group">
                             <label for="ai-max-concurrent">Max Concurrent Calls</label>
                             <input type="number" id="ai-max-concurrent" class="text-input" value="5" min="1" max="50" step="1">
                         </div>
-                        <div class="form-group"></div>
                         <div class="form-group"></div>
                     </div>
                     <div class="form-row">
@@ -1247,6 +1250,11 @@
                         <div class="form-group">
                             <label for="set-max-loss">Max Daily Loss %</label>
                             <input type="number" id="set-max-loss" class="text-input" value="5" step="0.5">
+                        </div>
+                        <div class="form-group">
+                            <label for="set-max-notional">Max Position Notional (USDT)</label>
+                            <input type="number" id="set-max-notional" class="text-input" value="10000" step="100" min="1">
+                            <p class="hint">Hard cap after leverage and exchange rounding</p>
                         </div>
                         <div class="form-group">
                             <label for="set-margin-mode">Margin Mode</label>

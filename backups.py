@@ -9,18 +9,21 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import zipfile
-from datetime import datetime, timedelta
+from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
 from loguru import logger
+from sqlalchemy.engine import make_url
 
-from core.config import settings
+from core.config import DATA_DIR, settings
 from core.utils.datetime import utcnow
 
 # Backup directory
-backup_path = Path(__file__).parent / "data" / "backups"
+backup_path = DATA_DIR / "backups"
 backup_path.mkdir(parents=True, exist_ok=True)
 
 # Backup scheduler settings
@@ -53,6 +56,26 @@ def _safe_extract_zip(zf: zipfile.ZipFile, destination: Path) -> None:
 def _is_postgresql() -> bool:
     """Check if the current database is PostgreSQL."""
     return "postgresql" in settings.database.url.lower()
+
+
+def _sqlite_source_path() -> Path | None:
+    """Resolve the SQLite file actually configured for this process."""
+    try:
+        url = make_url(settings.database.url)
+    except Exception:
+        return None
+    if not url.drivername.startswith("sqlite") or not url.database or url.database == ":memory:":
+        return None
+    return Path(url.database).expanduser().resolve(strict=False)
+
+
+def _create_sqlite_snapshot(source: Path, destination: Path) -> None:
+    """Create a consistent SQLite snapshot that includes committed WAL pages."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(str(source))) as source_db, closing(
+        sqlite3.connect(str(destination))
+    ) as target_db:
+        source_db.backup(target_db)
 
 
 def _parse_pg_url() -> dict:
@@ -118,33 +141,23 @@ async def _pg_dump_via_docker(dump_file: Path, pg: dict) -> tuple[int, bytes, by
     return (proc.returncode if proc.returncode is not None else 1), stdout, stderr
 
 
-async def create_backup(note: str = "") -> dict:
-    """Create a database backup (SQLite zip or PostgreSQL pg_dump)."""
-    timestamp = utcnow().strftime("%Y%m%d_%H%M%S")
-    backup_name = f"backup_{timestamp}"
-    backup_file = backup_path / f"{backup_name}.zip"
+async def _pg_dump_local(dump_file: Path, pg: dict) -> tuple[int, bytes, bytes]:
+    """Run local pg_dump while guaranteeing cleanup of temporary credentials."""
+    import tempfile
 
-    data_dir = Path(__file__).parent / "data"
-    files_to_backup = []
-
-    if _is_postgresql():
-        # PostgreSQL: use pg_dump
-        pg = _parse_pg_url()
-        dump_file = backup_path / f"{backup_name}.sql"
-
-        env = os.environ.copy()
-        # SECURITY: Use .pgpass file instead of PGPASSWORD env var to avoid
-        # password exposure in /proc/*/environ
-        pgpass_file = None
+    env = os.environ.copy()
+    pgpass_file: str | None = None
+    try:
         if pg["password"]:
-            import tempfile
-            pgpass_content = f"{pg['host']}:{pg['port']}:{pg['dbname']}:{pg['user']}:{pg['password']}\n"
-            pgpass_fd, pgpass_path = tempfile.mkstemp(prefix=".pgpass_")
-            with os.fdopen(pgpass_fd, 'w') as f:
-                f.write(pgpass_content)
-            os.chmod(pgpass_path, 0o600)
-            env["PGPASSFILE"] = pgpass_path
-            pgpass_file = pgpass_path
+            pgpass_content = (
+                f"{pg['host']}:{pg['port']}:{pg['dbname']}:"
+                f"{pg['user']}:{pg['password']}\n"
+            )
+            pgpass_fd, pgpass_file = tempfile.mkstemp(prefix=".pgpass_")
+            with os.fdopen(pgpass_fd, "w", encoding="utf-8") as file_obj:
+                file_obj.write(pgpass_content)
+            os.chmod(pgpass_file, 0o600)
+            env["PGPASSFILE"] = pgpass_file
 
         cmd = [
             "pg_dump",
@@ -155,6 +168,37 @@ async def create_backup(note: str = "") -> dict:
             "--format=custom",
             "-f", str(dump_file),
         ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        return (proc.returncode if proc.returncode is not None else 1), stdout, stderr
+    finally:
+        if pgpass_file:
+            try:
+                os.unlink(pgpass_file)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning(f"[Backup] Could not remove temporary pgpass file: {exc}")
+
+
+async def create_backup(note: str = "") -> dict:
+    """Create a database backup (SQLite zip or PostgreSQL pg_dump)."""
+    timestamp = utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    backup_name = f"backup_{timestamp}"
+    backup_file = backup_path / f"{backup_name}.zip"
+
+    files_to_backup = []
+    sqlite_snapshot: Path | None = None
+
+    if _is_postgresql():
+        # PostgreSQL: use pg_dump
+        pg = _parse_pg_url()
+        dump_file = backup_path / f"{backup_name}.sql"
 
         # P0-FIX: Validate all command parameters to prevent injection
         for param in [pg["host"], pg["port"], pg["user"], pg["dbname"], str(dump_file)]:
@@ -163,22 +207,8 @@ async def create_backup(note: str = "") -> dict:
                 return {"status": "error", "reason": "Invalid database connection parameter"}
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-
-            # Cleanup pgpass file
-            if pgpass_file and os.path.exists(pgpass_file):
-                try:
-                    os.unlink(pgpass_file)
-                except OSError:
-                    pass
-
-            if proc.returncode != 0:
+            returncode, stdout, stderr = await _pg_dump_local(dump_file, pg)
+            if returncode != 0:
                 error_msg = stderr.decode().strip() if stderr else "Unknown error"
                 logger.error(f"[Backup] pg_dump failed: {error_msg}")
                 # Clean up partial dump
@@ -207,34 +237,61 @@ async def create_backup(note: str = "") -> dict:
                 logger.error("[Backup] pg_dump not found. Install PostgreSQL client tools.")
                 return {"status": "error", "reason": "pg_dump not found. Install PostgreSQL client tools."}
     else:
-        # SQLite: copy database file
-        db_file = data_dir / "server.db"
-        if db_file.exists():
-            files_to_backup.append(("server.db", db_file))
+        # Snapshot the configured database rather than copying a hard-coded
+        # server.db. sqlite3.backup() also captures committed WAL contents.
+        db_file = _sqlite_source_path()
+        if db_file and db_file.exists():
+            sqlite_snapshot = backup_path / f".{backup_name}.sqlite"
+            try:
+                await asyncio.to_thread(_create_sqlite_snapshot, db_file, sqlite_snapshot)
+            except Exception as exc:
+                sqlite_snapshot.unlink(missing_ok=True)
+                logger.error(f"[Backup] SQLite snapshot failed: {exc}")
+                return {"status": "error", "reason": f"SQLite snapshot failed: {exc}"}
+            files_to_backup.append(("server.db", sqlite_snapshot))
 
     # P1-FIX: Exclude encryption key from ordinary downloadable backups to prevent secret exposure
-    # Include runtime settings only
-    settings_file = data_dir / "runtime_settings.json"
-    if settings_file.exists():
-        files_to_backup.append(("runtime_settings.json", settings_file))
+    # Preserve non-secret operational safety state so restoring a database
+    # cannot silently forget drawdown, daily loss, ghost-position, or pending
+    # reconciliation state.
+    state_files = (
+        "runtime_settings.json",
+        "account_risk_tracker.json",
+        "drawdown_cb_state.json",
+        "ghost_position_tracker.json",
+        "order_reconciliation.json",
+        "filter_stats.json",
+        "filter_performance.json",
+        "ai_calibration.json",
+        "portfolio_var_cache.json",
+        "ai_usage.jsonl",
+    )
+    for filename in state_files:
+        state_file = DATA_DIR / filename
+        if state_file.exists():
+            files_to_backup.append((filename, state_file))
 
     if not files_to_backup:
         return {"status": "error", "reason": "No files to backup"}
 
-    # Create zip
-    with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for name, path in files_to_backup:
-            zf.write(path, name)
+    try:
+        # Create zip
+        with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for name, path in files_to_backup:
+                zf.write(path, name)
 
-        # Add metadata
-        metadata = {
-            "created_at": utcnow().isoformat(),
-            "note": note,
-            "files": [name for name, _ in files_to_backup],
-            "database_type": "postgresql" if _is_postgresql() else "sqlite",
-            "version": settings.app_version,
-        }
-        zf.writestr("metadata.json", json.dumps(metadata, indent=2))
+            # Add metadata
+            metadata = {
+                "created_at": utcnow().isoformat(),
+                "note": note,
+                "files": [name for name, _ in files_to_backup],
+                "database_type": "postgresql" if _is_postgresql() else "sqlite",
+                "version": settings.app_version,
+            }
+            zf.writestr("metadata.json", json.dumps(metadata, indent=2))
+    finally:
+        if sqlite_snapshot is not None:
+            sqlite_snapshot.unlink(missing_ok=True)
 
     size_mb = backup_file.stat().st_size / (1024 * 1024)
 
@@ -332,7 +389,7 @@ async def restore_postgresql(backup_name: str) -> dict:
     if not backup_file.exists():
         return {"status": "error", "reason": "Backup not found"}
 
-    data_dir = Path(__file__).parent / "data"
+    data_dir = DATA_DIR
     staging_dir = data_dir / "restore_staging"
     staging_dir.mkdir(exist_ok=True)
 
@@ -346,8 +403,16 @@ async def restore_postgresql(backup_name: str) -> dict:
 
     pg = _parse_pg_url()
     env = os.environ.copy()
+    pgpass_file = None
     if pg["password"]:
-        env["PGPASSWORD"] = pg["password"]
+        import tempfile
+        pgpass_content = f"{pg['host']}:{pg['port']}:{pg['dbname']}:{pg['user']}:{pg['password']}\n"
+        pgpass_fd, pgpass_path = tempfile.mkstemp(prefix=".pgpass_")
+        with os.fdopen(pgpass_fd, 'w') as f:
+            f.write(pgpass_content)
+        os.chmod(pgpass_path, 0o600)
+        env["PGPASSFILE"] = pgpass_path
+        pgpass_file = pgpass_path
 
     cmd = [
         "pg_restore",
@@ -386,6 +451,13 @@ async def restore_postgresql(backup_name: str) -> dict:
         # Clean up staging
         shutil.rmtree(staging_dir, ignore_errors=True)
 
+        # Cleanup pgpass file
+        if pgpass_file and os.path.exists(pgpass_file):
+            try:
+                os.unlink(pgpass_file)
+            except OSError:
+                pass
+
         logger.info(f"[Backup] PostgreSQL restore completed: {backup_name}")
         return {"status": "ok", "backup_name": backup_name}
 
@@ -406,7 +478,7 @@ def stage_restore(backup_name: str) -> dict:
     if not backup_file.exists():
         return {"status": "error", "reason": "Backup not found"}
 
-    data_dir = Path(__file__).parent / "data"
+    data_dir = DATA_DIR
     staging_dir = data_dir / "restore_staging"
     staging_dir.mkdir(exist_ok=True)
 
@@ -436,7 +508,7 @@ def stage_restore(backup_name: str) -> dict:
                 if db_type == "postgresql" else
                 "For SQLite:\n"
                 "1. Stop the server\n"
-                "2. Copy files from staging_dir to data/\n"
+                f"2. Copy files from staging_dir to {DATA_DIR}\n"
                 "3. Restart the server\n"
             )
             + "WARNING: This will overwrite existing data!"
@@ -447,7 +519,7 @@ def stage_restore(backup_name: str) -> dict:
 async def _cleanup_old_backups() -> dict:
     """Remove backups older than _BACKUP_MAX_AGE_DAYS."""
     try:
-        cutoff = utcnow() - timedelta(days=_BACKUP_MAX_AGE_DAYS)
+        cutoff = datetime.now(UTC) - timedelta(days=_BACKUP_MAX_AGE_DAYS)
         removed_count = 0
         removed_size = 0
 
@@ -455,7 +527,7 @@ async def _cleanup_old_backups() -> dict:
             try:
                 # Extract timestamp from filename
                 stat = backup_file.stat()
-                file_mtime = datetime.fromtimestamp(stat.st_mtime)
+                file_mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
                 if file_mtime < cutoff:
                     size = stat.st_size
                     backup_file.unlink()
@@ -483,6 +555,12 @@ async def _backup_scheduler_loop() -> None:
 
     while _BACKUP_SCHEDULER_RUNNING:
         try:
+            # Avoid an expensive dump on every process restart. The first
+            # scheduled backup is due only after the configured interval.
+            await asyncio.sleep(_BACKUP_INTERVAL_HOURS * 3600)
+            if not _BACKUP_SCHEDULER_RUNNING:
+                break
+
             # Create backup with note
             result = await create_backup(note=f"Scheduled backup (interval: {_BACKUP_INTERVAL_HOURS}h)")
 
@@ -496,18 +574,11 @@ async def _backup_scheduler_loop() -> None:
             if cleanup_result.get("status") == "success" and cleanup_result.get("removed_count", 0) > 0:
                 logger.info(f"[Backup] Cleaned up {cleanup_result['removed_count']} old backups ({cleanup_result['removed_size_mb']} MB)")
 
-        except Exception as e:
-            logger.error(f"[Backup] Scheduler error: {e}")
-
-        # Wait for next backup interval
-        try:
-            await asyncio.wait_for(
-                asyncio.sleep(_BACKUP_INTERVAL_HOURS * 3600),
-                timeout=None
-            )
         except asyncio.CancelledError:
             logger.info("[Backup] Scheduler cancelled")
             break
+        except Exception as e:
+            logger.error(f"[Backup] Scheduler error: {e}")
 
     _BACKUP_SCHEDULER_RUNNING = False
 

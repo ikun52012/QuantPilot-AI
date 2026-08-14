@@ -1,18 +1,72 @@
 """Order event recording and conservative reconciliation helpers."""
+import hashlib
 import json
-import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from core.database import OrderEventModel
+from core.reconciliation_journal import get_uncommitted_order_intents, update_order_intent
 from core.utils.datetime import utcnow
 
 CONFIRMED_STATUSES = {"filled", "closed", "simulated", "confirmed"}
 FAILED_STATUSES = {"error", "failed", "rejected", "cancelled", "canceled", "expired"}
+
+
+async def recover_order_intent_journal(session: AsyncSession) -> dict[str, int]:
+    """Link fsynced exchange intents to DB events, surfacing crash gaps safely."""
+    linked = 0
+    recovered = 0
+    for intent in get_uncommitted_order_intents():
+        try:
+            updated_at = datetime.fromisoformat(str(intent.get("updated_at") or "").replace("Z", "+00:00"))
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
+            if datetime.now(UTC) - updated_at < timedelta(seconds=30):
+                continue
+        except (TypeError, ValueError):
+            pass
+        client_order_id = str(intent.get("client_order_id") or "")
+        if not client_order_id:
+            continue
+        result = await session.execute(
+            select(OrderEventModel).where(
+                OrderEventModel.client_order_id == client_order_id
+            ).limit(1)
+        )
+        event = result.scalar_one_or_none()
+        if event is not None:
+            update_order_intent(str(intent.get("id")), status="db_committed")
+            linked += 1
+            continue
+
+        # No committed row exists after restart/scheduled reconciliation.  The
+        # intent may have crossed the exchange boundary, so create a durable
+        # manual-review event and never replay it automatically.
+        event = OrderEventModel(
+            user_id=str(intent.get("user_id") or "") or None,
+            client_order_id=client_order_id,
+            exchange_order_id=str((intent.get("result") or {}).get("order_id") or ""),
+            ticker=str(intent.get("ticker") or ""),
+            direction=str(intent.get("direction") or ""),
+            order_type="unknown",
+            status="manual_review",
+            retry_state="manual_review",
+            attempt_count=1,
+            last_error="Recovered from fsynced order intent without a committed database event",
+            payload_json=json.dumps({"journal_intent": intent}, ensure_ascii=False, default=str),
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        session.add(event)
+        await session.flush()
+        update_order_intent(str(intent.get("id")), status="db_recovered_manual_review")
+        recovered += 1
+    return {"linked": linked, "recovered": recovered}
 
 
 def _safe_dump(value: Any) -> Any:
@@ -46,9 +100,26 @@ def _event_status(result: dict) -> tuple[str, str, str]:
         return "simulated", "not_required", ""
     if status in CONFIRMED_STATUSES:
         return "confirmed", "not_required", ""
+    if bool(result.get("rollback_success")):
+        return "rolled_back", "not_required", str(
+            result.get("reason") or "entry was closed after protection failure"
+        )
     if status in FAILED_STATUSES:
         reason = str(result.get("reason") or result.get("error") or "exchange rejected order")
-        return "retryable", "pending", reason
+        order_id = _extract_order_id(result, "exchange_order_id", "order_id", "id")
+        if (
+            bool(result.get("requires_reconciliation"))
+            or bool(result.get("rollback_required"))
+            or bool(order_id)
+        ):
+            return "manual_review", "manual_review", reason
+        if settings.order_execution.auto_reject_failed_orders:
+            return "rejected", "not_required", reason
+        if settings.order_execution.auto_approve_failed_orders:
+            # Approval is an audit acknowledgement only; it never submits or
+            # retries an exchange order.
+            return "acknowledged", "not_required", reason
+        return "failed", "not_required", reason
     if not status:
         return "manual_review", "manual_review", "missing exchange status"
     return status, "not_required", ""
@@ -70,8 +141,12 @@ async def record_order_event(
     signal = getattr(decision, "signal", None)
     client_order_id = (
         _extract_order_id(result, "client_order_id", "clientOrderId", "client_oid")
-        or f"qp_{uuid.uuid4().hex[:18]}"
     )
+    if not client_order_id:
+        idempotency_key = str(getattr(decision, "idempotency_key", "") or "")
+        if idempotency_key:
+            digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
+            client_order_id = f"qp_{digest}"
 
     event = OrderEventModel(
         user_id=user_id,
@@ -160,7 +235,7 @@ async def run_order_reconciliation(session: AsyncSession) -> dict:
 
 
 async def approve_order_event(session: AsyncSession, event_id: str, admin_notes: str = "") -> dict:
-    """Approve a manual review order event and mark it for re-execution."""
+    """Acknowledge a reconciled event without resubmitting an exchange order."""
     result = await session.execute(
         select(OrderEventModel).where(OrderEventModel.id == event_id)
     )
@@ -170,8 +245,9 @@ async def approve_order_event(session: AsyncSession, event_id: str, admin_notes:
     if event.status != "manual_review":
         return {"success": False, "error": f"Order event status is '{event.status}', must be 'manual_review' to approve"}
 
-    event.status = "approved"
-    event.retry_state = "approved"
+    event.status = "acknowledged"
+    event.retry_state = "not_required"
+    event.next_retry_at = None
     event.updated_at = utcnow()
     if admin_notes:
         payload = json.loads(event.payload_json or "{}")
@@ -179,8 +255,13 @@ async def approve_order_event(session: AsyncSession, event_id: str, admin_notes:
         event.payload_json = json.dumps(payload, ensure_ascii=False, default=str)
 
     await session.flush()
-    logger.info(f"[OrderReconciler] Order event {event_id} approved by admin")
-    return {"success": True, "event_id": event_id, "status": "approved"}
+    logger.info(f"[OrderReconciler] Order event {event_id} acknowledged by admin")
+    return {
+        "success": True,
+        "event_id": event_id,
+        "status": "acknowledged",
+        "replayed_order": False,
+    }
 
 
 async def reject_order_event(session: AsyncSession, event_id: str, admin_notes: str = "") -> dict:
@@ -208,26 +289,30 @@ async def reject_order_event(session: AsyncSession, event_id: str, admin_notes: 
 
 
 async def retry_order_event(session: AsyncSession, event_id: str, admin_notes: str = "") -> dict:
-    """Retry a manual review order event by resetting retry state."""
+    """Refuse unsafe blind resubmission of an ambiguous live order."""
     result = await session.execute(
         select(OrderEventModel).where(OrderEventModel.id == event_id)
     )
     event = result.scalar_one_or_none()
     if not event:
         return {"success": False, "error": "Order event not found"}
-    if event.status not in ("manual_review", "retryable", "failed", "error", "rejected"):
-        return {"success": False, "error": f"Order event status is '{event.status}', cannot retry"}
-
-    event.status = "retryable"
-    event.retry_state = "pending"
-    event.attempt_count = 0
-    event.next_retry_at = utcnow()
-    event.updated_at = utcnow()
     if admin_notes:
         payload = json.loads(event.payload_json or "{}")
         payload["admin_notes"] = admin_notes
         event.payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-
     await session.flush()
-    logger.info(f"[OrderReconciler] Order event {event_id} queued for retry by admin")
-    return {"success": True, "event_id": event_id, "status": "retryable"}
+    logger.warning(
+        f"[OrderReconciler] Refused blind retry for order event {event_id}; "
+        "exchange reconciliation is required"
+    )
+    return {
+        "success": False,
+        "event_id": event_id,
+        "status": event.status,
+        "error": (
+            "Blind order resubmission is disabled. Verify the deterministic "
+            "client_order_id on the exchange, then acknowledge this event or "
+            "manually requeue the original webhook only after proving no order exists."
+        ),
+        "replayed_order": False,
+    }

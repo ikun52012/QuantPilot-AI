@@ -147,7 +147,7 @@ def log_trade(decision: TradeDecision, order_result: dict, user_id: str | None =
             lambda t: logger.warning(f"[TradeLog] Background trade logging failed: {t.exception()}")
             if t.exception() else None
         )
-        return str(uuid.uuid4())  # Best-effort placeholder
+        return f"pending:{task.get_name()}"
     except RuntimeError:
         # No running event loop — safe to run synchronously
         return _asyncio.run(log_trade_async(decision, order_result, user_id))

@@ -21,7 +21,7 @@ SUPPORTED_NETWORKS = {
 
 def _setting_value_text(setting: AdminSettingModel | None) -> str | None:
     value = cast(Any, getattr(setting, "value", None))
-    return str(value) if value else None
+    return str(value) if value is not None else None
 
 
 async def get_payment_address(
@@ -30,7 +30,7 @@ async def get_payment_address(
     network: str,
 ) -> str | None:
     """Get payment wallet address for a currency/network."""
-    key = f"payment_address_{currency}_{network}".upper()
+    key = f"payment_address_{currency}_{network}".lower()
 
     result = await session.execute(
         select(AdminSettingModel).where(AdminSettingModel.key == key)
@@ -57,7 +57,7 @@ async def set_payment_address(
     address: str,
 ) -> bool:
     """Set payment wallet address."""
-    key = f"payment_address_{currency}_{network}".upper()
+    key = f"payment_address_{currency}_{network}".lower()
 
     result = await session.execute(
         select(AdminSettingModel).where(AdminSettingModel.key == key)
@@ -125,6 +125,17 @@ async def create_payment_request(
 
     from core.database import PaymentModel
     from core.utils.datetime import utcnow
+
+    if amount <= 0:
+        raise ValueError("Payment amount must be positive")
+
+    network_upper = (network or "").upper().strip()
+    if network_upper not in SUPPORTED_NETWORKS:
+        raise ValueError(f"Unsupported payment network: {network}. Supported: {', '.join(SUPPORTED_NETWORKS.keys())}")
+
+    expected_currency = SUPPORTED_NETWORKS[network_upper]["currency"]
+    if (currency or "").upper().strip() != expected_currency:
+        raise ValueError(f"Currency mismatch: network {network_upper} expects {expected_currency}, got {currency}")
 
     address = await get_payment_address(session, currency, network)
     if not address:

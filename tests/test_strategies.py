@@ -1,5 +1,6 @@
 """Tests for DCA and Grid Strategies."""
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -174,6 +175,114 @@ class TestDCAEngine:
         assert position.status == "active"
         decision = execute_trade.await_args.args[0]
         assert decision.idempotency_key == f"dca:{position.config_id}:close:stop_loss"
+
+    @pytest.mark.asyncio
+    async def test_live_close_cancels_all_dca_protection_orders(self, engine, config, monkeypatch):
+        position = engine.create_position(config, 50000.0)
+        config.paper_mode = False
+        engine.configs[position.config_id] = config
+        position.stop_loss_order_id = "sl-main"
+        position.stop_loss_order_ids = ["sl-main", "sl-orphan"]
+        position.take_profit_order_id = "tp-main"
+        position.take_profit_order_ids = ["tp-main", "tp-orphan"]
+
+        execute_trade = AsyncMock(return_value={"status": "closed", "order_id": "close-1"})
+        cancel_order = AsyncMock(return_value={"status": "cancelled"})
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+        monkeypatch.setattr("exchange.cancel_order", cancel_order)
+
+        await engine._close_position(
+            position.config_id,
+            51000.0,
+            "manual",
+            {"live_trading": True},
+        )
+
+        assert position.status == "closed"
+        assert position.stop_loss_order_id == ""
+        assert position.take_profit_order_id == ""
+        assert position.stop_loss_order_ids == []
+        assert position.take_profit_order_ids == []
+        assert {call.args[0] for call in cancel_order.await_args_list} == {
+            "sl-main", "sl-orphan", "tp-main", "tp-orphan",
+        }
+
+    @pytest.mark.asyncio
+    async def test_live_close_retries_cleanup_without_closing_position_twice(self, engine, config, monkeypatch):
+        position = engine.create_position(config, 50000.0)
+        config.paper_mode = False
+        engine.configs[position.config_id] = config
+        position.stop_loss_order_id = "sl-main"
+        position.stop_loss_order_ids = ["sl-main"]
+
+        execute_trade = AsyncMock(return_value={"status": "closed", "order_id": "close-1"})
+        cancel_order = AsyncMock(return_value={"status": "error", "reason": "offline"})
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+        monkeypatch.setattr("exchange.cancel_order", cancel_order)
+
+        await engine._close_position(
+            position.config_id,
+            51000.0,
+            "manual",
+            {"live_trading": True},
+        )
+
+        assert position.status == "cleanup_required"
+        assert position.stop_loss_order_id == "sl-main"
+
+        cancel_order.return_value = {"status": "cancelled"}
+        await engine._close_position(
+            position.config_id,
+            52000.0,
+            "cleanup_retry",
+            {"live_trading": True},
+        )
+
+        assert position.status == "closed"
+        assert position.close_price == 51000.0
+        execute_trade.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_live_add_entry_replaces_aggregate_protection(self, engine, config, monkeypatch):
+        position = engine.create_position(config, 50000.0)
+        position.stop_loss_order_id = "sl-old"
+        position.take_profit_order_id = "tp-old"
+        config.paper_mode = False
+        engine.configs[position.config_id] = config
+
+        monkeypatch.setattr("exchange.get_market_limits", lambda *args: {})
+        monkeypatch.setattr(
+            "exchange.execute_trade",
+            AsyncMock(return_value={
+                "status": "filled",
+                "order_id": "entry-2",
+                "entry_price": 49000.0,
+                "filled_quantity": 0.02,
+                "stop_loss_order_id": "sl-entry",
+                "take_profit_order_id": "tp-entry",
+            }),
+        )
+        place_stop = AsyncMock(return_value={"status": "placed", "order_id": "sl-new"})
+        place_take_profit = AsyncMock(return_value={"status": "placed", "order_id": "tp-new"})
+        cancel_order = AsyncMock(return_value={"status": "cancelled"})
+        monkeypatch.setattr("exchange.place_protective_stop", place_stop)
+        monkeypatch.setattr("exchange.place_protective_take_profit", place_take_profit)
+        monkeypatch.setattr("exchange.cancel_order", cancel_order)
+
+        result = await engine._add_entry(
+            position.config_id,
+            config,
+            49000.0,
+            {"live_trading": True},
+        )
+
+        assert result["success"] is True
+        assert position.stop_loss_order_id == "sl-new"
+        assert position.take_profit_order_id == "tp-new"
+        assert place_stop.await_args.kwargs["existing_order_id"] == "sl-old"
+        assert place_take_profit.await_args.kwargs["existing_order_id"] == "tp-old"
+        cancelled_ids = {call.args[0] for call in cancel_order.await_args_list}
+        assert cancelled_ids == {"sl-entry", "tp-entry"}
 
 
 class TestGridConfig:
@@ -488,6 +597,66 @@ class TestGridEngine:
         assert decision.idempotency_key == f"grid:{grid.config_id}:close:out_of_range"
 
     @pytest.mark.asyncio
+    async def test_close_live_grid_cancels_entry_and_protection_orders(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        config.paper_mode = False
+        engine.configs[grid.config_id] = config
+        pending_level = grid.grid_levels[0]
+        pending_level.order_id = "entry-open"
+        filled_level = grid.grid_levels[1]
+        filled_level.status = "filled"
+        filled_level.stop_loss_order_id = "sl-open"
+        filled_level.take_profit_order_id = "tp-open"
+
+        cancel_order = AsyncMock(return_value={"status": "cancelled"})
+        monkeypatch.setattr("exchange.cancel_order", cancel_order)
+        monkeypatch.setattr("exchange.execute_trade", AsyncMock())
+
+        await engine._close_grid(
+            grid.config_id,
+            53000.0,
+            "manual",
+            {"live_trading": True},
+        )
+
+        assert grid.status == "closed"
+        assert pending_level.order_id == ""
+        assert filled_level.stop_loss_order_id == ""
+        assert filled_level.take_profit_order_id == ""
+        assert {call.args[0] for call in cancel_order.await_args_list} == {
+            "entry-open", "sl-open", "tp-open",
+        }
+
+    @pytest.mark.asyncio
+    async def test_close_live_grid_stops_before_flatten_when_cancel_fails(self, engine, config, monkeypatch):
+        grid = engine.create_grid(config, 50000.0)
+        config.paper_mode = False
+        engine.configs[grid.config_id] = config
+        pending_level = grid.grid_levels[0]
+        pending_level.order_id = "entry-open"
+
+        cancel_order = AsyncMock(return_value={
+            "status": "error",
+            "reason": "offline",
+            "reconciliation_id": "recon-1",
+        })
+        execute_trade = AsyncMock()
+        monkeypatch.setattr("exchange.cancel_order", cancel_order)
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+
+        await engine._close_grid(
+            grid.config_id,
+            53000.0,
+            "manual",
+            {"live_trading": True},
+        )
+
+        assert grid.status == "cleanup_required"
+        assert pending_level.order_id == "entry-open"
+        assert grid.cleanup_errors[0]["reconciliation_id"] == "recon-1"
+        execute_trade.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_close_live_grid_rejects_partial_closed_net_exposure(self, engine, config, monkeypatch):
         grid = engine.create_grid(config, 50000.0)
         buy_level = next(level for level in grid.grid_levels if level.side == "buy")
@@ -498,10 +667,46 @@ class TestGridEngine:
         monkeypatch.setattr("exchange.cancel_order", AsyncMock(return_value={"status": "cancelled"}))
         monkeypatch.setattr("exchange.execute_trade", AsyncMock(return_value={"status": "partial_closed", "order_id": "close-net"}))
 
-        with pytest.raises(RuntimeError):
-            await engine._close_grid(grid.config_id, 53000.0, "out_of_range", {"live_trading": True})
+        await engine._close_grid(grid.config_id, 53000.0, "out_of_range", {"live_trading": True})
 
-        assert grid.status == "active"
+        assert grid.status == "cleanup_required"
+        assert grid.close_requires_manual_review is True
+        assert grid.cleanup_errors[0]["kind"] == "net_close"
+
+    @pytest.mark.asyncio
+    async def test_live_grid_rollback_retains_order_id_when_cancel_fails(self, engine, monkeypatch):
+        @asynccontextmanager
+        async def fake_lock(*args, **kwargs):
+            yield
+
+        config = GridConfig(
+            ticker="BTCUSDT",
+            upper_price=110.0,
+            lower_price=90.0,
+            grid_count=4,
+            total_capital_usdt=1000.0,
+            paper_mode=False,
+        )
+        execute_trade = AsyncMock(side_effect=[
+            {"status": "pending", "order_id": "live-order-1"},
+            {"status": "error", "reason": "rejected"},
+            {"status": "error", "reason": "rejected"},
+            {"status": "error", "reason": "rejected"},
+        ])
+        monkeypatch.setattr("strategies.grid.distributed_lock", fake_lock)
+        monkeypatch.setattr("exchange.execute_trade", execute_trade)
+        monkeypatch.setattr(
+            "exchange.cancel_order",
+            AsyncMock(return_value={"status": "error", "reason": "exchange unavailable"}),
+        )
+
+        with pytest.raises(RuntimeError, match="Rollback incomplete"):
+            await engine.create_grid_async(config, 100.0, {"live_trading": True})
+
+        position = engine.positions[config.strategy_id]
+        placed_level = next(level for level in position.grid_levels if level.order_id)
+        assert placed_level.order_id == "live-order-1"
+        assert placed_level.status == "pending"
 
 
 class TestDCAEntry:

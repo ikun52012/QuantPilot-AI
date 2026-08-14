@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -18,6 +19,9 @@ from ai_analyzer import (
 )
 from core.config import settings
 from core.database import PositionModel
+from enhanced_market_data import _cache as _enhanced_cache
+from enhanced_market_data import _cache_inflight as _enhanced_cache_inflight
+from enhanced_market_data import _fetch_with_cache
 from models import AIAnalysis, MarketContext, TradingViewSignal
 from position_monitor import _paper_trailing_stop_price
 from services.signal_processor import SignalProcessor
@@ -268,6 +272,31 @@ def test_analysis_config_signature_changes_with_zero_preserved_trailing_value():
     assert baseline != changed
 
 
+@pytest.mark.asyncio
+async def test_enhanced_market_data_cache_coalesces_concurrent_fetches():
+    key = "singleflight-test"
+    _enhanced_cache.pop(key, None)
+    _enhanced_cache_inflight.pop(key, None)
+    calls = 0
+    release = asyncio.Event()
+
+    async def fetcher():
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        return {"value": 42}
+
+    tasks = [asyncio.create_task(_fetch_with_cache(key, fetcher)) for _ in range(3)]
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(*tasks)
+
+    assert results == [{"value": 42}] * 3
+    assert calls == 1
+    assert key not in _enhanced_cache_inflight
+    _enhanced_cache.pop(key, None)
+
+
 def test_custom_exit_plan_preserves_zero_qty_override(monkeypatch):
     monkeypatch.setattr(settings.take_profit, "num_levels", 2)
     monkeypatch.setattr(settings.take_profit, "tp1_pct", 2.0)
@@ -397,16 +426,16 @@ def test_parse_response_rejects_nonfinite_stop_loss():
     assert result.suggested_stop_loss is None
 
 
-def test_parse_response_allows_missing_stop_loss_for_processor_fallback():
+def test_parse_response_rejects_missing_stop_loss():
     result = _parse_response(json.dumps({
         "confidence": 0.8,
         "recommendation": "execute",
         "reasoning": "ok",
     }))
 
-    assert result.recommendation == "execute"
+    assert result.recommendation == "reject"
     assert result.suggested_stop_loss is None
-    assert any("server will apply fallback" in warning for warning in result.warnings)
+    assert any("stop loss" in warning.lower() for warning in result.warnings)
 
 
 def test_validate_ai_analysis_clears_wrong_side_stop_loss(sample_signal, sample_market):

@@ -307,6 +307,7 @@ class MarketDataWebSocketManager:
         self._connections: dict[str, Any] = {}
         self._data: dict[str, dict] = {}
         self._last_update: dict[str, float] = {}
+        self._ws_tasks: dict = {}
 
     async def start(self):
         """Start WebSocket manager background task."""
@@ -396,7 +397,7 @@ class MarketDataWebSocketManager:
                 await conn.send(json.dumps(subscribe_msg))
 
             # Start message handler
-            asyncio.create_task(self._handle_messages(conn, ticker))
+            self._ws_tasks[ticker] = asyncio.create_task(self._handle_messages(conn, ticker))
             return conn
         except ImportError:
             logger.warning("[MarketWS] websockets package not installed, using REST fallback")
@@ -480,7 +481,7 @@ class MarketDataWebSocketManager:
                     high_24h=data.get("high", 0),
                     low_24h=data.get("low", 0),
                     volume_24h=data.get("volume", 0),
-                    price_change_pct_24h=data.get("change_pct", 0),
+                    price_change_24h=data.get("change_pct", 0),
                 )
 
             _market_cache[ticker] = (time.monotonic(), context)
@@ -638,10 +639,32 @@ def _empty_market_context(ticker: str) -> MarketContext:
         low_24h=0.0,
         bid_ask_spread=0.0,
         rsi_1h=None,
+        rsi_4h=None,
+        rsi_15m=None,
         atr_pct=None,
+        atr_4h_pct=None,
         ema_fast=None,
         ema_slow=None,
+        ema_200=None,
         orderbook_imbalance=None,
+        funding_rate=None,
+        open_interest=None,
+        open_interest_change_pct=None,
+        long_short_ratio=None,
+        macd_line=None,
+        macd_signal=None,
+        macd_histogram=None,
+        bb_upper=None,
+        bb_middle=None,
+        bb_lower=None,
+        bb_bandwidth=None,
+        bb_percent_b=None,
+        adx=None,
+        di_plus=None,
+        di_minus=None,
+        adx_trend_strength=None,
+        stoch_rsi=None,
+        obv=None,
     )
 
 
@@ -784,9 +807,8 @@ async def _fetch_market_context_live(
                 logger.warning(f"[MarketData] {exchange_id} returned zero price for {ticker}")
                 raise ValueError("Zero price from exchange")
 
-            # BUG FIX: Check length before using negative index to avoid wrap-around
-            price_1h_ago = float(ohlcv_1h[-3][4]) if len(ohlcv_1h) >= 3 else current_price
-            price_4h_ago = float(ohlcv_4h[-3][4]) if len(ohlcv_4h) >= 3 else current_price
+            price_1h_ago = float(ohlcv_1h[-2][4]) if len(ohlcv_1h) >= 2 else current_price
+            price_4h_ago = float(ohlcv_4h[-2][4]) if len(ohlcv_4h) >= 2 else current_price
 
             price_change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0.0
             price_change_4h = ((current_price - price_4h_ago) / price_4h_ago * 100) if price_4h_ago else 0.0
@@ -815,6 +837,7 @@ async def _fetch_market_context_live(
             closes = [c[4] for c in ohlcv_1h]
             ema_fast = _calculate_ema(closes, 8)
             ema_slow = _calculate_ema(closes, 21)
+            ema_200 = _calculate_ema(closes, 200)
 
             funding_rate, open_interest_data, long_short_ratio = await asyncio.gather(
                 _safe_fetch_funding_rate(exchange, symbol),
@@ -822,6 +845,18 @@ async def _fetch_market_context_live(
                 _safe_fetch_long_short_ratio(exchange, symbol),
             )
             open_interest, open_interest_change_pct = open_interest_data
+
+            ohlcv_15m = await _safe_fetch_ohlcv(exchange, symbol, "15m", 50)
+            enhanced_indicators = _compute_enhanced_indicators(ohlcv_1h, ohlcv_4h, ohlcv_15m)
+
+            macd_data = enhanced_indicators.get("macd", {})
+            bb_data = enhanced_indicators.get("bollinger_bands", {})
+            adx_data = enhanced_indicators.get("adx", {})
+            stoch_rsi_data = enhanced_indicators.get("stoch_rsi", {})
+            rsi_4h_val = enhanced_indicators.get("rsi_4h")
+            rsi_15m_val = enhanced_indicators.get("rsi_15m")
+            atr_4h_val = enhanced_indicators.get("atr_4h")
+            obv_val = enhanced_indicators.get("obv")
 
             context = MarketContext(
                 ticker=ticker,
@@ -838,14 +873,31 @@ async def _fetch_market_context_live(
                 open_interest=open_interest,
                 open_interest_change_pct=round(open_interest_change_pct, 2) if open_interest_change_pct else None,
                 rsi_1h=round(rsi, 2) if rsi else None,
+                rsi_4h=rsi_4h_val,
+                rsi_15m=rsi_15m_val,
                 atr_pct=round(atr_pct, 4) if atr else None,
+                atr_4h_pct=round((atr_4h_val / current_price * 100), 4) if atr_4h_val and current_price else None,
                 ema_fast=round(ema_fast, 2) if ema_fast else None,
                 ema_slow=round(ema_slow, 2) if ema_slow else None,
+                ema_200=round(ema_200, 2) if ema_200 else None,
                 orderbook_imbalance=round(ob_imbalance, 4),
                 long_short_ratio=long_short_ratio,
+                macd_line=macd_data.get("macd_line"),
+                macd_signal=macd_data.get("signal_line"),
+                macd_histogram=macd_data.get("histogram"),
+                bb_upper=bb_data.get("upper"),
+                bb_middle=bb_data.get("middle"),
+                bb_lower=bb_data.get("lower"),
+                bb_bandwidth=bb_data.get("bandwidth"),
+                bb_percent_b=bb_data.get("percent_b"),
+                adx=adx_data.get("adx"),
+                di_plus=adx_data.get("di_plus"),
+                di_minus=adx_data.get("di_minus"),
+                adx_trend_strength=adx_data.get("trend_strength"),
+                stoch_rsi=stoch_rsi_data.get("stoch_rsi"),
+                obv=obv_val,
             )
 
-            ohlcv_15m = await _safe_fetch_ohlcv(exchange, symbol, "15m", 50)
             context_any = cast(Any, context)
             context_any._ohlcv_15m = ohlcv_15m
             context_any._ohlcv_30m = ohlcv_30m
@@ -899,6 +951,27 @@ async def _safe_fetch_funding_rate(exchange: Any, symbol: str) -> float | None:
 
 
 async def _safe_fetch_open_interest(exchange: Any, symbol: str) -> tuple[float | None, float | None]:
+    oi, oi_change = await _safe_fetch_open_interest_current(exchange, symbol)
+    if oi is not None:
+        return oi, oi_change
+    return await _safe_fetch_open_interest_history(exchange, symbol)
+
+
+async def _safe_fetch_open_interest_current(exchange: Any, symbol: str) -> tuple[float | None, float | None]:
+    try:
+        if hasattr(exchange, "fetch_open_interest"):
+            oi_data = await asyncio.to_thread(exchange.fetch_open_interest, symbol)
+            if isinstance(oi_data, dict):
+                oi = _to_optional_float(oi_data.get("openInterestAmount"))
+                return oi, None
+    except (OSError, ConnectionError, TimeoutError) as e:
+        logger.debug(f"[MarketData] OI current fetch network error for {symbol}: {e}")
+    except Exception as e:
+        logger.debug(f"[MarketData] OI current fetch error for {symbol}: {e}")
+    return None, None
+
+
+async def _safe_fetch_open_interest_history(exchange: Any, symbol: str) -> tuple[float | None, float | None]:
     try:
         oi_data = await asyncio.to_thread(exchange.fetch_open_interest_history, symbol, "1h", None, 2)
         if oi_data and len(oi_data) >= 2:
@@ -913,9 +986,9 @@ async def _safe_fetch_open_interest(exchange: Any, symbol: str) -> tuple[float |
                 return oi, oi_change
             return oi, None
     except (OSError, ConnectionError, TimeoutError) as e:
-        logger.debug(f"[MarketData] OI fetch network error for {symbol}: {e}")
+        logger.debug(f"[MarketData] OI history fetch network error for {symbol}: {e}")
     except Exception as e:
-        logger.debug(f"[MarketData] OI fetch unexpected error for {symbol}: {e}")
+        logger.debug(f"[MarketData] OI history fetch error for {symbol}: {e}")
     return None, None
 
 
@@ -1022,7 +1095,6 @@ def _calculate_atr(ohlcv: list[list[float]], period: int = 14) -> float | None:
             atr = (atr * (period - 1) + trs[i]) / period
         return atr
 
-    # ENHANCED: Fallback with fewer candles (minimum 7)
     min_candles = 7
     if len(ohlcv) >= min_candles:
         logger.debug(f"[MarketData] ATR fallback: using {len(ohlcv)} candles (requested {period + 1})")
@@ -1032,9 +1104,10 @@ def _calculate_atr(ohlcv: list[list[float]], period: int = 14) -> float | None:
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
             trs.append(tr)
 
-        # Calculate ATR with available data
-        fallback_period = len(trs)
-        atr = sum(trs) / fallback_period
+        fallback_period = min(period, len(trs))
+        atr = sum(trs[:fallback_period]) / fallback_period
+        for i in range(fallback_period, len(trs)):
+            atr = (atr * (fallback_period - 1) + trs[i]) / fallback_period
         return atr
 
     # Insufficient data even for fallback
@@ -1050,6 +1123,519 @@ def _calculate_ema(data: list[float], period: int) -> float | None:
     for value in data[period:]:
         ema = (value - ema) * multiplier + ema
     return ema
+
+
+def _calculate_macd(
+    closes: list[float],
+    fast_period: int = 12,
+    slow_period: int = 26,
+    signal_period: int = 9,
+) -> dict[str, float | None]:
+    if len(closes) < slow_period + signal_period:
+        return {"macd_line": None, "signal_line": None, "histogram": None}
+
+    ema_fast = _calculate_ema_series(closes, fast_period)
+    ema_slow = _calculate_ema_series(closes, slow_period)
+    if ema_fast is None or ema_slow is None:
+        return {"macd_line": None, "signal_line": None, "histogram": None}
+
+    macd_line_vals = [f - s for f, s in zip(ema_fast, ema_slow, strict=True)]
+    if len(macd_line_vals) < signal_period:
+        return {"macd_line": None, "signal_line": None, "histogram": None}
+
+    signal_line_vals = _calculate_ema_series(macd_line_vals, signal_period)
+    if signal_line_vals is None:
+        return {"macd_line": None, "signal_line": None, "histogram": None}
+
+    ml = macd_line_vals[-1]
+    sl = signal_line_vals[-1]
+    return {
+        "macd_line": round(ml, 8),
+        "signal_line": round(sl, 8),
+        "histogram": round(ml - sl, 8),
+    }
+
+
+def _calculate_ema_series(data: list[float], period: int) -> list[float] | None:
+    if len(data) < period:
+        return None
+    multiplier = 2 / (period + 1)
+    ema = sum(data[:period]) / period
+    result = [ema]
+    for value in data[period:]:
+        ema = (value - ema) * multiplier + ema
+        result.append(ema)
+    offset = len(data) - len(result)
+    return [0.0] * offset + result
+
+
+def _calculate_bollinger_bands(
+    closes: list[float],
+    period: int = 20,
+    num_std: float = 2.0,
+) -> dict[str, float | None]:
+    if len(closes) < period:
+        return {"upper": None, "middle": None, "lower": None, "bandwidth": None, "percent_b": None}
+
+    window = closes[-period:]
+    middle = sum(window) / period
+    variance = sum((c - middle) ** 2 for c in window) / period
+    std = variance ** 0.5
+
+    upper = middle + num_std * std
+    lower = middle - num_std * std
+    bandwidth = ((upper - lower) / middle * 100) if middle > 0 else None
+    current = closes[-1]
+    percent_b = ((current - lower) / (upper - lower)) if (upper - lower) > 0 else None
+
+    return {
+        "upper": round(upper, 8),
+        "middle": round(middle, 8),
+        "lower": round(lower, 8),
+        "bandwidth": round(bandwidth, 4) if bandwidth is not None else None,
+        "percent_b": round(percent_b, 4) if percent_b is not None else None,
+    }
+
+
+def _calculate_adx(
+    ohlcv: list[list[float]],
+    period: int = 14,
+) -> dict[str, float | None]:
+    if len(ohlcv) < period * 2 + 1:
+        return {"adx": None, "di_plus": None, "di_minus": None, "trend_strength": None}
+
+    plus_dm_list: list[float] = []
+    minus_dm_list: list[float] = []
+    tr_list: list[float] = []
+
+    for i in range(1, len(ohlcv)):
+        high = ohlcv[i][2]
+        low = ohlcv[i][3]
+        prev_high = ohlcv[i - 1][2]
+        prev_low = ohlcv[i - 1][3]
+        prev_close = ohlcv[i - 1][4]
+
+        up_move = high - prev_high
+        down_move = prev_low - low
+
+        plus_dm = up_move if up_move > down_move and up_move > 0 else 0.0
+        minus_dm = down_move if down_move > up_move and down_move > 0 else 0.0
+
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+        tr_list.append(tr)
+
+    if len(tr_list) < period:
+        return {"adx": None, "di_plus": None, "di_minus": None, "trend_strength": None}
+
+    smoothed_plus_dm = sum(plus_dm_list[:period])
+    smoothed_minus_dm = sum(minus_dm_list[:period])
+    smoothed_tr = sum(tr_list[:period])
+
+    dx_values: list[float] = []
+
+    for i in range(period, len(tr_list)):
+        smoothed_plus_dm = smoothed_plus_dm - (smoothed_plus_dm / period) + plus_dm_list[i]
+        smoothed_minus_dm = smoothed_minus_dm - (smoothed_minus_dm / period) + minus_dm_list[i]
+        smoothed_tr = smoothed_tr - (smoothed_tr / period) + tr_list[i]
+
+        di_plus = (smoothed_plus_dm / smoothed_tr * 100) if smoothed_tr > 0 else 0.0
+        di_minus = (smoothed_minus_dm / smoothed_tr * 100) if smoothed_tr > 0 else 0.0
+
+        di_sum = di_plus + di_minus
+        dx = (abs(di_plus - di_minus) / di_sum * 100) if di_sum > 0 else 0.0
+        dx_values.append(dx)
+
+    if not dx_values:
+        return {"adx": None, "di_plus": None, "di_minus": None, "trend_strength": None}
+
+    if len(dx_values) >= period:
+        adx = sum(dx_values[:period]) / period
+        for i in range(period, len(dx_values)):
+            adx = (adx * (period - 1) + dx_values[i]) / period
+    else:
+        adx = sum(dx_values) / len(dx_values)
+
+    last_di_plus = (smoothed_plus_dm / smoothed_tr * 100) if smoothed_tr > 0 else 0.0
+    last_di_minus = (smoothed_minus_dm / smoothed_tr * 100) if smoothed_tr > 0 else 0.0
+
+    if adx >= 40:
+        trend_strength = "strong"
+    elif adx >= 25:
+        trend_strength = "moderate"
+    elif adx >= 15:
+        trend_strength = "weak"
+    else:
+        trend_strength = "ranging"
+
+    return {
+        "adx": round(adx, 2),
+        "di_plus": round(last_di_plus, 2),
+        "di_minus": round(last_di_minus, 2),
+        "trend_strength": trend_strength,
+    }
+
+
+def _calculate_stoch_rsi(
+    closes: list[float],
+    rsi_period: int = 14,
+    stoch_period: int = 14,
+) -> dict[str, float | None]:
+    if len(closes) < rsi_period + stoch_period + 1:
+        return {"stoch_rsi": None, "is_overbought": None, "is_oversold": None}
+
+    rsi_values: list[float] = []
+    for start in range(0, len(closes) - rsi_period):
+        slice_closes = closes[start:start + rsi_period + 1]
+        rsi_val = _calculate_rsi(slice_closes, rsi_period)
+        if rsi_val is not None:
+            rsi_values.append(rsi_val)
+
+    if len(rsi_values) < stoch_period:
+        return {"stoch_rsi": None, "is_overbought": None, "is_oversold": None}
+
+    recent = rsi_values[-stoch_period:]
+    min_rsi = min(recent)
+    max_rsi = max(recent)
+    current_rsi = rsi_values[-1]
+
+    if max_rsi - min_rsi == 0:
+        stoch_rsi = 50.0
+    else:
+        stoch_rsi = ((current_rsi - min_rsi) / (max_rsi - min_rsi)) * 100.0
+
+    return {
+        "stoch_rsi": round(stoch_rsi, 2),
+        "is_overbought": stoch_rsi > 80,
+        "is_oversold": stoch_rsi < 20,
+    }
+
+
+def _calculate_obv(closes: list[float], volumes: list[float]) -> float | None:
+    if len(closes) < 2 or len(volumes) < 2 or len(closes) != len(volumes):
+        return None
+
+    obv = 0.0
+    for i in range(1, len(closes)):
+        if closes[i] > closes[i - 1]:
+            obv += volumes[i]
+        elif closes[i] < closes[i - 1]:
+            obv -= volumes[i]
+    return round(obv, 2)
+
+
+def _compute_enhanced_indicators(
+    ohlcv_1h: list[list[float]],
+    ohlcv_4h: list[list[float]] | None = None,
+    ohlcv_15m: list[list[float]] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+
+    closes_1h = [c[4] for c in ohlcv_1h] if ohlcv_1h else []
+    volumes_1h = [c[5] for c in ohlcv_1h] if ohlcv_1h else []
+
+    if len(closes_1h) >= 26 + 9:
+        macd_data = _calculate_macd(closes_1h)
+        result["macd"] = macd_data
+
+    if len(closes_1h) >= 20:
+        bb_data = _calculate_bollinger_bands(closes_1h)
+        result["bollinger_bands"] = bb_data
+
+    if len(ohlcv_1h) >= 29:
+        adx_data = _calculate_adx(ohlcv_1h)
+        result["adx"] = adx_data
+
+    if len(closes_1h) >= 200:
+        ema_200 = _calculate_ema(closes_1h, 200)
+        result["ema_200"] = round(ema_200, 8) if ema_200 is not None else None
+
+    if len(closes_1h) >= 14 + 14 + 1:
+        stoch_rsi_data = _calculate_stoch_rsi(closes_1h)
+        result["stoch_rsi"] = stoch_rsi_data
+
+    if len(closes_1h) >= 2 and len(volumes_1h) >= 2:
+        obv = _calculate_obv(closes_1h, volumes_1h)
+        result["obv"] = obv
+
+    rsi_1h = _calculate_rsi(closes_1h, 14) if len(closes_1h) >= 15 else None
+    result["rsi_1h"] = round(rsi_1h, 2) if rsi_1h is not None else None
+
+    closes_4h = [c[4] for c in ohlcv_4h] if ohlcv_4h else []
+    if len(closes_4h) >= 15:
+        rsi_4h = _calculate_rsi(closes_4h, 14)
+        result["rsi_4h"] = round(rsi_4h, 2) if rsi_4h is not None else None
+    else:
+        result["rsi_4h"] = None
+
+    atr_1h = _calculate_atr(ohlcv_1h, 14) if len(ohlcv_1h) >= 8 else None
+    result["atr_1h"] = atr_1h
+
+    atr_4h = _calculate_atr(ohlcv_4h, 14) if ohlcv_4h and len(ohlcv_4h) >= 8 else None
+    result["atr_4h"] = atr_4h
+
+    closes_15m = [c[4] for c in ohlcv_15m] if ohlcv_15m else []
+    if len(closes_15m) >= 15:
+        rsi_15m = _calculate_rsi(closes_15m, 14)
+        result["rsi_15m"] = round(rsi_15m, 2) if rsi_15m is not None else None
+    else:
+        result["rsi_15m"] = None
+
+    return result
+
+
+def _calculate_macd(
+    closes: list[float],
+    fast_period: int = 12,
+    slow_period: int = 26,
+    signal_period: int = 9,
+) -> dict[str, float | None]:
+    """Calculate MACD, Signal line, and Histogram."""
+    if len(closes) < slow_period + signal_period:
+        return {"macd_line": None, "signal_line": None, "histogram": None}
+    fast_ema_values: list[float] = []
+    slow_ema_values: list[float] = []
+    fast_mult = 2 / (fast_period + 1)
+    slow_mult = 2 / (slow_period + 1)
+    fast_ema = sum(closes[:fast_period]) / fast_period
+    for i in range(fast_period, len(closes)):
+        fast_ema = (closes[i] - fast_ema) * fast_mult + fast_ema
+        if i >= slow_period - 1:
+            fast_ema_values.append(fast_ema)
+    slow_ema = sum(closes[:slow_period]) / slow_period
+    for i in range(slow_period, len(closes)):
+        slow_ema = (closes[i] - slow_ema) * slow_mult + slow_ema
+        slow_ema_values.append(slow_ema)
+    if len(fast_ema_values) != len(slow_ema_values):
+        min_len = min(len(fast_ema_values), len(slow_ema_values))
+        fast_ema_values = fast_ema_values[-min_len:]
+        slow_ema_values = slow_ema_values[-min_len:]
+    macd_line = [f - s for f, s in zip(fast_ema_values, slow_ema_values, strict=True)]
+    if len(macd_line) < signal_period:
+        return {"macd_line": None, "signal_line": None, "histogram": None}
+    sig_mult = 2 / (signal_period + 1)
+    signal_line = sum(macd_line[:signal_period]) / signal_period
+    for i in range(signal_period, len(macd_line)):
+        signal_line = (macd_line[i] - signal_line) * sig_mult + signal_line
+    current_macd = macd_line[-1]
+    histogram = current_macd - signal_line
+    prev_macd = macd_line[-2] if len(macd_line) >= 2 else current_macd
+    prev_signal = signal_line
+    if len(macd_line) >= signal_period + 1:
+        ps = sum(macd_line[-signal_period - 1:-1]) / signal_period
+        for v in macd_line[-signal_period:]:
+            ps = (v - ps) * sig_mult + ps
+        prev_signal = ps
+    prev_histogram = prev_macd - prev_signal
+    divergence = "none"
+    if histogram > 0 and prev_histogram <= 0:
+        divergence = "bullish_crossover"
+    elif histogram < 0 and prev_histogram >= 0:
+        divergence = "bearish_crossover"
+    return {
+        "macd_line": round(current_macd, 8),
+        "signal_line": round(signal_line, 8),
+        "histogram": round(histogram, 8),
+        "divergence": divergence,
+    }
+
+
+def _calculate_bollinger_bands(
+    closes: list[float],
+    period: int = 20,
+    num_std: float = 2.0,
+) -> dict[str, float | None]:
+    """Calculate Bollinger Bands, bandwidth, and %B."""
+    if len(closes) < period:
+        return {"upper": None, "middle": None, "lower": None, "bandwidth": None, "percent_b": None, "squeeze": None}
+    recent = closes[-period:]
+    middle = sum(recent) / period
+    variance = sum((c - middle) ** 2 for c in recent) / period
+    std = variance ** 0.5
+    upper = middle + num_std * std
+    lower = middle - num_std * std
+    current = closes[-1]
+    bandwidth = ((upper - lower) / middle * 100) if middle > 0 else None
+    percent_b = ((current - lower) / (upper - lower)) if (upper - lower) > 0 else None
+    avg_bandwidth = None
+    if len(closes) >= period * 2:
+        bw_values = []
+        for offset in range(len(closes) - period * 2 + 1, len(closes) - period + 1):
+            chunk = closes[offset:offset + period]
+            m = sum(chunk) / period
+            v = sum((c - m) ** 2 for c in chunk) / period
+            s = v ** 0.5
+            u = m + num_std * s
+            lower_band = m - num_std * s
+            bw_values.append((u - lower_band) / m * 100 if m > 0 else 0)
+        if bw_values:
+            avg_bandwidth = sum(bw_values) / len(bw_values)
+    squeeze = None
+    if bandwidth is not None and avg_bandwidth is not None and avg_bandwidth > 0:
+        squeeze = bandwidth < avg_bandwidth * 0.5
+    return {
+        "upper": round(upper, 8),
+        "middle": round(middle, 8),
+        "lower": round(lower, 8),
+        "bandwidth": round(bandwidth, 4) if bandwidth is not None else None,
+        "percent_b": round(percent_b, 4) if percent_b is not None else None,
+        "squeeze": squeeze,
+    }
+
+
+def _calculate_adx(ohlcv: list[list[float]], period: int = 14) -> dict[str, float | None]:
+    """Calculate ADX, +DI, and -DI."""
+    if len(ohlcv) < period * 2:
+        return {"adx": None, "di_plus": None, "di_minus": None, "trend_strength": None}
+    trs: list[float] = []
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    for i in range(1, len(ohlcv)):
+        high = ohlcv[i][2]
+        low = ohlcv[i][3]
+        prev_high = ohlcv[i - 1][2]
+        prev_low = ohlcv[i - 1][3]
+        prev_close = ohlcv[i - 1][4]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+        up_move = high - prev_high
+        down_move = prev_low - low
+        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+    if len(trs) < period:
+        return {"adx": None, "di_plus": None, "di_minus": None, "trend_strength": None}
+    smooth_tr = sum(trs[:period])
+    smooth_plus_dm = sum(plus_dm[:period])
+    smooth_minus_dm = sum(minus_dm[:period])
+    dx_values: list[float] = []
+    for i in range(period, len(trs)):
+        smooth_tr = smooth_tr - smooth_tr / period + trs[i]
+        smooth_plus_dm = smooth_plus_dm - smooth_plus_dm / period + plus_dm[i]
+        smooth_minus_dm = smooth_minus_dm - smooth_minus_dm / period + minus_dm[i]
+        di_plus = (smooth_plus_dm / smooth_tr * 100) if smooth_tr > 0 else 0.0
+        di_minus = (smooth_minus_dm / smooth_tr * 100) if smooth_tr > 0 else 0.0
+        dx_sum = di_plus + di_minus
+        dx = (abs(di_plus - di_minus) / dx_sum * 100) if dx_sum > 0 else 0.0
+        dx_values.append(dx)
+    if len(dx_values) < period:
+        current_di_plus = (smooth_plus_dm / smooth_tr * 100) if smooth_tr > 0 else None
+        current_di_minus = (smooth_minus_dm / smooth_tr * 100) if smooth_tr > 0 else None
+        adx_val = dx_values[-1] if dx_values else None
+        trend = _classify_adx_trend(adx_val)
+        return {"adx": round(adx_val, 2) if adx_val is not None else None, "di_plus": round(current_di_plus, 2) if current_di_plus is not None else None, "di_minus": round(current_di_minus, 2) if current_di_minus is not None else None, "trend_strength": trend}
+    adx = sum(dx_values[:period]) / period
+    for i in range(period, len(dx_values)):
+        adx = (adx * (period - 1) + dx_values[i]) / period
+    current_di_plus = (smooth_plus_dm / smooth_tr * 100) if smooth_tr > 0 else None
+    current_di_minus = (smooth_minus_dm / smooth_tr * 100) if smooth_tr > 0 else None
+    trend = _classify_adx_trend(adx)
+    return {
+        "adx": round(adx, 2),
+        "di_plus": round(current_di_plus, 2) if current_di_plus is not None else None,
+        "di_minus": round(current_di_minus, 2) if current_di_minus is not None else None,
+        "trend_strength": trend,
+    }
+
+
+def _classify_adx_trend(adx: float | None) -> str:
+    if adx is None:
+        return "unknown"
+    if adx >= 50:
+        return "extremely_strong"
+    if adx >= 25:
+        return "strong"
+    if adx >= 20:
+        return "moderate"
+    return "weak"
+
+
+def _calculate_stoch_rsi(closes: list[float], rsi_period: int = 14, stoch_period: int = 14) -> dict[str, float | None]:
+    """Calculate Stochastic RSI."""
+    if len(closes) < rsi_period + stoch_period:
+        return {"stoch_rsi": None, "overbought": None, "oversold": None}
+    rsi_values: list[float] = []
+    for start in range(0, len(closes) - rsi_period):
+        chunk = closes[start:start + rsi_period + 1]
+        rsi_val = _calculate_rsi(chunk, rsi_period)
+        if rsi_val is not None:
+            rsi_values.append(rsi_val)
+    if len(rsi_values) < stoch_period:
+        return {"stoch_rsi": None, "overbought": None, "oversold": None}
+    recent_rsi = rsi_values[-stoch_period:]
+    min_rsi = min(recent_rsi)
+    max_rsi = max(recent_rsi)
+    current_rsi = rsi_values[-1]
+    if max_rsi == min_rsi:
+        stoch_rsi = 50.0
+    else:
+        stoch_rsi = ((current_rsi - min_rsi) / (max_rsi - min_rsi)) * 100
+    return {
+        "stoch_rsi": round(stoch_rsi, 2),
+        "overbought": stoch_rsi >= 80,
+        "oversold": stoch_rsi <= 20,
+    }
+
+
+def _calculate_obv(closes: list[float], volumes: list[float]) -> float | None:
+    """Calculate On-Balance Volume."""
+    if len(closes) < 2 or len(volumes) < 2:
+        return None
+    obv = 0.0
+    for i in range(1, min(len(closes), len(volumes))):
+        if closes[i] > closes[i - 1]:
+            obv += volumes[i]
+        elif closes[i] < closes[i - 1]:
+            obv -= volumes[i]
+    return round(obv, 2)
+
+
+def calculate_multi_timeframe_indicators(
+    ohlcv_1h: list[list[float]],
+    ohlcv_4h: list[list[float]] | None = None,
+    ohlcv_15m: list[list[float]] | None = None,
+    ohlcv_30m: list[list[float]] | None = None,
+) -> dict[str, Any]:
+    """Calculate indicators across multiple timeframes for enhanced AI analysis."""
+    result: dict[str, Any] = {}
+    closes_1h = [c[4] for c in ohlcv_1h] if ohlcv_1h else []
+    result["macd"] = _calculate_macd(closes_1h)
+    result["bollinger_bands"] = _calculate_bollinger_bands(closes_1h)
+    result["adx"] = _calculate_adx(ohlcv_1h)
+    result["stoch_rsi"] = _calculate_stoch_rsi(closes_1h)
+    volumes_1h = [c[5] for c in ohlcv_1h] if ohlcv_1h else []
+    result["obv"] = _calculate_obv(closes_1h, volumes_1h)
+    result["ema200"] = _calculate_ema(closes_1h, 200)
+    if ohlcv_4h and len(ohlcv_4h) >= 15:
+        closes_4h = [c[4] for c in ohlcv_4h]
+        result["rsi_4h"] = _calculate_rsi(closes_4h, 14)
+        result["atr_4h_pct"] = None
+        atr_4h = _calculate_atr(ohlcv_4h, 14)
+        if atr_4h is not None and closes_4h[-1] > 0:
+            result["atr_4h_pct"] = round(atr_4h / closes_4h[-1] * 100, 4)
+        result["macd_4h"] = _calculate_macd(closes_4h)
+    else:
+        result["rsi_4h"] = None
+        result["atr_4h_pct"] = None
+        result["macd_4h"] = {"macd_line": None, "signal_line": None, "histogram": None}
+    if ohlcv_15m and len(ohlcv_15m) >= 15:
+        closes_15m = [c[4] for c in ohlcv_15m]
+        result["rsi_15m"] = _calculate_rsi(closes_15m, 14)
+        atr_15m = _calculate_atr(ohlcv_15m, 14)
+        if atr_15m is not None and closes_15m[-1] > 0:
+            result["atr_15m_pct"] = round(atr_15m / closes_15m[-1] * 100, 4)
+        else:
+            result["atr_15m_pct"] = None
+    else:
+        result["rsi_15m"] = None
+        result["atr_15m_pct"] = None
+    if ohlcv_30m and len(ohlcv_30m) >= 15:
+        closes_30m = [c[4] for c in ohlcv_30m]
+        result["rsi_30m"] = _calculate_rsi(closes_30m, 14)
+    else:
+        result["rsi_30m"] = None
+    return result
 
 
 async def fetch_correlated_assets_context() -> dict:
@@ -1232,7 +1818,7 @@ async def _fetch_blockchain_whale_data(symbol: str) -> dict[str, Any]:
 
             # ETH/USDT: Use Etherscan API (FREE tier: 5 calls/sec)
             if symbol in ['ETH', 'USDT']:
-                etherscan_api_key = get_secure_api_key("etherscan_api_key") or os.getenv('ETHERSCAN_API_KEY', '')
+                etherscan_api_key = get_secure_api_key("etherscan_api_key")
 
                 # Check ETH whale transfers using known exchange wallets
                 if symbol == 'ETH' and etherscan_api_key:
@@ -1323,7 +1909,12 @@ async def _fetch_whale_alert_api(api_key: str, symbol: str) -> dict[str, Any]:
     """
     data: dict[str, Any] = {}
 
-    whale_threshold_usd = float(os.getenv("WHALE_THRESHOLD_USD", "1000000"))
+    try:
+        whale_threshold_usd = float(os.getenv("WHALE_THRESHOLD_USD", "1000000"))
+        if whale_threshold_usd <= 0:
+            whale_threshold_usd = 1_000_000
+    except (ValueError, TypeError):
+        whale_threshold_usd = 1_000_000
     min_value = int(whale_threshold_usd * 0.5)  # Use half threshold for API
 
     try:
@@ -1382,14 +1973,24 @@ async def _fetch_whale_alert_api(api_key: str, symbol: str) -> dict[str, Any]:
     return data
 
 
-async def fetch_enhanced_market_context(ticker: str) -> MarketContext:
+async def fetch_enhanced_market_context(
+    ticker: str,
+    exchange_ids: list[str] | None = None,
+    market_type: str | None = None,
+    cache_scope: str | None = None,
+) -> MarketContext:
     """
     Fetch comprehensive market context including correlated assets and whale activity.
     """
     gathered = cast(
         tuple[MarketContext, dict[str, float], dict[str, Any]],
         await asyncio.gather(
-            fetch_market_context(ticker),
+            fetch_market_context(
+                ticker,
+                exchange_ids=exchange_ids,
+                market_type=market_type,
+                cache_scope=cache_scope,
+            ),
             fetch_correlated_assets_context(),
             fetch_whale_activity(ticker),
         ),

@@ -87,7 +87,13 @@ ok ".env 文件存在"
 # ─────────────────────────────────────────────
 # 创建必要目录
 # ─────────────────────────────────────────────
-for dir in "data" "data/backups" "logs" "trade_logs"; do
+DATA_DIR_VALUE="$(sed -n 's/^[[:space:]]*DATA_DIR[[:space:]]*=[[:space:]]*//p' .env | tail -n 1)"
+DATA_DIR_VALUE="${DATA_DIR_VALUE%\"}"
+DATA_DIR_VALUE="${DATA_DIR_VALUE#\"}"
+DATA_DIR_VALUE="${DATA_DIR_VALUE%\'}"
+DATA_DIR_VALUE="${DATA_DIR_VALUE#\'}"
+DATA_DIR_VALUE="${DATA_DIR_VALUE:-data}"
+for dir in "$DATA_DIR_VALUE" "$DATA_DIR_VALUE/backups" "logs" "trade_logs"; do
     mkdir -p "$dir"
 done
 ok "必要目录已创建"
@@ -112,7 +118,7 @@ fi
 # ─────────────────────────────────────────────
 if ! "$PYTHON" -c "import uvicorn" 2>/dev/null; then
     info "正在安装依赖..."
-    "$PYTHON" -m pip install -r requirements.txt -q
+    "$PYTHON" -m pip install --require-hashes -r requirements.lock -q
     ok "依赖安装完成"
 fi
 

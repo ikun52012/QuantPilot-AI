@@ -123,6 +123,10 @@ class GridPosition:
     close_reason: str = ""
     pending_orders: int = 0
     open_pairs: list[dict] = field(default_factory=list)
+    cleanup_errors: list[dict] = field(default_factory=list)
+    close_price: float = 0.0
+    close_remaining_quantity: float = 0.0
+    close_requires_manual_review: bool = False
 
 
 class GridEngine:
@@ -186,10 +190,10 @@ class GridEngine:
             return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.sync_position_state(position_id))
+            task = loop.create_task(self.sync_position_state(position_id))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
         except RuntimeError:
-            # No running event loop - log warning instead of creating conflicting loop
-            logger.warning(f"[Grid] Cannot sync state: no running event loop for position {position_id}")
+            logger.warning("[Grid] Cannot sync state: no running event loop")
 
     async def sync_position_state(self, position_id: str) -> bool:
         """Persist latest local Grid state into Redis hashes."""
@@ -198,7 +202,7 @@ class GridEngine:
             return False
 
         saved = await redis_hset_json(_GRID_STATE_HASH, position_id, record)
-        if record["status"] == "active":
+        if record["status"] in {"active", "cleanup_required"}:
             saved = await redis_hset_json(_GRID_ACTIVE_HASH, position_id, record) or saved
         else:
             await redis_hdel(_GRID_ACTIVE_HASH, position_id)
@@ -338,9 +342,16 @@ class GridEngine:
                 if not order_id:
                     continue
                 try:
-                    await cancel_order(order_id, config.ticker, exchange_config)
-                    setattr(level, attr, "")
-                    cancelled_orders.append(order_id)
+                    cancel_result = await cancel_order(order_id, config.ticker, exchange_config)
+                    if cancel_result.get("status") in {"cancelled", "canceled", "not_found", "simulated"}:
+                        setattr(level, attr, "")
+                        cancelled_orders.append(order_id)
+                    else:
+                        cancel_failures.append({
+                            "order_id": order_id,
+                            "reason": str(cancel_result.get("reason") or cancel_result.get("status")),
+                            "reconciliation_id": cancel_result.get("reconciliation_id"),
+                        })
                 except Exception as exc:
                     cancel_failures.append({"order_id": order_id, "reason": str(exc)})
         except Exception as exc:
@@ -463,6 +474,7 @@ class GridEngine:
             try:
                 from exchange import execute_trade
 
+                failed_levels: list[int] = []
                 for index, level in enumerate(position.grid_levels, start=1):
                     if level.status != "pending":
                         continue
@@ -481,7 +493,10 @@ class GridEngine:
                         idempotency_key=f"grid:{position.config_id}:level:{index}:open",
                     )
 
-                    order_result = await execute_trade(decision, exchange_config)
+                    grid_exchange_config = dict(exchange_config or {})
+                    grid_exchange_config["_position_side"] = "long" if level.side == "buy" else "short"
+
+                    order_result = await execute_trade(decision, grid_exchange_config)
 
                     if order_result.get("status") in ["filled", "pending", "simulated"]:
                         level.order_id = order_result.get("order_id", "")
@@ -489,6 +504,39 @@ class GridEngine:
                         logger.info(f"[Grid] Placed grid order {level.side} @ {level.price}: {order_result.get('order_id')}")
                     else:
                         logger.error(f"[Grid] Failed to place grid order: {order_result}")
+                        failed_levels.append(index - 1)
+
+                if failed_levels and not config.paper_mode:
+                    placed_count = len(position.grid_levels) - len(failed_levels)
+                    if placed_count == 0:
+                        raise RuntimeError(f"[Grid] All {len(position.grid_levels)} orders failed for {config.ticker}")
+                    if len(failed_levels) > len(position.grid_levels) // 2:
+                        logger.warning(f"[Grid] {len(failed_levels)}/{len(position.grid_levels)} orders failed, rolling back placed orders")
+                        rollback_failures: list[str] = []
+                        for lvl in position.grid_levels:
+                            if lvl.order_id:
+                                try:
+                                    from exchange import cancel_order
+
+                                    cancel_result = await cancel_order(lvl.order_id, config.ticker, exchange_config)
+                                    if cancel_result.get("status") not in {"cancelled", "not_found", "simulated"}:
+                                        rollback_failures.append(
+                                            f"{lvl.order_id}:{cancel_result.get('reason') or cancel_result.get('status')}"
+                                        )
+                                        continue
+                                except Exception as cancel_err:
+                                    logger.error(f"[Grid] Failed to cancel order {lvl.order_id} during rollback: {cancel_err}")
+                                    rollback_failures.append(f"{lvl.order_id}:{cancel_err}")
+                                    continue
+                                lvl.order_id = ""
+                                lvl.status = "cancelled"
+                                lvl.exchange_order_status = "cancelled"
+                        if rollback_failures:
+                            raise RuntimeError(
+                                "[Grid] Rollback incomplete; live orders still require reconciliation: "
+                                + ", ".join(rollback_failures)
+                            )
+                        raise RuntimeError(f"[Grid] Rolled back {placed_count} placed orders after {len(failed_levels)} failures")
 
             except Exception as e:
                 logger.error(f"[Grid] Exchange execution failed: {e}")
@@ -501,6 +549,10 @@ class GridEngine:
 
     def _calculate_grid_levels(self, config: GridConfig, current_price: float) -> list[GridLevel]:
         levels = []
+
+        if config.grid_count <= 0 or config.lower_price <= 0:
+            logger.warning("[Grid] Invalid grid config: grid_count and lower_price must be positive")
+            return levels
 
         if config.spacing_mode == "arithmetic":
             price_step = (config.upper_price - config.lower_price) / config.grid_count
@@ -535,7 +587,7 @@ class GridEngine:
             ratio = (config.upper_price / config.lower_price) ** (1 / config.grid_count)
 
             for i in range(config.grid_count):
-                price = config.lower_price * ratio ** (i + 0.5)
+                price = config.lower_price * ratio ** (i + 1)
 
                 if price < current_price:
                     side = "buy"
@@ -613,6 +665,25 @@ class GridEngine:
             position.current_price = current_price
             position.highest_price = max(position.highest_price, current_price)
             position.lowest_price = min(position.lowest_price, current_price)
+
+            if position.status == "cleanup_required":
+                if position.close_requires_manual_review:
+                    return {
+                        "action": "manual_review",
+                        "reason": "Grid close quantity is uncertain; exchange reconciliation required",
+                        "cleanup_errors": position.cleanup_errors,
+                    }
+                await self._close_grid(
+                    position_id,
+                    position.close_price or current_price,
+                    position.close_reason or "cleanup_retry",
+                    exchange_config,
+                )
+                return {
+                    "action": "cleanup",
+                    "reason": position.status,
+                    "cleanup_errors": position.cleanup_errors,
+                }
 
             if position.status != "active":
                 return {"action": "none", "reason": f"Position {position.status}"}
@@ -914,26 +985,86 @@ class GridEngine:
         config = self.configs.get(position_id)
 
         if config and not config.paper_mode:
-            close_confirmed = True
-            cancel_failures: list[str] = []
+            position.close_price = position.close_price or exit_price
+            position.close_reason = position.close_reason or reason
+            cancel_failures: list[dict] = []
             try:
                 from exchange import cancel_order
 
                 for level in position.grid_levels:
                     if level.status == "pending" and level.order_id:
                         try:
-                            await cancel_order(level.order_id, position.ticker, exchange_config)
-                            level.order_id = ""
-                            level.exchange_order_status = "cancelled"
+                            order_id = str(level.order_id)
+                            cancel_result = await cancel_order(order_id, position.ticker, exchange_config)
+                            if cancel_result.get("status") in {"cancelled", "canceled", "not_found", "simulated"}:
+                                level.order_id = ""
+                                level.exchange_order_status = "cancelled"
+                            else:
+                                cancel_failures.append({
+                                    "order_id": order_id,
+                                    "kind": "grid_entry",
+                                    "reason": str(cancel_result.get("reason") or cancel_result.get("status")),
+                                    "reconciliation_id": cancel_result.get("reconciliation_id"),
+                                })
                         except Exception as e:
                             logger.warning(f"[Grid] Failed to cancel grid order {level.order_id}: {e}")
-                            cancel_failures.append(level.order_id)
+                            cancel_failures.append({
+                                "order_id": str(level.order_id),
+                                "kind": "grid_entry",
+                                "reason": str(e),
+                            })
+
+                    for attr, kind in (
+                        ("stop_loss_order_id", "stop_loss"),
+                        ("take_profit_order_id", "take_profit"),
+                    ):
+                        protection_id = str(getattr(level, attr) or "")
+                        if not protection_id:
+                            continue
+                        try:
+                            cancel_result = await cancel_order(
+                                protection_id,
+                                position.ticker,
+                                exchange_config,
+                            )
+                            if cancel_result.get("status") in {"cancelled", "canceled", "not_found", "simulated"}:
+                                setattr(level, attr, "")
+                            else:
+                                cancel_failures.append({
+                                    "order_id": protection_id,
+                                    "kind": kind,
+                                    "reason": str(cancel_result.get("reason") or cancel_result.get("status")),
+                                    "reconciliation_id": cancel_result.get("reconciliation_id"),
+                                })
+                        except Exception as exc:
+                            cancel_failures.append({
+                                "order_id": protection_id,
+                                "kind": kind,
+                                "reason": str(exc),
+                            })
 
             except Exception as e:
                 logger.error(f"[Grid] Exchange close failed: {e}")
-                close_confirmed = False
+                cancel_failures.append({"kind": "cancel_setup", "reason": str(e)})
 
-            net_quantity = position.total_buy_quantity - position.total_sell_quantity
+            net_quantity = (
+                position.close_remaining_quantity
+                if position.status == "cleanup_required" and abs(position.close_remaining_quantity) > 1e-12
+                else position.total_buy_quantity - position.total_sell_quantity
+            )
+            position.close_remaining_quantity = net_quantity
+
+            if cancel_failures:
+                position.status = "cleanup_required"
+                position.cleanup_errors = cancel_failures
+                position.updated_at = utcnow()
+                await self.sync_position_state(position_id)
+                logger.error(
+                    f"[Grid] Close paused before flattening {position.ticker}; "
+                    f"{len(cancel_failures)} live orders still require cancellation"
+                )
+                return
+
             if abs(net_quantity) > 1e-12:
                 try:
                     from exchange import execute_trade
@@ -952,20 +1083,48 @@ class GridEngine:
                     order_result = await execute_trade(decision, exchange_config)
                     if order_result.get("status") in ["closed", "filled", "simulated"]:
                         logger.info(f"[Grid] Closed net grid exposure via exchange: {order_result.get('order_id')}")
+                        position.close_remaining_quantity = 0.0
                     elif order_result.get("status") == "partial_closed":
                         logger.error(f"[Grid] Net exposure close only partially filled: {order_result}")
-                        close_confirmed = False
+                        closed_quantity = abs(
+                            safe_float(
+                                order_result.get("closed_quantity")
+                                or order_result.get("filled_quantity")
+                                or order_result.get("quantity")
+                            )
+                        )
+                        if closed_quantity > 0:
+                            remaining = max(abs(net_quantity) - closed_quantity, 0.0)
+                            position.close_remaining_quantity = remaining if net_quantity > 0 else -remaining
+                        else:
+                            position.close_requires_manual_review = True
+                        position.status = "cleanup_required"
+                        position.cleanup_errors = [{
+                            "kind": "net_close",
+                            "reason": "partial close",
+                            "result": order_result,
+                        }]
+                        position.updated_at = utcnow()
+                        await self.sync_position_state(position_id)
+                        return
                     else:
                         logger.error(f"[Grid] Failed to close net grid exposure: {order_result}")
-                        close_confirmed = False
+                        position.status = "cleanup_required"
+                        position.cleanup_errors = [{
+                            "kind": "net_close",
+                            "reason": str(order_result.get("reason") or order_result.get("status")),
+                            "result": order_result,
+                        }]
+                        position.updated_at = utcnow()
+                        await self.sync_position_state(position_id)
+                        return
                 except Exception as e:
                     logger.error(f"[Grid] Net exposure close failed: {e}")
-                    close_confirmed = False
-
-            if cancel_failures or not close_confirmed:
-                position.updated_at = utcnow()
-                await self.sync_position_state(position_id)
-                raise RuntimeError("Grid exchange close was not fully confirmed; keeping grid active")
+                    position.status = "cleanup_required"
+                    position.cleanup_errors = [{"kind": "net_close", "reason": str(e)}]
+                    position.updated_at = utcnow()
+                    await self.sync_position_state(position_id)
+                    return
 
         closing_pnl = 0.0
         for level in position.grid_levels:
@@ -984,6 +1143,9 @@ class GridEngine:
         position.closed_at = utcnow()
         position.close_reason = reason
         position.realized_pnl_usdt = final_pnl
+        position.cleanup_errors = []
+        position.close_remaining_quantity = 0.0
+        position.close_requires_manual_review = False
 
         logger.info(f"[Grid] Closed grid {position_id}: reason={reason}, final_pnl={final_pnl:.2f}, trades={position.total_trades}")
 
@@ -1011,6 +1173,9 @@ class GridEngine:
             "unrealized_pnl_usdt": round(position.unrealized_pnl_usdt, 2),
             "total_fees_usdt": round(position.total_fees_usdt, 2),
             "total_capital_usdt": round(position.total_capital_usdt, 2),
+            "cleanup_errors": position.cleanup_errors,
+            "close_remaining_quantity": round(position.close_remaining_quantity, 8),
+            "close_requires_manual_review": position.close_requires_manual_review,
             "started_at": position.started_at.isoformat(),
             "grid_levels": [
                 {
@@ -1034,7 +1199,7 @@ class GridEngine:
         return [
             self.get_grid_status(pid)
             for pid, pos in self.positions.items()
-            if pos.status == "active"
+            if pos.status in {"active", "cleanup_required"}
         ]
 
     async def list_active_grids_async(self) -> list[dict]:
@@ -1049,10 +1214,9 @@ class GridEngine:
             if settings.redis.enabled:
                 try:
                     loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    asyncio.run(self.remove_grid_async(position_id))
-                else:
                     loop.create_task(self.remove_grid_async(position_id))
+                except RuntimeError:
+                    logger.warning(f"[Grid] Cannot remove grid {position_id} from Redis: no running event loop")
             return True
         return False
 

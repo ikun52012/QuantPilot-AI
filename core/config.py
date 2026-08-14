@@ -11,10 +11,29 @@ from typing import Any
 
 from dotenv import load_dotenv
 from loguru import logger
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-ENV_PATH = Path(__file__).parent.parent / ".env"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ENV_PATH = PROJECT_ROOT / ".env"
 load_dotenv(ENV_PATH, override=False)
+
+
+def _resolve_data_dir() -> Path:
+    """Return the single runtime data root used by every persistent service.
+
+    A configurable root keeps tests, paper environments, and live deployments
+    from sharing risk state, caches, reconciliation journals, or encryption
+    material merely because they run from the same source checkout.
+    """
+    configured = str(os.getenv("DATA_DIR", "") or "").strip()
+    path = Path(configured).expanduser() if configured else PROJECT_ROOT / "data"
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve(strict=False)
+
+
+DATA_DIR = _resolve_data_dir()
+DEFAULT_DATABASE_URL = f"sqlite+aiosqlite:///{(DATA_DIR / 'server.db').as_posix()}"
 
 
 def _json_env(name: str, default: Any) -> Any:
@@ -55,33 +74,35 @@ class AIConfig(BaseModel):
     temperature: float = 0.3
     max_tokens: int = 1000
     custom_system_prompt: str = ""
-    connect_timeout_secs: float = 10.0
-    read_timeout_secs: float = 60.0
-    write_timeout_secs: float = 30.0
-    pool_timeout_secs: float = 10.0
-    max_retries: int = 3
-    max_concurrent_calls: int = 5
-    signal_queue_limit: int = 50
-    global_processing_semaphore: int = 5
-    signal_processing_interval_secs: float = 1.0
+    connect_timeout_secs: float = Field(default=10.0, ge=1, le=120)
+    read_timeout_secs: float = Field(default=60.0, ge=5, le=300)
+    write_timeout_secs: float = Field(default=30.0, ge=5, le=120)
+    pool_timeout_secs: float = Field(default=10.0, ge=1, le=60)
+    max_retries: int = Field(default=3, ge=1, le=10)
+    max_concurrent_calls: int = Field(default=5, ge=1, le=50)
+    max_provider_requests_per_day: int = 500
+    webhook_max_provider_requests_per_day: int = 200
+    signal_queue_limit: int = Field(default=50, ge=1, le=500)
+    global_processing_semaphore: int = Field(default=5, ge=1, le=50)
+    signal_processing_interval_secs: float = Field(default=1.0, ge=0, le=30)
     dynamic_interval_enabled: bool = True
-    dynamic_interval_high_load_threshold: float = 30.0
-    dynamic_interval_high_load_multiplier: float = 2.0
-    priority_skip_interval_confidence_threshold: float = 0.85
+    dynamic_interval_high_load_threshold: float = Field(default=30.0, ge=1, le=100)
+    dynamic_interval_high_load_multiplier: float = Field(default=2.0, ge=0.5, le=10)
+    priority_skip_interval_confidence_threshold: float = Field(default=0.85, ge=0, le=1)
     dynamic_cache_ttl_enabled: bool = True
-    dynamic_cache_ttl_base: int = 60
-    dynamic_cache_ttl_high_volatility_multiplier: float = 0.5
-    dynamic_cache_ttl_low_volatility_multiplier: float = 2.0
+    dynamic_cache_ttl_base: int = Field(default=60, ge=10, le=600)
+    dynamic_cache_ttl_high_volatility_multiplier: float = Field(default=0.5, ge=0.1, le=5)
+    dynamic_cache_ttl_low_volatility_multiplier: float = Field(default=2.0, ge=0.1, le=10)
     # SMC cache TTL: high volatility = shorter, low = longer, normal = base
     smc_cache_ttl_enabled: bool = True
-    smc_cache_ttl_base: int = 120
-    smc_cache_ttl_high_vol: int = 60
-    smc_cache_ttl_low_vol: int = 180
+    smc_cache_ttl_base: int = Field(default=120, ge=10, le=600)
+    smc_cache_ttl_high_vol: int = Field(default=60, ge=10, le=600)
+    smc_cache_ttl_low_vol: int = Field(default=180, ge=10, le=600)
     # Pre-filter enhanced checks global timeout (seconds)
-    prefilter_enhanced_timeout_secs: float = 30.0
+    prefilter_enhanced_timeout_secs: float = Field(default=30.0, ge=5, le=120)
     batch_signals_enabled: bool = False
-    batch_signals_window_secs: float = 5.0
-    batch_signals_max_count: int = 3
+    batch_signals_window_secs: float = Field(default=5.0, ge=0, le=60)
+    batch_signals_max_count: int = Field(default=3, ge=1, le=20)
     prefetch_market_data: bool = True
     websocket_market_data_enabled: bool = False
     voting_enabled: bool = False
@@ -155,6 +176,29 @@ class AIConfig(BaseModel):
             write_timeout_secs=float(os.getenv("AI_WRITE_TIMEOUT_SECS", "30")),
             pool_timeout_secs=float(os.getenv("AI_POOL_TIMEOUT_SECS", "10")),
             max_retries=int(os.getenv("AI_MAX_RETRIES", "3")),
+            max_concurrent_calls=int(os.getenv("AI_MAX_CONCURRENT_CALLS", "5")),
+            max_provider_requests_per_day=max(0, int(os.getenv("AI_MAX_PROVIDER_REQUESTS_PER_DAY", "500"))),
+            webhook_max_provider_requests_per_day=max(0, int(os.getenv("AI_WEBHOOK_MAX_PROVIDER_REQUESTS_PER_DAY", "200"))),
+            signal_queue_limit=int(os.getenv("AI_SIGNAL_QUEUE_LIMIT", "50")),
+            global_processing_semaphore=int(os.getenv("AI_GLOBAL_PROCESSING_SEMAPHORE", "5")),
+            signal_processing_interval_secs=float(os.getenv("AI_SIGNAL_PROCESSING_INTERVAL_SECS", "1")),
+            dynamic_interval_enabled=os.getenv("AI_DYNAMIC_INTERVAL_ENABLED", "true").lower() == "true",
+            dynamic_interval_high_load_threshold=float(os.getenv("AI_DYNAMIC_INTERVAL_HIGH_LOAD_THRESHOLD", "30")),
+            dynamic_interval_high_load_multiplier=float(os.getenv("AI_DYNAMIC_INTERVAL_HIGH_LOAD_MULTIPLIER", "2")),
+            dynamic_cache_ttl_enabled=os.getenv("AI_DYNAMIC_CACHE_TTL_ENABLED", "true").lower() == "true",
+            dynamic_cache_ttl_base=int(os.getenv("AI_DYNAMIC_CACHE_TTL_BASE", "60")),
+            dynamic_cache_ttl_high_volatility_multiplier=float(os.getenv("AI_DYNAMIC_CACHE_TTL_HIGH_VOLATILITY_MULTIPLIER", "0.5")),
+            dynamic_cache_ttl_low_volatility_multiplier=float(os.getenv("AI_DYNAMIC_CACHE_TTL_LOW_VOLATILITY_MULTIPLIER", "2")),
+            smc_cache_ttl_enabled=os.getenv("AI_SMC_CACHE_TTL_ENABLED", "true").lower() == "true",
+            smc_cache_ttl_base=int(os.getenv("AI_SMC_CACHE_TTL_BASE", "120")),
+            smc_cache_ttl_high_vol=int(os.getenv("AI_SMC_CACHE_TTL_HIGH_VOL", "60")),
+            smc_cache_ttl_low_vol=int(os.getenv("AI_SMC_CACHE_TTL_LOW_VOL", "180")),
+            prefilter_enhanced_timeout_secs=float(os.getenv("AI_PREFILTER_ENHANCED_TIMEOUT_SECS", "30")),
+            batch_signals_enabled=os.getenv("AI_BATCH_SIGNALS_ENABLED", "false").lower() == "true",
+            batch_signals_window_secs=float(os.getenv("AI_BATCH_SIGNALS_WINDOW_SECS", "5")),
+            batch_signals_max_count=int(os.getenv("AI_BATCH_SIGNALS_MAX_COUNT", "3")),
+            prefetch_market_data=os.getenv("AI_PREFETCH_MARKET_DATA", "true").lower() == "true",
+            websocket_market_data_enabled=os.getenv("AI_WEBSOCKET_MARKET_DATA_ENABLED", "false").lower() == "true",
             voting_enabled=os.getenv("AI_VOTING_ENABLED", "false").lower() == "true",
             voting_models=_json_env("AI_VOTING_MODELS", []),
             voting_weights=_json_env("AI_VOTING_WEIGHTS", {}),
@@ -172,7 +216,7 @@ class ExchangeConfig(BaseModel):
     live_trading: bool = False
     sandbox_mode: bool = False
     market_type: str = "contract"
-    default_order_type: str = "limit"
+    default_order_type: str = "market"
     stop_loss_order_type: str = "market"
     limit_timeout_overrides: dict[str, int] = Field(default_factory=dict)
     pool_max_size: int = 50
@@ -220,7 +264,7 @@ class ExchangeConfig(BaseModel):
             live_trading=os.getenv("LIVE_TRADING", "false").lower() == "true",
             sandbox_mode=os.getenv("EXCHANGE_SANDBOX_MODE", "false").lower() == "true",
             market_type=os.getenv("EXCHANGE_MARKET_TYPE", "contract"),
-            default_order_type=os.getenv("EXCHANGE_DEFAULT_ORDER_TYPE", "limit"),
+            default_order_type=os.getenv("EXCHANGE_DEFAULT_ORDER_TYPE", "market"),
             stop_loss_order_type=os.getenv("EXCHANGE_STOP_LOSS_ORDER_TYPE", "market"),
             limit_timeout_overrides=_json_env("EXCHANGE_LIMIT_TIMEOUT_OVERRIDES", {}),
             pool_max_size=int(os.getenv("EXCHANGE_POOL_MAX_SIZE", "50")),
@@ -246,6 +290,7 @@ class RiskConfig(BaseModel):
     max_position_pct: float = 10.0
     max_daily_trades: int = 10
     max_daily_loss_pct: float = 5.0
+    max_total_loss_pct: float = 20.0
     exit_management_mode: str = "ai"
     ai_risk_profile: str = "balanced"
     custom_stop_loss_pct: float = 1.5
@@ -265,6 +310,10 @@ class RiskConfig(BaseModel):
     live_data_quality_mode: str = "fail_closed"
     max_live_missing_data_checks: int = 0
     block_live_on_risk_check_error: bool = True
+    max_slippage_pct: float = 1.0
+    max_position_notional_usdt: float = Field(default=10000.0, gt=0, le=1_000_000_000)
+    rolling_1h_max_drawdown_pct: float = 5.0
+    rolling_4h_max_drawdown_pct: float = 10.0
 
     @field_validator('margin_mode')
     @classmethod
@@ -303,6 +352,14 @@ class RiskConfig(BaseModel):
             raise ValueError("live_data_quality_mode must be 'fail_closed' or 'warn'")
         return normalized
 
+    @field_validator('max_slippage_pct')
+    @classmethod
+    def validate_max_slippage_pct(cls, v: float) -> float:
+        parsed = float(v)
+        if parsed <= 0 or parsed > 20:
+            raise ValueError("max_slippage_pct must be greater than 0 and at most 20")
+        return parsed
+
     @classmethod
     def from_env(cls) -> RiskConfig:
         return cls(
@@ -310,6 +367,7 @@ class RiskConfig(BaseModel):
             max_position_pct=float(os.getenv("MAX_POSITION_PCT", "10.0")),
             max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", "10")),
             max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "5.0")),
+            max_total_loss_pct=float(os.getenv("MAX_TOTAL_LOSS_PCT", "20.0")),
             exit_management_mode=os.getenv("EXIT_MANAGEMENT_MODE", "ai"),
             ai_risk_profile=os.getenv("AI_RISK_PROFILE", "balanced"),
             custom_stop_loss_pct=float(os.getenv("CUSTOM_STOP_LOSS_PCT", "1.5")),
@@ -323,6 +381,20 @@ class RiskConfig(BaseModel):
             live_data_quality_mode=os.getenv("LIVE_DATA_QUALITY_MODE", "fail_closed"),
             max_live_missing_data_checks=int(os.getenv("MAX_LIVE_MISSING_DATA_CHECKS", "0")),
             block_live_on_risk_check_error=os.getenv("BLOCK_LIVE_ON_RISK_CHECK_ERROR", "true").lower() == "true",
+            max_slippage_pct=float(os.getenv("MAX_SLIPPAGE_PCT", "1.0")),
+            max_position_notional_usdt=float(os.getenv("MAX_POSITION_NOTIONAL_USDT", "10000")),
+            rolling_1h_max_drawdown_pct=float(
+                os.getenv(
+                    "ROLLING_1H_MAX_DRAWDOWN_PCT",
+                    os.getenv("DRAWDOWN_1H_CIRCUIT_BREAKER_PCT", "5.0"),
+                )
+            ),
+            rolling_4h_max_drawdown_pct=float(
+                os.getenv(
+                    "ROLLING_4H_MAX_DRAWDOWN_PCT",
+                    os.getenv("DRAWDOWN_4H_CIRCUIT_BREAKER_PCT", "10.0"),
+                )
+            ),
         )
 
 
@@ -384,6 +456,36 @@ class TrailingStopSettings(BaseModel):
             trail_pct=float(os.getenv("TRAILING_STOP_PCT", "1.0")),
             activation_profit_pct=float(os.getenv("TRAILING_ACTIVATION_PCT", "1.0")),
             trailing_step_pct=float(os.getenv("TRAILING_STEP_PCT", "0.5")),
+            breakeven_buffer_pct=float(os.getenv("TRAILING_BREAKEVEN_BUFFER_PCT", "0.2")),
+            step_buffer_pct=float(os.getenv("TRAILING_STEP_BUFFER_PCT", "0.3")),
+        )
+
+
+class OrderExecutionConfig(BaseModel):
+    """Runtime controls for terminal order bookkeeping and leverage retries."""
+
+    auto_approve_failed_orders: bool = False
+    auto_reject_failed_orders: bool = False
+    auto_retry_leverage_errors: bool = True
+    max_leverage_retry_attempts: int = Field(default=3, ge=1, le=10)
+    leverage_retry_delay_secs: float = Field(default=1.0, ge=0.1, le=60.0)
+
+    @model_validator(mode="after")
+    def validate_terminal_failure_actions(self) -> OrderExecutionConfig:
+        if self.auto_approve_failed_orders and self.auto_reject_failed_orders:
+            raise ValueError(
+                "auto_approve_failed_orders and auto_reject_failed_orders are mutually exclusive"
+            )
+        return self
+
+    @classmethod
+    def from_env(cls) -> OrderExecutionConfig:
+        return cls(
+            auto_approve_failed_orders=os.getenv("AUTO_APPROVE_FAILED_ORDERS", "false").lower() == "true",
+            auto_reject_failed_orders=os.getenv("AUTO_REJECT_FAILED_ORDERS", "false").lower() == "true",
+            auto_retry_leverage_errors=os.getenv("AUTO_RETRY_LEVERAGE_ERRORS", "true").lower() == "true",
+            max_leverage_retry_attempts=int(os.getenv("MAX_LEVERAGE_RETRY_ATTEMPTS", "3")),
+            leverage_retry_delay_secs=float(os.getenv("LEVERAGE_RETRY_DELAY_SECS", "1")),
         )
 
 
@@ -399,6 +501,7 @@ class ServerConfig(BaseModel):
     cors_origins: list[str] = ["http://localhost:8000"]
     trusted_hosts: list[str] = ["*"]
     trust_proxy_headers: bool = False
+    webhook_entry_max_age_secs: int = Field(default=300, ge=30, le=3600)
 
     @classmethod
     def from_env(cls) -> ServerConfig:
@@ -417,12 +520,13 @@ class ServerConfig(BaseModel):
             cors_origins=cors_origins,
             trusted_hosts=trusted_hosts,
             trust_proxy_headers=os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true",
+            webhook_entry_max_age_secs=int(os.getenv("WEBHOOK_ENTRY_MAX_AGE_SECS", "300")),
         )
 
 
 class DatabaseConfig(BaseModel):
     """Database configuration."""
-    url: str = "sqlite+aiosqlite:///./data/server.db"
+    url: str = DEFAULT_DATABASE_URL
     pool_size: int = 15
     max_overflow: int = 20
     echo: bool = False
@@ -430,7 +534,7 @@ class DatabaseConfig(BaseModel):
     @classmethod
     def from_env(cls) -> DatabaseConfig:
         return cls(
-            url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/server.db"),
+            url=os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL),
             pool_size=int(os.getenv("DATABASE_POOL_SIZE", "15")),
             max_overflow=int(os.getenv("DATABASE_MAX_OVERFLOW", "20")),
             echo=os.getenv("DATABASE_ECHO", "false").lower() == "true",
@@ -505,6 +609,7 @@ class ScannerConfig(BaseModel):
     """Automatic market scanner configuration."""
     enabled: bool = False
     mode: str = "observe"
+    observe_ai_enabled: bool = False
     interval_secs: int = 600
     watchlist: list[str] = Field(default_factory=list)
     source_mode: str = "manual"
@@ -529,6 +634,8 @@ class ScannerConfig(BaseModel):
     min_atr_pct: float = 0.10
     max_spread_pct: float = 0.35
     live_symbol_whitelist: list[str] = Field(default_factory=list)
+    live_min_outcome_samples: int = 30
+    live_min_expectancy_pct: float = 0.0
     shutdown_timeout_secs: int = 30
     symbol_map: dict[str, dict[str, Any]] = Field(default_factory=dict)
     max_concurrent_fetches: int = 4
@@ -560,7 +667,7 @@ class ScannerConfig(BaseModel):
     outcome_max_sync_positions: int = 50
     outcome_path_metrics_enabled: bool = True
     walk_forward_enabled: bool = True
-    walk_forward_min_samples: int = 12
+    walk_forward_min_samples: int = 30
     walk_forward_validation_ratio: float = 0.30
     walk_forward_threshold_step: float = 2.5
     hard_filters_enabled: bool = True
@@ -661,6 +768,7 @@ class ScannerConfig(BaseModel):
         return cls(
             enabled=os.getenv("SCANNER_ENABLED", "false").lower() == "true",
             mode=os.getenv("SCANNER_MODE", "observe"),
+            observe_ai_enabled=os.getenv("SCANNER_OBSERVE_AI_ENABLED", "false").lower() == "true",
             interval_secs=max(60, int(os.getenv("SCANNER_INTERVAL_SECS", "600"))),
             watchlist=_json_env("SCANNER_WATCHLIST", []),
             source_mode=os.getenv("SCANNER_SOURCE_MODE", "manual"),
@@ -685,6 +793,8 @@ class ScannerConfig(BaseModel):
             min_atr_pct=max(0.0, float(os.getenv("SCANNER_MIN_ATR_PCT", "0.10"))),
             max_spread_pct=max(0.0, float(os.getenv("SCANNER_MAX_SPREAD_PCT", "0.35"))),
             live_symbol_whitelist=_json_env("SCANNER_LIVE_SYMBOL_WHITELIST", []),
+            live_min_outcome_samples=max(1, int(os.getenv("SCANNER_LIVE_MIN_OUTCOME_SAMPLES", "30"))),
+            live_min_expectancy_pct=float(os.getenv("SCANNER_LIVE_MIN_EXPECTANCY_PCT", "0")),
             shutdown_timeout_secs=max(1, int(os.getenv("SCANNER_SHUTDOWN_TIMEOUT_SECS", "30"))),
             symbol_map=_json_env("SCANNER_SYMBOL_MAP", {}),
             max_concurrent_fetches=max(1, int(os.getenv("SCANNER_MAX_CONCURRENT_FETCHES", "4"))),
@@ -716,7 +826,7 @@ class ScannerConfig(BaseModel):
             outcome_max_sync_positions=max(1, int(os.getenv("SCANNER_OUTCOME_MAX_SYNC_POSITIONS", "50"))),
             outcome_path_metrics_enabled=os.getenv("SCANNER_OUTCOME_PATH_METRICS_ENABLED", "true").lower() == "true",
             walk_forward_enabled=os.getenv("SCANNER_WALK_FORWARD_ENABLED", "true").lower() == "true",
-            walk_forward_min_samples=max(3, int(os.getenv("SCANNER_WALK_FORWARD_MIN_SAMPLES", "12"))),
+            walk_forward_min_samples=max(12, int(os.getenv("SCANNER_WALK_FORWARD_MIN_SAMPLES", "30"))),
             walk_forward_validation_ratio=max(0.1, min(0.5, float(os.getenv("SCANNER_WALK_FORWARD_VALIDATION_RATIO", "0.30")))),
             walk_forward_threshold_step=max(0.5, float(os.getenv("SCANNER_WALK_FORWARD_THRESHOLD_STEP", "2.5"))),
             hard_filters_enabled=os.getenv("SCANNER_HARD_FILTERS_ENABLED", "true").lower() == "true",
@@ -773,7 +883,7 @@ class Settings(BaseModel):
     default_admin_email: str = "admin@localhost"
     default_admin_password: str = ""
 
-    position_monitor_interval_secs: int = 60
+    position_monitor_interval_secs: int = 5
     notification_language: str = "en"
 
     ai: AIConfig | None = None
@@ -782,6 +892,7 @@ class Settings(BaseModel):
     risk: RiskConfig | None = None
     take_profit: TakeProfitSettings | None = None
     trailing_stop: TrailingStopSettings | None = None
+    order_execution: OrderExecutionConfig | None = None
     server: ServerConfig | None = None
     database: DatabaseConfig | None = None
     redis: RedisConfig | None = None
@@ -869,12 +980,34 @@ class Settings(BaseModel):
             # P0-FIX: Validate database URL for production
             if "sqlite" in self.database.url.lower():
                 errors.append("SQLite is not recommended for production live trading. Use PostgreSQL or MySQL.")
+            if not self.redis.enabled or not self.redis.url:
+                errors.append(
+                    "Redis must be enabled for live trading so distributed locks, "
+                    "renewable webhook leases, and account-risk state remain consistent"
+                )
+            if self.server.webhook_hmac_header_enabled:
+                if not self.server.webhook_hmac_secret:
+                    errors.append("WEBHOOK_HMAC_SECRET is required when HMAC verification is enabled")
+                elif len(self.server.webhook_hmac_secret) < 32:
+                    errors.append("WEBHOOK_HMAC_SECRET must be at least 32 characters for live trading")
 
             # P0-FIX: Validate risk settings
             if self.risk.max_position_pct > 50.0:
                 warnings.append("MAX_POSITION_PCT > 50% is very risky for live trading")
             if self.risk.max_daily_loss_pct > 20.0:
                 errors.append("MAX_DAILY_LOSS_PCT > 20% is too high for production")
+            if self.risk.live_data_quality_mode != "fail_closed":
+                errors.append(
+                    "LIVE_DATA_QUALITY_MODE must be 'fail_closed' for live trading"
+                )
+            if not self.risk.block_live_on_risk_check_error:
+                errors.append(
+                    "BLOCK_LIVE_ON_RISK_CHECK_ERROR must be true for live trading"
+                )
+            if self.risk.max_live_missing_data_checks > 0:
+                errors.append(
+                    "MAX_LIVE_MISSING_DATA_CHECKS must be 0 for live trading"
+                )
 
         for warning in warnings:
             import warnings as warn_module
@@ -898,7 +1031,7 @@ class Settings(BaseModel):
             default_admin_username=os.getenv("DEFAULT_ADMIN_USERNAME", "admin"),
             default_admin_email=os.getenv("DEFAULT_ADMIN_EMAIL", "admin@localhost"),
             default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", "").strip(),
-            position_monitor_interval_secs=int(os.getenv("POSITION_MONITOR_INTERVAL_SECS", "60")),
+            position_monitor_interval_secs=int(os.getenv("POSITION_MONITOR_INTERVAL_SECS", "5")),
             notification_language=os.getenv("NOTIFICATION_LANGUAGE", "en"),
             ai=AIConfig.from_env(),
             exchange=ExchangeConfig.from_env(),
@@ -906,6 +1039,7 @@ class Settings(BaseModel):
             risk=RiskConfig.from_env(),
             take_profit=TakeProfitSettings.from_env(),
             trailing_stop=TrailingStopSettings.from_env(),
+            order_execution=OrderExecutionConfig.from_env(),
             server=ServerConfig.from_env(),
             database=DatabaseConfig.from_env(),
             redis=RedisConfig.from_env(),

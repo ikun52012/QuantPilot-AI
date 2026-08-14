@@ -130,7 +130,7 @@ def _setup_page_routes(app: FastAPI):
     @app.get("/", response_class=HTMLResponse)
     async def homepage(request: Request):
         async with db_manager.async_session_factory() as db:
-            user = await get_optional_user(request, db)
+            user = await get_optional_user(request, db, None)
             if user:
                 return _redirect_no_store("/dashboard")
         return _apply_no_store_headers(FileResponse(STATIC_DIR / "home.html"))
@@ -138,7 +138,7 @@ def _setup_page_routes(app: FastAPI):
     @app.get("/dashboard")
     async def dashboard(request: Request):
         async with db_manager.async_session_factory() as db:
-            user = await get_optional_user(request, db)
+            user = await get_optional_user(request, db, None)
             if not user:
                 return _redirect_no_store("/login?expired=1")
         return _apply_no_store_headers(FileResponse(STATIC_DIR / "index.html"))
@@ -148,7 +148,7 @@ def _setup_page_routes(app: FastAPI):
         if _forced_login_requested(request):
             return _login_response(request)
         async with db_manager.async_session_factory() as db:
-            user = await get_optional_user(request, db)
+            user = await get_optional_user(request, db, None)
             if user:
                 return _redirect_no_store("/dashboard")
         return _login_response(request)
@@ -156,7 +156,7 @@ def _setup_page_routes(app: FastAPI):
     @app.get("/register")
     async def register_page(request: Request):
         async with db_manager.async_session_factory() as db:
-            user = await get_optional_user(request, db)
+            user = await get_optional_user(request, db, None)
             if user:
                 return _redirect_no_store("/dashboard")
         return _apply_no_store_headers(FileResponse(STATIC_DIR / "register.html"))

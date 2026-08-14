@@ -7,6 +7,7 @@ import pytest
 
 import pre_filter
 import services.signal_processor as signal_processor_module
+from core.config import settings
 from core.database import PositionModel
 from core.utils.datetime import utcnow
 from models import AIAnalysis, MarketContext, PreFilterResult, SignalDirection, TradeDecision, TradingViewSignal
@@ -63,6 +64,37 @@ class TestWebhookFingerprint:
         assert fp1 == fp2
 
 
+@pytest.mark.asyncio
+async def test_processing_interval_serializes_concurrent_same_user(monkeypatch):
+    original_sleep = signal_processor_module.asyncio.sleep
+    clock = [100.0]
+    completed_at = []
+    rate_key = "rate-user"
+    signal_processor_module._LAST_SIGNAL_PROCESS_TIME.clear()
+    signal_processor_module._LAST_SIGNAL_PROCESS_TIME[rate_key] = clock[0]
+
+    async def fake_sleep(delay):
+        clock[0] += delay
+        await original_sleep(0)
+
+    async def reserve():
+        await signal_processor_module._reserve_processing_slot(
+            rate_key,
+            1.0,
+            user_id=rate_key,
+        )
+        completed_at.append(clock[0])
+
+    monkeypatch.setattr(signal_processor_module._time, "time", lambda: clock[0])
+    monkeypatch.setattr(signal_processor_module.asyncio, "sleep", fake_sleep)
+
+    await signal_processor_module.asyncio.gather(reserve(), reserve())
+
+    assert sorted(completed_at) == [101.0, 102.0]
+    assert signal_processor_module._LAST_SIGNAL_PROCESS_TIME[rate_key] == 102.0
+    signal_processor_module._LAST_SIGNAL_PROCESS_TIME.clear()
+
+
 class TestSignalProcessorConfigParsing:
     def test_live_trading_requested_parses_string_booleans(self):
         assert SignalProcessor._live_trading_requested({"exchange": {"live_trading": "false"}}) is False
@@ -72,6 +104,40 @@ class TestSignalProcessorConfigParsing:
     def test_block_live_risk_errors_parses_string_booleans(self):
         assert SignalProcessor._block_live_risk_check_errors({"risk": {"block_live_on_risk_check_error": "false"}}) is False
         assert SignalProcessor._block_live_risk_check_errors({"risk": {"block_live_on_risk_check_error": "true"}}) is True
+
+
+@pytest.mark.asyncio
+async def test_scanner_live_market_validation_uses_target_market(monkeypatch):
+    calls = []
+
+    def fake_get_market_limits(exchange_id, symbol, market_type):
+        calls.append((exchange_id, symbol, market_type))
+        return {"symbol": "BTC/USDT:USDT"}
+
+    monkeypatch.setattr("exchange.get_market_limits", fake_get_market_limits)
+    signal = TradingViewSignal(
+        secret="test",
+        ticker="BTCUSDT",
+        direction=SignalDirection.LONG,
+        price=50000.0,
+        timeframe="60",
+    )
+    raw_body = {
+        "scanner": {
+            "exchange_name": "okx",
+            "market_type": "spot",
+            "target_exchange": "binance",
+            "target_market_type": "contract",
+            "exchange_symbol": "BTCUSDT",
+        }
+    }
+
+    ok, reason, limits = await SignalProcessor._validate_scanner_live_market(signal, raw_body)
+
+    assert ok is True
+    assert reason == ""
+    assert limits["symbol"] == "BTC/USDT:USDT"
+    assert calls == [("binance", "BTCUSDT", "contract")]
 
 
 @pytest.mark.asyncio
@@ -771,6 +837,10 @@ class TestSignalProcessorBuildDecision:
         pre_filter.get_today_pnl_async = AsyncMock(return_value=0.0)
         pre_filter.get_recent_trade_results_async = AsyncMock(return_value=[])
         pre_filter.check_account_loss_limits = AsyncMock(return_value=(True, None))
+        monkeypatch.setattr(
+            "core.account_risk.get_live_account_equity",
+            AsyncMock(return_value=10000.0),
+        )
         pre_filter._check_position_concentration = AsyncMock(return_value=(True, {"long_positions": 0, "short_positions": 0, "note": ""}))
 
         monkeypatch.setattr("core.database.get_user_balance_async", AsyncMock(return_value=10000.0))
@@ -801,7 +871,7 @@ class TestSignalProcessorBuildDecision:
         assert "Live data quality gate failed" in result.reason
 
     @pytest.mark.asyncio
-    async def test_prefilter_disabled_hard_check_does_not_leave_failure_reason(self, processor, monkeypatch):
+    async def test_prefilter_protected_daily_limit_cannot_be_disabled(self, processor, monkeypatch):
         import enhanced_market_data as emd
         emd.check_macro_event_risk = AsyncMock(return_value=(True, None))
         emd.fetch_liquidation_heatmap = AsyncMock(return_value={"nearest_liq_distance_pct": None, "total_long_liq_usd": 0, "total_short_liq_usd": 0})
@@ -817,7 +887,6 @@ class TestSignalProcessorBuildDecision:
         await pre_filter.clear_signal_memory()
         pre_filter._block_history.clear()
         pre_filter._CIRCUIT_BREAKERS.clear()
-        before_stats = dict(pre_filter._filter_stats_buffer.get("daily_trade_limit", {}))
 
         pre_filter.count_today_executed_trades_async = AsyncMock(return_value=1)
         pre_filter.get_today_pnl_async = AsyncMock(return_value=0.0)
@@ -846,10 +915,9 @@ class TestSignalProcessorBuildDecision:
             disabled_checks={"Daily_Trade_Limit"},
         )
 
-        assert result.passed is True
-        assert result.checks["daily_trade_limit"]["disabled"] is True
-        assert "Daily trade limit reached" not in result.reason
-        assert pre_filter._filter_stats_buffer.get("daily_trade_limit", {}) == before_stats
+        assert result.passed is False
+        assert result.checks["daily_trade_limit"].get("disabled") is not True
+        assert "Daily trade limit reached" in result.reason
 
     @pytest.mark.asyncio
     async def test_correlation_risk_error_blocks_live_mode(self, processor, sample_signal):
@@ -1033,6 +1101,55 @@ class TestSignalProcessorBuildDecision:
         assert decision.position_size_multiplier == 0.75
         assert "fallback_raw_missing_ai_entry" in decision.exit_quality_reasons
 
+    def test_scanner_modified_entry_without_suggested_entry_rejects(self, processor, sample_signal, sample_market):
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="modify",
+            reasoning="Need a better entry",
+            suggested_stop_loss=49200,
+            suggested_tp1=51500,
+            tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
+        )
+
+        decision = processor._build_trade_decision(
+            sample_signal,
+            analysis,
+            sample_market,
+            None,
+            {"_scanner_context": {"mode": "live", "payload": {"signal_source": "auto_scanner"}}},
+        )
+
+        assert decision.execute is False
+        assert "missing valid suggested_entry" in decision.reason
+
+    def test_scanner_modified_entry_out_of_range_rejects(self, processor, sample_signal, sample_market):
+        analysis = AIAnalysis(
+            confidence=0.8,
+            recommendation="modify",
+            reasoning="Wild entry",
+            suggested_entry=40000,
+            suggested_stop_loss=39200,
+            suggested_tp1=41200,
+            tp1_qty_pct=100.0,
+            tp2_qty_pct=0.0,
+            tp3_qty_pct=0.0,
+            tp4_qty_pct=0.0,
+        )
+
+        decision = processor._build_trade_decision(
+            sample_signal,
+            analysis,
+            sample_market,
+            None,
+            {"_scanner_context": {"mode": "live", "payload": {"signal_source": "auto_scanner"}}},
+        )
+
+        assert decision.execute is False
+        assert "above 5.00% limit" in decision.reason
+
     def test_fallback_stop_loss_reduces_position_size(self, processor, sample_signal, sample_market):
         analysis = AIAnalysis(
             confidence=0.8,
@@ -1150,6 +1267,46 @@ class TestPositionSizeCalculation:
             qty = processor._calculate_position_size(price=100, size_pct=1.0, leverage=1, decision=decision)
 
             assert qty == 5.0
+
+    def test_exchange_minimum_cannot_exceed_stop_loss_risk(self, processor):
+        with patch("services.signal_processor.settings") as mock_settings:
+            mock_settings.risk.account_equity_usdt = 1000
+            mock_settings.risk.max_position_pct = 10.0
+            mock_settings.risk.fixed_position_size_usdt = 100.0
+            mock_settings.risk.risk_per_trade_pct = 1.0
+            mock_settings.risk.position_sizing_mode = "percentage"
+            mock_settings.exchange.name = "binance"
+            mock_settings.exchange.market_type = "contract"
+            decision = TradeDecision(
+                execute=True,
+                ticker="BTCUSDT",
+                direction=SignalDirection.LONG,
+                entry_price=100.0,
+                stop_loss=90.0,
+            )
+
+            with patch(
+                "exchange.get_market_limits",
+                return_value={
+                    "symbol": "BTC/USDT:USDT",
+                    "min_amount": 2.0,
+                    "max_amount": 1000.0,
+                    "min_cost": 0.0,
+                    "max_cost": float("inf"),
+                    "contract_size": 1.0,
+                    "amount_precision": 6,
+                },
+            ):
+                qty = processor._calculate_position_size(
+                    price=100,
+                    size_pct=0.01,
+                    leverage=1,
+                    decision=decision,
+                )
+
+            assert qty == 0.0
+            assert decision.execute is False
+            assert "exceeds accepted stop-loss risk" in decision.reason
 
     def test_fixed_position_size_ignores_stop_loss_risk_cap(self, processor):
         with patch("services.signal_processor.settings") as mock_settings:
@@ -1356,6 +1513,130 @@ class TestPositionSizeCalculation:
             assert "Fixed margin deviation too large" in decision.reason
 
 
+class TestHardPositionNotionalCap:
+    def test_final_quantity_is_floored_below_hard_cap(self):
+        decision = TradeDecision(
+            execute=True,
+            ticker="BTCUSDT",
+            direction=SignalDirection.LONG,
+            entry_price=100.0,
+            quantity=20.0,
+        )
+
+        SignalProcessor._enforce_hard_notional_cap(
+            decision,
+            hard_cap=999.0,
+            contract_size=1.0,
+            limits={"amount_precision": 2, "min_amount": 0.001, "min_cost": 5.0},
+        )
+
+        assert decision.execute is True
+        assert decision.quantity == pytest.approx(9.99)
+        assert decision.quantity * decision.entry_price <= 999.0
+
+    def test_exchange_minimum_above_cap_blocks_entry(self):
+        decision = TradeDecision(
+            execute=True,
+            ticker="BTCUSDT",
+            direction=SignalDirection.LONG,
+            entry_price=100.0,
+            quantity=2.0,
+        )
+
+        SignalProcessor._enforce_hard_notional_cap(
+            decision,
+            hard_cap=50.0,
+            contract_size=1.0,
+            limits={"amount_precision": 2, "min_amount": 1.0, "min_cost": 0.0},
+        )
+
+        assert decision.execute is False
+        assert "minimum order exceeds hard notional cap" in decision.reason
+
+    def test_user_can_only_lower_global_notional_cap(self, monkeypatch):
+        monkeypatch.setattr(settings.risk, "max_position_notional_usdt", 1000.0)
+
+        lowered = SignalProcessor._resolved_risk_settings(
+            {"risk": {"max_position_notional_usdt": 500.0}}
+        )
+        attempted_raise = SignalProcessor._resolved_risk_settings(
+            {"risk": {"max_position_notional_usdt": 5000.0}}
+        )
+
+        assert lowered["max_position_notional_usdt"] == 500.0
+        assert attempted_raise["max_position_notional_usdt"] == 1000.0
+
+    def test_live_entry_fails_closed_when_market_limits_are_unavailable(self):
+        processor = SignalProcessor(AsyncMock())
+        decision = TradeDecision(
+            execute=True,
+            ticker="BTCUSDT",
+            direction=SignalDirection.LONG,
+            entry_price=100.0,
+            quantity=1.0,
+        )
+
+        with patch("exchange.get_market_limits", return_value={}):
+            processor._apply_position_limits(
+                decision,
+                {
+                    "exchange": "binance",
+                    "market_type": "contract",
+                    "live_trading": True,
+                },
+            )
+
+        assert decision.execute is False
+        assert "market limits could not be verified" in decision.reason
+
+    def test_position_cap_never_reduces_close_quantity(self):
+        processor = SignalProcessor(AsyncMock())
+        decision = TradeDecision(
+            execute=True,
+            ticker="BTCUSDT",
+            direction=SignalDirection.CLOSE_LONG,
+            entry_price=100.0,
+            quantity=250.0,
+        )
+
+        with patch("exchange.get_market_limits", return_value={}):
+            processor._apply_position_limits(
+                decision,
+                {
+                    "exchange": "binance",
+                    "market_type": "contract",
+                    "live_trading": True,
+                },
+                {"risk": {"max_position_notional_usdt": 50.0}},
+            )
+
+        assert decision.execute is True
+        assert decision.quantity == 250.0
+
+
+class TestEntrySignalExpiry:
+    def test_old_entry_is_expired_but_close_is_exempt(self, monkeypatch):
+        from datetime import UTC, datetime, timedelta
+
+        monkeypatch.setattr(settings.server, "webhook_entry_max_age_secs", 60)
+        old_timestamp = datetime.now(UTC) - timedelta(minutes=5)
+        entry = TradingViewSignal(
+            ticker="BTCUSDT",
+            direction=SignalDirection.LONG,
+            price=100.0,
+            timestamp=old_timestamp,
+        )
+        close = TradingViewSignal(
+            ticker="BTCUSDT",
+            direction=SignalDirection.CLOSE_LONG,
+            price=100.0,
+            timestamp=old_timestamp,
+        )
+
+        assert "expired before execution" in SignalProcessor._entry_signal_expiry_reason(entry)
+        assert SignalProcessor._entry_signal_expiry_reason(close) == ""
+
+
 class TestValidStopLoss:
     """Tests for stop loss validation."""
 
@@ -1446,7 +1727,7 @@ class TestPositionConflictSafety:
             entry_price=100.0,
             quantity=1.0,
             opened_at=utcnow(),
-            live_trading=True,
+            live_trading=False,
             entry_order_id="entry-short",
         )
         session = AsyncMock()

@@ -16,7 +16,14 @@ from core.security import decrypt_settings_payload
 from core.utils.datetime import utcnow
 
 # Thread-safe cache lock
-_performance_cache_lock = asyncio.Lock()
+_performance_cache_lock: asyncio.Lock | None = None
+
+
+def _get_performance_cache_lock() -> asyncio.Lock:
+    global _performance_cache_lock
+    if _performance_cache_lock is None:
+        _performance_cache_lock = asyncio.Lock()
+    return _performance_cache_lock
 
 
 async def _get_account_equity(session: AsyncSession, user_id: str | None = None) -> float:
@@ -409,7 +416,11 @@ async def _calculate_ai_stats(trades: list[Any]) -> dict[str, float | int]:
       to correlate AI confidence with actual PnL outcomes.
     """
     # Pass 1: Build trade_id -> confidence map from entry trades
+    # Also build position_id -> list of trades index for O(1) lookups
+    from collections import defaultdict
+
     confidence_map: dict[str, float] = {}
+    position_trades: dict[str, list] = defaultdict(list)
     for trade in trades:
         try:
             payload_raw = json.loads(getattr(trade, "payload_json", "") or "") if getattr(trade, "payload_json", "") else {}
@@ -423,6 +434,9 @@ async def _calculate_ai_stats(trades: list[Any]) -> dict[str, float | int]:
                 trade_id = getattr(trade, "id", "")
                 if trade_id:
                     confidence_map[trade_id] = float(confidence)
+            pid = str(payload_raw.get("position_id", "") or "")
+            if pid:
+                position_trades[pid].append(trade)
         except (TypeError, json.JSONDecodeError, ValueError):
             pass
 
@@ -456,7 +470,7 @@ async def _calculate_ai_stats(trades: list[Any]) -> dict[str, float | int]:
                 if confidence_value is None:
                     position_id = payload_raw.get("position_id")
                     if position_id:
-                        for t2 in trades:
+                        for t2 in position_trades.get(str(position_id), []):
                             try:
                                 p2 = json.loads(getattr(t2, "payload_json", "") or "") if getattr(t2, "payload_json", "") else {}
                                 if isinstance(p2, dict) and p2.get("position_id") == position_id:
@@ -503,6 +517,7 @@ async def _calculate_ai_stats(trades: list[Any]) -> dict[str, float | int]:
 
 
 # Cache invalidation
+# TODO: Implement cache population logic
 _performance_cache: dict[str, object] = {}
 _cache_time: dict[str, float] = {}
 
@@ -511,6 +526,6 @@ async def invalidate_performance_cache(user_id: str | None = None):
     """Invalidate performance cache."""
     global _performance_cache, _cache_time
     key = user_id or "global"
-    async with _performance_cache_lock:
+    async with _get_performance_cache_lock():
         _performance_cache.pop(key, None)
         _cache_time.pop(key, None)

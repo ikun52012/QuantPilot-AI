@@ -126,7 +126,8 @@ async def fetch_yfinance_data(symbol: str) -> dict[str, Any] | None:
             return {
                 "current_price": float(current_price),
                 "price_change_1h": float(price_change_1h),
-                "price_change_4h": float(price_change_24h / 6),  # approximate
+                "price_change_4h": float(price_change_24h / 6),  # Approximation: assumes linear price movement
+                "4h_change_estimated": True,
                 "price_change_24h": float(price_change_24h),
                 "volume_24h": float(volume_24h),
                 "high_24h": float(high_24h),
@@ -197,7 +198,8 @@ async def _fetch_yfinance_direct_api(symbol: str) -> dict[str, Any] | None:
             return {
                 "current_price": float(current_price),
                 "price_change_1h": float(price_change_1h),
-                "price_change_4h": float(price_change_24h / 6),
+                "price_change_4h": float(price_change_24h / 6),  # Approximation: assumes linear price movement
+                "4h_change_estimated": True,
                 "price_change_24h": float(price_change_24h),
                 "volume_24h": float(volume_24h),
                 "high_24h": float(high_24h),
@@ -254,9 +256,7 @@ def _calculate_atr_yf(hist: Any, period: int = 14) -> float:
 
         atr = sum(tr_list[-period:]) / period
         return atr
-    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
-        return 0
-    except Exception:
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError, ZeroDivisionError):
         return 0
 
 

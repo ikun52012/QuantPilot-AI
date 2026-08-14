@@ -1146,7 +1146,7 @@ async function loadSettings() {
         setFieldValue('set-live-trading', String(Boolean(userExchange.live_trading ?? status.live_trading)));
         if (sandbox) sandbox.checked = Boolean(userExchange.sandbox_mode ?? status.exchange_sandbox_mode);
         setFieldValue('set-exchange-market-type', userExchange.market_type || status.exchange_market_type || 'contract');
-        setFieldValue('set-default-order-type', userExchange.default_order_type || status.exchange_default_order_type || 'limit');
+        setFieldValue('set-default-order-type', userExchange.default_order_type || status.exchange_default_order_type || 'market');
         setFieldValue('set-stop-loss-order-type', userExchange.stop_loss_order_type || status.exchange_stop_loss_order_type || 'market');
         applyTimeoutOverrideFields('set', userExchange.limit_timeout_overrides || status.exchange_limit_timeout_overrides || {});
         toggleExchangePasswordField();
@@ -1213,6 +1213,7 @@ async function loadSettings() {
         setFieldValue('set-equity', risk.account_equity_usdt ?? 10000);
         setFieldValue('set-fixed-size', risk.fixed_position_size_usdt ?? 100);
         setFieldValue('set-risk-per-trade', risk.risk_per_trade_pct ?? 1);
+        setFieldValue('set-max-notional', risk.max_position_notional_usdt ?? 10000);
         setFieldValue('set-equity-risk', risk.account_equity_usdt ?? 10000);
         const mode = risk.exit_management_mode === 'custom' ? 'custom' : 'ai';
         const modeEl = document.getElementById(`exit-mode-${mode}`);
@@ -1274,7 +1275,7 @@ async function testConnection() {
             password: document.getElementById('set-password').value,
             sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false,
             market_type: document.getElementById('set-exchange-market-type')?.value || 'contract',
-            default_order_type: document.getElementById('set-default-order-type')?.value || 'limit',
+            default_order_type: document.getElementById('set-default-order-type')?.value || 'market',
             stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market',
             limit_timeout_overrides: timeoutOverridesFromInputs('set')
         })});
@@ -1292,7 +1293,7 @@ async function saveExchangeSettings() { await saveSettings('/api/settings/exchan
     live_trading: document.getElementById('set-live-trading')?.value === 'true',
     sandbox_mode: document.getElementById('set-exchange-sandbox')?.checked || false,
     market_type: document.getElementById('set-exchange-market-type')?.value || 'contract',
-    default_order_type: document.getElementById('set-default-order-type')?.value || 'limit',
+    default_order_type: document.getElementById('set-default-order-type')?.value || 'market',
     stop_loss_order_type: document.getElementById('set-stop-loss-order-type')?.value || 'market',
     limit_timeout_overrides: timeoutOverridesFromInputs('set')
 }, 'btn-save-exchange'); }
@@ -1363,6 +1364,7 @@ async function saveRiskSettings() {
         account_equity_usdt: accountEquity,
         fixed_position_size_usdt: readNumberInput('set-fixed-size', 100),
         risk_per_trade_pct: readNumberInput('set-risk-per-trade', 1),
+        max_position_notional_usdt: readNumberInput('set-max-notional', 10000),
     });
 }
 
@@ -1372,6 +1374,7 @@ function loadAIAdvancedSettings(status) {
     setFieldValue('ai-read-timeout', status.ai_read_timeout_secs ?? 60);
     setFieldValue('ai-write-timeout', status.ai_write_timeout_secs ?? 30);
     setFieldValue('ai-pool-timeout', status.ai_pool_timeout_secs ?? 10);
+    setFieldValue('ai-max-retries', status.ai_max_retries ?? 3);
     setFieldValue('ai-max-concurrent', status.ai_max_concurrent_calls ?? 5);
     setFieldValue('ai-signal-queue-limit', status.ai_signal_queue_limit ?? 50);
     setFieldValue('ai-processing-semaphore', status.ai_global_processing_semaphore ?? 5);
@@ -1407,6 +1410,7 @@ async function saveAITimeoutSettings() {
         read_timeout_secs: readNumberInput('ai-read-timeout', 60),
         write_timeout_secs: readNumberInput('ai-write-timeout', 30),
         pool_timeout_secs: readNumberInput('ai-pool-timeout', 10),
+        max_retries: readNumberInput('ai-max-retries', 3, v => parseInt(v, 10)),
         max_concurrent_calls: readNumberInput('ai-max-concurrent', 5, v => parseInt(v, 10)),
     }, 'btn-save-ai-timeout');
 }
@@ -1685,7 +1689,7 @@ function renderUserSettings(data) {
     setFieldValue('user-exchange', ex.exchange || ex.name || 'binance');
     setFieldValue('user-live-trading', String(Boolean(ex.live_trading)));
     setFieldValue('user-market-type', ex.market_type || 'contract');
-    setFieldValue('user-default-order-type', ex.default_order_type || 'limit');
+    setFieldValue('user-default-order-type', ex.default_order_type || 'market');
     setFieldValue('user-stop-loss-order-type', ex.stop_loss_order_type || 'market');
     applyTimeoutOverrideFields('user', ex.limit_timeout_overrides || {});
     const sandbox = document.getElementById('user-sandbox-mode');
@@ -1809,7 +1813,7 @@ async function saveUserExchangeSettings() {
         api_secret: document.getElementById('user-api-secret')?.value || '',
         password: document.getElementById('user-api-password')?.value || '',
         market_type: document.getElementById('user-market-type')?.value || 'contract',
-        default_order_type: document.getElementById('user-default-order-type')?.value || 'limit',
+        default_order_type: document.getElementById('user-default-order-type')?.value || 'market',
         stop_loss_order_type: document.getElementById('user-stop-loss-order-type')?.value || 'market',
         limit_timeout_overrides: timeoutOverridesFromInputs('user'),
     };
@@ -2388,26 +2392,26 @@ function renderOrderExecutionSettings(settings = {}) {
     if (!el) return;
     const autoApprove = settings.auto_approve_failed_orders || false;
     const autoReject = settings.auto_reject_failed_orders || false;
-    const autoRetryLeverage = settings.auto_retry_leverage_errors || false;
+    const autoRetryLeverage = settings.auto_retry_leverage_errors ?? true;
     const maxRetryAttempts = settings.max_leverage_retry_attempts || 3;
-    const retryDelay = settings.leverage_retry_delay_secs || 5;
+    const retryDelay = settings.leverage_retry_delay_secs ?? 1;
     el.innerHTML = `<div class="settings-form">
         <div class="form-row">
             <div class="form-group">
                 <label class="checkbox-label">
                     <input type="checkbox" id="auto-approve-failed" ${autoApprove ? 'checked' : ''}>
-                    <span>Auto-approve failed orders for manual review</span>
+                    <span>Auto-acknowledge confirmed pre-execution failures</span>
                 </label>
-                <span class="hint">Automatically approve orders that fail execution and move them to retry queue</span>
+                <span class="hint">Audit-only acknowledgement. Ambiguous or exchange-accepted orders always remain in manual review.</span>
             </div>
         </div>
         <div class="form-row">
             <div class="form-group">
                 <label class="checkbox-label">
                     <input type="checkbox" id="auto-reject-failed" ${autoReject ? 'checked' : ''}>
-                    <span>Auto-reject failed orders permanently</span>
+                    <span>Auto-reject confirmed pre-execution failures</span>
                 </label>
-                <span class="hint">Automatically reject orders that fail execution without manual review</span>
+                <span class="hint">Only applies when no exchange order ID exists and reconciliation is not required.</span>
             </div>
         </div>
         <div class="form-row">
@@ -2426,7 +2430,7 @@ function renderOrderExecutionSettings(settings = {}) {
             </div>
             <div class="form-group">
                 <label for="leverage-retry-delay">Retry delay (seconds)</label>
-                <input type="number" id="leverage-retry-delay" class="text-input" value="${retryDelay}" min="1" max="60">
+                <input type="number" id="leverage-retry-delay" class="text-input" value="${retryDelay}" min="0.1" max="60" step="0.1">
             </div>
         </div>
         <div class="form-row">
@@ -2451,7 +2455,7 @@ async function saveOrderExecutionSettings() {
             auto_reject_failed_orders: document.getElementById('auto-reject-failed')?.checked || false,
             auto_retry_leverage_errors: document.getElementById('auto-retry-leverage')?.checked || false,
             max_leverage_retry_attempts: parseInt(document.getElementById('max-leverage-retry')?.value || '3'),
-            leverage_retry_delay_secs: parseInt(document.getElementById('leverage-retry-delay')?.value || '5'),
+            leverage_retry_delay_secs: parseFloat(document.getElementById('leverage-retry-delay')?.value || '1'),
         };
         const result = await fetchAPI('/api/admin/order-execution-settings', {
             method: 'POST',
@@ -3499,15 +3503,13 @@ function renderAdminRiskThresholds(thresholds) {
     const inputs = fields.map(([key, label, hint]) => {
         const value = thresholds[key] ?? '';
         if (key === 'live_data_quality_mode') {
-            const strictSel = value === 'strict' ? 'selected' : '';
-            const normalSel = value === 'normal' || !value ? 'selected' : '';
-            const lenientSel = value === 'lenient' ? 'selected' : '';
+            const strictSel = value === 'fail_closed' || !value ? 'selected' : '';
+            const warnSel = value === 'warn' ? 'selected' : '';
             return `<div class="form-group">
                 <label for="risk-${key}">${escapeHtml(label)}</label>
                 <select id="risk-${key}" class="text-input">
-                    <option value="strict" ${strictSel}>Strict (strict)</option>
-                    <option value="normal" ${normalSel}>Normal (normal)</option>
-                    <option value="lenient" ${lenientSel}>Lenient (lenient)</option>
+                    <option value="fail_closed" ${strictSel}>Fail closed (recommended)</option>
+                    <option value="warn" ${warnSel}>Warn only</option>
                 </select>
                 <p class="hint">${escapeHtml(hint)}</p>
             </div>`;

@@ -106,10 +106,11 @@ def test_webhook_replay_window():
     # Import webhook module
     import routers.webhook
 
-    # Check that replay window is 60 seconds
+    # Five minutes tolerates TradingView delivery delay and clock skew while
+    # nonce deduplication still rejects the same authenticated payload.
     replay_window = routers.webhook._WEBHOOK_REPLAY_WINDOW_SECS
-    assert replay_window == 60, f"Webhook replay window is {replay_window}s, expected 60s"
-    print("  [PASS] Webhook replay window is 60 seconds")
+    assert replay_window == 300, f"Webhook replay window is {replay_window}s, expected 300s"
+    print("  [PASS] Webhook replay window is 300 seconds")
 
 
 def test_cookie_samesite():

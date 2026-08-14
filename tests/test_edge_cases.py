@@ -2,6 +2,7 @@
 QuantPilot AI - Edge Cases and Boundary Condition Tests
 Tests for edge cases, boundary conditions, and error handling.
 """
+import asyncio
 import math
 from datetime import UTC, datetime
 
@@ -765,7 +766,15 @@ class TestTradeDecision:
 
 class TestExchangeOrderRetries:
     @pytest.mark.asyncio
-    async def test_okx_order_retries_with_pos_side_after_parameter_error(self):
+    async def test_okx_order_retries_with_pos_side_after_parameter_error(self, monkeypatch):
+        async def run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        # This unit test verifies retry parameters, not Python's thread-pool
+        # implementation. Running the fake exchange inline avoids Windows
+        # executor flakiness after hundreds of event-loop based tests.
+        monkeypatch.setattr(asyncio, "to_thread", run_inline)
+
         class _FakeExchange:
             id = "okx"
 

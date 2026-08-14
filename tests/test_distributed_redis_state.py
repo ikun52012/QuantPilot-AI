@@ -1,11 +1,13 @@
 """Redis distributed coordination tests for strategy and AI hot state."""
 
+import asyncio
+
 import pytest
 
 import core.redis_coordination as redis_coordination
 from ai_analyzer import _AI_CACHE, _get_cached_analysis, _set_cached_analysis
 from core.config import settings
-from core.redis_coordination import DistributedLockTimeout, distributed_lock
+from core.redis_coordination import DistributedLockLost, DistributedLockTimeout, distributed_lock
 from models import AIAnalysis
 from strategies.dca import DCAConfig, DCAEngine
 from strategies.grid import GridConfig, GridEngine
@@ -37,7 +39,9 @@ class FakeRedis:
         self.values.pop(key, None)
         return int(existed)
 
-    async def eval(self, script, numkeys, key, token):
+    async def eval(self, script, numkeys, key, token, *args):
+        if "expire" in script:
+            return 1 if self.values.get(key) == token else 0
         if self.values.get(key) == token:
             self.values.pop(key, None)
             return 1
@@ -127,3 +131,37 @@ async def test_distributed_lock_blocks_same_redis_key(fake_redis):
         with pytest.raises(DistributedLockTimeout):
             async with distributed_lock("unit:test-lock", blocking_timeout_seconds=0.01, retry_interval_seconds=0.001):
                 pass
+
+
+@pytest.mark.asyncio
+async def test_distributed_lock_interrupts_work_after_ownership_loss(fake_redis):
+    lock_key = redis_coordination.make_key("lock", "unit:lost-lock")
+
+    with pytest.raises(DistributedLockLost):
+        async with distributed_lock("unit:lost-lock", ttl_seconds=1):
+            fake_redis.values[lock_key] = "different-owner"
+            await asyncio.sleep(1.2)
+
+
+@pytest.mark.asyncio
+async def test_distributed_lock_never_uses_non_atomic_delete_fallback(fake_redis):
+    delete_calls = 0
+    original_delete = fake_redis.delete
+
+    async def fail_release(script, numkeys, key, token, *args):
+        if "expire" in script:
+            return 1
+        raise RuntimeError("release eval unavailable")
+
+    async def track_delete(key):
+        nonlocal delete_calls
+        delete_calls += 1
+        return await original_delete(key)
+
+    fake_redis.eval = fail_release
+    fake_redis.delete = track_delete
+
+    async with distributed_lock("unit:release-failure", ttl_seconds=30):
+        pass
+
+    assert delete_calls == 0

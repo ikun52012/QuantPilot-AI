@@ -269,26 +269,75 @@ def apply_runtime_settings(runtime: dict[str, dict[str, Any]]) -> None:
         _apply_runtime_settings_unlocked(runtime)
 
 
+_EXCHANGE_RUNTIME_ATTRS = (
+    "name",
+    "api_key",
+    "api_secret",
+    "password",
+    "live_trading",
+    "sandbox_mode",
+    "market_type",
+    "default_order_type",
+    "stop_loss_order_type",
+    "limit_timeout_overrides",
+)
+
+
+def _apply_exchange_runtime_settings_unlocked(exchange: dict[str, Any]) -> None:
+    settings.exchange.name = str(exchange.get("name") or exchange.get("exchange") or settings.exchange.name).lower().strip()
+    if "api_key" in exchange:
+        settings.exchange.api_key = str(exchange.get("api_key") or "")
+    if "api_secret" in exchange:
+        settings.exchange.api_secret = str(exchange.get("api_secret") or "")
+    if "password" in exchange:
+        settings.exchange.password = str(exchange.get("password") or "")
+    settings.exchange.live_trading = _to_bool(exchange.get("live_trading"), settings.exchange.live_trading)
+    settings.exchange.sandbox_mode = _to_bool(exchange.get("sandbox_mode"), settings.exchange.sandbox_mode)
+    settings.exchange.market_type = str(exchange.get("market_type") or settings.exchange.market_type).lower().strip()
+    settings.exchange.default_order_type = str(
+        exchange.get("default_order_type") or settings.exchange.default_order_type
+    ).lower().strip()
+    settings.exchange.stop_loss_order_type = str(
+        exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type
+    ).lower().strip()
+    settings.exchange.limit_timeout_overrides = normalize_limit_timeout_overrides(
+        exchange.get("limit_timeout_overrides")
+        if "limit_timeout_overrides" in exchange
+        else settings.exchange.limit_timeout_overrides
+    )
+
+
+def validate_exchange_runtime_settings(exchange: dict[str, Any]) -> None:
+    """Validate an exchange runtime candidate without leaving global state changed.
+
+    Startup validation alone is insufficient because encrypted database settings
+    are applied after startup and admin settings can be hot-reloaded. Any
+    candidate whose resulting mode is live must pass the same production gates.
+    """
+    if not exchange:
+        return
+    with _SETTINGS_APPLY_LOCK:
+        previous = {name: getattr(settings.exchange, name) for name in _EXCHANGE_RUNTIME_ATTRS}
+        try:
+            _apply_exchange_runtime_settings_unlocked(exchange)
+            if settings.exchange.live_trading:
+                settings._validate_settings()
+        finally:
+            for name, value in previous.items():
+                setattr(settings.exchange, name, value)
+
+
 def _apply_runtime_settings_unlocked(runtime: dict[str, dict[str, Any]]) -> None:
     """Internal implementation of apply_runtime_settings. Must be called with _SETTINGS_APPLY_LOCK held."""
     exchange = runtime.get("exchange") or {}
     if exchange:
-        settings.exchange.name = str(exchange.get("name") or exchange.get("exchange") or settings.exchange.name).lower().strip()
-        settings.exchange.api_key = str(exchange.get("api_key") or "")
-        settings.exchange.api_secret = str(exchange.get("api_secret") or "")
-        settings.exchange.password = str(exchange.get("password") or "")
-        settings.exchange.live_trading = _to_bool(exchange.get("live_trading"), settings.exchange.live_trading)
-        settings.exchange.sandbox_mode = _to_bool(exchange.get("sandbox_mode"), settings.exchange.sandbox_mode)
-        settings.exchange.market_type = str(exchange.get("market_type") or settings.exchange.market_type).lower().strip()
-        settings.exchange.default_order_type = str(exchange.get("default_order_type") or settings.exchange.default_order_type).lower().strip()
-        settings.exchange.stop_loss_order_type = str(exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type).lower().strip()
-        settings.exchange.limit_timeout_overrides = normalize_limit_timeout_overrides(
-            exchange.get("limit_timeout_overrides") if "limit_timeout_overrides" in exchange else settings.exchange.limit_timeout_overrides
-        )
+        validate_exchange_runtime_settings(exchange)
+        _apply_exchange_runtime_settings_unlocked(exchange)
 
     ai = runtime.get("ai") or {}
     if ai:
-        settings.ai.provider = _normalize_ai_provider(ai.get("provider"))
+        if "provider" in ai:
+            settings.ai.provider = _normalize_ai_provider(ai.get("provider"))
         api_key = str(ai.get("api_key") or "").strip()
         if api_key:
             if settings.ai.provider == "openai":
@@ -350,6 +399,47 @@ def _apply_runtime_settings_unlocked(runtime: dict[str, dict[str, Any]]) -> None
             if strategy in {"weighted", "consensus", "best_confidence"}:
                 settings.ai.voting_strategy = strategy
 
+        # Operational AI settings are runtime controls, not merely persisted UI
+        # values.  Apply every field accepted by save_ai_settings so a restart or
+        # hot update produces the same effective configuration.
+        settings.ai.connect_timeout_secs = _to_float(ai.get("connect_timeout_secs"), settings.ai.connect_timeout_secs, 1, 120)
+        settings.ai.read_timeout_secs = _to_float(ai.get("read_timeout_secs"), settings.ai.read_timeout_secs, 5, 300)
+        settings.ai.write_timeout_secs = _to_float(ai.get("write_timeout_secs"), settings.ai.write_timeout_secs, 5, 120)
+        settings.ai.pool_timeout_secs = _to_float(ai.get("pool_timeout_secs"), settings.ai.pool_timeout_secs, 1, 60)
+        settings.ai.max_retries = _to_int(ai.get("max_retries"), settings.ai.max_retries, 1, 10)
+        settings.ai.max_concurrent_calls = _to_int(ai.get("max_concurrent_calls"), settings.ai.max_concurrent_calls, 1, 50)
+        settings.ai.signal_queue_limit = _to_int(ai.get("signal_queue_limit"), settings.ai.signal_queue_limit, 1, 500)
+        settings.ai.global_processing_semaphore = _to_int(ai.get("global_processing_semaphore"), settings.ai.global_processing_semaphore, 1, 50)
+        settings.ai.signal_processing_interval_secs = _to_float(ai.get("signal_processing_interval_secs"), settings.ai.signal_processing_interval_secs, 0, 30)
+        settings.ai.dynamic_interval_enabled = _to_bool(ai.get("dynamic_interval_enabled"), settings.ai.dynamic_interval_enabled)
+        settings.ai.dynamic_interval_high_load_threshold = _to_float(ai.get("dynamic_interval_high_load_threshold"), settings.ai.dynamic_interval_high_load_threshold, 1, 100)
+        settings.ai.dynamic_interval_high_load_multiplier = _to_float(ai.get("dynamic_interval_high_load_multiplier"), settings.ai.dynamic_interval_high_load_multiplier, 0.5, 10)
+        settings.ai.dynamic_cache_ttl_enabled = _to_bool(ai.get("dynamic_cache_ttl_enabled"), settings.ai.dynamic_cache_ttl_enabled)
+        settings.ai.dynamic_cache_ttl_base = _to_int(ai.get("dynamic_cache_ttl_base"), settings.ai.dynamic_cache_ttl_base, 10, 600)
+        settings.ai.dynamic_cache_ttl_high_volatility_multiplier = _to_float(ai.get("dynamic_cache_ttl_high_volatility_multiplier"), settings.ai.dynamic_cache_ttl_high_volatility_multiplier, 0.1, 5)
+        settings.ai.dynamic_cache_ttl_low_volatility_multiplier = _to_float(ai.get("dynamic_cache_ttl_low_volatility_multiplier"), settings.ai.dynamic_cache_ttl_low_volatility_multiplier, 0.1, 10)
+        settings.ai.smc_cache_ttl_enabled = _to_bool(ai.get("smc_cache_ttl_enabled"), settings.ai.smc_cache_ttl_enabled)
+        settings.ai.smc_cache_ttl_base = _to_int(ai.get("smc_cache_ttl_base"), settings.ai.smc_cache_ttl_base, 10, 600)
+        settings.ai.smc_cache_ttl_high_vol = _to_int(ai.get("smc_cache_ttl_high_vol"), settings.ai.smc_cache_ttl_high_vol, 10, 600)
+        settings.ai.smc_cache_ttl_low_vol = _to_int(ai.get("smc_cache_ttl_low_vol"), settings.ai.smc_cache_ttl_low_vol, 10, 600)
+        settings.ai.prefilter_enhanced_timeout_secs = _to_float(ai.get("prefilter_enhanced_timeout_secs"), settings.ai.prefilter_enhanced_timeout_secs, 5, 120)
+        settings.ai.batch_signals_enabled = _to_bool(ai.get("batch_signals_enabled"), settings.ai.batch_signals_enabled)
+        settings.ai.batch_signals_window_secs = _to_float(ai.get("batch_signals_window_secs"), settings.ai.batch_signals_window_secs, 0, 60)
+        settings.ai.batch_signals_max_count = _to_int(ai.get("batch_signals_max_count"), settings.ai.batch_signals_max_count, 1, 20)
+        settings.ai.prefetch_market_data = _to_bool(ai.get("prefetch_market_data"), settings.ai.prefetch_market_data)
+        settings.ai.websocket_market_data_enabled = _to_bool(ai.get("websocket_market_data_enabled"), settings.ai.websocket_market_data_enabled)
+
+        # Modules that cache asyncio semaphores / httpx timeout objects must be
+        # refreshed after a hot update.  Avoid imports here to prevent cycles.
+        import sys
+
+        ai_module = sys.modules.get("ai_analyzer")
+        if ai_module is not None and hasattr(ai_module, "refresh_ai_runtime_settings"):
+            ai_module.refresh_ai_runtime_settings()
+        processor_module = sys.modules.get("services.signal_processor")
+        if processor_module is not None and hasattr(processor_module, "refresh_signal_runtime_settings"):
+            processor_module.refresh_signal_runtime_settings()
+
     telegram = runtime.get("telegram") or {}
     if telegram:
         settings.telegram.bot_token = str(telegram.get("bot_token") or "")
@@ -372,6 +462,12 @@ def _apply_runtime_settings_unlocked(runtime: dict[str, dict[str, Any]]) -> None
         settings.risk.fixed_position_size_usdt = _to_float(risk.get("fixed_position_size_usdt"), settings.risk.fixed_position_size_usdt, 1, 1000000)
         settings.risk.risk_per_trade_pct = _to_float(risk.get("risk_per_trade_pct"), settings.risk.risk_per_trade_pct, 0.1, 100)
         settings.risk.account_equity_usdt = _to_float(risk.get("account_equity_usdt"), settings.risk.account_equity_usdt, 100, 10000000)
+        settings.risk.max_position_notional_usdt = _to_float(
+            risk.get("max_position_notional_usdt"),
+            settings.risk.max_position_notional_usdt,
+            1,
+            1_000_000_000,
+        )
         margin_mode = str(risk.get("margin_mode") or settings.risk.margin_mode).lower().strip()
         settings.risk.margin_mode = margin_mode if margin_mode in {"cross", "isolated"} else "cross"
 
@@ -402,6 +498,43 @@ def _apply_runtime_settings_unlocked(runtime: dict[str, dict[str, Any]]) -> None
             settings.trailing_stop.step_buffer_pct = _to_float(
                 trailing_stop.get("step_buffer_pct"), 0.3, 0, 2.0
             )
+
+    order_execution = runtime.get("order_execution") or {}
+    if order_execution:
+        settings.order_execution.auto_approve_failed_orders = _to_bool(
+            order_execution.get("auto_approve_failed_orders"),
+            settings.order_execution.auto_approve_failed_orders,
+        )
+        settings.order_execution.auto_reject_failed_orders = _to_bool(
+            order_execution.get("auto_reject_failed_orders"),
+            settings.order_execution.auto_reject_failed_orders,
+        )
+        if (
+            settings.order_execution.auto_approve_failed_orders
+            and settings.order_execution.auto_reject_failed_orders
+        ):
+            logger.error(
+                "[RuntimeSettings] Conflicting automatic failure actions disabled; "
+                "choose either approve or reject"
+            )
+            settings.order_execution.auto_approve_failed_orders = False
+            settings.order_execution.auto_reject_failed_orders = False
+        settings.order_execution.auto_retry_leverage_errors = _to_bool(
+            order_execution.get("auto_retry_leverage_errors"),
+            settings.order_execution.auto_retry_leverage_errors,
+        )
+        settings.order_execution.max_leverage_retry_attempts = _to_int(
+            order_execution.get("max_leverage_retry_attempts"),
+            settings.order_execution.max_leverage_retry_attempts,
+            1,
+            10,
+        )
+        settings.order_execution.leverage_retry_delay_secs = _to_float(
+            order_execution.get("leverage_retry_delay_secs"),
+            settings.order_execution.leverage_retry_delay_secs,
+            0.1,
+            60,
+        )
 
     scanner = runtime.get("scanner") or {}
     if scanner:
@@ -774,6 +907,70 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
 
         get_thresholds().reload_from_dict(prefilter_thresholds)
 
+        # Risk controls edited through the admin threshold panel are stored as
+        # individual keys. Restore them after the encrypted runtime bundle so
+        # the most recent admin choice survives a restart.
+        risk_admin_values = {
+            "max_same_direction_positions": await get_admin_setting(session, "max_same_direction_positions", ""),
+            "max_correlated_exposure_pct": await get_admin_setting(session, "max_correlated_exposure_pct", ""),
+            "max_live_missing_data_checks": await get_admin_setting(session, "max_live_missing_data_checks", ""),
+            "block_live_on_risk_check_error": await get_admin_setting(session, "block_live_on_risk_check_error", ""),
+            "max_daily_trades": await get_admin_setting(session, "max_daily_trades", ""),
+            "max_daily_loss_pct": await get_admin_setting(session, "max_daily_loss_pct", ""),
+            "max_position_pct": await get_admin_setting(session, "max_position_pct", ""),
+            "risk_per_trade_pct": await get_admin_setting(session, "risk_per_trade_pct", ""),
+            "margin_mode": await get_admin_setting(session, "margin_mode", ""),
+            "live_data_quality_mode": await get_admin_setting(session, "live_data_quality_mode", ""),
+        }
+        if risk_admin_values["max_same_direction_positions"]:
+            settings.risk.max_same_direction_positions = _to_int(
+                risk_admin_values["max_same_direction_positions"],
+                settings.risk.max_same_direction_positions,
+                1,
+                100,
+            )
+        if risk_admin_values["max_correlated_exposure_pct"]:
+            settings.risk.max_correlated_exposure_pct = _to_float(
+                risk_admin_values["max_correlated_exposure_pct"],
+                settings.risk.max_correlated_exposure_pct,
+                0.1,
+                100,
+            )
+        if risk_admin_values["max_live_missing_data_checks"]:
+            settings.risk.max_live_missing_data_checks = _to_int(
+                risk_admin_values["max_live_missing_data_checks"],
+                settings.risk.max_live_missing_data_checks,
+                0,
+                100,
+            )
+        if risk_admin_values["block_live_on_risk_check_error"]:
+            settings.risk.block_live_on_risk_check_error = _to_bool(
+                risk_admin_values["block_live_on_risk_check_error"],
+                settings.risk.block_live_on_risk_check_error,
+            )
+        if risk_admin_values["max_daily_trades"]:
+            settings.risk.max_daily_trades = _to_int(
+                risk_admin_values["max_daily_trades"], settings.risk.max_daily_trades, 1, 10_000
+            )
+        if risk_admin_values["max_daily_loss_pct"]:
+            settings.risk.max_daily_loss_pct = _to_float(
+                risk_admin_values["max_daily_loss_pct"], settings.risk.max_daily_loss_pct, 0.1, 100
+            )
+        if risk_admin_values["max_position_pct"]:
+            settings.risk.max_position_pct = _to_float(
+                risk_admin_values["max_position_pct"], settings.risk.max_position_pct, 0.1, 100
+            )
+        if risk_admin_values["risk_per_trade_pct"]:
+            settings.risk.risk_per_trade_pct = _to_float(
+                risk_admin_values["risk_per_trade_pct"], settings.risk.risk_per_trade_pct, 0.1, 100
+            )
+        margin_mode = str(risk_admin_values["margin_mode"] or "").lower().strip()
+        if margin_mode in {"cross", "isolated"}:
+            settings.risk.margin_mode = margin_mode
+        data_quality_mode = str(risk_admin_values["live_data_quality_mode"] or "").lower().strip()
+        if data_quality_mode in {"fail_closed", "warn"}:
+            settings.risk.live_data_quality_mode = data_quality_mode
+
         # Load webhook HMAC settings
         hmac_enabled_raw = await get_admin_setting(session, "webhook_hmac_header_enabled", "")
         if hmac_enabled_raw:
@@ -820,6 +1017,9 @@ async def apply_persisted_admin_settings(session: AsyncSession) -> dict[str, dic
     except Exception as e:
         logger.debug(f"[RuntimeSettings] Failed to apply persisted admin settings: {e}")
 
+    if settings.exchange.live_trading:
+        settings._validate_settings()
+
     return runtime
 
 
@@ -841,6 +1041,7 @@ async def save_exchange_settings(session: AsyncSession, data: dict[str, Any], ap
             else current.get("limit_timeout_overrides", settings.exchange.limit_timeout_overrides)
         ),
     }
+    validate_exchange_runtime_settings(updated)
     await _save_encrypted_dict(session, EXCHANGE_KEY, updated)
     if apply_immediately:
         apply_runtime_settings({"exchange": updated})
@@ -871,13 +1072,20 @@ async def save_ai_settings(session: AsyncSession, data: dict[str, Any]) -> dict[
         "anthropic_model": _coalesce_str(data.get("anthropic_model"), current.get("anthropic_model"), settings.ai.anthropic_model),
         "deepseek_model": _coalesce_str(data.get("deepseek_model"), current.get("deepseek_model"), settings.ai.deepseek_model),
         "voting_enabled": _to_bool(data.get("voting_enabled"), _to_bool(current.get("voting_enabled"), settings.ai.voting_enabled)),
-        "voting_models": list(data.get("voting_models") if "voting_models" in data else current.get("voting_models", settings.ai.voting_models)),
-        "voting_weights": dict(data.get("voting_weights") if "voting_weights" in data else current.get("voting_weights", settings.ai.voting_weights)),
+        "voting_models": list(
+            (data.get("voting_models") if "voting_models" in data else current.get("voting_models", settings.ai.voting_models))
+            or []
+        ),
+        "voting_weights": dict(
+            (data.get("voting_weights") if "voting_weights" in data else current.get("voting_weights", settings.ai.voting_weights))
+            or {}
+        ),
         "voting_strategy": _coalesce_str(data.get("voting_strategy"), current.get("voting_strategy"), settings.ai.voting_strategy),
         "connect_timeout_secs": _to_float(data.get("connect_timeout_secs"), _to_float(current.get("connect_timeout_secs"), settings.ai.connect_timeout_secs), 1, 120),
         "read_timeout_secs": _to_float(data.get("read_timeout_secs"), _to_float(current.get("read_timeout_secs"), settings.ai.read_timeout_secs), 5, 300),
         "write_timeout_secs": _to_float(data.get("write_timeout_secs"), _to_float(current.get("write_timeout_secs"), settings.ai.write_timeout_secs), 5, 120),
         "pool_timeout_secs": _to_float(data.get("pool_timeout_secs"), _to_float(current.get("pool_timeout_secs"), settings.ai.pool_timeout_secs), 1, 60),
+        "max_retries": _to_int(data.get("max_retries"), _to_int(current.get("max_retries"), settings.ai.max_retries), 1, 10),
         "max_concurrent_calls": _to_int(data.get("max_concurrent_calls"), _to_int(current.get("max_concurrent_calls"), settings.ai.max_concurrent_calls), 1, 50),
         "signal_queue_limit": _to_int(data.get("signal_queue_limit"), _to_int(current.get("signal_queue_limit"), settings.ai.signal_queue_limit), 1, 500),
         "global_processing_semaphore": _to_int(data.get("global_processing_semaphore"), _to_int(current.get("global_processing_semaphore"), settings.ai.global_processing_semaphore), 1, 50),
@@ -931,8 +1139,11 @@ async def save_risk_settings(session: AsyncSession, data: dict[str, Any]) -> dic
         "fixed_position_size_usdt": _to_float(data.get("fixed_position_size_usdt"), _to_float(current.get("fixed_position_size_usdt"), settings.risk.fixed_position_size_usdt), 1, 1000000),
         "risk_per_trade_pct": _to_float(data.get("risk_per_trade_pct"), _to_float(current.get("risk_per_trade_pct"), settings.risk.risk_per_trade_pct), 0.1, 100),
         "account_equity_usdt": _to_float(data.get("account_equity_usdt"), _to_float(current.get("account_equity_usdt"), settings.risk.account_equity_usdt), 100, 10000000),
+        "max_position_notional_usdt": _to_float(data.get("max_position_notional_usdt"), _to_float(current.get("max_position_notional_usdt"), settings.risk.max_position_notional_usdt), 1, 1_000_000_000),
         "margin_mode": str(data.get("margin_mode") or current.get("margin_mode") or settings.risk.margin_mode),
     }
+    if settings.exchange.live_trading and updated["max_daily_loss_pct"] > 20.0:
+        raise RuntimeError("MAX_DAILY_LOSS_PCT cannot exceed 20% while live trading is enabled")
     await _save_encrypted_dict(session, RISK_KEY, updated)
     apply_runtime_settings({"risk": updated})
     return updated
@@ -976,11 +1187,14 @@ async def save_order_execution_settings(session: AsyncSession, data: dict[str, A
     updated = {
         "auto_approve_failed_orders": _to_bool(data.get("auto_approve_failed_orders"), _to_bool(current.get("auto_approve_failed_orders"), False)),
         "auto_reject_failed_orders": _to_bool(data.get("auto_reject_failed_orders"), _to_bool(current.get("auto_reject_failed_orders"), False)),
-        "auto_retry_leverage_errors": _to_bool(data.get("auto_retry_leverage_errors"), _to_bool(current.get("auto_retry_leverage_errors"), False)),
+        "auto_retry_leverage_errors": _to_bool(data.get("auto_retry_leverage_errors"), _to_bool(current.get("auto_retry_leverage_errors"), settings.order_execution.auto_retry_leverage_errors)),
         "max_leverage_retry_attempts": _to_int(data.get("max_leverage_retry_attempts"), _to_int(current.get("max_leverage_retry_attempts"), 3), 1, 10),
-        "leverage_retry_delay_secs": _to_int(data.get("leverage_retry_delay_secs"), _to_int(current.get("leverage_retry_delay_secs"), 5), 1, 60),
+        "leverage_retry_delay_secs": _to_float(data.get("leverage_retry_delay_secs"), _to_float(current.get("leverage_retry_delay_secs"), settings.order_execution.leverage_retry_delay_secs), 0.1, 60),
     }
+    if updated["auto_approve_failed_orders"] and updated["auto_reject_failed_orders"]:
+        raise ValueError("auto_approve_failed_orders and auto_reject_failed_orders are mutually exclusive")
     await _save_encrypted_dict(session, ORDER_EXECUTION_KEY, updated)
+    apply_runtime_settings({"order_execution": updated})
     return updated
 
 
@@ -1423,6 +1637,7 @@ def runtime_status() -> dict[str, Any]:
         "ai_read_timeout_secs": settings.ai.read_timeout_secs,
         "ai_write_timeout_secs": settings.ai.write_timeout_secs,
         "ai_pool_timeout_secs": settings.ai.pool_timeout_secs,
+        "ai_max_retries": settings.ai.max_retries,
         "ai_max_concurrent_calls": settings.ai.max_concurrent_calls,
         "ai_signal_queue_limit": settings.ai.signal_queue_limit,
         "ai_global_processing_semaphore": settings.ai.global_processing_semaphore,
@@ -1485,6 +1700,7 @@ def runtime_status() -> dict[str, Any]:
             "fixed_position_size_usdt": settings.risk.fixed_position_size_usdt,
             "risk_per_trade_pct": settings.risk.risk_per_trade_pct,
             "account_equity_usdt": settings.risk.account_equity_usdt,
+            "max_position_notional_usdt": settings.risk.max_position_notional_usdt,
             "margin_mode": settings.risk.margin_mode,
         },
         "voting": {
@@ -1544,4 +1760,11 @@ def runtime_status() -> dict[str, Any]:
 
 async def get_order_execution_settings(session: AsyncSession) -> dict[str, Any]:
     """Get order execution auto-approve/auto-reject settings."""
-    return await _load_encrypted_dict(session, ORDER_EXECUTION_KEY)
+    persisted = await _load_encrypted_dict(session, ORDER_EXECUTION_KEY)
+    return {
+        "auto_approve_failed_orders": _to_bool(persisted.get("auto_approve_failed_orders"), settings.order_execution.auto_approve_failed_orders),
+        "auto_reject_failed_orders": _to_bool(persisted.get("auto_reject_failed_orders"), settings.order_execution.auto_reject_failed_orders),
+        "auto_retry_leverage_errors": _to_bool(persisted.get("auto_retry_leverage_errors"), settings.order_execution.auto_retry_leverage_errors),
+        "max_leverage_retry_attempts": _to_int(persisted.get("max_leverage_retry_attempts"), settings.order_execution.max_leverage_retry_attempts, 1, 10),
+        "leverage_retry_delay_secs": _to_float(persisted.get("leverage_retry_delay_secs"), settings.order_execution.leverage_retry_delay_secs, 0.1, 60),
+    }

@@ -291,7 +291,14 @@ async def get_pending_2fa_user(
         raise HTTPException(status_code=401, detail="User no longer exists")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
-    if int(payload.get("ver", 0)) != int(user.token_version or 0):
+
+    try:
+        token_ver = int(payload.get("ver", 0))
+        user_ver = int(user.token_version) if user.token_version is not None else 0
+    except (ValueError, TypeError):
+        token_ver = -1
+        user_ver = 0
+    if token_ver != user_ver:
         raise HTTPException(status_code=401, detail="Token has been revoked")
 
     return {
@@ -315,9 +322,13 @@ async def require_admin(
 async def get_optional_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict | None:
     """Returns user payload if authenticated, None otherwise."""
-    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    if credentials:
+        token = credentials.credentials
+    else:
+        token = request.cookies.get(AUTH_COOKIE_NAME, "")
     if not token:
         return None
 
@@ -333,7 +344,13 @@ async def get_optional_user(
         user = await get_user_by_id(db, payload["sub"])
         if not user or not user.is_active:
             return None
-        if int(payload.get("ver", 0)) != int(user.token_version or 0):
+        try:
+            token_ver = int(payload.get("ver", 0))
+            user_ver = int(user.token_version) if user.token_version is not None else 0
+        except (ValueError, TypeError):
+            token_ver = -1
+            user_ver = 0
+        if token_ver != user_ver:
             return None
         return {
             "sub": user.id,

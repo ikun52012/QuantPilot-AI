@@ -1,11 +1,21 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 import exchange as exchange_module
 from core.config import settings
-from models import AIAnalysis, MarketContext, SignalDirection, TakeProfitLevel, TradeDecision, TradingViewSignal
+from core.exceptions import OrderValidationError
+from models import (
+    AIAnalysis,
+    MarketContext,
+    SignalDirection,
+    TakeProfitLevel,
+    TradeDecision,
+    TradingViewSignal,
+    TrailingStopConfig,
+    TrailingStopMode,
+)
 from services.signal_processor import SignalProcessor
 
 
@@ -43,6 +53,45 @@ def _capture_exchange_kwargs(monkeypatch, fake_exchange):
 
     monkeypatch.setattr(exchange_module, "_get_or_create_exchange", fake_get_or_create_exchange)
     return captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "orderbook",
+    [
+        {},
+        {"asks": [[100.0, 0.1]], "bids": [[99.9, 10.0]]},
+        {"asks": [[101.0, 10.0]], "bids": [[100.9, 10.0]]},
+    ],
+)
+async def test_market_order_slippage_protection_fails_closed(
+    monkeypatch,
+    orderbook,
+):
+    created = []
+    fake_exchange = SimpleNamespace(
+        id="binance",
+        fetch_order_book=lambda *args, **kwargs: orderbook,
+        create_order=lambda **kwargs: created.append(kwargs),
+    )
+    monkeypatch.setattr(
+        exchange_module,
+        "_validate_and_adjust_amount",
+        lambda exchange, symbol, amount, allow_amount_increase: amount,
+    )
+
+    with pytest.raises(OrderValidationError):
+        await exchange_module._create_exchange_order(
+            fake_exchange,
+            symbol="BTC/USDT:USDT",
+            order_type="market",
+            side="buy",
+            amount=1.0,
+            max_slippage_pct=0.5,
+            slippage_reference_price=100.0,
+        )
+
+    assert created == []
 
 
 def _assert_empty_credentials(captured: dict):
@@ -206,6 +255,39 @@ async def test_execute_trade_preserves_explicit_empty_limit_timeout_overrides(mo
 
 
 @pytest.mark.asyncio
+async def test_user_live_entry_requires_global_master_switch(monkeypatch):
+    processor = SignalProcessor(session=AsyncMock())
+    decision = TradeDecision(
+        execute=True,
+        direction=SignalDirection.LONG,
+        ticker="BTCUSDT",
+        entry_price=100.0,
+        quantity=1.0,
+    )
+    monkeypatch.setattr(settings.exchange, "live_trading", False)
+    monkeypatch.setattr(
+        "services.signal_processor.get_user_by_id",
+        AsyncMock(return_value=SimpleNamespace(role="user")),
+    )
+
+    result = await processor._execute_trade(
+        decision,
+        "user-1",
+        {
+            "exchange": {
+                "name": "binance",
+                "api_key": "user-key",
+                "api_secret": "user-secret",
+                "live_trading": True,
+            }
+        },
+    )
+
+    assert result["status"] == "rejected"
+    assert "global LIVE_TRADING master switch" in result["reason"]
+
+
+@pytest.mark.asyncio
 async def test_execute_trade_applies_exchange_overrides_without_user_id(monkeypatch):
     processor = SignalProcessor(session=AsyncMock())
     decision = TradeDecision(
@@ -286,6 +368,41 @@ async def test_exchange_execute_trade_preserves_explicit_empty_credentials(monke
 
 
 @pytest.mark.asyncio
+async def test_exchange_accepted_order_without_id_requires_reconciliation(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(
+        exchange_module,
+        "_get_or_create_exchange",
+        lambda **kwargs: SimpleNamespace(options={"defaultType": "future"}),
+    )
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr(
+        exchange_module,
+        "_create_exchange_order",
+        AsyncMock(return_value={"status": "closed", "filled": 1.0, "average": 100.0}),
+    )
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            order_type="market",
+            idempotency_key="accepted-no-id",
+        ),
+        _user_exchange_config(),
+    )
+
+    assert result["status"] == "manual_review"
+    assert result["requires_reconciliation"] is True
+    assert result["failure_stage"] == "post_submission"
+    assert result["client_order_id"] == exchange_module.client_order_id_for_idempotency("accepted-no-id")
+
+
+@pytest.mark.asyncio
 async def test_exchange_execute_trade_treats_string_false_as_paper(monkeypatch):
     _set_global_exchange_defaults(monkeypatch)
     monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
@@ -360,7 +477,7 @@ async def test_execute_trade_close_uses_requested_quantity(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_trade_pending_limit_includes_exit_plan(monkeypatch):
+async def test_execute_trade_rejects_live_limit_without_atomic_protection(monkeypatch):
     _set_global_exchange_defaults(monkeypatch)
     monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
 
@@ -396,14 +513,10 @@ async def test_execute_trade_pending_limit_includes_exit_plan(monkeypatch):
         _user_exchange_config(),
     )
 
-    assert result["status"] == "pending"
-    assert result["quantity"] == 2.0
-    assert result["requested_quantity"] == 1.0
-    assert result["submitted_quantity"] == 2.0
-    assert result["limit_timeout_secs"] == 3600
-    assert result["stop_loss"] == 98.0
-    assert result["take_profit_orders"][0]["price"] == 103.0
-    assert result["take_profit_orders"][0]["status"] == "pending"
+    assert result["status"] == "rejected"
+    assert result["failure_stage"] == "pre_execution"
+    assert "cannot be attached atomically" in result["reason"]
+    exchange_module._create_exchange_order.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -641,6 +754,11 @@ async def test_execute_trade_rolls_back_partial_fill_when_protection_fails(monke
         AsyncMock(return_value={"id": "entry-1", "status": "open", "filled": 0.5, "average": 100.0}),
     )
     monkeypatch.setattr(exchange_module, "_create_conditional_order", AsyncMock(side_effect=RuntimeError("protect fail")))
+    monkeypatch.setattr(
+        exchange_module,
+        "_cancel_exchange_order",
+        AsyncMock(return_value={"status": "cancelled", "order_id": "entry-1"}),
+    )
     close_position = AsyncMock(return_value={"status": "closed", "order_id": "close-1", "exit_price": 99.0})
     monkeypatch.setattr(exchange_module, "_close_position", close_position)
 
@@ -661,6 +779,103 @@ async def test_execute_trade_rolls_back_partial_fill_when_protection_fails(monke
     assert result["status"] == "error"
     assert result["rollback_success"] is True
     assert close_position.await_args.kwargs["close_quantity"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_partial_fill_cancel_failure_protects_maximum_exposure(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    fake_exchange = SimpleNamespace(
+        options={"defaultType": "future"},
+        fetch_order=lambda order_id, symbol: {
+            "id": order_id,
+            "status": "open",
+            "filled": 0.5,
+            "remaining": 0.5,
+            "average": 100.0,
+        },
+    )
+    monkeypatch.setattr(exchange_module, "_get_or_create_exchange", lambda **kwargs: fake_exchange)
+    monkeypatch.setattr(
+        exchange_module,
+        "_create_exchange_order",
+        AsyncMock(return_value={"id": "entry-1", "status": "open", "filled": 0.5, "average": 100.0}),
+    )
+    monkeypatch.setattr(
+        exchange_module,
+        "_cancel_exchange_order",
+        AsyncMock(return_value={"status": "error", "order_id": "entry-1"}),
+    )
+    create_protection = AsyncMock(
+        side_effect=[
+            {"id": "tp-1"},
+            {"id": "sl-1"},
+        ]
+    )
+    monkeypatch.setattr(exchange_module, "_create_conditional_order", create_protection)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            take_profit=110.0,
+            stop_loss=95.0,
+            order_type="market",
+        ),
+        _user_exchange_config(),
+    )
+
+    assert result["status"] == "partial"
+    assert result["requires_reconciliation"] is True
+    assert result["entry_remainder_cancel_confirmed"] is False
+    assert result["take_profit_protected_qty"] == pytest.approx(1.0)
+    assert result["stop_loss_protected_qty"] == pytest.approx(1.0)
+    assert create_protection.await_args_list[0].args[4] == pytest.approx(1.0)
+    assert create_protection.await_args_list[1].args[4] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_missing_stop_order_id_is_protection_failure_and_rolls_back(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr(
+        exchange_module,
+        "_get_or_create_exchange",
+        lambda **kwargs: SimpleNamespace(options={"defaultType": "future"}),
+    )
+    monkeypatch.setattr(
+        exchange_module,
+        "_create_exchange_order",
+        AsyncMock(return_value={"id": "entry-1", "status": "closed", "filled": 1.0, "average": 100.0}),
+    )
+    monkeypatch.setattr(exchange_module, "_create_conditional_order", AsyncMock(return_value={}))
+    close_position = AsyncMock(
+        return_value={"status": "closed", "order_id": "close-1", "exit_price": 99.0}
+    )
+    monkeypatch.setattr(exchange_module, "_close_position", close_position)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            stop_loss=95.0,
+            order_type="market",
+        ),
+        _user_exchange_config(),
+    )
+
+    assert result["status"] == "error"
+    assert result["rollback_success"] is True
+    assert "SL:" in result["protection_errors"][0]
+    close_position.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -701,6 +916,111 @@ async def test_execute_trade_rolls_back_when_multi_tp_reports_failed(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_conditional_order_network_timeout_does_not_try_another_format(monkeypatch):
+    create_order = AsyncMock(side_effect=exchange_module.ccxt.NetworkError("timeout"))
+    monkeypatch.setattr(exchange_module, "_create_exchange_order", create_order)
+    journal = Mock(return_value="recon-test")
+    monkeypatch.setattr("core.reconciliation_journal.record_reconciliation_issue", journal)
+    fake_exchange = SimpleNamespace(id="binance", options={"defaultMarginMode": "cross"})
+
+    with pytest.raises(exchange_module.ccxt.NetworkError):
+        await exchange_module._create_conditional_order(
+            fake_exchange,
+            "BTC/USDT:USDT",
+            "stop_loss",
+            "sell",
+            1.0,
+            95.0,
+            "long",
+            client_order_id="qp-stop-test",
+        )
+
+    create_order.assert_awaited_once()
+    journal.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_moving_trailing_stop_is_always_reduce_only(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr(
+        exchange_module,
+        "_get_or_create_exchange",
+        lambda **kwargs: SimpleNamespace(options={"defaultType": "future"}),
+    )
+    create_order = AsyncMock(
+        side_effect=[
+            {"id": "entry-1", "status": "closed", "filled": 1.0, "average": 100.0},
+            {"id": "trail-1", "status": "open"},
+        ]
+    )
+    monkeypatch.setattr(exchange_module, "_create_exchange_order", create_order)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            order_type="market",
+            trailing_stop=TrailingStopConfig(mode=TrailingStopMode.MOVING, trail_pct=1.0),
+        ),
+        _user_exchange_config(),
+    )
+
+    assert result["status"] == "filled"
+    trailing_call = create_order.await_args_list[1]
+    assert trailing_call.kwargs["reduce_only"] is True
+    assert trailing_call.kwargs["params"]["reduceOnly"] is True
+    assert trailing_call.kwargs["client_order_id"].startswith("qp_ts_")
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_stop_submission_closes_exposure_and_requires_manual_review(monkeypatch):
+    _set_global_exchange_defaults(monkeypatch)
+    monkeypatch.setattr(exchange_module, "_CCXT_AVAILABLE", True)
+    monkeypatch.setattr(exchange_module, "_resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr(
+        exchange_module,
+        "_get_or_create_exchange",
+        lambda **kwargs: SimpleNamespace(options={"defaultType": "future"}),
+    )
+    monkeypatch.setattr(
+        exchange_module,
+        "_create_exchange_order",
+        AsyncMock(return_value={"id": "entry-1", "status": "closed", "filled": 1.0, "average": 100.0}),
+    )
+    monkeypatch.setattr(
+        exchange_module,
+        "_create_conditional_order",
+        AsyncMock(side_effect=exchange_module.ccxt.NetworkError("timeout")),
+    )
+    close_position = AsyncMock(return_value={"status": "closed", "order_id": "close-1", "exit_price": 99.0})
+    monkeypatch.setattr(exchange_module, "_close_position", close_position)
+
+    result = await exchange_module.execute_trade(
+        TradeDecision(
+            execute=True,
+            direction=SignalDirection.LONG,
+            ticker="BTCUSDT",
+            entry_price=100.0,
+            quantity=1.0,
+            stop_loss=95.0,
+            order_type="market",
+        ),
+        _user_exchange_config(),
+    )
+
+    assert result["status"] == "manual_review"
+    assert result["current_exposure_closed"] is True
+    assert result["requires_reconciliation"] is True
+    assert result["rollback_success"] is False
+    close_position.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_close_position_requires_exchange_flat_confirmation(monkeypatch):
     monkeypatch.setattr(exchange_module.asyncio, "sleep", AsyncMock())
 
@@ -727,6 +1047,63 @@ async def test_close_position_requires_exchange_flat_confirmation(monkeypatch):
 
     assert result["status"] == "close_unconfirmed"
     assert result["remaining_contracts"] == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_close_position_uses_new_id_for_terminal_partial_residual(monkeypatch):
+    monkeypatch.setattr(exchange_module.asyncio, "sleep", AsyncMock())
+
+    class FakeExchange:
+        id = "binance"
+        options = {"defaultType": "future"}
+
+        def __init__(self):
+            self.remaining = 1.0
+            self.orders = []
+
+        def load_markets(self):
+            return {"BTC/USDT:USDT": {"limits": {"amount": {}}, "precision": {"amount": 8}}}
+
+        def fetch_positions(self, symbols):
+            if self.remaining <= 0:
+                return []
+            return [{
+                "symbol": "BTC/USDT:USDT",
+                "side": "long",
+                "contracts": self.remaining,
+                "markPrice": 100.0,
+            }]
+
+        def fetch_orders(self, symbol, since=None, limit=None):
+            return list(self.orders)
+
+        def create_order(self, **kwargs):
+            fill = 0.5 if not self.orders else self.remaining
+            self.remaining = max(0.0, self.remaining - fill)
+            order = {
+                "id": f"close-{len(self.orders) + 1}",
+                "clientOrderId": kwargs["params"]["clientOrderId"],
+                "status": "closed",
+                "filled": fill,
+                "average": 99.0,
+            }
+            self.orders.append(order)
+            return order
+
+    fake_exchange = FakeExchange()
+    result = await exchange_module._close_position(
+        fake_exchange,
+        "BTC/USDT:USDT",
+        position_side="long",
+        client_order_id="qp_close_base",
+    )
+
+    assert result["status"] == "closed"
+    assert [order["clientOrderId"] for order in fake_exchange.orders] == [
+        "qp_close_base",
+        "qp_close_base_r2",
+    ]
+    assert result["close_verification"]["consecutive_flat_reads"] == 2
 
 
 @pytest.mark.asyncio

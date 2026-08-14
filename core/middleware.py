@@ -328,15 +328,6 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         if request.url.path in self.EXEMPT_PATHS:
             return await call_next(request)
 
-        # Background Sync runs from the service worker, which cannot read the
-        # non-HttpOnly CSRF cookie after the page is gone. Require a custom
-        # same-origin header so plain cross-site form posts still cannot hit it.
-        if (
-            request.url.path == "/api/user/trades/sync"
-            and request.headers.get("x-pwa-sync") == "1"
-        ):
-            return await call_next(request)
-
         # Check for auth cookie
         if not request.cookies.get("tvss_token"):
             return await call_next(request)
@@ -447,6 +438,14 @@ def setup_middleware(app) -> None:
     base_url = (settings.server.public_base_url or "").strip().rstrip("/")
     if base_url and base_url not in cors_origins:
         cors_origins.append(base_url)
+    has_wildcard = "*" in cors_origins
+    allow_credentials = not has_wildcard
+    if has_wildcard and settings.is_production:
+        logger.warning("[CORS] Wildcard origin with credentials is not allowed in production. Restricting to no credentials.")
+        cors_origins = [o for o in cors_origins if o != "*"]
+        if not cors_origins:
+            cors_origins = ["http://localhost:8000"]
+        allow_credentials = True
     trusted_hosts = list(settings.server.trusted_hosts)
     if not settings.is_production and trusted_hosts != ["*"]:
         for test_host in ("test", "testserver"):
@@ -455,7 +454,7 @@ def setup_middleware(app) -> None:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=True,
+        allow_credentials=allow_credentials,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=[
             "Authorization",

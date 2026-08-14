@@ -150,6 +150,51 @@ async def test_update_filter_thresholds_merges_existing_values(client: AsyncClie
 
 
 @pytest.mark.asyncio
+async def test_live_risk_update_is_rejected_and_runtime_is_restored(
+    client: AsyncClient,
+    db_session,
+    test_admin_data,
+    monkeypatch,
+):
+    from core.config import settings
+
+    headers = await _login_admin(client, db_session, test_admin_data)
+    original_mode = settings.risk.live_data_quality_mode
+    monkeypatch.setattr(settings.exchange, "live_trading", True)
+    monkeypatch.setattr(settings.risk, "live_data_quality_mode", original_mode)
+
+    response = await client.post(
+        "/api/admin/risk-thresholds",
+        json={"live_data_quality_mode": "warn"},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert settings.risk.live_data_quality_mode == original_mode
+    stored = await db_session.scalar(
+        select(AdminSettingModel).where(AdminSettingModel.key == "live_data_quality_mode")
+    )
+    assert stored is None
+
+
+@pytest.mark.asyncio
+async def test_order_execution_settings_reject_non_object_json(
+    client: AsyncClient,
+    db_session,
+    test_admin_data,
+):
+    headers = await _login_admin(client, db_session, test_admin_data)
+
+    response = await client.post(
+        "/api/admin/order-execution-settings",
+        json=[{"auto_approve_failed_orders": True}],
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_clear_trade_history_requires_confirmation(client: AsyncClient, db_session, test_admin_data):
     headers = await _login_admin(client, db_session, test_admin_data)
     db_session.add(TradeModel(timestamp=utcnow(), ticker="BTCUSDT", payload_json="{}"))

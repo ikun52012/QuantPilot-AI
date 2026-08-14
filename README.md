@@ -31,7 +31,7 @@
 ### 🆕 v5.2 Scanner, Admin, and Release Hardening
 - **Automatic Market Scanner**: Multi-timeframe scanner candidates with EMA200, HTF conflict, VWAP/POC, Open Interest, regime, ADX/MACD, and volume confirmation before AI review.
 - **Dedicated Admin Workspace**: Split Pre-Filter, Scanner, Logs, and Subscription administration pages with throttled loading and paginated audit views.
-- **Safer Order Metadata**: Live limit order tracking now preserves timeout and actual submitted quantity metadata for pending-position reconciliation.
+- **Fail-closed live entries**: New live entries use market execution only. Live limit entries are rejected until entry and protection can be attached atomically; historical pending limits remain reconciled and protected.
 
 ### 🆕 v5.1 Institutional-Grade Indicators & Fail-Closed Gate
 - **Institutional Indicator Filters**: Added VWAP deviation checks, Open Interest (OI) vs. price divergence/stall detection, exchange reserves flow monitoring, funding rate term structure multiplier limits, and cross-exchange price discrepancy arbitrage validation.
@@ -71,6 +71,7 @@ Before dispatching a signal to high-cost AI models, a highly optimized rule-base
 ### 4. 📊 DCA & Grid Trading Engines
 - **DCA Strategy**: Support for both Average Down and Average Up styles. Offers 4 sizing algorithms: Fixed Amount, Martingale multiplier (e.g. 1.5x), Geometric scaling, and Fibonacci ordering.
 - **Grid Trading**: Neutral, Long Bias, and Short Bias grid spacing (Arithmetic or Geometric), with auto-replenishment on price breakouts.
+- **Current safety boundary**: DCA and Grid are paper-only. Live creation is deliberately blocked until those engines share the unified position ledger, account circuit breakers, and crash-safe order reconciliation. Legacy live strategies are migrated to reduce/cancel-only cleanup.
 
 ### 5. ⚡ Live WebSocket Streaming
 - `/ws/positions`: Ultra-fast position updates and dynamic unrealized PnL streaming.
@@ -153,7 +154,7 @@ python -m venv venv
 source venv/bin/activate  # Linux/macOS
 # Windows PowerShell: .\venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 
 # 3. Environment Config
 cp .env.example .env
@@ -192,10 +193,17 @@ docker compose up -d
 | `WEBHOOK_SECRET` | Secret to authenticate TradingView alerts | Custom secure string |
 | `LIVE_TRADING` | **Master live trading switch** (must be true to trade) | `false` (default) |
 | `EXCHANGE` | Execution exchange destination | `binance` / `okx` / `bybit` |
+| `EXCHANGE_DEFAULT_ORDER_TYPE` | Entry order type; production-safe value is `market` | `market` |
+| `POSITION_MONITOR_INTERVAL_SECS` | Position/protection reconciliation interval | `5` |
 | `EXCHANGE_API_KEY` | Exchange API Key | `your_api_key` |
 | `EXCHANGE_API_SECRET` | Exchange API Secret | `your_api_secret` |
 | `AI_PROVIDER` | Decision AI service provider | `openrouter` / `deepseek` / `openai` |
+| `AI_MAX_PROVIDER_REQUESTS_PER_DAY` | Hard cap on all paid provider requests per UTC day (`0` disables the cap) | `500` |
+| `AI_WEBHOOK_MAX_PROVIDER_REQUESTS_PER_DAY` | TradingView-only provider request cap per UTC day | `200` |
 | `OPENROUTER_API_KEY` | OpenRouter API Key (if using OpenRouter) | `sk-or-v1-xxx` |
+| `SCANNER_MODE` | Scanner safety mode: candidate-only, paper execution, or live | `observe` / `paper` / `live` |
+| `SCANNER_OBSERVE_AI_ENABLED` | Allow paid AI in observe mode; keep false for free rule-only discovery | `false` |
+| `SCANNER_LIVE_MIN_OUTCOME_SAMPLES` | Minimum labeled paper outcomes before scanner live execution is permitted | `30` |
 | `TELEGRAM_BOT_TOKEN` | Bot token for Telegram alerts | `xxx:xxx` |
 
 **Admin Credentials**:
@@ -220,11 +228,13 @@ docker compose up -d
 
 ## 📬 TradingView Webhook Format
 
-Set your TradingView alert Webhook URL to `https://your-domain.com/api/webhook` and paste the following standard JSON payload:
+Set your TradingView alert Webhook URL to `https://your-domain.com/webhook` and paste the following standard JSON payload:
 
 ```json
 {
   "secret": "WEBHOOK_SECRET_configured_in_env",
+  "timestamp": "{{timenow}}",
+  "nonce": "{{ticker}}-{{timenow}}-{{strategy.order.id}}",
   "ticker": "{{ticker}}",
   "exchange": "{{exchange}}",
   "direction": "long",
@@ -234,6 +244,12 @@ Set your TradingView alert Webhook URL to `https://your-domain.com/api/webhook` 
 }
 ```
 
+Authenticated alerts are committed to the durable delivery queue before the
+endpoint returns `202 Accepted`. Crashed or transiently failed processing is
+reclaimed automatically, and exhausted events can be requeued from the admin
+webhook-event API. In live mode, the payload `exchange` must match the configured
+execution exchange.
+
 ---
 
 ## 🧪 Testing
@@ -242,7 +258,7 @@ We supply full unit and integration test coverage:
 
 ```bash
 # Install test suites
-pip install pytest pytest-asyncio httpx
+pip install pytest==9.1.1 pytest-asyncio==1.4.0 pytest-cov==7.1.0
 
 # Run all test cases
 pytest tests/ -v
@@ -262,6 +278,7 @@ Complete these security items before deployment:
 - [x] **Secret Rotation**: Change default `JWT_SECRET` and `WEBHOOK_SECRET` keys.
 - [x] **Network isolation**: Bind FastAPI to local boundaries and use an Nginx reverse proxy to restrict administrative API exposure.
 - [x] **Live verification**: Run simulation trades (`LIVE_TRADING=false`) for at least 1 month before turning on live API parameters.
+- [x] **Scanner evidence gate**: Keep the scanner in `paper` mode until it has at least 30 labeled outcomes with positive out-of-sample expectancy; rule scores are points, not win probabilities.
 - [x] **Multi-factor auth**: Secure all administrator records with TOTP Google Authenticator.
 - [x] **Logs rotation**: Configure offsite backups of `logs/` and `trade_logs/` directories to prevent tamper risk.
 

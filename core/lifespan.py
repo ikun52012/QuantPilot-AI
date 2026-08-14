@@ -3,17 +3,24 @@ QuantPilot AI - Application Lifespan Management
 Handles startup and shutdown logic separately from app factory.
 """
 import asyncio
+import json
 import os
+import sys
+import time as _time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 
 from core.cache import cache
-from core.config import settings
+from core.config import DATA_DIR, settings
 from core.database import db_manager, seed_defaults
+from core.redis_coordination import DistributedLockLost, DistributedLockTimeout, distributed_lock
 
 # Module-level scheduler reference for shutdown cleanup
 _scheduler = None
@@ -21,18 +28,81 @@ _scheduler_lock_fd: int | None = None
 _scheduler_lock_path: Path | None = None
 
 
-def _pid_is_running(pid: int) -> bool:
+def _process_start_time(pid: int) -> float | None:
+    """Return process creation time as a Unix timestamp when supported."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return None
+            try:
+                creation = wintypes.FILETIME()
+                exit_time = wintypes.FILETIME()
+                kernel = wintypes.FILETIME()
+                user = wintypes.FILETIME()
+                if not kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(creation),
+                    ctypes.byref(exit_time),
+                    ctypes.byref(kernel),
+                    ctypes.byref(user),
+                ):
+                    return None
+                ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+                return ticks / 10_000_000 - 11_644_473_600
+            finally:
+                kernel32.CloseHandle(handle)
+
+        stat_path = Path(f"/proc/{pid}/stat")
+        proc_stat_path = Path("/proc/stat")
+        if stat_path.exists() and proc_stat_path.exists():
+            stat_text = stat_path.read_text(encoding="ascii")
+            stat_tail = stat_text.rsplit(")", 1)[1].split()
+            start_ticks = int(stat_tail[19])
+            boot_line = next(
+                line for line in proc_stat_path.read_text(encoding="ascii").splitlines()
+                if line.startswith("btime ")
+            )
+            boot_time = int(boot_line.split()[1])
+            clock_ticks = os.sysconf("SC_CLK_TCK")
+            return boot_time + start_ticks / clock_ticks
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+    return None
+
+
+def _pid_is_running(pid: int, expected_start_time: float | None = None) -> bool:
     if pid <= 0:
         return False
     try:
-        os.kill(pid, 0)
-        return True
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            kernel32.CloseHandle(handle)
+        else:
+            os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
     except OSError:
         return False
+
+    if expected_start_time is not None:
+        actual_start_time = _process_start_time(pid)
+        # A process created after the lock timestamp is a reused PID, not the
+        # original lock owner.  Allow a small clock/precision tolerance.
+        if actual_start_time is not None and actual_start_time > expected_start_time + 1.0:
+            return False
+    return True
 
 
 def _acquire_scheduler_lock() -> bool:
@@ -41,29 +111,34 @@ def _acquire_scheduler_lock() -> bool:
     if _scheduler_lock_fd is not None:
         return True
 
-    lock_dir = Path(__file__).resolve().parent.parent / "data"
+    lock_dir = DATA_DIR
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "scheduler.lock"
 
     for attempt in range(2):
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode("ascii"))
+            os.write(fd, f"{os.getpid()}:{_time.time()}".encode("ascii"))
             _scheduler_lock_fd = fd
             _scheduler_lock_path = lock_path
             return True
         except FileExistsError:
             try:
-                raw_pid = lock_path.read_text(encoding="ascii").strip()
-                existing_pid = int(raw_pid or "0")
+                raw = lock_path.read_text(encoding="ascii").strip()
+                parts = raw.split(":", 1)
+                existing_pid = int(parts[0] or "0")
+                existing_start_time = float(parts[1]) if len(parts) > 1 else None
             except (OSError, ValueError):
                 existing_pid = 0
-            if attempt == 0 and not _pid_is_running(existing_pid):
-                try:
-                    lock_path.unlink()
-                    continue
-                except OSError:
-                    pass
+                existing_start_time = None
+            if attempt == 0:
+                if not _pid_is_running(existing_pid, expected_start_time=existing_start_time):
+                    try:
+                        lock_path.unlink()
+                        logger.info(f"[Scheduler] Removed stale scheduler lock for inactive pid={existing_pid}")
+                        continue
+                    except OSError:
+                        pass
             logger.warning(f"[Scheduler] Another process owns the scheduler lock (pid={existing_pid}); skipping jobs")
             return False
         except OSError as exc:
@@ -90,34 +165,77 @@ def _release_scheduler_lock() -> None:
         _scheduler_lock_path = None
 
 
-async def _market_scanner_job():
+async def _run_coordinated_job(
+    name: str,
+    job: Callable[[], Awaitable[Any]],
+    ttl_seconds: int,
+) -> Any:
+    """Run one scheduled side effect across the whole deployment."""
     try:
-        from services.market_scanner import run_scanner_once
-        result = await run_scanner_once()
-        if result.get("status") not in {"disabled", "skipped"}:
-            logger.info(
-                f"[Scheduler] Market scanner run: status={result.get('status')} "
-                f"scanned={result.get('scanned', 0)} candidates={result.get('candidates', 0)}"
-            )
-    except Exception as e:
-        logger.error(f"[Scheduler] Market scanner failed: {e}")
+        async with distributed_lock(
+            f"scheduler-job:{name}",
+            ttl_seconds=max(10, int(ttl_seconds)),
+            blocking_timeout_seconds=0.1,
+            allow_local_fallback=not settings.redis.enabled,
+        ):
+            return await job()
+    except DistributedLockTimeout:
+        logger.debug(f"[Scheduler] Skipped {name}; another instance owns the job lease")
+        return None
+    except DistributedLockLost as exc:
+        logger.error(f"[Scheduler] Distributed lease lost for {name}: {exc}")
+        return None
+
+
+def _coordinated_job(
+    name: str,
+    job: Callable[[], Awaitable[Any]],
+    ttl_seconds: int,
+) -> Callable[[], Awaitable[Any]]:
+    async def _wrapped() -> Any:
+        return await _run_coordinated_job(name, job, ttl_seconds)
+
+    return _wrapped
+
+
+async def _market_scanner_job():
+    async def _run() -> None:
+        try:
+            from services.market_scanner import run_scanner_once
+            result = await run_scanner_once()
+            if result.get("status") not in {"disabled", "skipped"}:
+                logger.info(
+                    f"[Scheduler] Market scanner run: status={result.get('status')} "
+                    f"scanned={result.get('scanned', 0)} candidates={result.get('candidates', 0)}"
+                )
+        except Exception as e:
+            logger.error(f"[Scheduler] Market scanner failed: {e}")
+
+    await _run_coordinated_job(
+        "market_scanner",
+        _run,
+        max(120, int(settings.scanner.scan_timeout_secs) + 60),
+    )
 
 
 async def _scanner_rejection_summary_job():
-    try:
-        from core.database import get_scanner_rejection_summary
-        from notifier import notify_scanner_rejection_summary
+    async def _run() -> None:
+        try:
+            from core.database import get_scanner_rejection_summary
+            from notifier import notify_scanner_rejection_summary
 
-        async with db_manager.async_session_factory() as session:
-            summary = await get_scanner_rejection_summary(session, scope="admin")
-        await notify_scanner_rejection_summary(summary)
-        if int(summary.get("rejected_or_held") or 0) > 0:
-            logger.info(
-                f"[Scheduler] Scanner rejection summary sent: "
-                f"{summary.get('rejected_or_held')}/{summary.get('total_results')} rejected or held"
-            )
-    except Exception as e:
-        logger.error(f"[Scheduler] Scanner rejection summary failed: {e}")
+            async with db_manager.async_session_factory() as session:
+                summary = await get_scanner_rejection_summary(session, scope="admin")
+            await notify_scanner_rejection_summary(summary)
+            if int(summary.get("rejected_or_held") or 0) > 0:
+                logger.info(
+                    f"[Scheduler] Scanner rejection summary sent: "
+                    f"{summary.get('rejected_or_held')}/{summary.get('total_results')} rejected or held"
+                )
+        except Exception as e:
+            logger.error(f"[Scheduler] Scanner rejection summary failed: {e}")
+
+    await _run_coordinated_job("scanner_rejection_summary", _run, 300)
 
 
 def sync_scanner_scheduler() -> dict:
@@ -172,6 +290,19 @@ async def _on_startup():
 
     await _init_database()
     try:
+        from services.order_reconciler import recover_order_intent_journal
+
+        async with db_manager.async_session_factory() as session:
+            recovery = await recover_order_intent_journal(session)
+            await session.commit()
+        if recovery.get("recovered"):
+            logger.critical(
+                f"[Startup] Recovered {recovery['recovered']} exchange order intent(s) "
+                "into manual review"
+            )
+    except Exception as e:
+        logger.error(f"[Startup] Order intent journal recovery failed: {e}")
+    try:
         from services.scanner_rules import load_rules_config
         load_rules_config()
     except Exception as e:
@@ -185,7 +316,6 @@ async def _on_startup():
     await _init_cache()
     await _init_scheduler()
     await _restore_strategies()
-    await _init_backup_scheduler()
 
 
 async def _init_database():
@@ -294,40 +424,79 @@ async def _init_scheduler():
         except Exception as e:
             logger.debug(f"[Scheduler] Exchange pool cleanup failed: {e}")
 
+    async def _confidence_calibration_job():
+        try:
+            from core.confidence_calibrator import refresh_calibration_table
+
+            await refresh_calibration_table()
+        except Exception as e:
+            logger.warning(f"[Scheduler] Confidence calibration refresh failed: {e}")
+
+    async def _webhook_delivery_job():
+        try:
+            from services.webhook_worker import process_due_webhook_events
+
+            result = await process_due_webhook_events(limit=10)
+            if result.get("processed"):
+                logger.info(
+                    f"[Scheduler] Durable webhook worker processed "
+                    f"{result.get('processed')} event(s)"
+                )
+            from services.order_reconciler import recover_order_intent_journal
+
+            async with db_manager.async_session_factory() as session:
+                await recover_order_intent_journal(session)
+                await session.commit()
+        except Exception as e:
+            logger.error(f"[Scheduler] Durable webhook worker failed: {e}")
+
+    async def _strategy_monitor_job():
+        try:
+            from routers.strategies import run_strategy_monitor_once
+
+            result = await run_strategy_monitor_once()
+            if result.get("dca") or result.get("grid"):
+                logger.debug(
+                    f"[Scheduler] Strategy monitor: {result.get('dca', 0)} DCA, "
+                    f"{result.get('grid', 0)} Grid"
+                )
+        except Exception as e:
+            logger.error(f"[Scheduler] Strategy monitor failed: {e}")
+
     scheduler.add_job(
-        _daily_reset_job,
+        _coordinated_job("daily_reset", _daily_reset_job, 120),
         CronTrigger(hour=0, minute=0, second=0, timezone="UTC"),
         id="daily_reset",
         name="Daily trade counter reset",
     )
     scheduler.add_job(
-        _daily_backup_job,
+        _coordinated_job("daily_backup", _daily_backup_job, 3600),
         CronTrigger(hour=2, minute=0, second=0, timezone="UTC"),
         id="daily_backup",
         name="Daily database backup",
     )
     scheduler.add_job(
-        _cleanup_old_records_job,
+        _coordinated_job("cleanup_old_records", _cleanup_old_records_job, 1800),
         CronTrigger(hour=3, minute=0, second=0, timezone="UTC"),
         id="cleanup_old_records",
         name="Daily database cleanup",
     )
     scheduler.add_job(
-        _cleanup_old_backups_job,
+        _coordinated_job("cleanup_old_backups", _cleanup_old_backups_job, 1800),
         CronTrigger(hour=3, minute=30, second=0, timezone="UTC"),
         id="cleanup_old_backups",
         name="Daily backup cleanup",
     )
     scheduler.add_job(
-        _cleanup_scanner_audits_job,
+        _coordinated_job("cleanup_scanner_audits", _cleanup_scanner_audits_job, 1800),
         CronTrigger(hour=4, minute=0, second=0, timezone="UTC"),
         id="cleanup_scanner_audits",
         name="Daily scanner audit cleanup",
     )
     scheduler.add_job(
-        _position_monitor_job,
+        _coordinated_job("position_monitor", _position_monitor_job, 120),
         "interval",
-        seconds=max(10, int(settings.position_monitor_interval_secs)),
+        seconds=max(2, int(settings.position_monitor_interval_secs)),
         max_instances=1,
         coalesce=True,
         id="position_monitor",
@@ -335,13 +504,43 @@ async def _init_scheduler():
     )
     # P2-11: Periodic exchange pool cleanup
     scheduler.add_job(
-        _exchange_pool_cleanup_job,
+        _coordinated_job("exchange_pool_cleanup", _exchange_pool_cleanup_job, 300),
         "interval",
         seconds=1800,
         max_instances=1,
         coalesce=True,
         id="exchange_pool_cleanup",
         name="Exchange pool cleanup",
+    )
+    scheduler.add_job(
+        _coordinated_job("confidence_calibration", _confidence_calibration_job, 1800),
+        "interval",
+        hours=6,
+        max_instances=1,
+        coalesce=True,
+        id="confidence_calibration",
+        name="AI confidence calibration refresh",
+        next_run_time=datetime.now(UTC),
+    )
+    scheduler.add_job(
+        _coordinated_job("webhook_delivery", _webhook_delivery_job, 120),
+        "interval",
+        seconds=5,
+        max_instances=1,
+        coalesce=True,
+        id="webhook_delivery",
+        name="Durable webhook delivery worker",
+        next_run_time=datetime.now(UTC),
+    )
+    scheduler.add_job(
+        _coordinated_job("strategy_monitor", _strategy_monitor_job, 120),
+        "interval",
+        seconds=30,
+        max_instances=1,
+        coalesce=True,
+        id="strategy_monitor",
+        name="Persistent DCA/Grid strategy monitor",
+        next_run_time=datetime.now(UTC),
     )
     scheduler.add_job(
         _scanner_rejection_summary_job,
@@ -365,22 +564,6 @@ async def _init_scheduler():
     )
 
 
-async def _init_backup_scheduler():
-    """Initialize automatic backup scheduler on startup."""
-    try:
-        from backups import start_backup_scheduler
-
-        # Start backup scheduler with default settings (24h interval, 30 days retention)
-        result = start_backup_scheduler(interval_hours=24.0, max_age_days=30)
-
-        if result.get("status") == "started":
-            logger.info(f"[Backup] {result.get('message')}")
-        elif result.get("status") == "already_running":
-            logger.info(f"[Backup] Scheduler already running (every {result.get('interval_hours')}h, keep {result.get('max_age_days')} days)")
-    except Exception as e:
-        logger.warning(f"[Backup] Failed to start backup scheduler: {e}")
-
-
 async def _restore_strategies():
     """Restore active DCA/Grid strategies from database."""
     try:
@@ -391,11 +574,31 @@ async def _restore_strategies():
         async with db_manager.async_session_factory() as session:
             result = await session.execute(
                 select(StrategyStateModel).where(
-                    StrategyStateModel.status == "active",
+                    StrategyStateModel.status.in_(["active", "cleanup_required"]),
                     StrategyStateModel.strategy_type.in_(["dca", "grid"]),
                 )
             )
             rows = list(result.scalars().all())
+
+            # Live strategy engines predate the unified position ledger and
+            # cannot prove crash-safe ownership of every exchange order.  New
+            # live creation is disabled; migrate any legacy live state to a
+            # reduce/cancel-only cleanup path on startup.
+            for row in rows:
+                try:
+                    config_data = json.loads(row.config_json or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    config_data = {}
+                if not bool(config_data.get("paper_mode", True)):
+                    try:
+                        state_data = json.loads(row.state_json or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        state_data = {}
+                    state_data["status"] = "cleanup_required"
+                    state_data["close_reason"] = "legacy_live_strategy_safety_cleanup"
+                    row.status = "cleanup_required"
+                    row.state_json = json.dumps(state_data, ensure_ascii=False, default=str)
+            await session.commit()
 
         restored_dca = 0
         restored_grid = 0
@@ -463,13 +666,5 @@ async def _on_shutdown():
         logger.debug(f"[Redis] Shutdown cleanup failed: {e}")
 
     await db_manager.close()
-
-    # Stop backup scheduler
-    try:
-        from backups import stop_backup_scheduler
-        result = stop_backup_scheduler()
-        logger.info(f"[Backup] {result.get('message', 'Scheduler stopped')}")
-    except Exception as e:
-        logger.debug(f"[Backup] Shutdown: {e}")
 
     logger.info("QuantPilot AI shut down complete")

@@ -1,4 +1,4 @@
-# TradingView Signal Server - Windows 一键启动脚本
+﻿# TradingView Signal Server - Windows 一键启动脚本
 # 使用方式: .\scripts\start.ps1
 # 可选参数: .\scripts\start.ps1 -Port 8000 -Host 0.0.0.0 -Check
 
@@ -25,10 +25,14 @@ function Find-Python {
         "C:\Users\Admini\.workbuddy\binaries\python\versions\3.13.0\python.exe",
         "C:\Users\Admini\.workbuddy\binaries\python\versions\3.12.0\python.exe",
         "C:\Users\Admini\.workbuddy\binaries\python\versions\3.11.0\python.exe",
-        "C:\Users\Admini\.workbuddy\binaries\python\versions\3.10.0\python.exe",
-        (Get-Command python3 -ErrorAction SilentlyContinue)?.Source,
-        (Get-Command python -ErrorAction SilentlyContinue)?.Source
+        "C:\Users\Admini\.workbuddy\binaries\python\versions\3.10.0\python.exe"
     )
+    foreach ($commandName in @("python3", "python")) {
+        $command = Get-Command $commandName -ErrorAction SilentlyContinue
+        if ($command -and $command.Source) {
+            $candidates += $command.Source
+        }
+    }
     foreach ($c in $candidates) {
         if ($c -and (Test-Path $c)) {
             $ver = & $c -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}')" 2>$null
@@ -79,7 +83,15 @@ if (-not (Test-Path ".env")) {
 # ─────────────────────────────────────────────
 # 创建必要目录
 # ─────────────────────────────────────────────
-@("data", "data\backups", "logs", "trade_logs") | ForEach-Object {
+$runtimeDataDir = "data"
+$dataDirLine = Get-Content ".env" | Where-Object { $_ -match '^\s*DATA_DIR\s*=' } | Select-Object -Last 1
+if ($dataDirLine) {
+    $configuredDataDir = (($dataDirLine -split '=', 2)[1]).Trim().Trim('"').Trim("'")
+    if ($configuredDataDir) {
+        $runtimeDataDir = $configuredDataDir
+    }
+}
+@($runtimeDataDir, (Join-Path $runtimeDataDir "backups"), "logs", "trade_logs") | ForEach-Object {
     if (-not (Test-Path $_)) {
         New-Item -ItemType Directory -Path $_ -Force | Out-Null
         Write-Host "  [OK] 创建目录: $_" -ForegroundColor Green
@@ -111,7 +123,7 @@ $uvicornCheck = & $pyExe -c "import uvicorn" 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "  [INFO] 正在安装依赖..." -ForegroundColor Yellow
-    & $pyExe -m pip install -r requirements.txt --quiet
+    & $pyExe -m pip install --require-hashes -r requirements.lock --quiet
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] 依赖安装失败" -ForegroundColor Red
         exit 1

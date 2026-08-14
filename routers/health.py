@@ -134,7 +134,10 @@ async def check_exchange_api() -> HealthCheckResult:
             settings.exchange.api_secret,
             sandbox=settings.exchange.sandbox_mode,
         )
-        await asyncio.to_thread(exchange.load_markets)
+        await asyncio.wait_for(
+            asyncio.to_thread(exchange.load_markets),
+            timeout=15.0,
+        )
 
         latency = (time.time() - start) * 1000
         markets_count = len(exchange.markets)
@@ -199,6 +202,17 @@ async def check_ai_api() -> HealthCheckResult:
                     status="degraded",
                     error="OpenRouter API key not configured",
                 )
+        elif provider == "custom":
+            if not settings.ai.custom_provider_api_url or not settings.ai.custom_provider_api_key:
+                return HealthCheckResult(
+                    status="degraded",
+                    error="Custom AI provider URL or API key not configured",
+                )
+        else:
+            return HealthCheckResult(
+                status="unhealthy",
+                error="Configured AI provider is unsupported",
+            )
 
         return HealthCheckResult(
             status="healthy",
@@ -343,10 +357,18 @@ async def quick_health_check(request: Request):
         return JSONResponse(status_code=429, content={"status": "rate_limited"})
 
     try:
-        await check_database()
+        db_check = await check_database()
+        if db_check.status != "healthy":
+            return JSONResponse(
+                status_code=503,
+                content={"status": "unhealthy", "timestamp": utcnow().isoformat()},
+            )
         return {"status": "healthy", "timestamp": utcnow().isoformat()}
     except Exception:
-        return {"status": "unhealthy", "timestamp": utcnow().isoformat()}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "timestamp": utcnow().isoformat()},
+        )
 
 
 @router.get("/live")
@@ -360,17 +382,64 @@ async def liveness_check(request: Request):
 
 @router.get("/ready")
 async def readiness_check(request: Request):
-    """Kubernetes readiness probe - application is ready to serve requests."""
+    """Trading readiness probe, including market-data and AI dependencies."""
     ip = client_ip(request)
     if not await _check_health_rate_limit(ip):
         return JSONResponse(status_code=429, content={"status": "rate_limited"})
     try:
         db_check = await check_database()
         if db_check.status != "healthy":
-            return {"status": "not_ready", "reason": "Database unavailable"}
-        return {"status": "ready", "timestamp": utcnow().isoformat()}
+            return JSONResponse(status_code=503, content={"status": "not_ready", "reason": "Database unavailable"})
+
+        if settings.exchange.live_trading:
+            redis_check = await check_redis()
+            if redis_check.status != "healthy":
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "not_ready", "reason": "Redis coordination unavailable"},
+                )
+
+        from core import lifespan as lifespan_module
+
+        scheduler = getattr(lifespan_module, "_scheduler", None)
+        if scheduler is None or not bool(getattr(scheduler, "running", False)):
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not_ready", "reason": "Trading scheduler unavailable"},
+            )
+
+        exchange_check, ai_check = await asyncio.gather(
+            check_exchange_api(),
+            check_ai_api(),
+        )
+        if exchange_check.status != "healthy":
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "not_ready",
+                    "reason": "Exchange market data unavailable",
+                    "trading_ready": False,
+                    "analysis_ready": ai_check.status == "healthy",
+                },
+            )
+        if ai_check.status != "healthy":
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "not_ready",
+                    "reason": "AI analysis provider unavailable",
+                    "trading_ready": False,
+                    "analysis_ready": False,
+                },
+            )
+        return {
+            "status": "ready",
+            "trading_ready": True,
+            "analysis_ready": True,
+            "timestamp": utcnow().isoformat(),
+        }
     except Exception:
-        return {"status": "not_ready", "reason": "Readiness check failed"}
+        return JSONResponse(status_code=503, content={"status": "not_ready", "reason": "Readiness check failed"})
 
 
 # Rate limiting for health endpoints

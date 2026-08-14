@@ -12,6 +12,8 @@ from typing import Any
 
 from loguru import logger
 
+from core.config import DATA_DIR
+
 from .event_types import Event, EventTypes
 
 
@@ -63,7 +65,7 @@ class EventBus:
     def __init__(
         self,
         persist_events: bool = True,
-        event_store_path: str = "./data/events",
+        event_store_path: str | Path | None = None,
         max_event_history: int = 1000,
     ):
         """Initialize EventBus.
@@ -78,7 +80,7 @@ class EventBus:
         self._event_history: list[Event] = []
         self._max_event_history = max_event_history
         self._persist_events = persist_events
-        self._event_store_path = Path(event_store_path)
+        self._event_store_path = Path(event_store_path) if event_store_path else DATA_DIR / "events"
 
         # Metrics
         self._metrics = {
@@ -254,7 +256,7 @@ async def get_event_bus() -> EventBus:
 
         _EVENT_BUS = EventBus(
             persist_events=True,
-            event_store_path="./data/events",
+            event_store_path=DATA_DIR / "events",
             max_event_history=1000,
         )
 

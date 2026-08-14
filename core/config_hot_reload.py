@@ -19,6 +19,8 @@ from typing import Any
 
 from loguru import logger
 
+from core.config import DATA_DIR
+
 try:
     from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
@@ -50,7 +52,7 @@ class ConfigHotReloader:
         self,
         config_path: str = "./config/runtime.json",
         validate_changes: bool = True,
-        history_file: str = "./data/config_changes.json",
+        history_file: str | Path | None = None,
     ):
         """Initialize config hot-reloader.
 
@@ -61,7 +63,7 @@ class ConfigHotReloader:
         """
         self.config_path = Path(config_path)
         self.validate_changes = validate_changes
-        self.history_file = Path(history_file)
+        self.history_file = Path(history_file) if history_file else DATA_DIR / "config_changes.json"
 
         self.callbacks: dict[str, Callable] = {}
         self._observer: Observer | None = None
@@ -399,7 +401,7 @@ async def get_config_hot_reloader() -> ConfigHotReloader:
         _CONFIG_HOT_RELOADER = ConfigHotReloader(
             config_path="./config/runtime.json",
             validate_changes=True,
-            history_file="./data/config_changes.json",
+            history_file=DATA_DIR / "config_changes.json",
         )
         await _CONFIG_HOT_RELOADER.start()
 

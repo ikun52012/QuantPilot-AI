@@ -140,17 +140,34 @@ self.addEventListener('sync', (event) => {
 
 async function syncTrades() {
   const pendingTrades = await getPendingTrades();
+  let csrfToken = '';
+  try {
+    if (self.cookieStore) {
+      const csrfCookie = await self.cookieStore.get('tvss_csrf');
+      csrfToken = csrfCookie?.value || '';
+    }
+  } catch (error) {
+    console.error('Unable to read CSRF token for background sync');
+  }
+
+  if (!csrfToken) {
+    throw new Error('CSRF token unavailable; queued trades were kept for a later sync');
+  }
 
   for (const trade of pendingTrades) {
     try {
-      await fetch('/api/user/trades/sync', {
+      const response = await fetch('/api/user/trades/sync', {
         method: 'POST',
         body: JSON.stringify(trade),
         headers: {
           'Content-Type': 'application/json',
-          'X-PWA-Sync': '1'
+          'X-PWA-Sync': '1',
+          'X-CSRF-Token': csrfToken
         }
       });
+      if (!response.ok) {
+        throw new Error(`Trade sync rejected with HTTP ${response.status}`);
+      }
       await removePendingTrade(trade.id);
     } catch (error) {
       console.error('Failed to sync trade:', trade.id);

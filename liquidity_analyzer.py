@@ -280,6 +280,8 @@ def _detect_vacuum_zones(
     if not bids or not asks:
         return vacuums
 
+    _VACUUM_ZONE_MIN_AVG_VOLUME = 10  # Minimum average volume for vacuum zone detection
+
     # Check for gaps in order book
     # A vacuum zone is where there's a significant gap between price levels
 
@@ -296,7 +298,7 @@ def _detect_vacuum_zones(
             avg_volume = volume / gap_pct if gap_pct > 0 else 0
 
             # Low average volume = vacuum
-            if avg_volume < 10:  # Threshold varies by market
+            if avg_volume < _VACUUM_ZONE_MIN_AVG_VOLUME:
                 vacuums.append(VacuumZone(
                     start_price=prev_price,
                     end_price=price,
@@ -319,7 +321,7 @@ def _detect_vacuum_zones(
             volume = float(ask.get("amount", 0) or 0)
             avg_volume = volume / gap_pct if gap_pct > 0 else 0
 
-            if avg_volume < 10:
+            if avg_volume < _VACUUM_ZONE_MIN_AVG_VOLUME:
                 vacuums.append(VacuumZone(
                     start_price=prev_price,
                     end_price=price,

@@ -113,9 +113,10 @@ async def _strategy_exchange_config(
     if not allow_reduce and not settings.exchange.live_trading:
         raise HTTPException(403, "Global LIVE_TRADING must be enabled before live strategy execution")
 
-    control_state = await trading_allowed(db, user_id=user_id, live_trading=True)
-    if not control_state.get("allowed"):
-        raise HTTPException(423, control_state.get("block_reason") or "Trading is currently disabled")
+    if not allow_reduce:
+        control_state = await trading_allowed(db, user_id=user_id, live_trading=True)
+        if not control_state.get("allowed"):
+            raise HTTPException(423, control_state.get("block_reason") or "Trading is currently disabled")
 
     db_user = await get_user_by_id(db, user_id)
     if not db_user:
@@ -140,7 +141,7 @@ async def _strategy_exchange_config(
         exchange = user_settings.get("exchange") or {}
         if not isinstance(exchange, dict):
             raise HTTPException(400, "User exchange settings are invalid")
-        if not safe_bool(exchange.get("live_trading"), False):
+        if not allow_reduce and not safe_bool(exchange.get("live_trading"), False):
             raise HTTPException(403, "Enable live trading in user exchange settings before using live strategies")
 
         exchange_config = {
@@ -155,6 +156,7 @@ async def _strategy_exchange_config(
             "default_order_type": exchange.get("default_order_type") or settings.exchange.default_order_type,
             "stop_loss_order_type": exchange.get("stop_loss_order_type") or settings.exchange.stop_loss_order_type,
             "limit_timeout_overrides": exchange.get("limit_timeout_overrides") or settings.exchange.limit_timeout_overrides,
+            "max_leverage": db_user.max_leverage or 20,
         }
 
     if not exchange_config.get("api_key") or not exchange_config.get("api_secret"):
@@ -208,8 +210,13 @@ def _restore_dca(row: StrategyStateModel) -> None:
     for key in ("started_at", "updated_at", "closed_at"):
         if key in position_data:
             position_data[key] = _parse_datetime(position_data.get(key))
+    position = DCAPosition(**position_data)
+    if position.stop_loss_order_id and position.stop_loss_order_id not in position.stop_loss_order_ids:
+        position.stop_loss_order_ids.append(position.stop_loss_order_id)
+    if position.take_profit_order_id and position.take_profit_order_id not in position.take_profit_order_ids:
+        position.take_profit_order_ids.append(position.take_profit_order_id)
     dca_engine.configs[row.id] = config
-    dca_engine.positions[row.id] = DCAPosition(**position_data)
+    dca_engine.positions[row.id] = position
 
 
 def _restore_grid(row: StrategyStateModel) -> None:
@@ -297,7 +304,7 @@ def _list_dca_for_user(user_id: str) -> list[dict]:
         for strategy_id, config in dca_engine.configs.items()
         if config.user_id == user_id
         and dca_engine.positions.get(strategy_id)
-        and dca_engine.positions[strategy_id].status == "active"
+        and dca_engine.positions[strategy_id].status in {"active", "cleanup_required"}
     ]
 
 
@@ -307,7 +314,7 @@ def _list_grid_for_user(user_id: str) -> list[dict]:
         for strategy_id, config in grid_engine.configs.items()
         if config.user_id == user_id
         and grid_engine.positions.get(strategy_id)
-        and grid_engine.positions[strategy_id].status == "active"
+        and grid_engine.positions[strategy_id].status in {"active", "cleanup_required"}
     ]
 
 
@@ -319,6 +326,11 @@ async def create_dca_strategy(
 ):
     """Create a new DCA strategy position."""
     try:
+        if not request.paper_mode:
+            raise HTTPException(
+                409,
+                "Live DCA is disabled until it uses the unified position ledger, account-risk checks, and crash-safe reconciliation. Paper DCA remains available.",
+            )
         from market_data import fetch_market_context
 
         context = await fetch_market_context(request.ticker)
@@ -433,6 +445,7 @@ async def check_dca_strategy(
             db,
             user,
             live_requested=bool(config and not config.paper_mode),
+            allow_reduce=status.get("status") == "cleanup_required",
         )
 
         result = await dca_engine.check_and_execute(strategy_id, current_price, exchange_config)
@@ -503,11 +516,12 @@ async def close_dca_strategy(
         )
 
         return {
-            "status": "closed",
+            "status": final_status.get("status", "closed"),
             "strategy_id": strategy_id,
             "close_price": round(current_price, 6),
             "final_pnl_usdt": final_status.get("realized_pnl_usdt", 0),
             "entries_count": final_status.get("entries_count", 0),
+            "cleanup_errors": final_status.get("cleanup_errors", []),
         }
 
     except HTTPException:
@@ -525,6 +539,11 @@ async def create_grid_strategy(
 ):
     """Create a new grid trading strategy."""
     try:
+        if not request.paper_mode:
+            raise HTTPException(
+                409,
+                "Live Grid is disabled until every level has durable order ownership and exchange-confirmed protection. Paper Grid remains available.",
+            )
         from market_data import fetch_market_context
 
         context = await fetch_market_context(request.ticker)
@@ -641,6 +660,7 @@ async def check_grid_strategy(
             db,
             user,
             live_requested=bool(config and not config.paper_mode),
+            allow_reduce=status.get("status") == "cleanup_required",
         )
 
         result = await grid_engine.check_and_execute(strategy_id, current_price, exchange_config)
@@ -711,11 +731,12 @@ async def close_grid_strategy(
         )
 
         return {
-            "status": "closed",
+            "status": final_status.get("status", "closed"),
             "strategy_id": strategy_id,
             "close_price": round(current_price, 6),
             "final_pnl_usdt": final_status.get("realized_pnl_usdt", 0),
             "total_trades": final_status.get("total_trades", 0),
+            "cleanup_errors": final_status.get("cleanup_errors", []),
         }
 
     except HTTPException:
@@ -878,6 +899,95 @@ async def get_strategy_detail(
     return detail
 
 
+async def run_strategy_monitor_once() -> dict[str, int]:
+    """Monitor all restored strategies once and durably persist every change."""
+    checked_dca = 0
+    checked_grid = 0
+    await dca_engine.refresh_active_from_redis()
+    await grid_engine.refresh_active_from_redis()
+
+    async with db_manager.async_session_factory() as monitor_db:
+        for strategy_id in list(dca_engine.positions.keys()):
+            position = dca_engine.positions.get(strategy_id)
+            config = dca_engine.configs.get(strategy_id)
+            if not position or not config or position.status not in {"active", "cleanup_required"}:
+                continue
+            try:
+                if not config.paper_mode and position.status == "active":
+                    position.status = "cleanup_required"
+                    position.close_reason = "legacy_live_strategy_safety_cleanup"
+                from market_data import fetch_market_context
+
+                context = await fetch_market_context(position.ticker)
+                exchange_config = await _strategy_exchange_config(
+                    monitor_db,
+                    {"sub": config.user_id, "role": ""},
+                    live_requested=not config.paper_mode,
+                    # Legacy live strategies are migrated to cleanup_required;
+                    # only reduce/cancel work is permitted thereafter.
+                    allow_reduce=position.status == "cleanup_required",
+                )
+                await dca_engine.check_and_execute(
+                    strategy_id,
+                    context.current_price,
+                    exchange_config,
+                )
+                await _persist_strategy_state(
+                    monitor_db,
+                    config.user_id,
+                    "dca",
+                    strategy_id,
+                    position.ticker,
+                    config,
+                    dca_engine.positions[strategy_id],
+                )
+                await monitor_db.commit()
+                checked_dca += 1
+            except Exception as exc:
+                await monitor_db.rollback()
+                logger.error(f"[Monitor/DCA] Check failed for {strategy_id}: {exc}")
+
+        for strategy_id in list(grid_engine.positions.keys()):
+            position = grid_engine.positions.get(strategy_id)
+            config = grid_engine.configs.get(strategy_id)
+            if not position or not config or position.status not in {"active", "cleanup_required"}:
+                continue
+            try:
+                if not config.paper_mode and position.status == "active":
+                    position.status = "cleanup_required"
+                    position.close_reason = "legacy_live_strategy_safety_cleanup"
+                from market_data import fetch_market_context
+
+                context = await fetch_market_context(position.ticker)
+                exchange_config = await _strategy_exchange_config(
+                    monitor_db,
+                    {"sub": config.user_id, "role": ""},
+                    live_requested=not config.paper_mode,
+                    allow_reduce=position.status == "cleanup_required",
+                )
+                await grid_engine.check_and_execute(
+                    strategy_id,
+                    context.current_price,
+                    exchange_config,
+                )
+                await _persist_strategy_state(
+                    monitor_db,
+                    config.user_id,
+                    "grid",
+                    strategy_id,
+                    position.ticker,
+                    config,
+                    grid_engine.positions[strategy_id],
+                )
+                await monitor_db.commit()
+                checked_grid += 1
+            except Exception as exc:
+                await monitor_db.rollback()
+                logger.error(f"[Monitor/Grid] Check failed for {strategy_id}: {exc}")
+
+    return {"dca": checked_dca, "grid": checked_grid}
+
+
 @router.post("/monitor/start")
 async def start_strategy_monitor(
     interval_seconds: int = 60,
@@ -887,43 +997,7 @@ async def start_strategy_monitor(
     async def _monitor_loop():
         while True:
             try:
-                await dca_engine.refresh_active_from_redis()
-                await grid_engine.refresh_active_from_redis()
-
-                async with db_manager.async_session_factory() as monitor_db:
-
-                    for strategy_id in list(dca_engine.positions.keys()):
-                        position = dca_engine.positions.get(strategy_id)
-                        config = dca_engine.configs.get(strategy_id)
-                        if position and position.status == "active":
-                            try:
-                                from market_data import fetch_market_context
-                                context = await fetch_market_context(position.ticker)
-                                strategy_exchange_config = await _strategy_exchange_config(
-                                    monitor_db,
-                                    {"sub": config.user_id if config else "", "role": ""},
-                                    live_requested=bool(config and not config.paper_mode),
-                                )
-                                await dca_engine.check_and_execute(strategy_id, context.current_price, strategy_exchange_config)
-                            except Exception as e:
-                                logger.debug(f"[Monitor/DCA] Check failed for {strategy_id}: {e}")
-
-                    for strategy_id in list(grid_engine.positions.keys()):
-                        position = grid_engine.positions.get(strategy_id)
-                        config = grid_engine.configs.get(strategy_id)
-                        if position and position.status == "active":
-                            try:
-                                from market_data import fetch_market_context
-                                context = await fetch_market_context(position.ticker)
-                                strategy_exchange_config = await _strategy_exchange_config(
-                                    monitor_db,
-                                    {"sub": config.user_id if config else "", "role": ""},
-                                    live_requested=bool(config and not config.paper_mode),
-                                )
-                                await grid_engine.check_and_execute(strategy_id, context.current_price, strategy_exchange_config)
-                            except Exception as e:
-                                logger.debug(f"[Monitor/Grid] Check failed for {strategy_id}: {e}")
-
+                await run_strategy_monitor_once()
                 await asyncio.sleep(interval_seconds)
 
             except asyncio.CancelledError:

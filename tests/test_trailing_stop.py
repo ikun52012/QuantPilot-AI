@@ -1,6 +1,7 @@
 """Tests for trailing stop functionality."""
 import json
-from unittest.mock import AsyncMock
+from datetime import timedelta
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -379,6 +380,77 @@ async def test_place_protective_stop_keeps_old_stop_when_new_stop_fails(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_place_protective_stop_rolls_back_new_stop_when_old_cancel_fails(monkeypatch):
+    class FakeExchange:
+        def __init__(self):
+            self.options = {"defaultType": "future"}
+
+    fake_exchange = FakeExchange()
+    cancel_order = AsyncMock(side_effect=[
+        {"status": "error", "order_id": "stop-old", "reason": "offline"},
+        {"status": "cancelled", "order_id": "stop-new"},
+    ])
+
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: fake_exchange)
+    monkeypatch.setattr("exchange._resolve_symbol", lambda *args, **kwargs: "TRB/USDT:USDT")
+    monkeypatch.setattr("exchange._cancel_exchange_order", cancel_order)
+    monkeypatch.setattr(
+        "exchange._create_conditional_order",
+        AsyncMock(return_value={"id": "stop-new"}),
+    )
+
+    result = await place_protective_stop(
+        ticker="TRBUSDT",
+        direction="long",
+        quantity=1.5,
+        stop_price=99.0,
+        exchange_config={"live_trading": True, "market_type": "contract"},
+        existing_order_id="stop-old",
+    )
+
+    assert result["status"] == "error"
+    assert result["existing_order_id"] == "stop-old"
+    assert "order_id" not in result
+    assert [call.args[2] for call in cancel_order.await_args_list] == ["stop-old", "stop-new"]
+
+
+@pytest.mark.asyncio
+async def test_place_protective_stop_journals_both_orders_when_rollback_fails(monkeypatch):
+    class FakeExchange:
+        def __init__(self):
+            self.options = {"defaultType": "future"}
+
+    fake_exchange = FakeExchange()
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda *args, **kwargs: fake_exchange)
+    monkeypatch.setattr("exchange._resolve_symbol", lambda *args, **kwargs: "TRB/USDT:USDT")
+    monkeypatch.setattr(
+        "exchange._cancel_exchange_order",
+        AsyncMock(return_value={"status": "error", "reason": "offline"}),
+    )
+    monkeypatch.setattr(
+        "exchange._create_conditional_order",
+        AsyncMock(return_value={"id": "stop-new"}),
+    )
+    journal = Mock()
+    journal.return_value = "recon-1"
+    monkeypatch.setattr("exchange._record_cancel_reconciliation", journal)
+
+    result = await place_protective_stop(
+        ticker="TRBUSDT",
+        direction="long",
+        quantity=1.5,
+        stop_price=99.0,
+        exchange_config={"live_trading": True, "market_type": "contract"},
+        existing_order_id="stop-old",
+    )
+
+    assert result["status"] == "manual_review"
+    assert result["active_order_ids"] == ["stop-old", "stop-new"]
+    assert result["reconciliation_id"] == "recon-1"
+    journal.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_close_conflicting_position_keeps_protection_when_exchange_close_fails(monkeypatch):
     class FakeSession:
         pass
@@ -589,6 +661,86 @@ def test_detect_tp_hits_matches_each_level_by_own_order_id():
     assert hits[0]["level"] == 2
     assert levels[0]["status"] == "pending"
     assert levels[1]["status"] == "hit"
+
+
+def test_live_tp_fill_does_not_double_decrement_authoritative_exchange_quantity():
+    position = PositionModel(
+        id="pos-tp-authoritative",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        live_trading=True,
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=0.5,
+        take_profit_order_ids_json=json.dumps(["tp1", "tp2"]),
+        take_profit_json=json.dumps([
+            {"level": 1, "price": 110.0, "qty_pct": 50.0, "order_id": "tp1", "status": "pending"},
+            {"level": 2, "price": 120.0, "qty_pct": 50.0, "order_id": "tp2", "status": "pending"},
+        ]),
+    )
+
+    hits = _detect_tp_hits_from_orders(
+        position,
+        [{"id": "tp1", "status": "filled", "filled": 0.5, "average": 110.0}],
+        authoritative_remaining=0.5,
+    )
+
+    assert len(hits) == 1
+    assert position.remaining_quantity == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_timeout_cancel_order_not_found_keeps_unknown_order_state(monkeypatch):
+    import ccxt
+
+    position = PositionModel(
+        id="pos-timeout-ambiguous",
+        ticker="BTCUSDT",
+        direction="long",
+        status="pending",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        opened_at=utcnow(),
+        entry_order_id="entry-ambiguous",
+        order_type="limit",
+        limit_timeout_secs=60,
+    )
+
+    class FakeExchange:
+        fetch_count = 0
+
+        def fetch_order(self, order_id, symbol):
+            self.fetch_count += 1
+            if self.fetch_count == 1:
+                return {
+                    "id": order_id,
+                    "status": "open",
+                    "filled": 0.0,
+                    "timestamp": 1,
+                }
+            raise ccxt.NetworkError("history temporarily unavailable")
+
+        def cancel_order(self, order_id, symbol):
+            raise ccxt.OrderNotFound("order moved from open-order history")
+
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda **kwargs: FakeExchange())
+    monkeypatch.setattr("exchange._resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    result = await _check_pending_limit_orders(
+        FakeSession(),
+        position,
+        {"live_trading": True, "market_type": "contract"},
+    )
+
+    assert result == {"status": "state_unknown"}
+    assert position.status == "pending"
+    assert position.entry_order_id == "entry-ambiguous"
 
 
 @pytest.mark.asyncio
@@ -857,7 +1009,7 @@ async def test_missing_entry_order_syncs_when_exchange_exposure_exists(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_empty_open_positions_and_single_fetch_none_closes_open_db_position(monkeypatch):
+async def test_empty_open_positions_and_single_fetch_none_uses_ghost_threshold(monkeypatch):
     position = PositionModel(
         id="pos-empty-list-ghost",
         ticker="BTCUSDT",
@@ -884,9 +1036,13 @@ async def test_empty_open_positions_and_single_fetch_none_closes_open_db_positio
     async def fake_fetch_single_position(*args, **kwargs):
         return None
 
+    async def fake_ticker(*args, **kwargs):
+        return {"last": 99.0}
+
     monkeypatch.setattr("exchange.get_open_positions", fake_open_positions)
     monkeypatch.setattr("exchange.get_recent_orders", fake_recent_orders)
     monkeypatch.setattr("exchange.fetch_single_position", fake_fetch_single_position)
+    monkeypatch.setattr("exchange.get_ticker", fake_ticker)
 
     class FakeSession:
         def __init__(self):
@@ -898,13 +1054,62 @@ async def test_empty_open_positions_and_single_fetch_none_closes_open_db_positio
     session = FakeSession()
     stats = await _reconcile_exchange_position(session, position, {"live_trading": True, "market_type": "contract"})
 
-    assert stats["closed"] == 1
-    assert position.status == "closed"
-    assert position.close_reason == "exchange_position_not_found"
-    assert position.remaining_quantity == 0.0
-    assert position.exit_price == 99.0
-    assert session.flush_count == 1
-    assert position.id not in _GHOST_POSITION_TRACKER
+    assert stats["closed"] == 0
+    assert position.status == "open"
+    assert position.close_reason in {None, ""}
+    assert position.remaining_quantity == 1.0
+    assert _GHOST_POSITION_TRACKER[position.id]["fail_count"] == 6
+
+
+@pytest.mark.asyncio
+async def test_empty_positions_single_fetch_error_never_advances_ghost_close(monkeypatch):
+    position = PositionModel(
+        id="pos-empty-query-error",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        opened_at=utcnow(),
+        last_price=101.0,
+    )
+    _GHOST_POSITION_TRACKER[position.id] = {
+        "fail_count": 7,
+        "first_missing_at": utcnow() - timedelta(hours=1),
+        "last_check": utcnow(),
+    }
+
+    async def fake_open_positions(*args, **kwargs):
+        return []
+
+    async def fake_recent_orders(*args, **kwargs):
+        return []
+
+    async def failing_single_fetch(*args, **kwargs):
+        raise TimeoutError("exchange unavailable")
+
+    async def fake_ticker(*args, **kwargs):
+        return {"last": 101.0}
+
+    monkeypatch.setattr("exchange.get_open_positions", fake_open_positions)
+    monkeypatch.setattr("exchange.get_recent_orders", fake_recent_orders)
+    monkeypatch.setattr("exchange.fetch_single_position", failing_single_fetch)
+    monkeypatch.setattr("exchange.get_ticker", fake_ticker)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    stats = await _reconcile_exchange_position(
+        FakeSession(),
+        position,
+        {"live_trading": True, "market_type": "contract"},
+    )
+
+    assert stats["closed"] == 0
+    assert position.status == "open"
+    assert _GHOST_POSITION_TRACKER[position.id]["fail_count"] == 7
 
 
 @pytest.mark.asyncio
@@ -1019,6 +1224,107 @@ async def test_verify_protective_orders_places_missing_sl_and_tp_without_order_i
 
 
 @pytest.mark.asyncio
+async def test_verify_protective_orders_replaces_under_sized_sl_and_tp(monkeypatch):
+    position = PositionModel(
+        id="pos-under-protected",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=2.0,
+        remaining_quantity=2.0,
+        stop_loss=95.0,
+        stop_loss_order_id="sl-small",
+        take_profit_json=json.dumps([
+            {
+                "level": 1,
+                "price": 110.0,
+                "qty_pct": 100,
+                "status": "pending",
+                "order_id": "tp-small",
+                "protected_qty": 1.0,
+            },
+        ]),
+        take_profit_order_ids_json=json.dumps(["tp-small"]),
+        trailing_stop_config_json=json.dumps({"_stop_loss_protected_qty": 1.0}),
+    )
+
+    async def fake_open_orders(*args, **kwargs):
+        return [
+            {"id": "sl-small", "amount": 1.0},
+            {"id": "tp-small", "amount": 1.0},
+        ]
+
+    cancel_order = AsyncMock(return_value={"status": "cancelled"})
+    create_order = AsyncMock(return_value={"id": "tp-full"})
+    place_stop = AsyncMock(return_value={"status": "placed", "order_id": "sl-full"})
+    monkeypatch.setattr("exchange.get_open_orders", fake_open_orders)
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda **kwargs: object())
+    monkeypatch.setattr("exchange._resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    monkeypatch.setattr("exchange._cancel_exchange_order", cancel_order)
+    monkeypatch.setattr("exchange._create_conditional_order", create_order)
+    monkeypatch.setattr("exchange.place_protective_stop", place_stop)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    changed = await _verify_protective_orders(
+        FakeSession(),
+        position,
+        {"live_trading": True, "market_type": "contract"},
+    )
+
+    assert changed is True
+    assert position.stop_loss_order_id == "sl-full"
+    assert json.loads(position.take_profit_json)[0]["order_id"] == "tp-full"
+    assert create_order.await_args.args[4] == pytest.approx(2.0)
+    assert place_stop.await_args.args[2] == pytest.approx(2.0)
+    cancel_order.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_protective_orders_replaces_unverifiable_legacy_sl(monkeypatch):
+    position = PositionModel(
+        id="pos-unverifiable-sl",
+        ticker="BTCUSDT",
+        direction="long",
+        status="open",
+        entry_price=100.0,
+        quantity=1.0,
+        remaining_quantity=1.0,
+        stop_loss=95.0,
+        stop_loss_order_id="sl-legacy",
+        take_profit_json=json.dumps([]),
+        trailing_stop_config_json=json.dumps({}),
+    )
+
+    monkeypatch.setattr(
+        "exchange.get_open_orders",
+        AsyncMock(return_value=[{"id": "sl-legacy"}]),
+    )
+    monkeypatch.setattr("exchange._get_or_create_exchange", lambda **kwargs: object())
+    monkeypatch.setattr("exchange._resolve_symbol", lambda *args, **kwargs: "BTC/USDT:USDT")
+    place_stop = AsyncMock(return_value={"status": "placed", "order_id": "sl-verified"})
+    monkeypatch.setattr("exchange.place_protective_stop", place_stop)
+
+    class FakeSession:
+        async def flush(self):
+            return None
+
+    changed = await _verify_protective_orders(
+        FakeSession(),
+        position,
+        {"live_trading": True, "market_type": "contract"},
+    )
+
+    assert changed is True
+    assert position.stop_loss_order_id == "sl-verified"
+    assert json.loads(position.trailing_stop_config_json)["_stop_loss_protected_qty"] == pytest.approx(1.0)
+    place_stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_verify_protective_orders_does_not_expand_missing_tp_subset(monkeypatch):
     position = PositionModel(
         id="pos-missing-one-tp",
@@ -1044,7 +1350,7 @@ async def test_verify_protective_orders_does_not_expand_missing_tp_subset(monkey
         return {"id": "tp-new"}
 
     async def fake_open_orders(*args, **kwargs):
-        return [{"id": "tp-open"}, {"id": "sl-open"}]
+        return [{"id": "tp-open", "amount": 0.5}, {"id": "sl-open", "amount": 1.0}]
 
     monkeypatch.setattr("exchange.get_open_orders", fake_open_orders)
     monkeypatch.setattr("exchange._get_or_create_exchange", lambda **kwargs: object())
@@ -1119,8 +1425,8 @@ async def test_verify_protective_orders_recognizes_okx_algo_order_ids(monkeypatc
         assert exchange_config["require_algo_orders"] is True
         assert exchange_config["raise_on_error"] is True
         return [
-            {"id": "tp-algo", "source": "okx_algo", "type": "conditional"},
-            {"id": "sl-algo", "source": "okx_algo", "type": "conditional"},
+            {"id": "tp-algo", "source": "okx_algo", "type": "conditional", "amount": 1.0},
+            {"id": "sl-algo", "source": "okx_algo", "type": "conditional", "amount": 1.0},
         ]
 
     create_order = AsyncMock()
