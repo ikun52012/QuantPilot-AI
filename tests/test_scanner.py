@@ -1139,7 +1139,10 @@ async def test_sync_scanner_outcomes_records_real_pnl_label(monkeypatch, db_sess
 
 
 @pytest.mark.asyncio
-async def test_walk_forward_thresholds_use_real_outcome_labels(db_session):
+async def test_walk_forward_thresholds_use_real_outcome_labels(db_session, monkeypatch):
+    # Pin the minimum sample count so the 12 labels below are sufficient even in
+    # environments without a .env file (CI), where the default is higher.
+    monkeypatch.setattr(settings.scanner, "walk_forward_min_samples", 12)
     now = utcnow()
     for idx in range(12):
         score = 80.0 + idx if idx >= 6 else 55.0 + idx
