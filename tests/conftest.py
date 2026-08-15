@@ -196,6 +196,24 @@ def isolate_runtime_state_files(tmp_path, monkeypatch):
     portfolio_risk._VAR_CACHE.clear()
 
 
+@pytest.fixture(autouse=True)
+def isolate_redis_coordination_client():
+    """Give every test a fresh Redis coordination client.
+
+    The cached client is bound to the event loop that created it. pytest-asyncio
+    runs each test on a new loop, so a client cached by an earlier test would be
+    reused on a closed loop and fail with "Event loop is closed" (this surfaces in
+    the PostgreSQL+Redis CI job where REDIS_ENABLED=true).
+    """
+    import core.redis_coordination as redis_coordination
+
+    redis_coordination._CLIENT = None
+    redis_coordination._REDIS_UNAVAILABLE_LOGGED = False
+    yield
+    redis_coordination._CLIENT = None
+    redis_coordination._REDIS_UNAVAILABLE_LOGGED = False
+
+
 @pytest_asyncio.fixture
 async def client(db_engine, cleanup_db):
     """Create test HTTP client."""
